@@ -18,7 +18,11 @@ from .types import ToolRuntimeRequest, ToolRuntimeResult
 
 
 def _error_result(message: str, *, details: dict[str, Any] | None = None) -> AgentToolResult:
-    return AgentToolResult(content=[TextContent(text=message)], details=details or {})
+    return AgentToolResult(
+        content=[TextContent(text=message)],
+        details=details or {},
+        is_error=True,
+    )
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -64,7 +68,11 @@ class ToolRuntime:
                 signal=signal,
                 on_update=on_update,
             )
-            return runtime_result.result
+            result = runtime_result.result
+            result.is_error = runtime_result.is_error
+            result.approved = runtime_result.approved
+            result.approval_id = runtime_result.approval_id
+            return result
 
         return _execute
 
@@ -77,12 +85,15 @@ class ToolRuntime:
     ) -> ToolRuntimeResult:
         tool = self.registry.get(request.name)
         if tool is None:
+            result = _error_result(
+                f"Tool {request.name} not found",
+                details={"tool": request.name, "reason": "tool_not_found"},
+            )
+            result.approved = False
             return ToolRuntimeResult(
-                result=_error_result(
-                    f"Tool {request.name} not found",
-                    details={"tool": request.name, "reason": "tool_not_found"},
-                ),
+                result=result,
                 is_error=True,
+                approved=False,
             )
 
         metadata = self.registry.metadata_for(request.name)
@@ -104,15 +115,18 @@ class ToolRuntime:
                 decision,
             )
             if not approval.approved:
+                result = _error_result(
+                    approval.reason or "Tool execution requires approval",
+                    details={
+                        "tool": request.name,
+                        "reason": decision.reason,
+                        "approval_id": approval.approval_id,
+                    },
+                )
+                result.approved = False
+                result.approval_id = approval.approval_id
                 return ToolRuntimeResult(
-                    result=_error_result(
-                        approval.reason or "Tool execution requires approval",
-                        details={
-                            "tool": request.name,
-                            "reason": decision.reason,
-                            "approval_id": approval.approval_id,
-                        },
-                    ),
+                    result=result,
                     is_error=True,
                     approved=False,
                     approval_id=approval.approval_id,
@@ -121,7 +135,12 @@ class ToolRuntime:
         try:
             value = tool.execute(request.tool_call_id, request.params, signal, on_update)
             result = await _maybe_await(value)
-            return ToolRuntimeResult(result=result, is_error=False)
+            return ToolRuntimeResult(
+                result=result,
+                is_error=bool(result.is_error),
+                approved=result.approved,
+                approval_id=result.approval_id,
+            )
         except Exception as exc:
             return ToolRuntimeResult(
                 result=_error_result(
@@ -133,11 +152,13 @@ class ToolRuntime:
 
     @staticmethod
     def _blocked_result(request: ToolRuntimeRequest, decision: ToolDecision) -> ToolRuntimeResult:
+        result = _error_result(
+            decision.reason or "Tool execution was blocked",
+            details={"tool": request.name, "reason": decision.reason, **decision.details},
+        )
+        result.approved = False
         return ToolRuntimeResult(
-            result=_error_result(
-                decision.reason or "Tool execution was blocked",
-                details={"tool": request.name, "reason": decision.reason, **decision.details},
-            ),
+            result=result,
             is_error=True,
             approved=False,
         )

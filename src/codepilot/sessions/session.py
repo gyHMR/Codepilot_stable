@@ -1,12 +1,12 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-"""AgentSession orchestrates one application-level Agent conversation.
+"""AgentSession 负责编排一次应用级别的 Agent 对话。
 
-Responsibilities:
-1) Manage the workspace session directory.
-2) Persist Agent events and messages.
-3) Provide stable prompt and continue entry points.
-4) Run context overflow checks and compaction.
+主要职责：
+1) 管理工作区会话目录。
+2) 持久化 Agent 事件和消息。
+3) 提供稳定的 prompt（发送提示）和 continue（继续运行）入口。
+4) 执行上下文溢出检测与压缩（compaction）。
 """
 
 from pathlib import Path
@@ -40,11 +40,28 @@ logger = logging.getLogger("codepilot.sessions.session")
 
 
 class AgentSession:
+    """Agent 会话管理类。
+
+    封装了一个完整的 Agent 对话生命周期，包括：
+    - 消息的收发与持久化存储
+    - 上下文窗口的溢出检测与自动压缩
+    - 会话分支（fork）与切换
+    - 生命周期钩子的执行
+    - 请求失败时的自动重试
+    """
+
     def __init__(self, options: AgentSessionOptions) -> None:
+        """初始化 Agent 会话。
+
+        Args:
+            options: 会话配置选项，包含工作区目录、模型信息、系统提示词、工具列表等。
+        """
         workspace_dir = Path(options.workspace_dir)
         self.workspace_dir = workspace_dir
+        # 如果未提供 session_id，则自动生成一个新的
         self.session_id = options.session_id or new_session_id()
 
+        # 初始化会话持久化存储，并确保目录结构已创建
         self.store = SessionStore(workspace_dir=workspace_dir, session_id=self.session_id)
         self.store.ensure_initialized(
             model_id=options.model.id,
@@ -52,11 +69,14 @@ class AgentSession:
             system_prompt=options.system_prompt,
         )
 
+        # 加载已持久化的历史消息；优先读取会话消息，若无则读取上下文消息
         persisted_messages = self.store.load_session_messages()
         if not persisted_messages:
             persisted_messages = self.store.load_context_messages()
+        # 将历史消息与本次传入的新消息合并
         merged_messages = [*persisted_messages, *options.messages]
 
+        # 构建 Agent 配置项
         agent_opts = AgentOptions(
             model=options.model,
             system_prompt=options.system_prompt,
@@ -70,32 +90,51 @@ class AgentSession:
         )
         if options.convert_to_llm is not None:
             agent_opts.convert_to_llm = options.convert_to_llm
+
+        # 创建核心 Agent 实例
         self.agent = Agent(agent_opts)
-        self.max_context_messages = options.max_context_messages
-        self.max_context_tokens = options.max_context_tokens
-        self.retain_recent_messages = options.retain_recent_messages
-        self.summary_builder = options.summary_builder
+
+        # 上下文管理相关配置
+        self.max_context_messages = options.max_context_messages       # 消息数量上限
+        self.max_context_tokens = options.max_context_tokens           # token 数量上限
+        self.retain_recent_messages = options.retain_recent_messages   # 压缩时保留的最近消息数
+        self.summary_builder = options.summary_builder                 # 自定义摘要构建器
+
         self.tool_execution = options.tool_execution
+        # 重试机制配置
         self.retry_enabled = options.retry_enabled
         self.max_retries = options.max_retries
         self.retry_base_delay_ms = options.retry_base_delay_ms
+
         self.prompt_debug_sources = options.prompt_debug_sources
+        # MCP（Model Context Protocol）服务器与客户端
         self.mcp_servers = options.mcp_servers
         self.mcp_client = options.mcp_client
+        # 扩展命令注册表
         self.extension_commands = dict(options.extension_commands)
+        # 提示词执行前后的生命周期钩子
         self.before_prompt_hooks = list(options.before_prompt_hooks)
         self.after_prompt_hooks = list(options.after_prompt_hooks)
+        # 工具调用前后的回调
         self.before_tool_call = options.before_tool_call
         self.after_tool_call = options.after_tool_call
+
+        # 订阅 Agent 事件，用于持久化事件和消息
         self._unsubscribe = self.agent.subscribe(self._on_agent_event)
 
     @property
     def messages(self) -> list[AgentMessage]:
+        """获取当前会话的全部消息列表。"""
         return self.agent.state.messages
 
     @property
     def last_usage(self) -> dict | None:
-        """Return usage from the latest assistant message."""
+        """返回最近一条助手消息的 token 用量和费用信息。
+
+        Returns:
+            包含 input_tokens、output_tokens、total_tokens、cache_read、
+            cache_write 和 cost 的字典；若无助手消息则返回 None。
+        """
         for msg in reversed(self.agent.state.messages):
             if isinstance(msg, AssistantMessage):
                 u = msg.usage
@@ -115,7 +154,11 @@ class AgentSession:
 
     @property
     def cumulative_usage(self) -> dict:
-        """Return cumulative token usage and cost for the session."""
+        """返回本次会话的累计 token 用量和总费用。
+
+        Returns:
+            包含 input_tokens、output_tokens、total_tokens 和 total_cost 的字典。
+        """
         total_input = 0
         total_output = 0
         total_tokens = 0
@@ -134,6 +177,22 @@ class AgentSession:
         }
 
     async def prompt(self, text: str, *, images: list[str] | None = None) -> list[AgentMessage]:
+        """向 Agent 发送用户提示词并获取回复。
+
+        执行流程：
+        1. 运行 before_prompt 钩子
+        2. 检测上下文是否溢出，必要时触发压缩
+        3. 调用 Agent 执行（含重试机制）
+        4. 执行后再次检查并压缩上下文
+        5. 运行 after_prompt 钩子
+
+        Args:
+            text: 用户输入的文本。
+            images: 可选的图片路径列表（base64 或 URL）。
+
+        Returns:
+            本次交互产生的 Agent 消息列表。
+        """
         await self._run_lifecycle_hooks(text=text, is_continue=False, hooks=self.before_prompt_hooks)
         await self._check_and_compact_before_prompt()
         result = await self._run_with_retry(lambda: self.agent.prompt(text, images=images))
@@ -142,12 +201,25 @@ class AgentSession:
         return result
 
     async def prompt_message(self, message: UserMessage) -> list[AgentMessage]:
+        """直接发送一个 UserMessage 对象给 Agent（不经过生命周期钩子）。
+
+        Args:
+            message: 构造好的 UserMessage 实例。
+
+        Returns:
+            本次交互产生的 Agent 消息列表。
+        """
         await self._check_and_compact_before_prompt()
         result = await self._run_with_retry(lambda: self.agent.prompt(message))
         await self._compact_context_if_needed()
         return result
 
     async def continue_run(self) -> list[AgentMessage]:
+        """继续上一次未完成的 Agent 运行（例如工具调用后的延续）。
+
+        Returns:
+            继续运行产生的 Agent 消息列表。
+        """
         await self._run_lifecycle_hooks(text="", is_continue=True, hooks=self.before_prompt_hooks)
         result = await self._run_with_retry(self.agent.continue_run)
         await self._compact_context_if_needed()
@@ -155,42 +227,81 @@ class AgentSession:
         return result
 
     def subscribe(self, listener: Callable[[AgentEvent], None]) -> Callable[[], None]:
+        """订阅 Agent 事件流。
+
+        Args:
+            listener: 事件回调函数，接收 AgentEvent 参数。
+
+        Returns:
+            取消订阅的函数，调用后停止接收事件。
+        """
         return self.agent.subscribe(listener)
 
     def close(self) -> None:
+        """关闭会话，取消事件订阅以释放资源。"""
         self._unsubscribe()
 
+    # ── 会话分支与历史导航 ──────────────────────────────────────
+
     def list_entry_ids(self) -> list[str]:
+        """列出当前会话所有条目的 ID 列表。"""
         return self.store.list_entry_ids()
 
     def list_entries(self) -> list[dict]:
+        """列出当前会话所有条目的详细信息。"""
         return self.store.list_entries()
 
     def get_leaf_id(self) -> str | None:
+        """获取当前会话分支的末端（叶子）条目 ID。"""
         return self.store.get_leaf_id()
 
     def get_entry_path(self, entry_id: str) -> list[str]:
+        """获取从根条目到指定条目的路径（ID 列表）。"""
         return self.store.get_entry_path(entry_id)
 
     def get_session_tree(self) -> list[dict]:
+        """获取会话的树形结构，用于可视化分支历史。"""
         return self.store.get_session_tree()
 
     def fork_session(self, from_entry_id: str | None = None) -> "AgentSession":
+        """从指定条目分叉（fork）一个新的会话。
+
+        Args:
+            from_entry_id: 分叉起点的条目 ID，None 表示从当前末端分叉。
+
+        Returns:
+            新创建的 AgentSession 实例。
+        """
         return branch_fork_session(self, from_entry_id=from_entry_id)
 
     def fork_from_entry(self, entry_id: str) -> "AgentSession":
+        """从指定条目分叉会话（fork_session 的便捷别名）。"""
         return self.fork_session(from_entry_id=entry_id)
 
     def switch_to_entry(self, entry_id: str) -> None:
+        """切换当前会话到指定的历史条目。"""
         branch_switch_to_entry(self, entry_id)
 
     def switch_session(self, session_id: str) -> None:
+        """切换到另一个会话。"""
         branch_switch_session(self, session_id)
 
     def record_checkpoint(self, label: str, details: dict | None = None) -> SessionCheckpoint:
+        """在当前会话中记录一个检查点（checkpoint）。
+
+        Args:
+            label: 检查点的标签名称。
+            details: 可选的附加详情字典。
+
+        Returns:
+            创建的 SessionCheckpoint 实例。
+        """
         return record_checkpoint(self.store, session_id=self.session_id, label=label, details=details)
 
+    # ── 内部方法 ────────────────────────────────────────────────
+
     async def _on_agent_event(self, event: AgentEvent) -> None:
+        """Agent 事件回调：将事件持久化到存储，并在消息结束时保存上下文消息。"""
         self.store.append_event(event)
         if event["type"] == "message_end":
             message = event["message"]
@@ -203,6 +314,15 @@ class AgentSession:
         is_continue: bool,
         hooks: list,
     ) -> None:
+        """执行生命周期钩子列表。
+
+        钩子可以是同步或异步函数，统一通过 inspect.isawaitable 兼容处理。
+
+        Args:
+            text: 当前用户输入文本。
+            is_continue: 是否为继续运行（而非新提示）。
+            hooks: 要执行的钩子函数列表。
+        """
         if not hooks:
             return
         ctx = ExtensionLifecycleContext(
@@ -217,7 +337,10 @@ class AgentSession:
                 await value
 
     async def _check_and_compact_before_prompt(self) -> None:
-        """Check for context overflow before calling the LLM."""
+        """在调用 LLM 之前检测上下文是否溢出。
+
+        如果已溢出，则强制触发上下文压缩，以确保请求不会因超出窗口而失败。
+        """
         model = self.agent.state.model
         ctx = Context(
             messages=self.agent.state.messages,
@@ -232,38 +355,61 @@ class AgentSession:
             await self._compact_context_if_needed(force=True)
 
     async def _compact_context_if_needed(self, *, force: bool = False) -> None:
+        """根据需要压缩上下文消息。
+
+        触发条件（满足任一即触发）：
+        - force=True（强制压缩）
+        - 消息数量超过 max_context_messages
+        - 估算 token 数超过 max_context_tokens
+
+        压缩策略：
+        1. 保留最近的 retain_recent_messages 条消息不动
+        2. 将更早的消息交给 LLM 生成摘要（或使用自定义摘要构建器）
+        3. 用一条摘要消息替换所有旧消息
+
+        Args:
+            force: 是否强制执行压缩（忽略阈值判断）。
+        """
         max_messages = self.max_context_messages
         max_tokens = self.max_context_tokens
         over_message_limit = bool(max_messages and max_messages > 0 and len(self.agent.state.messages) > max_messages)
         estimated_tokens = estimate_context_tokens(self.agent.state.messages, self.agent.state.system_prompt)
         over_token_limit = bool(max_tokens and max_tokens > 0 and estimated_tokens > max_tokens)
 
+        # 未触发任何压缩条件，直接返回
         if not force and not over_message_limit and not over_token_limit:
             return
 
         messages = list(self.agent.state.messages)
+        # 至少保留 2 条消息，最多保留 retain_recent_messages 条
         retain = max(2, min(self.retain_recent_messages, len(messages) - 1))
         if len(messages) <= retain:
             return
 
+        # 分割：旧消息（待压缩）和近期消息（保留原样）
         older = messages[:-retain]
         recent = messages[-retain:]
 
+        # 生成摘要：优先使用自定义构建器，否则调用 LLM
         if self.summary_builder:
             summary_text = self.summary_builder(older).strip()
         else:
             summary_text = await self._llm_summary(older)
 
+        # LLM 摘要失败时，使用基于规则的降级摘要
         if not summary_text:
             summary_text = self._fallback_summary(older)
 
+        # 构造压缩后的消息列表：摘要 + 最近消息
         summary_message = UserMessage(
             content=[TextContent(text=f"[Context Summary]\n{summary_text}")],
         )
         compacted = [summary_message, *recent]
 
+        # 更新 Agent 状态和持久化存储
         self.agent.set_messages(compacted)
         self.store.rewrite_context_messages(compacted)
+        # 记录压缩事件，便于调试和审计
         self.store.append_event(
             {
                 "type": "context_compacted",
@@ -281,7 +427,14 @@ class AgentSession:
         )
 
     async def _llm_summary(self, messages: list[Message]) -> str:
-        """Generate a context summary with the current LLM."""
+        """使用当前 LLM 对历史消息生成上下文摘要。
+
+        Args:
+            messages: 需要压缩的旧消息列表。
+
+        Returns:
+            生成的摘要文本；失败时返回空字符串。
+        """
         formatted = self._format_messages_for_summary(messages)
         if not formatted.strip():
             return ""
@@ -309,13 +462,25 @@ class AgentSession:
 
     @staticmethod
     def _format_messages_for_summary(messages: list[Message]) -> str:
+        """将消息列表格式化为供摘要使用的文本格式。"""
         return format_messages_for_summary(messages)
 
     @staticmethod
     def _fallback_summary(messages: list[Message]) -> str:
+        """当 LLM 摘要不可用时，使用基于规则的方式生成降级摘要。"""
         return fallback_summary(messages)
 
     async def _run_with_retry(self, op: Callable[[], Awaitable[list[AgentMessage]]]) -> list[AgentMessage]:
+        """带重试机制地执行异步操作。
+
+        当请求失败且满足重试条件时，自动进行指数退避重试。
+
+        Args:
+            op: 要执行的异步操作（通常是 agent.prompt 或 agent.continue_run）。
+
+        Returns:
+            操作成功后的 Agent 消息列表。
+        """
         return await run_with_retry(
             op=op,
             retry_enabled=self.retry_enabled,
@@ -330,4 +495,5 @@ class AgentSession:
 
     @staticmethod
     def _should_retry(message: AssistantMessage | None) -> bool:
+        """判断给定的助手消息是否满足重试条件。"""
         return should_retry(message)

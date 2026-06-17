@@ -32,10 +32,13 @@ AgentMessage = Message
 
 @dataclass
 class AgentToolResult:
-    """工具执行产物：内容块 + 细节对象（UI/日志可用）。"""
+    """工具执行产物：内容块、细节对象和运行状态。"""
 
     content: list[TextContent | ImageContent]
     details: Any = None
+    is_error: bool = False
+    approved: bool = True
+    approval_id: str | None = None
 
 
 AgentToolUpdateCallback = Callable[[AgentToolResult], None]
@@ -207,6 +210,9 @@ class ToolExecutionEndEvent(AgentEventBase):
     toolName: str
     result: AgentToolResult
     isError: bool
+    approved: bool
+    approvalId: str | None
+    errorReason: str | None
 
 
 class ErrorEvent(AgentEventBase):

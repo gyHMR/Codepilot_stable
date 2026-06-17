@@ -37,6 +37,9 @@ def normalize_event_value(value: Any) -> Any:
         return {
             "content": [normalize_event_value(block) for block in value.content],
             "details": normalize_event_value(value.details),
+            "is_error": value.is_error,
+            "approved": value.approved,
+            "approval_id": value.approval_id,
         }
     if isinstance(value, dict):
         return {str(k): normalize_event_value(v) for k, v in value.items()}
