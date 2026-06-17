@@ -14,15 +14,42 @@ from .approval import ApprovalProvider, DenyApprovalProvider
 from .diff import DiffRecorder
 from .permissions import PermissionPolicy, ToolDecision, ToolRequest
 from .registry import ToolRegistry
-from .types import ToolRuntimeRequest, ToolRuntimeResult
+from .types import ToolResultStatus, ToolRuntimeRequest, ToolRuntimeResult
 
 
-def _error_result(message: str, *, details: dict[str, Any] | None = None) -> AgentToolResult:
+def _tool_result(
+    message: str,
+    *,
+    status: ToolResultStatus,
+    details: dict[str, Any] | None = None,
+    is_error: bool = True,
+) -> AgentToolResult:
+    merged_details = {"status": status, **(details or {})}
     return AgentToolResult(
         content=[TextContent(text=message)],
-        details=details or {},
-        is_error=True,
+        details=merged_details,
+        is_error=is_error,
+        status=status,
     )
+
+
+def _sync_result_status(
+    result: AgentToolResult,
+    status: ToolResultStatus,
+    *,
+    approved: bool,
+    approval_id: str | None = None,
+) -> AgentToolResult:
+    result.status = status
+    result.approved = approved
+    result.approval_id = approval_id
+    if result.details is None:
+        result.details = {}
+    if isinstance(result.details, dict):
+        result.details.setdefault("status", status)
+        if approval_id is not None:
+            result.details.setdefault("approval_id", approval_id)
+    return result
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -41,15 +68,15 @@ class ToolRuntime:
     def as_agent_tools(self) -> list[AgentTool]:
         adapters: list[AgentTool] = []
         for tool in self.registry.list():
-            adapters.append(
-                AgentTool(
-                    name=tool.name,
-                    label=tool.label,
-                    description=tool.description,
-                    parameters=tool.parameters,
-                    execute=self._make_execute_adapter(tool.name),
-                )
+            adapter = AgentTool(
+                name=tool.name,
+                label=tool.label,
+                description=tool.description,
+                parameters=tool.parameters,
+                execute=self._make_execute_adapter(tool.name),
             )
+            setattr(adapter, "runtime_managed", True)
+            adapters.append(adapter)
         return adapters
 
     def _make_execute_adapter(self, name: str):
@@ -70,8 +97,11 @@ class ToolRuntime:
             )
             result = runtime_result.result
             result.is_error = runtime_result.is_error
+            result.status = runtime_result.status
             result.approved = runtime_result.approved
             result.approval_id = runtime_result.approval_id
+            if isinstance(result.details, dict):
+                result.details.setdefault("status", runtime_result.status)
             return result
 
         return _execute
@@ -85,13 +115,15 @@ class ToolRuntime:
     ) -> ToolRuntimeResult:
         tool = self.registry.get(request.name)
         if tool is None:
-            result = _error_result(
+            result = _tool_result(
                 f"Tool {request.name} not found",
+                status="error",
                 details={"tool": request.name, "reason": "tool_not_found"},
             )
             result.approved = False
             return ToolRuntimeResult(
                 result=result,
+                status="error",
                 is_error=True,
                 approved=False,
             )
@@ -115,18 +147,21 @@ class ToolRuntime:
                 decision,
             )
             if not approval.approved:
-                result = _error_result(
+                result = _tool_result(
                     approval.reason or "Tool execution requires approval",
+                    status="approval_required",
                     details={
                         "tool": request.name,
                         "reason": decision.reason,
                         "approval_id": approval.approval_id,
+                        "policy_reason": decision.reason,
                     },
                 )
                 result.approved = False
                 result.approval_id = approval.approval_id
                 return ToolRuntimeResult(
                     result=result,
+                    status="approval_required",
                     is_error=True,
                     approved=False,
                     approval_id=approval.approval_id,
@@ -135,30 +170,48 @@ class ToolRuntime:
         try:
             value = tool.execute(request.tool_call_id, request.params, signal, on_update)
             result = await _maybe_await(value)
+            status: ToolResultStatus = "error" if result.is_error else "success"
+            _sync_result_status(
+                result,
+                status,
+                approved=result.approved,
+                approval_id=result.approval_id,
+            )
             return ToolRuntimeResult(
                 result=result,
+                status=status,
                 is_error=bool(result.is_error),
                 approved=result.approved,
                 approval_id=result.approval_id,
             )
         except Exception as exc:
+            result = _tool_result(
+                str(exc),
+                status="error",
+                details={"tool": request.name, "reason": "tool_exception", "error_kind": type(exc).__name__},
+            )
             return ToolRuntimeResult(
-                result=_error_result(
-                    str(exc),
-                    details={"tool": request.name, "reason": "tool_exception"},
-                ),
+                result=result,
+                status="error",
                 is_error=True,
             )
 
     @staticmethod
     def _blocked_result(request: ToolRuntimeRequest, decision: ToolDecision) -> ToolRuntimeResult:
-        result = _error_result(
+        result = _tool_result(
             decision.reason or "Tool execution was blocked",
-            details={"tool": request.name, "reason": decision.reason, **decision.details},
+            status="denied",
+            details={
+                "tool": request.name,
+                "reason": decision.reason,
+                "policy_reason": decision.reason,
+                **decision.details,
+            },
         )
         result.approved = False
         return ToolRuntimeResult(
             result=result,
+            status="denied",
             is_error=True,
             approved=False,
         )

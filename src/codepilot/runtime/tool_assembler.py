@@ -10,7 +10,6 @@ from codepilot.extensions import load_extensions, load_skills
 from codepilot.extensions.mcp import create_mcp_proxy_tools, parse_mcp_tool_configs
 from codepilot.extensions.types import LoadedExtensions
 from codepilot.tools.builtin import (
-    READ_ONLY_TOOL_NAMES,
     create_builtin_tools,
     get_builtin_tool_metadata,
 )
@@ -57,12 +56,13 @@ def assemble_tools(
     for tool in mcp_tools:
         tool_map[tool.name] = tool
 
-    merged_tools = list(tool_map.values())
-    if config.read_only_mode:
-        merged_tools = [tool for tool in merged_tools if tool.name in READ_ONLY_TOOL_NAMES]
     registry = ToolRegistry()
-    for tool in merged_tools:
-        registry.register(tool, metadata=get_builtin_tool_metadata(tool.name))
+    for tool in tool_map.values():
+        metadata = get_builtin_tool_metadata(tool.name)
+        registry.register(tool, metadata=metadata)
+
+    if config.read_only_mode:
+        registry = _read_only_registry(registry)
     runtime = ToolRuntime(
         registry=registry,
         permission_policy=PermissionPolicy(
@@ -80,3 +80,12 @@ def assemble_tools(
         loaded_extensions=loaded_extensions,
         loaded_skills=loaded_skills,
     )
+
+
+def _read_only_registry(registry: ToolRegistry) -> ToolRegistry:
+    filtered = ToolRegistry()
+    for tool in registry.list():
+        metadata = registry.metadata_for(tool.name)
+        if metadata is not None and metadata.read_only:
+            filtered.register(tool, metadata=metadata)
+    return filtered

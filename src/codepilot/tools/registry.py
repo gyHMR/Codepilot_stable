@@ -40,13 +40,14 @@ def infer_tool_metadata(tool: AgentTool) -> ToolMetadata:
     read_only = name in {"read", "read_file", "grep", "find", "ls", "list_dir"}
     mutating = name in {"write", "write_file", "edit", "bash"}
     category = _infer_category(name)
+    external = category in {"extension", "mcp"}
     return ToolMetadata(
         name=name,
         category=category,
         read_only=read_only,
         concurrency_safe=read_only,
         exclusive=not read_only,
-        requires_approval=False,
+        requires_approval=external,
         risk_level=_infer_risk(name, mutating),
         resource_scope=(category,),
         network_access=False,
@@ -68,6 +69,8 @@ def _infer_category(name: str) -> str:
 
 def _infer_risk(name: str, mutating: bool) -> str:
     if name.startswith("mcp_"):
+        return "medium"
+    if _infer_category(name) == "extension":
         return "medium"
     if name == "bash":
         return "medium"

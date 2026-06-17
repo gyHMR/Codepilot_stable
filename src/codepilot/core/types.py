@@ -22,6 +22,7 @@ from codepilot.llm.types import (
     ToolCall,
     ToolResultMessage,
 )
+from codepilot.protocols.tools import ToolResultStatus
 
 
 ToolExecutionMode = Literal["sequential", "parallel"]
@@ -37,6 +38,7 @@ class AgentToolResult:
     content: list[TextContent | ImageContent]
     details: Any = None
     is_error: bool = False
+    status: ToolResultStatus = "success"
     approved: bool = True
     approval_id: str | None = None
 
