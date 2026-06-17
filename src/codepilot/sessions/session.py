@@ -10,7 +10,6 @@ Responsibilities:
 """
 
 from pathlib import Path
-import asyncio
 import inspect
 import logging
 from typing import Awaitable, Callable
@@ -23,13 +22,17 @@ from codepilot.llm.types import (
     Message,
     SimpleStreamOptions,
     TextContent,
-    ToolResultMessage,
     UserMessage,
 )
 from codepilot.core import Agent, AgentEvent, AgentMessage, AgentOptions
 
 from codepilot.extensions.types import ExtensionLifecycleContext
+from .branching import fork_session as branch_fork_session
+from .branching import switch_session as branch_switch_session
+from .branching import switch_to_entry as branch_switch_to_entry
+from .checkpoint import SessionCheckpoint, record_checkpoint
 from .compaction import COMPACTION_SYSTEM_PROMPT, fallback_summary, format_messages_for_summary
+from .retry import run_with_retry, should_retry
 from .store import SessionStore, new_session_id
 from .types import AgentSessionOptions
 
@@ -173,65 +176,19 @@ class AgentSession:
         return self.store.get_session_tree()
 
     def fork_session(self, from_entry_id: str | None = None) -> "AgentSession":
-        new_id = new_session_id()
-        fork_store = self.store.fork_to(new_id, from_entry_id=from_entry_id)
-        meta = fork_store.read_meta() or {}
-        model = self.agent.state.model
-        system_prompt = str(meta.get("system_prompt", self.agent.state.system_prompt))
-        return AgentSession(
-            AgentSessionOptions(
-                model=model,
-                workspace_dir=self.workspace_dir,
-                system_prompt=system_prompt,
-                tools=list(self.agent.state.tools),
-                session_id=new_id,
-                thinking_level=self.agent.state.thinking_level,
-                tool_execution=self.tool_execution,
-                max_context_messages=self.max_context_messages,
-                max_context_tokens=self.max_context_tokens,
-                retain_recent_messages=self.retain_recent_messages,
-                summary_builder=self.summary_builder,
-                retry_enabled=self.retry_enabled,
-                max_retries=self.max_retries,
-                retry_base_delay_ms=self.retry_base_delay_ms,
-                prompt_debug_sources=self.prompt_debug_sources,
-                mcp_servers=self.mcp_servers,
-                mcp_client=self.mcp_client,
-                extension_commands=self.extension_commands,
-                before_prompt_hooks=self.before_prompt_hooks,
-                after_prompt_hooks=self.after_prompt_hooks,
-                before_tool_call=self.before_tool_call,
-                after_tool_call=self.after_tool_call,
-            )
-        )
+        return branch_fork_session(self, from_entry_id=from_entry_id)
 
     def fork_from_entry(self, entry_id: str) -> "AgentSession":
         return self.fork_session(from_entry_id=entry_id)
 
     def switch_to_entry(self, entry_id: str) -> None:
-        self.store.set_leaf(entry_id)
-        restored = self.store.load_session_messages(leaf_id=entry_id)
-        self.agent.set_messages(restored)
-        self.store.append_event(
-            {
-                "type": "session_switch_entry",
-                "session_id": self.session_id,
-                "entry_id": entry_id,
-            }
-        )
+        branch_switch_to_entry(self, entry_id)
 
     def switch_session(self, session_id: str) -> None:
-        new_store = SessionStore(self.workspace_dir, session_id)
-        meta = new_store.read_meta()
-        if not meta:
-            raise ValueError(f"Session not found: {session_id}")
+        branch_switch_session(self, session_id)
 
-        self.session_id = session_id
-        self.store = new_store
-        restored = new_store.load_session_messages()
-        if not restored:
-            restored = new_store.load_context_messages()
-        self.agent.set_messages(restored)
+    def record_checkpoint(self, label: str, details: dict | None = None) -> SessionCheckpoint:
+        return record_checkpoint(self.store, session_id=self.session_id, label=label, details=details)
 
     async def _on_agent_event(self, event: AgentEvent) -> None:
         self.store.append_event(event)
@@ -359,56 +316,18 @@ class AgentSession:
         return fallback_summary(messages)
 
     async def _run_with_retry(self, op: Callable[[], Awaitable[list[AgentMessage]]]) -> list[AgentMessage]:
-        attempts = self.max_retries + 1 if self.retry_enabled else 1
-        last: list[AgentMessage] | None = None
-
-        for attempt in range(attempts):
-            messages = await op()
-            last = messages
-
-            final_assistant = next((m for m in reversed(self.agent.state.messages) if isinstance(m, AssistantMessage)), None)
-            should_retry = self._should_retry(final_assistant)
-            if not should_retry or attempt >= attempts - 1:
-                return messages
-
-            delay_ms = int(self.retry_base_delay_ms * (2**attempt))
-            self.store.append_event(
-                {
-                    "type": "auto_retry_start",
-                    "attempt": attempt + 1,
-                    "max_attempts": attempts,
-                    "delay_ms": delay_ms,
-                    "error_message": final_assistant.error_message if final_assistant else "",
-                }
-            )
-            await asyncio.sleep(delay_ms / 1000.0)
-
-        return last or []
+        return await run_with_retry(
+            op=op,
+            retry_enabled=self.retry_enabled,
+            max_retries=self.max_retries,
+            retry_base_delay_ms=self.retry_base_delay_ms,
+            get_final_assistant=lambda: next(
+                (m for m in reversed(self.agent.state.messages) if isinstance(m, AssistantMessage)),
+                None,
+            ),
+            append_event=self.store.append_event,
+        )
 
     @staticmethod
     def _should_retry(message: AssistantMessage | None) -> bool:
-        if message is None:
-            return False
-        if message.stop_reason not in {"error", "aborted"}:
-            return False
-        error_text = (message.error_message or "").lower()
-        if "invalid_api_key" in error_text or "authentication" in error_text or "unauthorized" in error_text:
-            return False
-        return True
-
-
-def _extract_text_from_user(message: UserMessage) -> str:
-    if isinstance(message.content, str):
-        return message.content[:180]
-    text = "".join(block.text for block in message.content if isinstance(block, TextContent))
-    return text[:180]
-
-
-def _extract_text_from_assistant(message: AssistantMessage) -> str:
-    text = "".join(block.text for block in message.content if isinstance(block, TextContent))
-    return text[:180]
-
-
-def _extract_text_from_tool_result(message: ToolResultMessage) -> str:
-    text = "".join(block.text for block in message.content if isinstance(block, TextContent))
-    return text[:180]
+        return should_retry(message)

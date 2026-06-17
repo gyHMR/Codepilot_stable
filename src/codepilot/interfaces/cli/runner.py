@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from dataclasses import asdict, is_dataclass
-import inspect
 import json
 import sys
 from typing import Any, Callable
@@ -19,8 +18,7 @@ from typing import Any, Callable
 from codepilot.llm.types import AssistantMessage, TextContent
 from codepilot.core import AgentEvent
 
-from codepilot.extensions.types import ExtensionCommandContext
-from codepilot.runtime.command_registry import format_commands_for_help, list_runtime_commands, resolve_registered_command
+from codepilot.runtime.command_registry import format_commands_for_help, handle_runtime_command, list_runtime_commands
 from codepilot.runtime.types import InputFn, OutputFn, RunMode
 from codepilot.sessions.session import AgentSession
 
@@ -152,146 +150,18 @@ async def run_interactive(
 
         # "/" 开头的命令交给交互命令处理器
         if text.startswith("/"):
-            handled, switched = await _handle_interactive_command(current_session, text, output=output)
+            command_result = await handle_runtime_command(current_session, text)
+            for line in command_result.output_lines:
+                output(line)
             # 如果命令返回了新会话（如 /fork, /clear），切换到新会话
-            if switched is not None:
+            if command_result.switched_session is not None:
                 current_session.close()
-                current_session = switched
-            if handled:
+                current_session = command_result.switched_session
+            if command_result.handled:
                 continue
 
         # 普通文本 → 发送给 Agent 处理
         await run_print(current_session, text, output=output, show_tool_events=show_tool_events)
-
-
-def _create_fresh_session(old: AgentSession) -> AgentSession:
-    """创建全新空白会话，保留模型/工具/设置但不带历史消息。
-
-    用于 /clear 命令：清空上下文但保留配置。
-    """
-    from codepilot.runtime.types import AgentSessionOptions
-    from codepilot.sessions.store import new_session_id
-
-    return AgentSession(
-        AgentSessionOptions(
-            model=old.agent.state.model,                # 保留原模型
-            workspace_dir=old.workspace_dir,            # 保留工作区
-            system_prompt=old.agent.state.system_prompt, # 保留系统提示词
-            tools=list(old.agent.state.tools),          # 保留工具列表
-            session_id=new_session_id(),                # 生成新会话 ID
-            messages=[],                                # 清空消息历史
-            thinking_level=old.agent.state.thinking_level,
-            tool_execution=old.tool_execution,
-            max_context_messages=old.max_context_messages,
-            max_context_tokens=old.max_context_tokens,
-            retain_recent_messages=old.retain_recent_messages,
-            summary_builder=old.summary_builder,
-            retry_enabled=old.retry_enabled,
-            max_retries=old.max_retries,
-            retry_base_delay_ms=old.retry_base_delay_ms,
-            mcp_servers=old.mcp_servers,
-            mcp_client=old.mcp_client,
-            extension_commands=old.extension_commands,
-            before_prompt_hooks=old.before_prompt_hooks,
-            after_prompt_hooks=old.after_prompt_hooks,
-            before_tool_call=old.before_tool_call,
-            after_tool_call=old.after_tool_call,
-        )
-    )
-
-
-async def _handle_interactive_command(
-    session: AgentSession, text: str, *, output: OutputFn = print
-) -> tuple[bool, AgentSession | None]:
-    """处理交互模式下的 "/" 命令。
-
-    返回:
-        (handled, switched_session)
-        - handled: 是否成功处理了命令
-        - switched_session: 若不为 None，表示需要切换到新会话
-
-    支持的命令：
-        /help              - 显示帮助信息
-        /session           - 显示当前会话 ID 和叶子节点 ID
-        /tree              - 显示会话树结构
-        /clear             - 清空上下文，创建新会话
-        /new, /fork        - 从指定 entry 分叉新会话
-        /switch <entry_id> - 切换到指定 entry
-        其他注册的扩展命令   - 由扩展处理器处理
-    """
-    # 解析命令和参数（命令和参数之间用空格分隔）
-    cmd, _, rest = text.partition(" ")
-    arg = rest.strip()
-
-    # /help — 显示所有可用命令
-    if cmd == "/help":
-        output(format_commands_for_help(session))
-        return True, None
-
-    # /session — 显示当前会话 ID 和叶子节点 ID
-    if cmd == "/session":
-        output(f"session_id={session.session_id} leaf_id={session.get_leaf_id()}")
-        return True, None
-
-    # /tree — 以缩进树形结构显示会话的所有 entry
-    if cmd == "/tree":
-        entries = session.list_entries()
-        if not entries:
-            output("(empty)")
-            return True, None
-        for item in entries:
-            depth = int(item.get("depth", 0))
-            prefix = "  " * max(depth, 0)
-            leaf_mark = " *" if item.get("is_leaf") else ""
-            output(f"{prefix}- {item.get('id')}{leaf_mark}")
-        return True, None
-
-    # /clear — 清空上下文，创建全新会话
-    if cmd == "/clear":
-        fresh = _create_fresh_session(session)
-        output(f"context cleared → new session_id={fresh.session_id}")
-        return True, fresh
-
-    # /new 或 /fork — 从指定 entry 分叉出新会话
-    if cmd in {"/new", "/fork"}:
-        from_entry = arg or session.get_leaf_id() or ""
-        if not from_entry:
-            output("cannot resolve source entry")
-            return True, None
-        forked = session.fork_from_entry(from_entry)
-        output(f"forked to session_id={forked.session_id}")
-        return True, forked
-
-    # /switch — 切换当前会话的叶子节点到指定 entry
-    if cmd == "/switch":
-        if not arg:
-            output("usage: /switch <entry_id>")
-            return True, None
-        session.switch_to_entry(arg)
-        output(f"switched leaf -> {session.get_leaf_id()}")
-        return True, None
-
-    # 尝试匹配扩展注册的命令（如 /commit, /review 等）
-    reg = resolve_registered_command(session, cmd)
-    if reg:
-        value = reg.handler(
-            ExtensionCommandContext(
-                name=reg.name,
-                args=[p for p in arg.split(" ") if p],
-                raw_text=text,
-                session=session,
-                message=None,
-            )
-        )
-        # 支持异步命令处理器
-        if inspect.isawaitable(value):
-            value = await value
-        if value:
-            output(str(value))
-        return True, None
-
-    # 未识别的命令
-    return False, None
 
 
 async def run(options: RunOptions) -> AssistantMessage | None:
