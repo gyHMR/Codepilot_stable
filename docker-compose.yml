@@ -1,0 +1,62 @@
+services:
+  codepilot-im:
+    build:
+      context: .
+    image: codepilot:dev
+    environment:
+      CODEPILOT_PROVIDER: ${CODEPILOT_PROVIDER:-anthropic}
+      CODEPILOT_MODEL_ID: ${CODEPILOT_MODEL_ID:-claude-sonnet-4-5}
+      CODEPILOT_TRANSPORT: ${CODEPILOT_TRANSPORT:-webhook}
+      CODEPILOT_HOST: ${CODEPILOT_HOST:-0.0.0.0}
+      CODEPILOT_PORT: ${CODEPILOT_PORT:-8787}
+      CODEPILOT_WORKSPACE: ${CODEPILOT_WORKSPACE:-/workspace}
+      CODEPILOT_LOG_LEVEL: ${CODEPILOT_LOG_LEVEL:-debug}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_VERIFY_TOKEN: ${FEISHU_VERIFY_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "${CODEPILOT_PORT:-8787}:${CODEPILOT_PORT:-8787}"
+    volumes:
+      - .:/workspace
+    command:
+      - sh
+      - -c
+      - >
+        codepilot-im
+        --platform feishu
+        --transport "$${CODEPILOT_TRANSPORT}"
+        --workspace "$${CODEPILOT_WORKSPACE}"
+        --host "$${CODEPILOT_HOST}"
+        --port "$${CODEPILOT_PORT}"
+        --provider "$${CODEPILOT_PROVIDER}"
+        --model-id "$${CODEPILOT_MODEL_ID}"
+        --feishu-app-id "$${FEISHU_APP_ID}"
+        --feishu-app-secret "$${FEISHU_APP_SECRET}"
+        --feishu-verify-token "$${FEISHU_VERIFY_TOKEN}"
+        --log-level "$${CODEPILOT_LOG_LEVEL}"
+
+  codepilot-cli:
+    build:
+      context: .
+    image: codepilot:dev
+    environment:
+      CODEPILOT_PROVIDER: ${CODEPILOT_PROVIDER:-anthropic}
+      CODEPILOT_MODEL_ID: ${CODEPILOT_MODEL_ID:-claude-sonnet-4-5}
+      CODEPILOT_WORKSPACE: ${CODEPILOT_WORKSPACE:-/workspace}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - .:/workspace
+    stdin_open: true
+    tty: true
+    command:
+      - sh
+      - -c
+      - >
+        codepilot
+        --mode interactive
+        --workspace "$${CODEPILOT_WORKSPACE}"
+        --provider "$${CODEPILOT_PROVIDER}"
+        --model-id "$${CODEPILOT_MODEL_ID}"
