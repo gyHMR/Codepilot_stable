@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Sequence
 
-from codepilot.runtime.factory import create_agent_session
+from codepilot.runtime.service import RuntimeService
 from codepilot.runtime.types import CreateAgentSessionOptions
 
 from .runner import RunOptions, run
@@ -143,8 +143,8 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         load_workspace_resources=not bool(args.disable_workspace_resources),  # 是否加载工作区资源
     )
 
-    # 通过工厂函数创建 Agent 会话实例
-    session = create_agent_session(options)
+    runtime = RuntimeService()
+    session = runtime.create_session(options).session
 
     try:
         # ── 会话管理操作 ──────────────────────────────────────
@@ -197,7 +197,7 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         )
     finally:
         # 确保会话资源被正确释放
-        session.close()
+        runtime.close_session(session.session_id)
 
     return 0
 

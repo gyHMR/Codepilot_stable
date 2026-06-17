@@ -15,6 +15,7 @@ from .command_registry import format_commands_for_help, list_runtime_commands
 from .convert_to_llm import convert_to_llm
 from .factory import create_agent_session
 from .resources import WorkspaceResourceLoader, WorkspaceResources, WorkspaceSettings
+from .service import CreateSessionRequest, RuntimeService, SessionHandle, UserInput
 from .system_prompt import SystemPromptBuildOptions, build_default_system_prompt, build_system_prompt
 from .types import AgentSessionOptions, CreateAgentSessionOptions
 
@@ -37,6 +38,10 @@ __all__ = [
     "CreateAgentSessionOptions",
     "convert_to_llm",
     "create_agent_session",
+    "RuntimeService",
+    "CreateSessionRequest",
+    "SessionHandle",
+    "UserInput",
     "create_builtin_tools",
     "WorkspaceResourceLoader",
     "WorkspaceResources",

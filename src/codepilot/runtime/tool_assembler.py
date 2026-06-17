@@ -10,6 +10,9 @@ from codepilot.extensions import load_extensions, load_skills
 from codepilot.extensions.mcp import create_mcp_proxy_tools, parse_mcp_tool_configs
 from codepilot.extensions.types import LoadedExtensions
 from codepilot.tools.builtin import READ_ONLY_TOOL_NAMES, create_builtin_tools
+from codepilot.tools.permissions import PermissionPolicy
+from codepilot.tools.registry import ToolRegistry
+from codepilot.tools.runtime import ToolRuntime
 
 from .config_loader import RuntimeConfig
 from .types import CreateAgentSessionOptions
@@ -18,6 +21,8 @@ from .types import CreateAgentSessionOptions
 @dataclass(frozen=True)
 class AssembledTools:
     tools: list[AgentTool]
+    registry: ToolRegistry
+    runtime: ToolRuntime
     loaded_extensions: LoadedExtensions
     loaded_skills: LoadedExtensions
 
@@ -54,9 +59,22 @@ def assemble_tools(
     merged_tools = list(tool_map.values())
     if config.read_only_mode:
         merged_tools = [tool for tool in merged_tools if tool.name in READ_ONLY_TOOL_NAMES]
+    registry = ToolRegistry()
+    registry.extend(merged_tools)
+    runtime = ToolRuntime(
+        registry=registry,
+        permission_policy=PermissionPolicy(
+            read_only=config.read_only_mode,
+            block_dangerous_bash=config.block_dangerous_bash,
+            bash_allow_patterns=config.bash_allow_patterns,
+            bash_block_patterns=config.bash_block_patterns,
+        ),
+    )
 
     return AssembledTools(
-        tools=merged_tools,
+        tools=runtime.as_agent_tools(),
+        registry=registry,
+        runtime=runtime,
         loaded_extensions=loaded_extensions,
         loaded_skills=loaded_skills,
     )

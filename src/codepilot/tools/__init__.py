@@ -21,3 +21,28 @@ __all__ = [
     "WorkspaceSandbox",
     "create_builtin_tools",
 ]
+from .approval import ApprovalDecision, ApprovalProvider, DenyApprovalProvider
+from .base import AgentTool, AgentToolResult, ToolMetadata
+from .diff import DiffRecorder, FileDiff
+from .permissions import PermissionPolicy, ToolDecision, ToolRequest
+from .registry import ToolRegistry
+from .runtime import ToolRuntime
+from .types import ToolRuntimeRequest, ToolRuntimeResult
+
+__all__ = [
+    "AgentTool",
+    "AgentToolResult",
+    "ApprovalDecision",
+    "ApprovalProvider",
+    "DenyApprovalProvider",
+    "DiffRecorder",
+    "FileDiff",
+    "PermissionPolicy",
+    "ToolDecision",
+    "ToolMetadata",
+    "ToolRegistry",
+    "ToolRequest",
+    "ToolRuntime",
+    "ToolRuntimeRequest",
+    "ToolRuntimeResult",
+]
