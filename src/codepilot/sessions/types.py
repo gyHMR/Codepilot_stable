@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-"""
-coding_agent 对外类型定义。
+"""Session-owned type definitions.
+
+This module keeps long-lived AgentSession construction types in the
+sessions layer so session orchestration does not depend on runtime assembly.
 """
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal, Optional
+from typing import Any, Awaitable, Callable, Optional
 
-from codepilot.llm.models import get_model
-from codepilot.llm.types import Message, Model
 from codepilot.core import (
     AfterToolCallContext,
     AfterToolCallResult,
@@ -20,34 +20,24 @@ from codepilot.core import (
     ToolExecutionMode,
 )
 from codepilot.extensions.types import LifecycleHook, RegisteredCommand
-from codepilot.sessions.types import AgentSessionOptions, ConvertToLlmFn
+from codepilot.llm.types import Message, Model
+
+ConvertToLlmFn = Callable[[list[AgentMessage]], list[Message] | Awaitable[list[Message]]]
 
 
 @dataclass
-class CreateAgentSessionOptions:
-    """
-    更友好的会话创建参数：
+class AgentSessionOptions:
+    """Low-level AgentSession initialization parameters."""
 
-    你可以二选一提供模型信息：
-    1) 直接传 model；
-    2) 传 provider + model_id（由工厂自动解析）。
-
-    若传入已有 session_id，工厂会优先尝试从会话元数据恢复
-    provider/model_id/system_prompt。
-    """
-
+    model: Model
     workspace_dir: str | Path
-    model: Optional[Model] = None
-    provider: Optional[str] = None
-    model_id: Optional[str] = None
     system_prompt: str = ""
     tools: list[AgentTool] = field(default_factory=list)
     session_id: Optional[str] = None
     messages: list[AgentMessage] = field(default_factory=list)
     thinking_level: str = "off"
     tool_execution: ToolExecutionMode = "parallel"
-    load_workspace_resources: bool = True
-    enabled_builtin_tools: Optional[list[str]] = None
+    convert_to_llm: Optional[ConvertToLlmFn] = None
     max_context_messages: Optional[int] = None
     max_context_tokens: Optional[int] = None
     retain_recent_messages: int = 24
@@ -72,20 +62,14 @@ class CreateAgentSessionOptions:
     before_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
     after_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
     before_tool_call: Optional[
-        Callable[[BeforeToolCallContext, Any | None], BeforeToolCallResult | None | Awaitable[BeforeToolCallResult | None]]
+        Callable[
+            [BeforeToolCallContext, Any | None],
+            BeforeToolCallResult | None | Awaitable[BeforeToolCallResult | None],
+        ]
     ] = None
     after_tool_call: Optional[
-        Callable[[AfterToolCallContext, Any | None], AfterToolCallResult | None | Awaitable[AfterToolCallResult | None]]
+        Callable[
+            [AfterToolCallContext, Any | None],
+            AfterToolCallResult | None | Awaitable[AfterToolCallResult | None],
+        ]
     ] = None
-
-    def resolve_model(self) -> Model:
-        if self.model is not None:
-            return self.model
-        if self.provider and self.model_id:
-            return get_model(self.provider, self.model_id)
-        raise ValueError("Model is required: provide model or provider+model_id")
-
-
-RunMode = Literal["print", "interactive", "rpc"]
-OutputFn = Callable[[str], None]
-InputFn = Callable[[str], str]

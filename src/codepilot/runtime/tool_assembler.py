@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+"""Tool assembly for runtime sessions."""
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from codepilot.core import AgentTool
+from codepilot.extensions import load_extensions, load_skills
+from codepilot.extensions.mcp import create_mcp_proxy_tools, parse_mcp_tool_configs
+from codepilot.extensions.types import LoadedExtensions
+from codepilot.tools.builtin import READ_ONLY_TOOL_NAMES, create_builtin_tools
+
+from .config_loader import RuntimeConfig
+from .types import CreateAgentSessionOptions
+
+
+@dataclass(frozen=True)
+class AssembledTools:
+    tools: list[AgentTool]
+    loaded_extensions: LoadedExtensions
+    loaded_skills: LoadedExtensions
+
+
+def assemble_tools(
+    workspace: Path,
+    options: CreateAgentSessionOptions,
+    config: RuntimeConfig,
+) -> AssembledTools:
+    loaded_extensions = load_extensions(workspace, configured_paths=config.extension_paths)
+    loaded_skills = load_skills(workspace, configured_paths=config.skill_paths)
+    mcp_tools = create_mcp_proxy_tools(
+        parse_mcp_tool_configs(config.mcp_servers),
+        client=options.mcp_client,
+    )
+
+    builtin_tools = create_builtin_tools(
+        workspace,
+        enabled_names=config.enabled_builtin_tools,
+        block_dangerous_bash=config.block_dangerous_bash,
+        bash_allow_patterns=config.bash_allow_patterns,
+        bash_block_patterns=config.bash_block_patterns,
+        edit_require_unique_match=config.edit_require_unique_match,
+    )
+
+    tool_map = {tool.name: tool for tool in builtin_tools}
+    for tool in options.tools:
+        tool_map[tool.name] = tool
+    for tool in loaded_extensions.tools:
+        tool_map[tool.name] = tool
+    for tool in mcp_tools:
+        tool_map[tool.name] = tool
+
+    merged_tools = list(tool_map.values())
+    if config.read_only_mode:
+        merged_tools = [tool for tool in merged_tools if tool.name in READ_ONLY_TOOL_NAMES]
+
+    return AssembledTools(
+        tools=merged_tools,
+        loaded_extensions=loaded_extensions,
+        loaded_skills=loaded_skills,
+    )

@@ -29,10 +29,9 @@ from codepilot.llm.types import (
 from codepilot.core import Agent, AgentEvent, AgentMessage, AgentOptions
 
 from codepilot.extensions.types import ExtensionLifecycleContext
-from codepilot.runtime.types import AgentSessionOptions
-
 from .compaction import COMPACTION_SYSTEM_PROMPT, fallback_summary, format_messages_for_summary
 from .store import SessionStore, new_session_id
+from .types import AgentSessionOptions
 
 logger = logging.getLogger("codepilot.sessions.session")
 
@@ -413,4 +412,3 @@ def _extract_text_from_assistant(message: AssistantMessage) -> str:
 def _extract_text_from_tool_result(message: ToolResultMessage) -> str:
     text = "".join(block.text for block in message.content if isinstance(block, TextContent))
     return text[:180]
-
