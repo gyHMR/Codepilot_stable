@@ -53,6 +53,16 @@ def empty_assistant_message(api: str, provider: str, model: str) -> AssistantMes
     )
 
 
+def normalize_usage(usage: Usage) -> Usage:
+    """Ensure derived token and cost fields are populated consistently."""
+
+    if usage.total_tokens <= 0:
+        usage.total_tokens = usage.input + usage.output + usage.cache_read + usage.cache_write
+    if usage.cost.total <= 0:
+        usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cache_read + usage.cost.cache_write
+    return usage
+
+
 def to_openai_messages(context: Context) -> list[dict[str, Any]]:
     """把统一 Message 转成 OpenAI Chat Completions 的 messages。"""
     out: list[dict[str, Any]] = []

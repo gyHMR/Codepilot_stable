@@ -11,10 +11,18 @@ from __future__ import annotations
 import asyncio
 from typing import Any, AsyncIterator, Optional
 
+from codepilot.protocols import LLMStreamEvent, LLMStreamEventType
+
 from .types import AssistantMessage
 
 
 _SENTINEL = object()
+
+
+def llm_event(event_type: LLMStreamEventType, **payload: object) -> LLMStreamEvent:
+    """Build a normalized LLM stream event."""
+
+    return {"type": event_type, **payload}  # type: ignore[typeddict-item]
 
 
 class AssistantMessageEventStream:

@@ -11,7 +11,6 @@ from codepilot.core.types import AgentToolUpdateCallback
 from codepilot.llm.types import TextContent
 
 from .approval import ApprovalProvider, DenyApprovalProvider
-from .diff import DiffRecorder
 from .permissions import PermissionPolicy, ToolDecision, ToolRequest
 from .registry import ToolRegistry
 from .types import ToolResultStatus, ToolRuntimeRequest, ToolRuntimeResult
@@ -63,7 +62,6 @@ class ToolRuntime:
     registry: ToolRegistry
     permission_policy: PermissionPolicy = field(default_factory=PermissionPolicy)
     approval_provider: ApprovalProvider = field(default_factory=DenyApprovalProvider)
-    diff_recorder: DiffRecorder = field(default_factory=DiffRecorder)
 
     def as_agent_tools(self) -> list[AgentTool]:
         adapters: list[AgentTool] = []

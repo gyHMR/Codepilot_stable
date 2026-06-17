@@ -17,11 +17,9 @@ import httpx
 
 from ..env_api_keys import get_env_api_key
 from ..errors import classify_llm_error
-from ..events import llm_event
-from ..event_stream import AssistantMessageEventStream
+from ..event_stream import AssistantMessageEventStream, llm_event
 from ..types import Context, Model, SimpleStreamOptions, StreamOptions, TextContent, ThinkingContent, ToolCall
-from ..usage import normalize_usage
-from ._common import empty_assistant_message, parse_partial_json, to_anthropic_messages, to_anthropic_tools
+from ._common import empty_assistant_message, normalize_usage, parse_partial_json, to_anthropic_messages, to_anthropic_tools
 
 
 def _map_stop_reason(reason: str | None) -> str:

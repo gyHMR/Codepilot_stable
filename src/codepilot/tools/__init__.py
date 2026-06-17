@@ -6,14 +6,19 @@ model instead of embedding filesystem and shell checks in entry points.
 """
 
 from .approval import ApprovalDecision, ApprovalProvider, DenyApprovalProvider
-from .base import AgentTool, AgentToolResult, ToolMetadata
 from .builtin import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES, create_builtin_tools
-from .diff import DiffRecorder, FileDiff
 from .permissions import PermissionPolicy, ToolDecision, ToolRequest
 from .registry import ToolRegistry
 from .runtime import ToolRuntime
 from .sandbox import WorkspaceSandbox
-from .types import ToolResultStatus, ToolRuntimeRequest, ToolRuntimeResult
+from .types import (
+    AgentTool,
+    AgentToolResult,
+    ToolMetadata,
+    ToolResultStatus,
+    ToolRuntimeRequest,
+    ToolRuntimeResult,
+)
 
 
 __all__ = [
@@ -22,8 +27,6 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalProvider",
     "DenyApprovalProvider",
-    "DiffRecorder",
-    "FileDiff",
     "MUTATING_TOOL_NAMES",
     "PermissionPolicy",
     "READ_ONLY_TOOL_NAMES",

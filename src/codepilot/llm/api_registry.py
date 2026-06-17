@@ -9,13 +9,35 @@ api -> provider 实现的注册中心。
 """
 
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Protocol
 
 from .event_stream import AssistantMessageEventStream
 from .types import Context, Model, SimpleStreamOptions, StreamOptions
 
 StreamFn = Callable[[Model, Context, StreamOptions | None], AssistantMessageEventStream]
 SimpleStreamFn = Callable[[Model, Context, SimpleStreamOptions | None], AssistantMessageEventStream]
+
+
+class LLMProvider(Protocol):
+    """Protocol implemented by model API adapters."""
+
+    api: str
+
+    def stream(
+        self,
+        model: Model,
+        context: Context,
+        options: StreamOptions | None = None,
+    ) -> AssistantMessageEventStream:
+        ...
+
+    def stream_simple(
+        self,
+        model: Model,
+        context: Context,
+        options: SimpleStreamOptions | None = None,
+    ) -> AssistantMessageEventStream:
+        ...
 
 
 @dataclass
@@ -28,6 +50,9 @@ class ApiProvider:
     name: str = ""
     provider_id: str = ""
     metadata: dict[str, object] = field(default_factory=dict)
+
+
+LLMProviderDescriptor = ApiProvider
 
 
 _REGISTRY: dict[str, ApiProvider] = {}
