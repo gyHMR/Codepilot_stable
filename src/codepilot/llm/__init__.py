@@ -4,9 +4,12 @@ Codepilot LLM public exports.
 
 from .api_registry import ApiProvider, clear_api_providers, get_api_provider, register_api_provider
 from .env_api_keys import get_env_api_key
+from .errors import LLMErrorInfo, LLMErrorKind
 from .event_stream import AssistantMessageEventStream
+from .events import LLMStreamEvent, LLMStreamEventType
 from .models import get_model, get_models, get_providers
 from .overflow import estimate_context_tokens, estimate_message_tokens, is_context_overflow, overflow_ratio
+from .provider import LLMProvider
 from .stream import complete, complete_simple, stream, stream_simple
 from .types import (
     Api,
@@ -16,6 +19,7 @@ from .types import (
     ImageContent,
     Message,
     Model,
+    ModelCapabilities,
     Provider,
     SimpleStreamOptions,
     StopReason,
@@ -58,8 +62,14 @@ __all__ = [
     "Context",
     "Cost",
     "ImageContent",
+    "LLMErrorInfo",
+    "LLMErrorKind",
+    "LLMProvider",
+    "LLMStreamEvent",
+    "LLMStreamEventType",
     "Message",
     "Model",
+    "ModelCapabilities",
     "Provider",
     "SimpleStreamOptions",
     "StopReason",

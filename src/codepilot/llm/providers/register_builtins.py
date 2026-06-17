@@ -10,19 +10,33 @@ from .openai_compatible import stream_openai_compatible, stream_simple_openai_co
 
 
 def register_builtin_api_providers() -> None:
-    """注册第一阶段支持的两个协议。"""
+    """Register built-in wire protocol adapters."""
     register_api_provider(
         ApiProvider(
             api="anthropic-messages",
             stream=stream_anthropic,
             stream_simple=stream_simple_anthropic,
+            name="Anthropic Messages",
+            provider_id="anthropic",
         )
     )
+    register_api_provider(
+        ApiProvider(
+            api="openai-compatible",
+            stream=stream_openai_compatible,
+            stream_simple=stream_simple_openai_compatible,
+            name="OpenAI-compatible Chat Completions",
+            provider_id="openai-compatible",
+        )
+    )
+    # Compatibility alias for older configs and learning docs.
     register_api_provider(
         ApiProvider(
             api="openai-standard",
             stream=stream_openai_compatible,
             stream_simple=stream_simple_openai_compatible,
+            name="OpenAI-compatible Chat Completions (legacy alias)",
+            provider_id="openai-compatible",
         )
     )
 

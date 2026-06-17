@@ -46,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--switch-entry", default=None, help="Switch current session leaf to entry id")
 
     # ── 模型配置 ──────────────────────────────────────────────
-    parser.add_argument("--provider", default=None, help="Model provider, e.g. anthropic/openai-standard")
+    parser.add_argument("--provider", default=None, help="Model provider, e.g. anthropic/openai/deepseek")
     parser.add_argument("--model-id", default=None, help="Model id")
     parser.add_argument("--system-prompt", default="", help="System prompt")
     parser.add_argument("--thinking-level", default="off", help="Thinking level: off/minimal/low/medium/high/xhigh")

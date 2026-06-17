@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1", help="Webhook server host")
     parser.add_argument("--port", type=int, default=8787, help="Webhook server port")
     parser.add_argument("--path", default="/feishu/events", help="Webhook path")
-    parser.add_argument("--provider", default="openai-standard", help="coding_agent provider")
+    parser.add_argument("--provider", default="openai", help="coding_agent provider")
     parser.add_argument("--model-id", default="gpt-4o-mini", help="coding_agent model id")
     parser.add_argument("--read-only", action="store_true", help="Enable read-only tool mode")
     parser.add_argument("--channel-queue-limit", type=int, default=20, help="Per-channel in-memory queue limit")

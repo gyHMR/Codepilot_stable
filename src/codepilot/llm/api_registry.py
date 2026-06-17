@@ -8,7 +8,7 @@ api -> provider 实现的注册中心。
 2) 后续扩展新 provider 时只需注册，不改调用方代码。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from .event_stream import AssistantMessageEventStream
@@ -20,9 +20,14 @@ SimpleStreamFn = Callable[[Model, Context, SimpleStreamOptions | None], Assistan
 
 @dataclass
 class ApiProvider:
+    """Registered implementation for one model wire protocol."""
+
     api: str
     stream: StreamFn
     stream_simple: SimpleStreamFn
+    name: str = ""
+    provider_id: str = ""
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 _REGISTRY: dict[str, ApiProvider] = {}

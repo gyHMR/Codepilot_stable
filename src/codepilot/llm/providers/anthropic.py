@@ -16,8 +16,11 @@ from typing import Any
 import httpx
 
 from ..env_api_keys import get_env_api_key
+from ..errors import classify_llm_error
+from ..events import llm_event
 from ..event_stream import AssistantMessageEventStream
 from ..types import Context, Model, SimpleStreamOptions, StreamOptions, TextContent, ThinkingContent, ToolCall
+from ..usage import normalize_usage
 from ._common import empty_assistant_message, parse_partial_json, to_anthropic_messages, to_anthropic_tools
 
 
@@ -77,7 +80,7 @@ def stream_anthropic(
                     json=payload,
                 ) as response:
                     response.raise_for_status()
-                    stream.push({"type": "start", "partial": out})
+                    stream.push(llm_event("start", partial=out))
 
                     current_event: str | None = None
                     current_index: int | None = None
@@ -113,24 +116,18 @@ def stream_anthropic(
                                 tb = TextContent(text="")
                                 text_blocks[current_index] = tb
                                 out.content.append(tb)
-                                stream.push(
-                                    {"type": "text_start", "contentIndex": len(out.content) - 1, "partial": out}
-                                )
+                                stream.push(llm_event("text_start", contentIndex=len(out.content) - 1, partial=out))
                             elif block_type in {"thinking", "redacted_thinking"}:
                                 th = ThinkingContent(thinking="", redacted=(block_type == "redacted_thinking"))
                                 thinking_blocks[current_index] = th
                                 out.content.append(th)
-                                stream.push(
-                                    {"type": "thinking_start", "contentIndex": len(out.content) - 1, "partial": out}
-                                )
+                                stream.push(llm_event("thinking_start", contentIndex=len(out.content) - 1, partial=out))
                             elif block_type == "tool_use":
                                 tc = ToolCall(id=block.get("id", ""), name=block.get("name", ""), arguments={})
                                 tool_blocks[current_index] = tc
                                 tool_partial_json[current_index] = ""
                                 out.content.append(tc)
-                                stream.push(
-                                    {"type": "toolcall_start", "contentIndex": len(out.content) - 1, "partial": out}
-                                )
+                                stream.push(llm_event("toolcall_start", contentIndex=len(out.content) - 1, partial=out))
 
                         elif current_event == "content_block_delta":
                             idx = data.get("index", current_index if current_index is not None else 0)
@@ -140,36 +137,36 @@ def stream_anthropic(
                                 text = delta.get("text", "")
                                 text_blocks[idx].text += text
                                 stream.push(
-                                    {
-                                        "type": "text_delta",
-                                        "contentIndex": out.content.index(text_blocks[idx]),
-                                        "delta": text,
-                                        "partial": out,
-                                    }
+                                    llm_event(
+                                        "text_delta",
+                                        contentIndex=out.content.index(text_blocks[idx]),
+                                        delta=text,
+                                        partial=out,
+                                    )
                                 )
                             elif delta_type in {"thinking_delta", "signature_delta"} and idx in thinking_blocks:
                                 text = delta.get("thinking", "")
                                 if text:
                                     thinking_blocks[idx].thinking += text
                                     stream.push(
-                                        {
-                                            "type": "thinking_delta",
-                                            "contentIndex": out.content.index(thinking_blocks[idx]),
-                                            "delta": text,
-                                            "partial": out,
-                                        }
+                                        llm_event(
+                                            "thinking_delta",
+                                            contentIndex=out.content.index(thinking_blocks[idx]),
+                                            delta=text,
+                                            partial=out,
+                                        )
                                     )
                             elif delta_type == "input_json_delta" and idx in tool_blocks:
                                 piece = delta.get("partial_json", "")
                                 tool_partial_json[idx] += piece
                                 tool_blocks[idx].arguments = parse_partial_json(tool_partial_json[idx])
                                 stream.push(
-                                    {
-                                        "type": "toolcall_delta",
-                                        "contentIndex": out.content.index(tool_blocks[idx]),
-                                        "delta": piece,
-                                        "partial": out,
-                                    }
+                                    llm_event(
+                                        "toolcall_delta",
+                                        contentIndex=out.content.index(tool_blocks[idx]),
+                                        delta=piece,
+                                        partial=out,
+                                    )
                                 )
 
                         elif current_event == "content_block_stop":
@@ -177,32 +174,32 @@ def stream_anthropic(
                             if idx in text_blocks:
                                 block = text_blocks[idx]
                                 stream.push(
-                                    {
-                                        "type": "text_end",
-                                        "contentIndex": out.content.index(block),
-                                        "content": block.text,
-                                        "partial": out,
-                                    }
+                                    llm_event(
+                                        "text_end",
+                                        contentIndex=out.content.index(block),
+                                        content=block.text,
+                                        partial=out,
+                                    )
                                 )
                             elif idx in thinking_blocks:
                                 block = thinking_blocks[idx]
                                 stream.push(
-                                    {
-                                        "type": "thinking_end",
-                                        "contentIndex": out.content.index(block),
-                                        "content": block.thinking,
-                                        "partial": out,
-                                    }
+                                    llm_event(
+                                        "thinking_end",
+                                        contentIndex=out.content.index(block),
+                                        content=block.thinking,
+                                        partial=out,
+                                    )
                                 )
                             elif idx in tool_blocks:
                                 block = tool_blocks[idx]
                                 stream.push(
-                                    {
-                                        "type": "toolcall_end",
-                                        "contentIndex": out.content.index(block),
-                                        "toolCall": block,
-                                        "partial": out,
-                                    }
+                                    llm_event(
+                                        "toolcall_end",
+                                        contentIndex=out.content.index(block),
+                                        toolCall=block,
+                                        partial=out,
+                                    )
                                 )
 
                         elif current_event == "message_delta":
@@ -211,12 +208,14 @@ def stream_anthropic(
                             out.stop_reason = _map_stop_reason(delta.get("stop_reason"))
                             out.usage.output = usage.get("output_tokens", out.usage.output)
 
-                    stream.push({"type": "done", "reason": out.stop_reason, "message": out})
+                    normalize_usage(out.usage)
+                    stream.push(llm_event("done", reason=out.stop_reason, message=out))
                     stream.end(out)
         except Exception as exc:
             out.stop_reason = "error"
             out.error_message = str(exc)
-            stream.push({"type": "error", "reason": "error", "error": out})
+            out.error_info = classify_llm_error(exc, model)
+            stream.push(llm_event("error", reason="error", error=out, errorInfo=out.error_info))
             stream.end(out)
 
     asyncio.create_task(_run())

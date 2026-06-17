@@ -16,8 +16,11 @@ from typing import Any
 import httpx
 
 from ..env_api_keys import get_env_api_key
+from ..errors import classify_llm_error
+from ..events import llm_event
 from ..event_stream import AssistantMessageEventStream
 from ..types import Context, Model, SimpleStreamOptions, StreamOptions, TextContent, ThinkingContent, ToolCall
+from ..usage import normalize_usage
 from ._common import empty_assistant_message, parse_partial_json, to_openai_messages, to_openai_tools
 
 
@@ -41,7 +44,9 @@ def stream_openai_compatible(
         out = empty_assistant_message(api=model.api, provider=model.provider, model=model.id)
         try:
             # 允许调用参数覆盖环境变量。
-            api_key = resolved_options.api_key or get_env_api_key(model.provider) or get_env_api_key("openai")
+            api_key = resolved_options.api_key or get_env_api_key(model.provider)
+            if not api_key and model.provider not in {"deepseek"}:
+                api_key = get_env_api_key("openai")
             headers = {"Content-Type": "application/json"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
@@ -73,7 +78,7 @@ def stream_openai_compatible(
                     json=payload,
                 ) as response:
                     response.raise_for_status()
-                    stream.push({"type": "start", "partial": out})
+                    stream.push(llm_event("start", partial=out))
 
                     current_text: TextContent | None = None
                     current_thinking: ThinkingContent | None = None
@@ -104,15 +109,15 @@ def stream_openai_compatible(
                             if current_text is None:
                                 current_text = TextContent(text="")
                                 out.content.append(current_text)
-                                stream.push({"type": "text_start", "contentIndex": len(out.content) - 1, "partial": out})
+                                stream.push(llm_event("text_start", contentIndex=len(out.content) - 1, partial=out))
                             current_text.text += text_delta
                             stream.push(
-                                {
-                                    "type": "text_delta",
-                                    "contentIndex": len(out.content) - 1,
-                                    "delta": text_delta,
-                                    "partial": out,
-                                }
+                                llm_event(
+                                    "text_delta",
+                                    contentIndex=len(out.content) - 1,
+                                    delta=text_delta,
+                                    partial=out,
+                                )
                             )
 
                         # reasoning 兼容字段（不同网关命名可能不同）
@@ -121,17 +126,15 @@ def stream_openai_compatible(
                             if current_thinking is None:
                                 current_thinking = ThinkingContent(thinking="")
                                 out.content.append(current_thinking)
-                                stream.push(
-                                    {"type": "thinking_start", "contentIndex": len(out.content) - 1, "partial": out}
-                                )
+                                stream.push(llm_event("thinking_start", contentIndex=len(out.content) - 1, partial=out))
                             current_thinking.thinking += reasoning_delta
                             stream.push(
-                                {
-                                    "type": "thinking_delta",
-                                    "contentIndex": len(out.content) - 1,
-                                    "delta": reasoning_delta,
-                                    "partial": out,
-                                }
+                                llm_event(
+                                    "thinking_delta",
+                                    contentIndex=len(out.content) - 1,
+                                    delta=reasoning_delta,
+                                    partial=out,
+                                )
                             )
 
                         # 工具调用增量（按 index 聚合）
@@ -143,7 +146,7 @@ def stream_openai_compatible(
                                 tool_call_index_map[index] = tc
                                 tool_call_partial_json[index] = ""
                                 out.content.append(tc)
-                                stream.push({"type": "toolcall_start", "contentIndex": len(out.content) - 1, "partial": out})
+                                stream.push(llm_event("toolcall_start", contentIndex=len(out.content) - 1, partial=out))
 
                             if tc_delta.get("id"):
                                 tc.id = tc_delta["id"]
@@ -154,12 +157,12 @@ def stream_openai_compatible(
                                 tool_call_partial_json[index] += fn["arguments"]
                                 tc.arguments = parse_partial_json(tool_call_partial_json[index])
                                 stream.push(
-                                    {
-                                        "type": "toolcall_delta",
-                                        "contentIndex": out.content.index(tc),
-                                        "delta": fn["arguments"],
-                                        "partial": out,
-                                    }
+                                    llm_event(
+                                        "toolcall_delta",
+                                        contentIndex=out.content.index(tc),
+                                        delta=fn["arguments"],
+                                        partial=out,
+                                    )
                                 )
 
                         usage = chunk.get("usage")
@@ -168,41 +171,43 @@ def stream_openai_compatible(
                             out.usage.output = usage.get("completion_tokens", out.usage.output)
                             out.usage.total_tokens = usage.get("total_tokens", out.usage.total_tokens)
 
+                    normalize_usage(out.usage)
                     # 收尾事件：把进行中的块发出 *_end
                     if current_text is not None:
                         stream.push(
-                            {
-                                "type": "text_end",
-                                "contentIndex": out.content.index(current_text),
-                                "content": current_text.text,
-                                "partial": out,
-                            }
+                            llm_event(
+                                "text_end",
+                                contentIndex=out.content.index(current_text),
+                                content=current_text.text,
+                                partial=out,
+                            )
                         )
                     if current_thinking is not None:
                         stream.push(
-                            {
-                                "type": "thinking_end",
-                                "contentIndex": out.content.index(current_thinking),
-                                "content": current_thinking.thinking,
-                                "partial": out,
-                            }
+                            llm_event(
+                                "thinking_end",
+                                contentIndex=out.content.index(current_thinking),
+                                content=current_thinking.thinking,
+                                partial=out,
+                            )
                         )
                     for tc in tool_call_index_map.values():
                         stream.push(
-                            {
-                                "type": "toolcall_end",
-                                "contentIndex": out.content.index(tc),
-                                "toolCall": tc,
-                                "partial": out,
-                            }
+                            llm_event(
+                                "toolcall_end",
+                                contentIndex=out.content.index(tc),
+                                toolCall=tc,
+                                partial=out,
+                            )
                         )
 
-                    stream.push({"type": "done", "reason": out.stop_reason, "message": out})
+                    stream.push(llm_event("done", reason=out.stop_reason, message=out))
                     stream.end(out)
         except Exception as exc:
             out.stop_reason = "error"
             out.error_message = str(exc)
-            stream.push({"type": "error", "reason": "error", "error": out})
+            out.error_info = classify_llm_error(exc, model)
+            stream.push(llm_event("error", reason="error", error=out, errorInfo=out.error_info))
             stream.end(out)
 
     asyncio.create_task(_run())
