@@ -19,18 +19,6 @@ from .service import CreateSessionRequest, RuntimeService, SessionHandle, UserIn
 from .system_prompt import SystemPromptBuildOptions, build_default_system_prompt, build_system_prompt
 from .types import AgentSessionOptions, CreateAgentSessionOptions
 
-_CLI_EXPORTS = {"RunOptions", "build_parser", "main", "run", "run_print", "run_interactive", "run_rpc"}
-
-
-def __getattr__(name: str):
-    if name in _CLI_EXPORTS:
-        from codepilot import interfaces
-        from codepilot.interfaces import cli
-
-        _ = interfaces
-        return getattr(cli, name)
-    raise AttributeError(f"module 'codepilot.runtime' has no attribute {name!r}")
-
 
 __all__ = [
     "AgentSession",
@@ -57,11 +45,4 @@ __all__ = [
     "list_runtime_commands",
     "parse_mcp_tool_configs",
     "create_mcp_proxy_tools",
-    "build_parser",
-    "main",
-    "RunOptions",
-    "run",
-    "run_print",
-    "run_interactive",
-    "run_rpc",
 ]
