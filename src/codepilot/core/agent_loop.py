@@ -284,7 +284,7 @@ async def _run_loop(
             new_messages.append(assistant)
 
             # 如果遇到错误或中止，立即结束整个循环
-            if assistant.stop_reason in {"error", "aborted"}:
+            if assistant.stop_reason in {"error", "aborted"}: 
                 await _emit(emit, {"type": "turn_end", "message": assistant, "toolResults": []})
                 await _emit(emit, {"type": "agent_end", "messages": new_messages})
                 return
