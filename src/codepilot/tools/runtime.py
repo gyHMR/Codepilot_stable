@@ -85,8 +85,14 @@ class ToolRuntime:
                 is_error=True,
             )
 
+        metadata = self.registry.metadata_for(request.name)
         decision = self.permission_policy.decide(
-            ToolRequest(name=request.name, params=request.params, source=request.source)
+            ToolRequest(
+                name=request.name,
+                params=request.params,
+                source=request.source,
+                metadata=metadata,
+            )
         )
         if decision.denied:
             return self._blocked_result(request, decision)
@@ -94,7 +100,7 @@ class ToolRuntime:
         if decision.requires_approval:
             approval = await self.approval_provider.request_approval(
                 request,
-                self.registry.metadata_for(request.name),
+                metadata,
                 decision,
             )
             if not approval.approved:

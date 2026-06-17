@@ -4,13 +4,35 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 ApprovalDecision = Literal["approve", "deny"]
-WebEventKind = Literal["agent_event", "tool_approval_required", "session_state", "error"]
+WebEventKind = Literal[
+    "agent_event",
+    "session_created",
+    "session_state",
+    "tool_approval_required",
+    "error",
+]
 
 
 @dataclass(frozen=True)
 class WebSessionRef:
     workspace_dir: str
     session_id: str | None = None
+
+
+@dataclass(frozen=True)
+class WebCreateSessionRequest:
+    workspace_dir: str
+    provider: str | None = None
+    model_id: str | None = None
+    system_prompt: str = ""
+    session_id: str | None = None
+    read_only_mode: bool = False
+    load_workspace_resources: bool = True
+
+
+@dataclass(frozen=True)
+class WebSessionSummary:
+    session_id: str
 
 
 @dataclass(frozen=True)
@@ -33,3 +55,10 @@ class WebEventEnvelope:
     type: WebEventKind
     session_id: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WebRouteSpec:
+    method: str
+    path: str
+    description: str

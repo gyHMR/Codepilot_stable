@@ -47,7 +47,7 @@ def infer_tool_metadata(tool: AgentTool) -> ToolMetadata:
         concurrency_safe=read_only,
         exclusive=not read_only,
         requires_approval=False,
-        risk_level="medium" if mutating else "low",
+        risk_level=_infer_risk(name, mutating),
         resource_scope=(category,),
         network_access=False,
         credential_required=False,
@@ -64,3 +64,11 @@ def _infer_category(name: str) -> str:
     if name.startswith("mcp_"):
         return "mcp"
     return "extension"
+
+
+def _infer_risk(name: str, mutating: bool) -> str:
+    if name.startswith("mcp_"):
+        return "medium"
+    if name == "bash":
+        return "medium"
+    return "medium" if mutating else "low"

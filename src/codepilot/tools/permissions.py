@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .types import ToolMetadata
+
 READ_ONLY_TOOL_NAMES = {"read", "read_file", "grep", "find", "ls", "list_dir"}
 MUTATING_TOOL_NAMES = {"write", "write_file", "edit", "bash"}
 
@@ -15,6 +17,7 @@ class ToolRequest:
     name: str
     params: dict[str, Any] = field(default_factory=dict)
     source: str = "agent"
+    metadata: ToolMetadata | None = None
 
 
 @dataclass(frozen=True)
@@ -55,11 +58,23 @@ class PermissionPolicy:
     bash_allow_patterns: list[str] | None = None
     bash_block_patterns: list[str] | None = None
     require_approval_for_mutations: bool = False
+    require_approval_for_high_risk: bool = True
 
     def decide(self, request: ToolRequest) -> ToolDecision:
         name = request.name
-        if self.read_only and name not in READ_ONLY_TOOL_NAMES:
-            return ToolDecision("deny", "read_only_mode", {"tool": name})
+        metadata = request.metadata
+        read_only = metadata.read_only if metadata is not None else name in READ_ONLY_TOOL_NAMES
+        mutating = not read_only if metadata is not None else name in MUTATING_TOOL_NAMES
+        if self.read_only and not read_only:
+            return ToolDecision(
+                "deny",
+                "read_only_mode",
+                {
+                    "tool": name,
+                    "category": metadata.category if metadata else "",
+                    "resource_scope": list(metadata.resource_scope) if metadata else [],
+                },
+            )
 
         if name == "bash":
             command = str(request.params.get("command", "")).strip()
@@ -72,8 +87,23 @@ class PermissionPolicy:
                     return ToolDecision("allow", "dangerous_command_allowed", {"command": command})
                 return ToolDecision("deny", "dangerous_command", {"command": command})
 
-        if self.require_approval_for_mutations and name in MUTATING_TOOL_NAMES:
-            return ToolDecision("approval_required", "mutation_requires_approval", {"tool": name})
+        if metadata and metadata.requires_approval:
+            return ToolDecision(
+                "approval_required",
+                "tool_metadata_requires_approval",
+                _metadata_details(metadata),
+            )
+
+        if metadata and self.require_approval_for_high_risk and metadata.risk_level == "high":
+            return ToolDecision(
+                "approval_required",
+                "high_risk_tool_requires_approval",
+                _metadata_details(metadata),
+            )
+
+        if self.require_approval_for_mutations and mutating:
+            details = _metadata_details(metadata) if metadata else {"tool": name}
+            return ToolDecision("approval_required", "mutation_requires_approval", details)
 
         return ToolDecision("allow")
 
@@ -93,3 +123,16 @@ def is_dangerous_bash_command(command: str) -> bool:
         "remove-item -recurse",
     ]
     return any(pattern in text for pattern in patterns)
+
+
+def _metadata_details(metadata: ToolMetadata | None) -> dict[str, Any]:
+    if metadata is None:
+        return {}
+    return {
+        "tool": metadata.name,
+        "category": metadata.category,
+        "risk_level": metadata.risk_level,
+        "resource_scope": list(metadata.resource_scope),
+        "network_access": metadata.network_access,
+        "credential_required": metadata.credential_required,
+    }

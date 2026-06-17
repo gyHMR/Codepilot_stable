@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from codepilot.llm.types import Message
-from codepilot.observability import event_to_record, summarize_events
+from codepilot.observability import EventRecorder
 
 from .serde import message_from_dict, message_to_dict
 
@@ -39,6 +39,7 @@ class SessionStore:
         self.session_file = self.root / "session.jsonl"
         self.context_file = self.root / "context.jsonl"
         self.events_file = self.root / "events.jsonl"
+        self.event_recorder = EventRecorder(self.events_file)
 
     def ensure_initialized(self, *, model_id: str, provider: str, system_prompt: str) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -93,25 +94,14 @@ class SessionStore:
         self.append_session_message(message)
 
     def append_event(self, event: dict[str, Any]) -> None:
-        with self.events_file.open("a", encoding="utf-8") as fp:
-            fp.write(json.dumps(event_to_record(event), ensure_ascii=False) + "\n")
+        self.event_recorder.append(event)
         self.touch_updated_at()
 
     def load_events(self, *, limit: int | None = None) -> list[dict[str, Any]]:
-        if not self.events_file.exists():
-            return []
-        lines = [line.strip() for line in self.events_file.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if limit is not None and limit >= 0:
-            lines = lines[-limit:]
-        events: list[dict[str, Any]] = []
-        for line in lines:
-            data = json.loads(line)
-            if isinstance(data, dict):
-                events.append(data)
-        return events
+        return self.event_recorder.load(limit=limit)
 
     def summarize_events(self) -> dict[str, Any]:
-        return summarize_events(self.load_events())
+        return self.event_recorder.summarize()
 
     def rewrite_context_messages(self, messages: list[Message]) -> None:
         lines = []
