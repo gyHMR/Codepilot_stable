@@ -45,19 +45,6 @@ class AgentSessionOptions:
     retry_enabled: bool = True
     max_retries: int = 2
     retry_base_delay_ms: int = 1200
-    read_only_mode: bool = False
-    block_dangerous_bash: bool = True
-    bash_allow_patterns: Optional[list[str]] = None
-    bash_block_patterns: Optional[list[str]] = None
-    edit_require_unique_match: bool = True
-    prompt_guidelines: Optional[list[str]] = None
-    append_system_prompt: Optional[str] = None
-    tool_snippets: Optional[dict[str, str]] = None
-    extension_paths: Optional[list[str]] = None
-    skill_paths: Optional[list[str]] = None
-    prompt_debug_sources: bool = False
-    mcp_servers: Optional[list[dict[str, Any]]] = None
-    mcp_client: Any | None = None
     extension_commands: dict[str, RegisteredCommand] = field(default_factory=dict)
     before_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
     after_prompt_hooks: list[LifecycleHook] = field(default_factory=list)

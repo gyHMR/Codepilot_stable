@@ -46,6 +46,38 @@ def _extract_assistant_text(message: AssistantMessage) -> str:
     return "".join(block.text for block in message.content if isinstance(block, TextContent)).strip()
 
 
+class CliEventRenderer:
+    """Render Agent events for human-oriented CLI output."""
+
+    def __init__(self, *, output: OutputFn, show_tool_events: bool = True) -> None:
+        self.output = output
+        self.show_tool_events = show_tool_events
+        self.deltas: list[str] = []
+
+    def handle_event(self, event: AgentEvent) -> None:
+        t = event["type"]
+
+        if self.show_tool_events and t in {"tool_execution_start", "tool_execution_end"}:
+            self.output(f"[tool-event] {t}: {event.get('toolName', '')}")
+            return
+
+        if t == "message_update":
+            assistant_event = event.get("assistantMessageEvent") or {}
+            if assistant_event.get("type") == "text_delta":
+                delta = str(assistant_event.get("delta", ""))
+                self.deltas.append(delta)
+
+    def render_final(self, final_assistant: AssistantMessage | None) -> None:
+        if self.deltas:
+            self.output("".join(self.deltas).strip())
+        elif final_assistant is not None:
+            self.output(_extract_assistant_text(final_assistant) or "(empty)")
+
+        if final_assistant is not None:
+            self.output(f"[assistant.stop_reason] {final_assistant.stop_reason}")
+            self.output(f"[assistant.error_message] {final_assistant.error_message}")
+
+
 async def run_print(
     session: AgentSession,
     prompt: str,
@@ -70,27 +102,9 @@ async def run_print(
     返回:
         最后一条 Assistant 消息，若无则返回 None
     """
-    # 收集流式输出的文本片段
-    deltas: list[str] = []
-
-    def on_event(event: AgentEvent) -> None:
-        """事件回调：处理工具执行事件和流式文本更新。"""
-        t = event["type"]
-
-        # 工具执行开始/结束事件
-        if show_tool_events and t in {"tool_execution_start", "tool_execution_end"}:
-            output(f"[tool-event] {t}: {event.get('toolName', '')}")
-            return
-
-        # 流式文本更新事件：收集 delta 片段
-        if t == "message_update":
-            assistant_event = event.get("assistantMessageEvent") or {}
-            if assistant_event.get("type") == "text_delta":
-                delta = str(assistant_event.get("delta", ""))
-                deltas.append(delta)
-
     # 订阅事件，执行完毕后取消订阅
-    unsubscribe = session.subscribe(on_event)
+    renderer = CliEventRenderer(output=output, show_tool_events=show_tool_events)
+    unsubscribe = session.subscribe(renderer.handle_event)
     try:
         await session.prompt(prompt)
     finally:
@@ -99,16 +113,7 @@ async def run_print(
     # 获取最后一条 Assistant 消息
     final_assistant = next((m for m in reversed(session.messages) if isinstance(m, AssistantMessage)), None)
 
-    # 输出结果：优先用流式 delta，否则从最终消息中提取文本
-    if deltas:
-        output("".join(deltas).strip())
-    elif final_assistant is not None:
-        output(_extract_assistant_text(final_assistant) or "(empty)")
-
-    # 输出元信息
-    if final_assistant is not None:
-        output(f"[assistant.stop_reason] {final_assistant.stop_reason}")
-        output(f"[assistant.error_message] {final_assistant.error_message}")
+    renderer.render_final(final_assistant)
     return final_assistant
 
 

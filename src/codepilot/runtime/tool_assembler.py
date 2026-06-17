@@ -9,7 +9,11 @@ from codepilot.core import AgentTool
 from codepilot.extensions import load_extensions, load_skills
 from codepilot.extensions.mcp import create_mcp_proxy_tools, parse_mcp_tool_configs
 from codepilot.extensions.types import LoadedExtensions
-from codepilot.tools.builtin import READ_ONLY_TOOL_NAMES, create_builtin_tools
+from codepilot.tools.builtin import (
+    READ_ONLY_TOOL_NAMES,
+    create_builtin_tools,
+    get_builtin_tool_metadata,
+)
 from codepilot.tools.permissions import PermissionPolicy
 from codepilot.tools.registry import ToolRegistry
 from codepilot.tools.runtime import ToolRuntime
@@ -42,9 +46,6 @@ def assemble_tools(
     builtin_tools = create_builtin_tools(
         workspace,
         enabled_names=config.enabled_builtin_tools,
-        block_dangerous_bash=config.block_dangerous_bash,
-        bash_allow_patterns=config.bash_allow_patterns,
-        bash_block_patterns=config.bash_block_patterns,
         edit_require_unique_match=config.edit_require_unique_match,
     )
 
@@ -60,7 +61,8 @@ def assemble_tools(
     if config.read_only_mode:
         merged_tools = [tool for tool in merged_tools if tool.name in READ_ONLY_TOOL_NAMES]
     registry = ToolRegistry()
-    registry.extend(merged_tools)
+    for tool in merged_tools:
+        registry.register(tool, metadata=get_builtin_tool_metadata(tool.name))
     runtime = ToolRuntime(
         registry=registry,
         permission_policy=PermissionPolicy(

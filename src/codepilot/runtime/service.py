@@ -2,10 +2,12 @@ from __future__ import annotations
 
 """Application service shared by CLI, Web, and IM interfaces."""
 
+import asyncio
+from contextlib import suppress
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable, cast
 
-from codepilot.core import AgentEvent, AgentMessage
+from codepilot.core import AgentEvent
 from codepilot.sessions.session import AgentSession
 
 from .factory import create_agent_session
@@ -52,35 +54,45 @@ class RuntimeService:
 
     async def send_message(self, session_id: str, message: UserInput) -> AsyncIterator[AgentEvent]:
         session = self.get_session(session_id)
-        queue: list[AgentEvent] = []
-
-        def _listener(event: AgentEvent) -> None:
-            queue.append(event)
-
-        unsubscribe = session.subscribe(_listener)
-        try:
-            await session.prompt(message.text, images=message.images)
-        finally:
-            unsubscribe()
-
-        for event in queue:
+        async for event in self._stream_session_events(
+            session,
+            lambda: session.prompt(message.text, images=message.images),
+        ):
             yield event
 
     async def continue_session(self, session_id: str) -> AsyncIterator[AgentEvent]:
         session = self.get_session(session_id)
-        queue: list[AgentEvent] = []
+        async for event in self._stream_session_events(session, session.continue_run):
+            yield event
+
+    async def _stream_session_events(
+        self,
+        session: AgentSession,
+        run: Callable[[], Awaitable[object]],
+    ) -> AsyncIterator[AgentEvent]:
+        done_marker = object()
+        queue: asyncio.Queue[AgentEvent | object] = asyncio.Queue()
 
         def _listener(event: AgentEvent) -> None:
-            queue.append(event)
+            queue.put_nowait(event)
 
         unsubscribe = session.subscribe(_listener)
+        task = asyncio.create_task(run())
+        task.add_done_callback(lambda _task: queue.put_nowait(done_marker))
+
         try:
-            await session.continue_run()
+            while True:
+                item = await queue.get()
+                if item is done_marker:
+                    break
+                yield cast(AgentEvent, item)
+            await task
         finally:
             unsubscribe()
-
-        for event in queue:
-            yield event
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
 
     async def approve_tool_call(self, approval_id: str, decision: str) -> None:
         _ = approval_id, decision

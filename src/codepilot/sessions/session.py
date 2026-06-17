@@ -106,10 +106,6 @@ class AgentSession:
         self.max_retries = options.max_retries
         self.retry_base_delay_ms = options.retry_base_delay_ms
 
-        self.prompt_debug_sources = options.prompt_debug_sources
-        # MCP（Model Context Protocol）服务器与客户端
-        self.mcp_servers = options.mcp_servers
-        self.mcp_client = options.mcp_client
         # 扩展命令注册表
         self.extension_commands = dict(options.extension_commands)
         # 提示词执行前后的生命周期钩子

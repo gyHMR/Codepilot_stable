@@ -4,15 +4,7 @@ from typing import Any, Callable
 
 from codepilot.core import AgentTool, AgentToolResult
 from codepilot.llm.types import TextContent
-from codepilot.tools.permissions import PermissionPolicy, ToolRequest
 from codepilot.tools.sandbox import WorkspaceSandbox
-
-
-def _permission_block_result(decision) -> AgentToolResult:
-    return AgentToolResult(
-        content=[TextContent(text=f"Tool blocked: {decision.reason}")],
-        details={"blocked": True, "reason": decision.reason, **decision.details},
-    )
 
 
 def _replace_nth(text: str, old: str, new: str, nth: int) -> str:
@@ -33,7 +25,6 @@ def _replace_nth(text: str, old: str, new: str, nth: int) -> str:
 def create_file_tools(
     sandbox: WorkspaceSandbox,
     *,
-    policy: PermissionPolicy,
     allow: Callable[[str], bool],
     edit_require_unique_match: bool = True,
 ) -> list[AgentTool]:
@@ -77,9 +68,6 @@ def create_file_tools(
 
     async def write_tool(tool_call_id: str, params: dict[str, Any], signal=None, on_update=None) -> AgentToolResult:
         _ = tool_call_id, signal, on_update
-        decision = policy.decide(ToolRequest(name="write", params=params))
-        if not decision.allowed:
-            return _permission_block_result(decision)
         path_text = str(params.get("path", ""))
         content = str(params.get("content", ""))
         overwrite = bool(params.get("overwrite", True))
@@ -95,9 +83,6 @@ def create_file_tools(
 
     async def edit_tool(tool_call_id: str, params: dict[str, Any], signal=None, on_update=None) -> AgentToolResult:
         _ = tool_call_id, signal, on_update
-        decision = policy.decide(ToolRequest(name="edit", params=params))
-        if not decision.allowed:
-            return _permission_block_result(decision)
         path_text = str(params.get("path", ""))
         old_text = str(params.get("old_text", ""))
         new_text = str(params.get("new_text", ""))

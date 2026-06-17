@@ -5,27 +5,12 @@ from typing import Any, Callable
 
 from codepilot.core import AgentTool, AgentToolResult
 from codepilot.llm.types import TextContent
-from codepilot.tools.permissions import PermissionPolicy, ToolRequest
 from codepilot.tools.sandbox import WorkspaceSandbox
-
-
-def _decision_result(decision) -> AgentToolResult:
-    if decision.requires_approval:
-        text = "Tool requires approval, but no approval handler is configured."
-    else:
-        text = "Blocked dangerous command. Set allow_dangerous=true only when you fully understand the risk."
-        if decision.reason == "block_pattern":
-            text = "Blocked by bash block patterns."
-    return AgentToolResult(
-        content=[TextContent(text=text)],
-        details={"blocked": True, "reason": decision.reason, **decision.details},
-    )
 
 
 def create_shell_tools(
     sandbox: WorkspaceSandbox,
     *,
-    policy: PermissionPolicy,
     allow: Callable[[str], bool],
 ) -> list[AgentTool]:
     tools: list[AgentTool] = []
@@ -37,9 +22,6 @@ def create_shell_tools(
         cwd_text = str(params.get("cwd", "."))
         if not command:
             return AgentToolResult(content=[TextContent(text="Missing command")], details={})
-        decision = policy.decide(ToolRequest(name="bash", params=params))
-        if not decision.allowed:
-            return _decision_result(decision)
 
         cwd = sandbox.resolve_path(cwd_text)
         if not cwd.exists() or not cwd.is_dir():
