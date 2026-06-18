@@ -11,14 +11,17 @@ from .events import (
     validate_agent_event,
 )
 from .recorder import EventRecorder
-from .summaries import EvalRunSummary, build_eval_summary
+from .summaries import EvalRunSummary, RunSummary, build_eval_summary, build_run_report, build_run_summary
 
 __all__ = [
     "AGENT_EVENT_TYPES",
     "EvalRunSummary",
     "EventRecorder",
+    "RunSummary",
     "SESSION_EVENT_TYPES",
     "build_eval_summary",
+    "build_run_report",
+    "build_run_summary",
     "event_to_record",
     "normalize_event_value",
     "summarize_events",

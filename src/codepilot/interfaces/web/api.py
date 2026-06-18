@@ -47,6 +47,8 @@ def web_route_specs() -> list[WebRouteSpec]:
         WebRouteSpec("GET", "/api/sessions", "List runtime sessions"),
         WebRouteSpec("POST", "/api/sessions", "Create or resume a session"),
         WebRouteSpec("GET", "/api/sessions/{session_id}", "Get one session summary"),
+        WebRouteSpec("GET", "/api/sessions/{session_id}/runs", "List run results for one session"),
+        WebRouteSpec("GET", "/api/sessions/{session_id}/runs/{run_id}/report", "Get one run report"),
         WebRouteSpec("POST", "/api/sessions/{session_id}/messages", "Send a user message"),
         WebRouteSpec("POST", "/api/tool-approvals/{approval_id}", "Approve or deny a tool call"),
         WebRouteSpec("WS", "/ws/sessions/{session_id}", "Stream RuntimeEvent envelopes"),
@@ -83,6 +85,12 @@ class WebConsoleBackend:
     def get_session(self, session_id: str) -> WebSessionSummary:
         session = self.runtime.get_session(session_id)
         return WebSessionSummary(session_id=session.session_id)
+
+    def list_runs(self, session_id: str) -> list[dict[str, Any]]:
+        return self.runtime.list_runs(session_id)
+
+    def get_run_report(self, session_id: str, run_id: str) -> dict[str, Any]:
+        return self.runtime.get_run_report(session_id, run_id)
 
     async def send_message(self, request: WebPromptRequest) -> list[WebEventEnvelope]:
         session_id = request.session.session_id

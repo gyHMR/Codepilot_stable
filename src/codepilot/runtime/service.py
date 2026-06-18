@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import AsyncIterator, Awaitable, Callable, cast
+from typing import Any, AsyncIterator, Awaitable, Callable, cast
 
 from codepilot.core import AgentEvent
+from codepilot.observability import build_run_report
+from codepilot.protocols import AgentRunResult
 from codepilot.sessions.session import AgentSession
 
 from .factory import create_agent_session
@@ -52,11 +54,15 @@ class RuntimeService:
     def list_sessions(self) -> list[dict[str, str]]:
         return [{"session_id": session_id} for session_id in sorted(self._sessions)]
 
+    async def run_message(self, session_id: str, message: UserInput) -> AgentRunResult:
+        session = self.get_session(session_id)
+        return await session.run(message.text, images=message.images)
+
     async def send_message(self, session_id: str, message: UserInput) -> AsyncIterator[AgentEvent]:
         session = self.get_session(session_id)
         async for event in self._stream_session_events(
             session,
-            lambda: session.prompt(message.text, images=message.images),
+            lambda: session.run(message.text, images=message.images),
         ):
             yield event
 
@@ -64,6 +70,23 @@ class RuntimeService:
         session = self.get_session(session_id)
         async for event in self._stream_session_events(session, session.continue_run):
             yield event
+
+    def list_runs(self, session_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+        session = self.get_session(session_id)
+        return session.store.load_run_results(limit=limit)
+
+    def get_run_result(self, session_id: str, run_id: str) -> dict[str, Any]:
+        session = self.get_session(session_id)
+        return session.store.run_store.load_run_result(run_id)
+
+    def get_run_events(self, session_id: str, run_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+        session = self.get_session(session_id)
+        return session.store.run_store.load_events(run_id, limit=limit)
+
+    def get_run_report(self, session_id: str, run_id: str) -> dict[str, Any]:
+        result = self.get_run_result(session_id, run_id)
+        events = self.get_run_events(session_id, run_id)
+        return build_run_report(result, events=events)
 
     async def _stream_session_events(
         self,
