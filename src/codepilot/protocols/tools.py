@@ -43,8 +43,8 @@ ToolResultBlock = Union[TextContent, ImageContent]
 class ToolResult:
     """Normalized tool execution result."""
 
-    tool_call_id: str
-    tool_name: str
+    tool_call_id: str = ""
+    tool_name: str = ""
     content: list[ToolResultBlock] = field(default_factory=list)
     status: ToolResultStatus = "success"
     is_error: bool = False
@@ -52,6 +52,12 @@ class ToolResult:
     approval_id: str | None = None
     details: Any = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.is_error and self.status == "success":
+            self.status = "error"
+        elif self.status != "success":
+            self.is_error = True
 
 
 @dataclass(frozen=True)

@@ -1,26 +1,19 @@
-## 中文编码规则
+## 项目定位
 
-本项目在 Windows 环境下开发，包含中文文档、中文注释和中文界面文本。
+Codepilot 是面向学生学习与求职展示的本地 Coding Agent 项目。优先保证代码清晰、调用链可解释、功能可演示，不按复杂生产级平台设计。
 
-* 所有项目文件默认使用 `UTF-8` 编码。
-* 读取或写入中文文件时，必须显式指定编码，不要依赖 Windows / PowerShell 默认编码。
-* 优先使用 Python 读写中文文件：
+## 开发原则
 
-```python
-from pathlib import Path
+- 围绕主线开发：理解任务与仓库 → 调用工具行动 → 验证结果 → 输出证据 → 保存过程。
+- 保持依赖方向：`protocols → llm/tools → core → sessions/observability → extensions → runtime → interfaces`。
+- 优先简单方案和小型抽象；没有真实需求时，不引入复杂 FSM、事件总线、依赖注入框架、数据库或分布式设计。
+- 一个概念只保留一个主要实现位置；新增文件、类型或兼容层必须有明确职责和调用方。
+- 可以按清晰、稳定的功能职责进行必要拆分，但避免产生大量薄包装、纯转发或职责零碎的文件；学习项目应优先保持目录紧凑，及时合并没有独立变化理由的模块。
+- 修改公共协议或核心调用链时，保持必要的向后兼容，并补充最小测试。
+- 代码、注释和文档应便于学生阅读与面试讲解，避免过度封装和隐式行为。
 
-path = Path("file.md")
-text = path.read_text(encoding="utf-8")
-path.write_text(text, encoding="utf-8", newline="\n")
-```
+## 中文编码
 
-* 不要用未指定编码的 `type`、`cat`、`Get-Content`、`Set-Content`、`Out-File`、`echo > file` 处理中文文件。
-* 如果必须用 PowerShell，需显式指定 UTF-8：
-
-```powershell
-Get-Content "file.md" -Encoding UTF8
-Set-Content "file.md" $content -Encoding UTF8
-```
-
-* 如果看到 `涓枃`、`ä¸­æ–‡`、`���` 等乱码，必须停止修改文件，先确认原文件编码，不要基于乱码内容重写。
-* CSV 若用于 Excel 双击打开，可使用 `utf-8-sig`；其他情况默认 `utf-8`。
+- 项目文件默认使用 `UTF-8` 和 LF；读写中文文件时必须显式指定 `encoding="utf-8"`。
+- 不使用未指定编码的 PowerShell 文本读写命令处理中文文件。
+- 发现乱码时立即停止修改，先确认原文件编码。

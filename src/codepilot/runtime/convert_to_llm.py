@@ -109,7 +109,9 @@ def _process_assistant(
         stop_reason=msg.stop_reason,
         response_id=msg.response_id,
         error_message=msg.error_message,
+        error_info=msg.error_info,
         timestamp=msg.timestamp,
+        metadata=dict(msg.metadata),
     )
 
 
@@ -138,9 +140,11 @@ def _process_tool_result(msg: ToolResultMessage, *, max_chars: int) -> ToolResul
         tool_call_id=msg.tool_call_id,
         tool_name=msg.tool_name,
         content=new_content,
+        status=msg.status,
         is_error=msg.is_error,
         details=msg.details,
         timestamp=msg.timestamp,
+        metadata=dict(msg.metadata),
     )
 
 

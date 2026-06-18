@@ -14,6 +14,7 @@ from .sandbox import WorkspaceSandbox
 from .types import (
     AgentTool,
     AgentToolResult,
+    AgentToolUpdateCallback,
     ToolMetadata,
     ToolResultStatus,
     ToolRuntimeRequest,
@@ -24,6 +25,7 @@ from .types import (
 __all__ = [
     "AgentTool",
     "AgentToolResult",
+    "AgentToolUpdateCallback",
     "ApprovalDecision",
     "ApprovalProvider",
     "DenyApprovalProvider",

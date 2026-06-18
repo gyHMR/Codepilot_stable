@@ -9,7 +9,7 @@ from __future__ import annotations
 """
 
 import asyncio
-from typing import Any, AsyncIterator, Optional
+from typing import AsyncIterator, Optional, cast
 
 from codepilot.protocols import LLMStreamEvent, LLMStreamEventType
 
@@ -28,12 +28,12 @@ def llm_event(event_type: LLMStreamEventType, **payload: object) -> LLMStreamEve
 class AssistantMessageEventStream:
     def __init__(self) -> None:
         # 事件队列：用于迭代消费。
-        self._queue: "asyncio.Queue[Any]" = asyncio.Queue()
+        self._queue: asyncio.Queue[LLMStreamEvent | object] = asyncio.Queue()
         # 最终结果 Future：用于一次性获取完整消息。
         self._result: "asyncio.Future[AssistantMessage]" = asyncio.get_event_loop().create_future()
         self._closed = False
 
-    def push(self, event: dict[str, Any]) -> None:
+    def push(self, event: LLMStreamEvent) -> None:
         """推送一个事件（text_delta/toolcall_delta/...）。"""
         if self._closed:
             return
@@ -70,12 +70,12 @@ class AssistantMessageEventStream:
         """等待并返回最终 AssistantMessage。"""
         return await self._result
 
-    def __aiter__(self) -> AsyncIterator[dict[str, Any]]:
+    def __aiter__(self) -> AsyncIterator[LLMStreamEvent]:
         return self._iter_events()
 
-    async def _iter_events(self) -> AsyncIterator[dict[str, Any]]:
+    async def _iter_events(self) -> AsyncIterator[LLMStreamEvent]:
         while True:
             item = await self._queue.get()
             if item is _SENTINEL:
                 break
-            yield item
+            yield cast(LLMStreamEvent, item)

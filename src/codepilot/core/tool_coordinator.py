@@ -39,6 +39,22 @@ def tool_error_reason(result: AgentToolResult, is_error: bool) -> str | None:
     return None
 
 
+def bind_tool_result(
+    tool_call: ToolCall,
+    result: AgentToolResult,
+    *,
+    is_error: bool,
+) -> AgentToolResult:
+    """Attach call identity and keep status/error fields consistent."""
+
+    result.tool_call_id = tool_call.id
+    result.tool_name = tool_call.name
+    if is_error and result.status == "success":
+        result.status = "error"
+    result.is_error = is_error or result.status != "success"
+    return result
+
+
 @dataclass
 class PreparedToolCall:
     tool_call: ToolCall
@@ -103,6 +119,18 @@ class ToolCallCoordinator:
                 f"Tool {tool_call.name} not found",
                 approved=False,
             ), True
+        if not tool.runtime_managed and not self._config.allow_unmanaged_tools:
+            result = error_tool_result(
+                f"Tool {tool_call.name} is not managed by ToolRuntime",
+                approved=False,
+            )
+            result.status = "denied"
+            result.details = {
+                "tool": tool_call.name,
+                "reason": "unmanaged_tool",
+                "status": "denied",
+            }
+            return None, result, True
 
         args = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
         if self._config.before_tool_call:
@@ -195,7 +223,8 @@ class ToolCallCoordinator:
                 if after.is_error is not None:
                     is_error = after.is_error
 
-        result.is_error = is_error
+        bind_tool_result(prepared.tool_call, result, is_error=is_error)
+        is_error = result.is_error
         await self._emit_tool_end(prepared.tool_call, result, is_error)
         return await self._emit_tool_result_message(prepared.tool_call, result, is_error)
 
@@ -306,7 +335,8 @@ class ToolCallCoordinator:
         result: AgentToolResult,
         is_error: bool,
     ) -> ToolResultMessage:
-        result.is_error = is_error
+        bind_tool_result(tool_call, result, is_error=is_error)
+        is_error = result.is_error
         await self._emit_tool_end(tool_call, result, is_error)
         return await self._emit_tool_result_message(tool_call, result, is_error)
 
@@ -358,4 +388,3 @@ class ToolCallCoordinator:
         await self._emitter.emit({"type": "message_start", "message": message})
         await self._emitter.emit({"type": "message_end", "message": message})
         return message
-

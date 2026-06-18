@@ -1,6 +1,24 @@
 from .content import ContentBlock, ImageContent, TextContent, ThinkingContent
 from .errors import ErrorInfo, ErrorSource, LLMErrorInfo, LLMErrorKind
-from .events import AgentEvent, EventEnvelope, RuntimeEvent, RuntimeEventType
+from .events import (
+    AgentEndEvent,
+    AgentEvent,
+    AgentEventBase,
+    AgentEventSink,
+    AgentStartEvent,
+    ErrorEvent,
+    EventEnvelope,
+    MessageEndEvent,
+    MessageStartEvent,
+    MessageUpdateEvent,
+    RuntimeEvent,
+    RuntimeEventType,
+    ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
+    ToolExecutionUpdateEvent,
+    TurnEndEvent,
+    TurnStartEvent,
+)
 from .llm import (
     Api,
     Cost,
@@ -38,6 +56,10 @@ from .tools import (
 
 __all__ = [
     "AgentEvent",
+    "AgentEventBase",
+    "AgentEventSink",
+    "AgentStartEvent",
+    "AgentEndEvent",
     "Api",
     "AssistantBlock",
     "AssistantMessage",
@@ -46,6 +68,7 @@ __all__ = [
     "Cost",
     "ErrorInfo",
     "ErrorSource",
+    "ErrorEvent",
     "EventEnvelope",
     "ImageContent",
     "LLMErrorInfo",
@@ -58,6 +81,9 @@ __all__ = [
     "Provider",
     "RuntimeEvent",
     "RuntimeEventType",
+    "MessageEndEvent",
+    "MessageStartEvent",
+    "MessageUpdateEvent",
     "SimpleStreamOptions",
     "StopReason",
     "StreamOptions",
@@ -71,9 +97,14 @@ __all__ = [
     "ToolResultBlock",
     "ToolResultMessage",
     "ToolResultStatus",
+    "ToolExecutionEndEvent",
+    "ToolExecutionStartEvent",
+    "ToolExecutionUpdateEvent",
     "ToolRiskLevel",
     "ToolSpec",
     "Usage",
     "UserBlock",
     "UserMessage",
+    "TurnEndEvent",
+    "TurnStartEvent",
 ]

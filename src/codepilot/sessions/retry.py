@@ -47,8 +47,10 @@ async def run_with_retry(
 def should_retry(message: AssistantMessage | None) -> bool:
     if message is None:
         return False
-    if message.stop_reason not in {"error", "aborted"}:
+    if message.stop_reason != "error":
         return False
+    if message.error_info is not None:
+        return message.error_info.retryable
     error_text = (message.error_message or "").lower()
     if "invalid_api_key" in error_text or "authentication" in error_text or "unauthorized" in error_text:
         return False

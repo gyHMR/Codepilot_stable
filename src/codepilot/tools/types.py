@@ -1,14 +1,51 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable, Protocol
 
-from codepilot.core import AgentTool, AgentToolResult
 from codepilot.protocols.tools import (
+    Tool,
     ToolMetadata,
+    ToolResult,
     ToolResultStatus,
     ToolRiskLevel,
 )
+
+
+AgentToolResult = ToolResult
+AgentToolUpdateCallback = Callable[[AgentToolResult], None]
+
+
+class ToolExecuteFn(Protocol):
+    def __call__(
+        self,
+        tool_call_id: str,
+        params: dict[str, Any],
+        signal: Any | None = None,
+        on_update: AgentToolUpdateCallback | None = None,
+    ) -> Awaitable[AgentToolResult] | AgentToolResult:
+        ...
+
+
+@dataclass
+class AgentTool:
+    """Executable tool definition owned by the tools layer."""
+
+    name: str
+    label: str
+    description: str
+    parameters: dict[str, Any]
+    execute: ToolExecuteFn
+    runtime_managed: bool = False
+
+    def to_spec(self) -> Tool:
+        """Return the provider-facing tool description without the executor."""
+
+        return Tool(
+            name=self.name,
+            description=self.description,
+            parameters=self.parameters,
+        )
 
 
 @dataclass(frozen=True)
@@ -31,6 +68,8 @@ class ToolRuntimeResult:
 __all__ = [
     "AgentTool",
     "AgentToolResult",
+    "AgentToolUpdateCallback",
+    "ToolExecuteFn",
     "ToolMetadata",
     "ToolResultStatus",
     "ToolRiskLevel",

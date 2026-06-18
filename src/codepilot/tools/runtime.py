@@ -6,14 +6,19 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
-from codepilot.core import AgentTool, AgentToolResult
-from codepilot.core.types import AgentToolUpdateCallback
 from codepilot.llm.types import TextContent
 
 from .approval import ApprovalProvider, DenyApprovalProvider
 from .permissions import PermissionPolicy, ToolDecision, ToolRequest
 from .registry import ToolRegistry
-from .types import ToolResultStatus, ToolRuntimeRequest, ToolRuntimeResult
+from .types import (
+    AgentTool,
+    AgentToolResult,
+    AgentToolUpdateCallback,
+    ToolResultStatus,
+    ToolRuntimeRequest,
+    ToolRuntimeResult,
+)
 
 
 def _tool_result(
@@ -33,21 +38,24 @@ def _tool_result(
 
 
 def _sync_result_status(
+    request: ToolRuntimeRequest,
     result: AgentToolResult,
     status: ToolResultStatus,
     *,
     approved: bool,
     approval_id: str | None = None,
 ) -> AgentToolResult:
+    result.tool_call_id = request.tool_call_id
+    result.tool_name = request.name
     result.status = status
     result.approved = approved
     result.approval_id = approval_id
     if result.details is None:
         result.details = {}
     if isinstance(result.details, dict):
-        result.details.setdefault("status", status)
+        result.details["status"] = status
         if approval_id is not None:
-            result.details.setdefault("approval_id", approval_id)
+            result.details["approval_id"] = approval_id
     return result
 
 
@@ -72,8 +80,8 @@ class ToolRuntime:
                 description=tool.description,
                 parameters=tool.parameters,
                 execute=self._make_execute_adapter(tool.name),
+                runtime_managed=True,
             )
-            setattr(adapter, "runtime_managed", True)
             adapters.append(adapter)
         return adapters
 
@@ -118,6 +126,8 @@ class ToolRuntime:
                 status="error",
                 details={"tool": request.name, "reason": "tool_not_found"},
             )
+            result.tool_call_id = request.tool_call_id
+            result.tool_name = request.name
             result.approved = False
             return ToolRuntimeResult(
                 result=result,
@@ -155,6 +165,8 @@ class ToolRuntime:
                         "policy_reason": decision.reason,
                     },
                 )
+                result.tool_call_id = request.tool_call_id
+                result.tool_name = request.name
                 result.approved = False
                 result.approval_id = approval.approval_id
                 return ToolRuntimeResult(
@@ -168,8 +180,11 @@ class ToolRuntime:
         try:
             value = tool.execute(request.tool_call_id, request.params, signal, on_update)
             result = await _maybe_await(value)
-            status: ToolResultStatus = "error" if result.is_error else "success"
+            status: ToolResultStatus = result.status
+            if status == "success" and result.is_error:
+                status = "error"
             _sync_result_status(
+                request,
                 result,
                 status,
                 approved=result.approved,
@@ -188,6 +203,8 @@ class ToolRuntime:
                 status="error",
                 details={"tool": request.name, "reason": "tool_exception", "error_kind": type(exc).__name__},
             )
+            result.tool_call_id = request.tool_call_id
+            result.tool_name = request.name
             return ToolRuntimeResult(
                 result=result,
                 status="error",
@@ -206,6 +223,8 @@ class ToolRuntime:
                 **decision.details,
             },
         )
+        result.tool_call_id = request.tool_call_id
+        result.tool_name = request.name
         result.approved = False
         return ToolRuntimeResult(
             result=result,

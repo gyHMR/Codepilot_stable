@@ -9,6 +9,7 @@ from __future__ import annotations
 """
 
 from typing import Any
+from dataclasses import asdict
 
 from codepilot.llm.types import (
     AssistantMessage,
@@ -22,6 +23,7 @@ from codepilot.llm.types import (
     Usage,
     UserMessage,
 )
+from codepilot.protocols.errors import LLMErrorInfo
 
 
 def _user_block_to_dict(block: TextContent | ImageContent) -> dict[str, Any]:
@@ -84,7 +86,9 @@ def message_to_dict(message: Message) -> dict[str, Any]:
             "stop_reason": message.stop_reason,
             "response_id": message.response_id,
             "error_message": message.error_message,
+            "error_info": asdict(message.error_info) if message.error_info else None,
             "timestamp": message.timestamp,
+            "metadata": message.metadata,
         }
 
     if isinstance(message, ToolResultMessage):
@@ -93,9 +97,11 @@ def message_to_dict(message: Message) -> dict[str, Any]:
             "tool_call_id": message.tool_call_id,
             "tool_name": message.tool_name,
             "content": [_tool_result_block_to_dict(b) for b in message.content],
+            "status": message.status,
             "is_error": message.is_error,
             "details": message.details,
             "timestamp": message.timestamp,
+            "metadata": message.metadata,
         }
 
     raise TypeError(f"Unsupported message type: {type(message)!r}")
@@ -159,6 +165,21 @@ def message_from_dict(data: dict[str, Any]) -> Message:
                 total=float(cost_data.get("total", 0.0)) if isinstance(cost_data, dict) else 0.0,
             ),
         )
+        error_info_data = data.get("error_info")
+        error_info = None
+        if isinstance(error_info_data, dict):
+            error_info = LLMErrorInfo(
+                code=str(error_info_data.get("code", "llm.unknown")),
+                message=str(error_info_data.get("message", "")),
+                retryable=bool(error_info_data.get("retryable", False)),
+                kind=error_info_data.get("kind", "unknown"),
+                provider=str(error_info_data.get("provider", "")),
+                model=str(error_info_data.get("model", "")),
+                status_code=error_info_data.get("status_code"),
+                details=error_info_data.get("details", {})
+                if isinstance(error_info_data.get("details"), dict)
+                else {},
+            )
         return AssistantMessage(
             content=[_assistant_block_from_dict(i) for i in data.get("content", []) if isinstance(i, dict)],
             api=data.get("api", ""),
@@ -168,7 +189,9 @@ def message_from_dict(data: dict[str, Any]) -> Message:
             stop_reason=data.get("stop_reason", "stop"),
             response_id=data.get("response_id"),
             error_message=data.get("error_message"),
+            error_info=error_info,
             timestamp=int(data.get("timestamp", 0)),
+            metadata=data.get("metadata", {}) if isinstance(data.get("metadata"), dict) else {},
         )
 
     if role == "toolResult":
@@ -176,9 +199,11 @@ def message_from_dict(data: dict[str, Any]) -> Message:
             tool_call_id=data.get("tool_call_id", ""),
             tool_name=data.get("tool_name", ""),
             content=[_tool_result_block_from_dict(i) for i in data.get("content", []) if isinstance(i, dict)],
+            status=data.get("status", "error" if data.get("is_error") else "success"),
             is_error=bool(data.get("is_error", False)),
             details=data.get("details"),
             timestamp=int(data.get("timestamp", 0)),
+            metadata=data.get("metadata", {}) if isinstance(data.get("metadata"), dict) else {},
         )
 
     raise ValueError(f"Unknown role: {role!r}")

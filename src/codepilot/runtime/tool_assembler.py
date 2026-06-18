@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from codepilot.core import AgentTool
 from codepilot.extensions import load_extensions, load_skills
 from codepilot.extensions.mcp import create_mcp_proxy_tools, parse_mcp_tool_configs
 from codepilot.extensions.types import LoadedExtensions
@@ -16,6 +15,7 @@ from codepilot.tools.builtin import (
 from codepilot.tools.permissions import PermissionPolicy
 from codepilot.tools.registry import ToolRegistry
 from codepilot.tools.runtime import ToolRuntime
+from codepilot.tools.types import AgentTool
 
 from .config_loader import RuntimeConfig
 from .types import CreateAgentSessionOptions

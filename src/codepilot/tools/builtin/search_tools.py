@@ -3,9 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
-from codepilot.core import AgentTool, AgentToolResult
 from codepilot.llm.types import TextContent
 from codepilot.tools.sandbox import WorkspaceSandbox
+from codepilot.tools.types import AgentTool, AgentToolResult
 
 
 def create_search_tools(sandbox: WorkspaceSandbox, *, allow: Callable[[str], bool]) -> list[AgentTool]:

@@ -5,12 +5,12 @@ agent_core 的类型定义。
 
 这一层关注“编排”而不是“具体 provider 实现”：
 1) 维护 Agent 状态；
-2) 定义工具执行协议；
-3) 定义循环配置和事件格式。
+2) 定义循环配置；
+3) re-export tools/protocols 拥有的跨层类型，保持兼容。
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Literal, Optional, Protocol, TypedDict
+from typing import Any, Awaitable, Callable, Literal, Optional
 
 from codepilot.llm.types import (
     AssistantMessage,
@@ -22,53 +22,34 @@ from codepilot.llm.types import (
     ToolCall,
     ToolResultMessage,
 )
-from codepilot.protocols.tools import ToolResultStatus
+from codepilot.protocols.events import (
+    AgentEndEvent,
+    AgentEvent,
+    AgentEventBase,
+    AgentEventSink,
+    AgentStartEvent,
+    ErrorEvent,
+    MessageEndEvent,
+    MessageStartEvent,
+    MessageUpdateEvent,
+    ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
+    ToolExecutionUpdateEvent,
+    TurnEndEvent,
+    TurnStartEvent,
+)
+from codepilot.tools.types import (
+    AgentTool,
+    AgentToolResult,
+    AgentToolUpdateCallback,
+    ToolExecuteFn,
+)
 
 
 ToolExecutionMode = Literal["sequential", "parallel"]
 
 # 当前阶段只支持 LLM 消息类型，后续可以扩展 custom message。
 AgentMessage = Message
-
-
-@dataclass
-class AgentToolResult:
-    """工具执行产物：内容块、细节对象和运行状态。"""
-
-    content: list[TextContent | ImageContent]
-    details: Any = None
-    is_error: bool = False
-    status: ToolResultStatus = "success"
-    approved: bool = True
-    approval_id: str | None = None
-
-
-AgentToolUpdateCallback = Callable[[AgentToolResult], None]
-
-
-class ToolExecuteFn(Protocol):
-    def __call__(
-        self,
-        tool_call_id: str,
-        params: dict[str, Any],
-        signal: Any | None = None,
-        on_update: AgentToolUpdateCallback | None = None,
-    ) -> Awaitable[AgentToolResult] | AgentToolResult: ...
-
-
-@dataclass
-class AgentTool:
-    """
-    Agent 可执行工具定义。
-
-    注意：name/description/parameters 同时也会作为 LLM 可见的工具元信息。
-    """
-
-    name: str
-    label: str
-    description: str
-    parameters: dict[str, Any]
-    execute: ToolExecuteFn
 
 
 @dataclass
@@ -130,6 +111,7 @@ class AgentLoopConfig:
     session_id: Optional[str] = None
     max_tool_iterations: int = 12
     max_tool_calls_per_turn: Optional[int] = None
+    allow_unmanaged_tools: bool = False
 
 
 @dataclass
@@ -143,100 +125,3 @@ class AgentState:
     stream_message: AgentMessage | None = None
     pending_tool_calls: set[str] = field(default_factory=set)
     error: str | None = None
-
-
-class AgentEventBase(TypedDict):
-    """
-    所有事件统一元字段（贴近 TS 版 runtime 事件结构）。
-    """
-
-    type: str
-    runId: str
-    turnId: int
-    eventId: str
-    timestamp: int
-    sessionId: str | None
-
-
-class AgentStartEvent(AgentEventBase):
-    type: Literal["agent_start"]
-
-
-class AgentEndEvent(AgentEventBase):
-    type: Literal["agent_end"]
-    messages: list[AgentMessage]
-
-
-class TurnStartEvent(AgentEventBase):
-    type: Literal["turn_start"]
-
-
-class TurnEndEvent(AgentEventBase):
-    type: Literal["turn_end"]
-    message: AssistantMessage
-    toolResults: list[ToolResultMessage]
-
-
-class MessageStartEvent(AgentEventBase):
-    type: Literal["message_start"]
-    message: AgentMessage
-
-
-class MessageUpdateEvent(AgentEventBase):
-    type: Literal["message_update"]
-    message: AgentMessage
-    assistantMessageEvent: dict[str, Any]
-
-
-class MessageEndEvent(AgentEventBase):
-    type: Literal["message_end"]
-    message: AgentMessage
-
-
-class ToolExecutionStartEvent(AgentEventBase):
-    type: Literal["tool_execution_start"]
-    toolCallId: str
-    toolName: str
-    args: dict[str, Any]
-
-
-class ToolExecutionUpdateEvent(AgentEventBase):
-    type: Literal["tool_execution_update"]
-    toolCallId: str
-    toolName: str
-    args: dict[str, Any]
-    partialResult: AgentToolResult
-
-
-class ToolExecutionEndEvent(AgentEventBase):
-    type: Literal["tool_execution_end"]
-    toolCallId: str
-    toolName: str
-    result: AgentToolResult
-    status: ToolResultStatus
-    isError: bool
-    approved: bool
-    approvalId: str | None
-    errorReason: str | None
-
-
-class ErrorEvent(AgentEventBase):
-    type: Literal["error"]
-    error: str
-
-
-AgentEvent = (
-    AgentStartEvent
-    | AgentEndEvent
-    | TurnStartEvent
-    | TurnEndEvent
-    | MessageStartEvent
-    | MessageUpdateEvent
-    | MessageEndEvent
-    | ToolExecutionStartEvent
-    | ToolExecutionUpdateEvent
-    | ToolExecutionEndEvent
-    | ErrorEvent
-)
-
-AgentEventSink = Callable[[AgentEvent], None | Awaitable[None]]

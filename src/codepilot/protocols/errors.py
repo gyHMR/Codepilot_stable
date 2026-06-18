@@ -12,6 +12,7 @@ LLMErrorKind = Literal[
     "network",
     "context_length",
     "provider_response",
+    "unsupported_capability",
     "unknown",
 ]
 

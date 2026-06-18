@@ -104,6 +104,7 @@ class AgentOptions:
     ] = None
     max_tool_iterations: int = 12
     max_tool_calls_per_turn: Optional[int] = None
+    allow_unmanaged_tools: bool = False
     session_id: Optional[str] = None
 
 
@@ -298,6 +299,7 @@ class Agent:
             session_id=self._options.session_id,
             max_tool_iterations=self._options.max_tool_iterations,
             max_tool_calls_per_turn=self._options.max_tool_calls_per_turn,
+            allow_unmanaged_tools=self._options.allow_unmanaged_tools,
         )
 
         # 构建上下文快照（使用副本，避免循环过程中被外部修改）

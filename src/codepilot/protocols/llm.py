@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from .errors import LLMErrorInfo
+
+if TYPE_CHECKING:
+    from .messages import AssistantMessage
+    from .tools import ToolCall
 
 
 Api = str
@@ -117,14 +121,14 @@ class LLMStreamEvent(TypedDict, total=False):
     """Provider-normalized stream event."""
 
     type: LLMStreamEventType
-    partial: Any
+    partial: AssistantMessage
     contentIndex: int
     delta: str
     content: str
-    toolCall: Any
+    toolCall: ToolCall
     reason: str
-    message: Any
-    error: Any
+    message: AssistantMessage
+    error: AssistantMessage
     errorInfo: LLMErrorInfo
     raw: Any
 

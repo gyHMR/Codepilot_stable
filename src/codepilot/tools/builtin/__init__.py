@@ -2,14 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from codepilot.core import AgentTool
-
 from codepilot.tools.permissions import (
     MUTATING_TOOL_NAMES,
     READ_ONLY_TOOL_NAMES,
 )
 from codepilot.tools.sandbox import WorkspaceSandbox
-from codepilot.tools.types import ToolMetadata, ToolRiskLevel
+from codepilot.tools.types import AgentTool, ToolMetadata, ToolRiskLevel
 
 from .file_tools import create_file_tools
 from .search_tools import create_search_tools
