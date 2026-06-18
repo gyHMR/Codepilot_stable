@@ -63,6 +63,7 @@ class AgentSession:
         """
         workspace_dir = Path(options.workspace_dir)
         self.workspace_dir = workspace_dir
+        self.get_api_key = options.get_api_key
         # 如果未提供 session_id，则自动生成一个新的
         self.session_id = options.session_id or new_session_id()
 
@@ -89,6 +90,7 @@ class AgentSession:
             messages=merged_messages,
             thinking_level=options.thinking_level,
             tool_execution=options.tool_execution,
+            get_api_key=options.get_api_key,
             before_tool_call=options.before_tool_call,
             after_tool_call=options.after_tool_call,
             retry_enabled=options.retry_enabled,
@@ -474,10 +476,14 @@ class AgentSession:
                 system_prompt=COMPACTION_SYSTEM_PROMPT,
             )
             model = self.agent.state.model
+            api_key = None
+            if self.get_api_key is not None:
+                value = self.get_api_key(model.provider)
+                api_key = await value if inspect.isawaitable(value) else value
             result = await complete_simple(
                 model,
                 summary_context,
-                SimpleStreamOptions(max_tokens=2000),
+                SimpleStreamOptions(max_tokens=2000, api_key=api_key),
             )
             text_parts = [b.text for b in result.content if isinstance(b, TextContent)]
             summary = "\n".join(text_parts).strip()

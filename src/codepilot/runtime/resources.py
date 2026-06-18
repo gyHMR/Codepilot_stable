@@ -7,11 +7,70 @@
 """
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from codepilot.core import ToolExecutionMode
+from codepilot.protocols import Model, ModelCapabilities
+
+
+SUPPORTED_MODEL_APIS = {"openai-compatible", "anthropic-messages"}
+
+
+@dataclass(frozen=True)
+class WorkspaceModelConfig:
+    api: str
+    provider: str
+    model_id: str
+    base_url: str
+    api_key: str | None = None
+    api_key_env: str | None = None
+    context_window: int = 128_000
+    max_tokens: int = 8192
+    reasoning: bool = False
+    vision: bool = False
+
+    def __post_init__(self) -> None:
+        if self.api not in SUPPORTED_MODEL_APIS:
+            raise ValueError(f"Unsupported API protocol: {self.api}")
+        if not self.provider or not self.model_id or not self.base_url:
+            raise ValueError("provider, model_id and base_url are required")
+        if self.context_window <= 0 or self.max_tokens <= 0:
+            raise ValueError("context_window and max_tokens must be positive")
+
+    def to_model(self) -> Model:
+        return Model(
+            id=self.model_id,
+            name=self.model_id,
+            api=self.api,
+            provider=self.provider,
+            base_url=self.base_url,
+            reasoning=self.reasoning,
+            input=["text", "image"] if self.vision else ["text"],
+            context_window=self.context_window,
+            max_tokens=self.max_tokens,
+            capabilities=ModelCapabilities(
+                tools=True,
+                vision=self.vision,
+                streaming=True,
+                reasoning=self.reasoning,
+                system_prompt=True,
+                tool_choice=self.api == "openai-compatible",
+                parallel_tool_calls=self.api == "openai-compatible",
+            ),
+        )
+
+    def resolve_api_key(self) -> str | None:
+        if self.api_key_env:
+            value = os.getenv(self.api_key_env)
+            if value:
+                return value
+        return self.api_key
+
+    def build_api_key_resolver(self) -> Callable[[str], str | None]:
+        return lambda _provider: self.resolve_api_key()
 
 
 @dataclass
@@ -44,6 +103,7 @@ class WorkspaceSettings:
 @dataclass
 class WorkspaceResources:
     settings: WorkspaceSettings
+    model: WorkspaceModelConfig | None
     prompt: Optional[str]
     enabled_tools: Optional[list[str]]
 
@@ -53,12 +113,14 @@ class WorkspaceResourceLoader:
         self.workspace_dir = Path(workspace_dir)
         self.resource_root = self.workspace_dir / ".codepilot"
         self.settings_file = self.resource_root / "settings.json"
+        self.model_file = self.resource_root / "model.local.json"
         self.prompt_file = self.resource_root / "prompt.md"
         self.tools_file = self.resource_root / "tools.json"
 
     def load(self) -> WorkspaceResources:
         return WorkspaceResources(
             settings=self._load_settings(),
+            model=self._load_model(),
             prompt=self._load_prompt(),
             enabled_tools=self._load_tools(),
         )
@@ -107,6 +169,28 @@ class WorkspaceResourceLoader:
             else None,
             mcp_servers=self._to_object_list(raw.get("mcp_servers")),
         )
+
+    def _load_model(self) -> WorkspaceModelConfig | None:
+        if not self.model_file.exists():
+            return None
+        raw = self._safe_load_json(self.model_file)
+        if not isinstance(raw, dict):
+            raise ValueError(f"Invalid model config JSON: {self.model_file}")
+        try:
+            return WorkspaceModelConfig(
+                api=str(raw.get("api", "")),
+                provider=str(raw.get("provider", "")),
+                model_id=str(raw.get("model_id", "")),
+                base_url=str(raw.get("base_url", "")),
+                api_key=raw.get("api_key") if isinstance(raw.get("api_key"), str) else None,
+                api_key_env=raw.get("api_key_env") if isinstance(raw.get("api_key_env"), str) else None,
+                context_window=int(raw.get("context_window", 128_000)),
+                max_tokens=int(raw.get("max_tokens", 8192)),
+                reasoning=bool(raw.get("reasoning", False)),
+                vision=bool(raw.get("vision", False)),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid model config {self.model_file}: {exc}") from exc
 
     def _load_prompt(self) -> Optional[str]:
         if not self.prompt_file.exists():

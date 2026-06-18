@@ -38,6 +38,7 @@ class AgentSessionOptions:
     thinking_level: str = "off"
     tool_execution: ToolExecutionMode = "parallel"
     convert_to_llm: Optional[ConvertToLlmFn] = None
+    get_api_key: Optional[Callable[[str], str | None | Awaitable[str | None]]] = None
     max_context_messages: Optional[int] = None
     max_context_tokens: Optional[int] = None
     retain_recent_messages: int = 24

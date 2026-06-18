@@ -28,7 +28,8 @@ def create_agent_session(options: AgentSessionOptions | CreateAgentSessionOption
 
     workspace, resources = load_workspace_resources(options)
     restored_meta = read_restored_session_meta(workspace, options.session_id)
-    model = resolve_model(options, resources, restored_meta)
+    resolved_model = resolve_model(options, resources, restored_meta)
+    model = resolved_model.model
     config = resolve_runtime_config(options, resources, restored_meta)
     assembled_tools = assemble_tools(workspace, options, config)
     context_sources = build_runtime_context_sources(
@@ -71,6 +72,7 @@ def create_agent_session(options: AgentSessionOptions | CreateAgentSessionOption
         thinking_level=config.thinking_level,
         tool_execution=config.tool_execution,
         convert_to_llm=convert_to_llm,
+        get_api_key=resolved_model.get_api_key,
         max_context_messages=config.max_context_messages,
         max_context_tokens=config.max_context_tokens,
         retain_recent_messages=config.retain_recent_messages,

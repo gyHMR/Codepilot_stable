@@ -11,9 +11,7 @@ def test_source_files_do_not_contain_common_mojibake_markers() -> None:
     offenders: list[str] = []
     paths = [
         *(ROOT / "src" / "codepilot").rglob("*.py"),
-        ROOT / "docs" / "ARCHITECTURE.md",
-        ROOT / "docs" / "05_系统重构路线.md",
-        ROOT / "docs" / "06_测试可观测性与编码规范.md",
+        *(ROOT / "docs").rglob("*.md"),
     ]
     for path in paths:
         text = path.read_text(encoding="utf-8")

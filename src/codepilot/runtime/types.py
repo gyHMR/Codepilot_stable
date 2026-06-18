@@ -40,6 +40,7 @@ class CreateAgentSessionOptions:
     model: Optional[Model] = None
     provider: Optional[str] = None
     model_id: Optional[str] = None
+    get_api_key: Optional[Callable[[str], str | None | Awaitable[str | None]]] = None
     system_prompt: str = ""
     tools: list[AgentTool] = field(default_factory=list)
     session_id: Optional[str] = None

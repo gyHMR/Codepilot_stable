@@ -11,13 +11,63 @@ python -m coding_agent --mode interactive --provider anthropic --model-id glm-4.
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Sequence
 
+from codepilot.runtime.resources import WorkspaceResourceLoader
 from codepilot.runtime.service import RuntimeService
 from codepilot.runtime.types import CreateAgentSessionOptions
 
 from .runner import RunOptions, run
+
+
+_MODEL_CONFIG_TEMPLATE = {
+    "api": "openai-compatible",
+    "provider": "deepseek",
+    "model_id": "deepseek-chat",
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "context_window": 64000,
+    "max_tokens": 8192,
+    "reasoning": False,
+    "vision": False,
+}
+
+
+def _init_model_config(workspace: str | Path) -> None:
+    config_file = Path(workspace) / ".codepilot" / "model.local.json"
+    if config_file.exists():
+        raise ValueError(f"Model config already exists: {config_file}")
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(
+        json.dumps(_MODEL_CONFIG_TEMPLATE, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    print(f"Created {config_file}")
+    print("Edit this file, replace api_key (or configure api_key_env), then run `codepilot`.")
+
+
+def _check_model_config(workspace: str | Path) -> None:
+    loader = WorkspaceResourceLoader(workspace)
+    model = loader.load().model
+    if model is None:
+        raise ValueError(f"Model config not found: {loader.model_file}")
+    if model.api_key_env and os.getenv(model.api_key_env):
+        credential_source = f"environment:{model.api_key_env}"
+    elif model.api_key:
+        credential_source = "model.local.json"
+    else:
+        credential_source = "missing"
+    print(f"config={loader.model_file}")
+    print(f"api={model.api}")
+    print(f"provider={model.provider}")
+    print(f"model_id={model.model_id}")
+    print(f"base_url={model.base_url}")
+    print(f"credential={credential_source}")
+    print("status=valid" if credential_source != "missing" else "status=missing_credential")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,6 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ── 工作区与会话 ──────────────────────────────────────────
     parser.add_argument("--workspace", default=".", help="Workspace directory")
+    parser.add_argument("--init-config", action="store_true", help="Create .codepilot/model.local.json")
+    parser.add_argument("--check-config", action="store_true", help="Validate model.local.json without making a request")
     parser.add_argument("--session-id", default=None, help="Existing session id to resume")
     parser.add_argument("--list-entries", action="store_true", help="Print session entry ids and exit")
     parser.add_argument("--show-tree", action="store_true", help="Print session tree as JSON and exit")
@@ -120,6 +172,14 @@ async def _run_from_args(args: argparse.Namespace) -> int:
     返回:
         退出码，0 表示成功
     """
+    if args.init_config:
+        _init_model_config(args.workspace)
+        return 0
+
+    if args.check_config:
+        _check_model_config(args.workspace)
+        return 0
+
     # 将命令行参数映射到会话配置选项
     options = CreateAgentSessionOptions(
         workspace_dir=Path(args.workspace),           # 工作区目录

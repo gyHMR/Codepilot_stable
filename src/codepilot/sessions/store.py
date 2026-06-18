@@ -45,7 +45,13 @@ class SessionStore:
         self.event_recorder = EventRecorder(self.events_file)
         self.run_store = RunStore(self.workspace_dir, self.session_id)
 
-    def ensure_initialized(self, *, model_id: str, provider: str, system_prompt: str) -> None:
+    def ensure_initialized(
+        self,
+        *,
+        model_id: str,
+        provider: str,
+        system_prompt: str,
+    ) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         if self.meta_file.exists():
             return
