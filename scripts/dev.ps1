@@ -4,9 +4,9 @@ Codepilot Docker development launcher.
 
 .DESCRIPTION
 Examples:
-  .\dev.ps1                         # Build and run IM webhook service
-  .\dev.ps1 -Mode cli               # Build and start interactive CLI
-  .\dev.ps1 -Mode im -Transport longconn
+  .\scripts\dev.ps1                         # Build and run IM webhook service
+  .\scripts\dev.ps1 -Mode cli               # Build and start interactive CLI
+  .\scripts\dev.ps1 -Mode im -Transport longconn
 #>
 param(
     [ValidateSet("im", "cli")]
@@ -20,7 +20,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-Set-Location $PSScriptRoot
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+Set-Location $RepoRoot
 
 $env:CODEPILOT_TRANSPORT = $Transport
 $env:CODEPILOT_HOST = $ListenHost

@@ -38,6 +38,8 @@ Thumbs.db
 # Runtime state
 .codepilot/sessions/
 .codepilot/im/
+test/.tmp_runs/
+test_tmp_runs/
 
 # Secrets / local env
 .env
@@ -49,4 +51,3 @@ TODOLIST/
 docs/
 .codex/
 Planing/
-tests/

@@ -33,7 +33,7 @@ python -m codepilot.interfaces.cli --help
 
 ## Docker Quick Start
 
-Create a `.env` file from `.env.example`, fill in the required API keys and Feishu credentials, then run:
+Create a `.env` file from `docker/env.example`, fill in the required API keys and Feishu credentials, then run:
 
 ```bash
 docker compose up --build codepilot-im
@@ -45,13 +45,19 @@ For interactive CLI mode:
 docker compose run --rm codepilot-cli
 ```
 
+Helper scripts live under `scripts/`:
+
+```bash
+./scripts/dev.sh --mode cli
+```
+
 ## Verification
 
 After structural changes, run:
 
 ```bash
 python -m compileall -q src/codepilot
-python -m pytest tests -q
+python -m pytest test -q
 python -m codepilot.interfaces.cli --help
 ```
 
@@ -59,5 +65,5 @@ For dependency-boundary cleanup:
 
 ```bash
 rg "codepilot[.]interfaces|from [.]\\.[.]interfaces|from interfaces" src/codepilot/runtime src/codepilot/core src/codepilot/tools src/codepilot/sessions
-rg "codepilot[.]runtime[.](agent_session|builtin_tools|cli|runner|session_store|serde|memory)|python -m codepilot[.]runtime|runtime[.]runner|runtime[.]cli" src tests docs README.md pyproject.toml
+rg "codepilot[.]runtime[.](agent_session|builtin_tools|cli|runner|session_store|serde|memory)|python -m codepilot[.]runtime|runtime[.]runner|runtime[.]cli" src test docs README.md pyproject.toml
 ```

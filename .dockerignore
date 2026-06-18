@@ -6,6 +6,8 @@ __pycache__/
 .venv/
 venv/
 env/
+test/
+test_tmp_runs/
 build/
 dist/
 *.egg-info/
@@ -15,5 +17,6 @@ dist/
 .env
 .env.ps1
 TODOLIST/
-.docs/
+docs/
+Planing/
 .codex/

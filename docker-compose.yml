@@ -2,6 +2,7 @@ services:
   codepilot-im:
     build:
       context: .
+      dockerfile: docker/Dockerfile
     image: codepilot:dev
     environment:
       CODEPILOT_PROVIDER: ${CODEPILOT_PROVIDER:-anthropic}
@@ -40,6 +41,7 @@ services:
   codepilot-cli:
     build:
       context: .
+      dockerfile: docker/Dockerfile
     image: codepilot:dev
     environment:
       CODEPILOT_PROVIDER: ${CODEPILOT_PROVIDER:-anthropic}

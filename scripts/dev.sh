@@ -2,14 +2,15 @@
 # Codepilot Docker development launcher.
 #
 # Usage:
-#   ./dev.sh
-#   ./dev.sh --mode cli
-#   ./dev.sh --mode im --transport longconn
+#   ./scripts/dev.sh
+#   ./scripts/dev.sh --mode cli
+#   ./scripts/dev.sh --mode im --transport longconn
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 MODE="${MODE:-im}"
 export CODEPILOT_TRANSPORT="${CODEPILOT_TRANSPORT:-webhook}"
