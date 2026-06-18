@@ -1,30 +1,65 @@
 from __future__ import annotations
 
+"""
+工具相关类型定义。
+
+定义了工具调用全生命周期涉及的类型：
+- Tool / ToolSpec: 工具定义（模型可见的工具规范）
+- ToolCall: 模型发出的工具调用请求
+- ToolResult: 工具执行结果
+- ToolMetadata: 工具元数据（风险级别、权限要求等）
+"""
+
 from dataclasses import dataclass, field
 from typing import Any, Literal, Union
 
 from .content import ImageContent, TextContent
 
 
+# 工具风险级别：用于权限控制和审批流程
 ToolRiskLevel = Literal["low", "medium", "high"]
+
+# 工具执行结果状态
 ToolResultStatus = Literal["success", "error", "denied", "approval_required", "cancelled"]
 
 
 @dataclass
 class Tool:
-    """Model-visible tool specification."""
+    """模型可见的工具定义（Tool Specification）。
+
+    描述一个可供 LLM 调用的工具，包含名称、描述和参数 schema。
+
+    Attributes:
+        name: 工具名称（LLM 通过此名称发起调用）。
+        description: 工具功能描述（帮助 LLM 理解何时使用此工具）。
+        parameters: 参数的 JSON Schema 定义。
+    """
 
     name: str
     description: str
     parameters: dict[str, Any]
 
 
+# ToolSpec 是 Tool 的别名，保持向后兼容
 ToolSpec = Tool
 
 
 @dataclass
 class ToolCall:
-    """Normalized tool call requested by a model."""
+    """模型发出的归一化工具调用请求。
+
+    当 LLM 决定调用工具时，生成此对象描述要调用的工具和参数。
+
+    Attributes:
+        type: 类型标识，固定为 "toolCall"。
+        id: 工具调用的唯一 ID（用于匹配 ToolResultMessage）。
+        name: 要调用的工具名称。
+        arguments: 解析后的参数字典。
+        raw_arguments: 原始参数 JSON 字符串（解析失败时保留原文）。
+        index: 在同一批工具调用中的序号。
+        provider: 来源 provider 标识（可选）。
+        metadata: 附加元数据字典。
+    """
 
     type: Literal["toolCall"] = "toolCall"
     id: str = ""
@@ -36,12 +71,33 @@ class ToolCall:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+# 工具结果中可包含的内容块类型
 ToolResultBlock = Union[TextContent, ImageContent]
 
 
 @dataclass
 class ToolResult:
-    """Normalized tool execution result."""
+    """归一化的工具执行结果。
+
+    工具执行完成后返回此对象，包含执行状态、输出内容、影响范围等信息。
+
+    Attributes:
+        tool_call_id: 对应的工具调用 ID。
+        tool_name: 工具名称。
+        content: 结果内容块列表（文本/图片）。
+        status: 执行状态。
+        is_error: 是否为错误结果（与 status 自动同步）。
+        approved: 是否已通过审批。
+        approval_id: 审批记录 ID（可选）。
+        error_code: 错误代码（可选）。
+        exit_code: 进程退出码（可选）。
+        affected_paths: 受影响的文件路径列表。
+        workspace_changed: 是否修改了工作区文件。
+        diff_summary: 变更摘要（可选）。
+        verification: 验证结果字典（可选）。
+        details: 附加详情（可选）。
+        metadata: 附加元数据字典。
+    """
 
     tool_call_id: str = ""
     tool_name: str = ""
@@ -60,6 +116,7 @@ class ToolResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """初始化后处理：自动同步 is_error 和 status 的一致性。"""
         if self.is_error and self.status == "success":
             self.status = "error"
         elif self.status != "success":
@@ -68,6 +125,24 @@ class ToolResult:
 
 @dataclass(frozen=True)
 class ToolMetadata:
+    """工具元数据（不可变）。
+
+    描述工具的静态属性，用于权限控制、并发调度和审批流程。
+
+    Attributes:
+        name: 工具名称。
+        category: 工具分类（如 "file"、"shell"、"search"）。
+        read_only: 是否为只读工具（不修改文件系统）。
+        concurrency_safe: 是否可安全并发执行。
+        exclusive: 是否需要独占访问（执行期间阻止其他工具）。
+        requires_approval: 是否需要用户审批才能执行。
+        risk_level: 风险级别（low/medium/high）。
+        resource_scope: 资源作用域（如文件路径模式）。
+        network_access: 是否需要网络访问。
+        credential_required: 是否需要凭据。
+        extra: 扩展字段字典。
+    """
+
     name: str
     category: str
     read_only: bool
