@@ -11,7 +11,7 @@ import json
 import time
 from typing import Any
 
-from ..types import (
+from codepilot.protocols import (
     AssistantMessage,
     Context,
     ImageContent,

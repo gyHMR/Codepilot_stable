@@ -3,9 +3,18 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
-from codepilot.llm.types import TextContent
+from codepilot.protocols import TextContent
 from codepilot.tools.sandbox import WorkspaceSandbox
 from codepilot.tools.types import AgentTool, AgentToolResult
+
+
+def _error_result(message: str, error_code: str) -> AgentToolResult:
+    return AgentToolResult(
+        content=[TextContent(text=message)],
+        status="error",
+        error_code=error_code,
+        details={},
+    )
 
 
 def create_search_tools(sandbox: WorkspaceSandbox, *, allow: Callable[[str], bool]) -> list[AgentTool]:
@@ -20,17 +29,17 @@ def create_search_tools(sandbox: WorkspaceSandbox, *, allow: Callable[[str], boo
         max_matches = int(params.get("max_matches", 200))
         case_sensitive = bool(params.get("case_sensitive", True))
         if not pattern:
-            return AgentToolResult(content=[TextContent(text="Missing pattern")], details={})
+            return _error_result("Missing pattern", "missing_pattern")
 
         root = sandbox.resolve_path(start_path)
         if not root.exists():
-            return AgentToolResult(content=[TextContent(text=f"Path not found: {start_path}")], details={})
+            return _error_result(f"Path not found: {start_path}", "path_not_found")
 
         flags = 0 if case_sensitive else re.IGNORECASE
         try:
             regex = re.compile(pattern, flags)
         except re.error as exc:
-            return AgentToolResult(content=[TextContent(text=f"Invalid regex: {exc}")], details={})
+            return _error_result(f"Invalid regex: {exc}", "invalid_regex")
 
         matches: list[str] = []
         files = [p for p in root.glob(glob_pattern) if p.is_file()]
@@ -60,7 +69,7 @@ def create_search_tools(sandbox: WorkspaceSandbox, *, allow: Callable[[str], boo
         max_results = int(params.get("max_results", 200))
         root = sandbox.resolve_path(start_path)
         if not root.exists():
-            return AgentToolResult(content=[TextContent(text=f"Path not found: {start_path}")], details={})
+            return _error_result(f"Path not found: {start_path}", "path_not_found")
 
         results = []
         for path in root.glob(pattern):

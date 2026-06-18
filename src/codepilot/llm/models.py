@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Built-in model catalog."""
 
-from .types import Model, ModelCapabilities
+from codepilot.protocols import Model, ModelCapabilities
 
 _MODELS: dict[str, dict[str, Model]] = {
     "anthropic": {

@@ -14,13 +14,13 @@ from codepilot.core import (
     AfterToolCallContext,
     AfterToolCallResult,
     AgentMessage,
-    AgentTool,
     BeforeToolCallContext,
     BeforeToolCallResult,
     ToolExecutionMode,
 )
 from codepilot.extensions.types import LifecycleHook, RegisteredCommand
-from codepilot.llm.types import Message, Model
+from codepilot.protocols import Message, Model
+from codepilot.tools import AgentTool
 
 ConvertToLlmFn = Callable[[list[AgentMessage]], list[Message] | Awaitable[list[Message]]]
 

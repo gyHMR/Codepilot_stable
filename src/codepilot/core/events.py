@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-import uuid
 from typing import Any, cast
 
-from .types import AgentEvent, AgentEventSink
+from codepilot.protocols import AgentEvent, AgentEventSink
 
 
 def now_ms() -> int:
@@ -27,10 +26,16 @@ async def maybe_await(value: Any) -> Any:
 class AgentEventEmitter:
     """Adds stable run/turn/event metadata before forwarding events."""
 
-    def __init__(self, sink: AgentEventSink, *, session_id: str | None = None) -> None:
+    def __init__(
+        self,
+        sink: AgentEventSink,
+        *,
+        run_id: str,
+        session_id: str | None = None,
+    ) -> None:
         self._sink = sink
         self._session_id = session_id
-        self.run_id = f"run_{uuid.uuid4().hex[:12]}"
+        self.run_id = run_id
         self.turn_id = 0
         self._event_seq = 0
 
@@ -49,4 +54,3 @@ class AgentEventEmitter:
             "sessionId": self._session_id,
         }
         await maybe_await(self._sink(cast(AgentEvent, enriched)))
-

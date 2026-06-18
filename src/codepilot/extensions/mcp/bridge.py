@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from codepilot.llm.types import TextContent
-from codepilot.core import AgentTool, AgentToolResult
+from codepilot.protocols import TextContent
+from codepilot.tools import AgentTool, AgentToolResult
 
 
 class MCPClient(Protocol):

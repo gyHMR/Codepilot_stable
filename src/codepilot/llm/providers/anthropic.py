@@ -18,7 +18,15 @@ import httpx
 from ..env_api_keys import get_env_api_key
 from ..errors import classify_llm_error
 from ..event_stream import AssistantMessageEventStream, llm_event
-from ..types import Context, Model, SimpleStreamOptions, StreamOptions, TextContent, ThinkingContent, ToolCall
+from codepilot.protocols import (
+    Context,
+    Model,
+    SimpleStreamOptions,
+    StreamOptions,
+    TextContent,
+    ThinkingContent,
+    ToolCall,
+)
 from ._common import empty_assistant_message, normalize_usage, parse_partial_json, to_anthropic_messages, to_anthropic_tools
 
 

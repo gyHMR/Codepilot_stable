@@ -12,7 +12,7 @@ agent_core 的类型定义。
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal, Optional
 
-from codepilot.llm.types import (
+from codepilot.protocols import (
     AssistantMessage,
     ImageContent,
     Message,
@@ -22,27 +22,9 @@ from codepilot.llm.types import (
     ToolCall,
     ToolResultMessage,
 )
-from codepilot.protocols.events import (
-    AgentEndEvent,
-    AgentEvent,
-    AgentEventBase,
-    AgentEventSink,
-    AgentStartEvent,
-    ErrorEvent,
-    MessageEndEvent,
-    MessageStartEvent,
-    MessageUpdateEvent,
-    ToolExecutionEndEvent,
-    ToolExecutionStartEvent,
-    ToolExecutionUpdateEvent,
-    TurnEndEvent,
-    TurnStartEvent,
-)
 from codepilot.tools.types import (
     AgentTool,
     AgentToolResult,
-    AgentToolUpdateCallback,
-    ToolExecuteFn,
 )
 
 
@@ -112,6 +94,10 @@ class AgentLoopConfig:
     max_tool_iterations: int = 12
     max_tool_calls_per_turn: Optional[int] = None
     allow_unmanaged_tools: bool = False
+    repeated_tool_call_limit: int = 3
+    retry_enabled: bool = True
+    max_model_retries: int = 2
+    retry_base_delay_ms: int = 1200
 
 
 @dataclass

@@ -6,10 +6,10 @@ from typing import Any, Awaitable, Callable, Literal
 from codepilot.core import (
     AfterToolCallContext,
     AfterToolCallResult,
-    AgentTool,
     BeforeToolCallContext,
     BeforeToolCallResult,
 )
+from codepilot.tools import AgentTool
 
 BeforeHook = Callable[[BeforeToolCallContext, Any | None], BeforeToolCallResult | None | Awaitable[BeforeToolCallResult | None]]
 AfterHook = Callable[[AfterToolCallContext, Any | None], AfterToolCallResult | None | Awaitable[AfterToolCallResult | None]]

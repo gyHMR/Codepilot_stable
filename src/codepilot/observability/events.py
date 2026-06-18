@@ -3,8 +3,13 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
-from codepilot.llm.types import AssistantMessage, Message, ToolResultMessage, UserMessage
-from codepilot.protocols.tools import ToolResult
+from codepilot.protocols import (
+    AssistantMessage,
+    Message,
+    ToolResult,
+    ToolResultMessage,
+    UserMessage,
+)
 
 AGENT_EVENT_TYPES = {
     "agent_start",
@@ -12,6 +17,7 @@ AGENT_EVENT_TYPES = {
     "message_start",
     "message_update",
     "message_end",
+    "model_retry_start",
     "tool_execution_start",
     "tool_execution_update",
     "tool_execution_end",
@@ -43,6 +49,12 @@ def normalize_event_value(value: Any) -> Any:
             "status": value.status,
             "approved": value.approved,
             "approval_id": value.approval_id,
+            "error_code": value.error_code,
+            "exit_code": value.exit_code,
+            "affected_paths": list(value.affected_paths),
+            "workspace_changed": value.workspace_changed,
+            "diff_summary": value.diff_summary,
+            "verification": normalize_event_value(value.verification),
         }
     if isinstance(value, dict):
         return {str(k): normalize_event_value(v) for k, v in value.items()}

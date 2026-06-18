@@ -10,7 +10,8 @@ Codepilot uses a single `codepilot` Python namespace:
 - `runtime` assembles config, model providers, prompts, tools, sessions, hooks, and commands through `RuntimeService`.
 - `core` contains the minimal agent loop.
 - `tools` contains `ToolRegistry`, `ToolRuntime`, metadata, permission policy, approval hooks, sandboxing, and builtin coding tools.
-- `sessions` owns session lifecycle, store, compaction, branching, retry, checkpoint, and memory.
+- `sessions` owns session lifecycle, store, compaction, branching, checkpoint, and memory.
+- `core` owns one complete Run, including model attempts, tool-loop guards, retry, stop semantics, and RunResult.
 - `observability` normalizes JSONL events and prepares summaries for Web Console and future eval reports.
 
 Runtime compatibility modules from older import paths have been removed. New code should import from the module that owns the responsibility.

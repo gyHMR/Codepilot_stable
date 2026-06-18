@@ -4,9 +4,7 @@ from typing import Any
 
 import httpx
 
-from codepilot.protocols import LLMErrorInfo, LLMErrorKind
-
-from .types import Model
+from codepilot.protocols import LLMErrorInfo, LLMErrorKind, Model
 
 
 def classify_llm_error(exc: Exception, model: Model) -> LLMErrorInfo:

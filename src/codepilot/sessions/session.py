@@ -12,11 +12,11 @@ from __future__ import annotations
 from pathlib import Path
 import inspect
 import logging
-from typing import Awaitable, Callable
+from typing import Callable
 
 from codepilot.llm.overflow import estimate_context_tokens, is_context_overflow
-from codepilot.llm.stream import complete_simple
-from codepilot.llm.types import (
+from codepilot.llm.api_registry import complete_simple
+from codepilot.protocols import (
     AssistantMessage,
     Context,
     Message,
@@ -32,7 +32,6 @@ from .branching import switch_session as branch_switch_session
 from .branching import switch_to_entry as branch_switch_to_entry
 from .checkpoint import SessionCheckpoint, record_checkpoint
 from .compaction import COMPACTION_SYSTEM_PROMPT, fallback_summary, format_messages_for_summary
-from .retry import run_with_retry, should_retry
 from .store import SessionStore, new_session_id
 from .types import AgentSessionOptions
 
@@ -86,6 +85,9 @@ class AgentSession:
             tool_execution=options.tool_execution,
             before_tool_call=options.before_tool_call,
             after_tool_call=options.after_tool_call,
+            retry_enabled=options.retry_enabled,
+            max_model_retries=options.max_retries,
+            retry_base_delay_ms=options.retry_base_delay_ms,
             session_id=self.session_id,
         )
         if options.convert_to_llm is not None:
@@ -122,6 +124,10 @@ class AgentSession:
     def messages(self) -> list[AgentMessage]:
         """获取当前会话的全部消息列表。"""
         return self.agent.state.messages
+
+    @property
+    def last_run_result(self) -> AgentRunResult | None:
+        return self.agent.last_run_result
 
     @property
     def last_usage(self) -> dict | None:
@@ -191,7 +197,8 @@ class AgentSession:
         """
         await self._run_lifecycle_hooks(text=text, is_continue=False, hooks=self.before_prompt_hooks)
         await self._check_and_compact_before_prompt()
-        result = await self._run_with_retry(lambda: self.agent.prompt(text, images=images))
+        result = await self.agent.prompt(text, images=images)
+        self._persist_last_run_result()
         await self._compact_context_if_needed()
         await self._run_lifecycle_hooks(text=text, is_continue=False, hooks=self.after_prompt_hooks)
         return result
@@ -206,7 +213,8 @@ class AgentSession:
             本次交互产生的 Agent 消息列表。
         """
         await self._check_and_compact_before_prompt()
-        result = await self._run_with_retry(lambda: self.agent.prompt(message))
+        result = await self.agent.prompt(message)
+        self._persist_last_run_result()
         await self._compact_context_if_needed()
         return result
 
@@ -217,9 +225,34 @@ class AgentSession:
             继续运行产生的 Agent 消息列表。
         """
         await self._run_lifecycle_hooks(text="", is_continue=True, hooks=self.before_prompt_hooks)
-        result = await self._run_with_retry(self.agent.continue_run)
+        result = await self.agent.continue_run()
+        self._persist_last_run_result()
         await self._compact_context_if_needed()
         await self._run_lifecycle_hooks(text="", is_continue=True, hooks=self.after_prompt_hooks)
+        return result
+
+    async def run(
+        self,
+        text: str,
+        *,
+        images: list[str] | None = None,
+    ) -> AgentRunResult:
+        """Run one user task and persist its structured result."""
+
+        await self._run_lifecycle_hooks(
+            text=text,
+            is_continue=False,
+            hooks=self.before_prompt_hooks,
+        )
+        await self._check_and_compact_before_prompt()
+        result = await self.agent.run(text, images=images)
+        self.store.append_run_result(result)
+        await self._compact_context_if_needed()
+        await self._run_lifecycle_hooks(
+            text=text,
+            is_continue=False,
+            hooks=self.after_prompt_hooks,
+        )
         return result
 
     def subscribe(self, listener: Callable[[AgentEvent], None]) -> Callable[[], None]:
@@ -302,6 +335,11 @@ class AgentSession:
         if event["type"] == "message_end":
             message = event["message"]
             self.store.append_context_message(message)
+
+    def _persist_last_run_result(self) -> None:
+        result = self.agent.last_run_result
+        if result is not None:
+            self.store.append_run_result(result)
 
     async def _run_lifecycle_hooks(
         self,
@@ -465,31 +503,3 @@ class AgentSession:
     def _fallback_summary(messages: list[Message]) -> str:
         """当 LLM 摘要不可用时，使用基于规则的方式生成降级摘要。"""
         return fallback_summary(messages)
-
-    async def _run_with_retry(self, op: Callable[[], Awaitable[list[AgentMessage]]]) -> list[AgentMessage]:
-        """带重试机制地执行异步操作。
-
-        当请求失败且满足重试条件时，自动进行指数退避重试。
-
-        Args:
-            op: 要执行的异步操作（通常是 agent.prompt 或 agent.continue_run）。
-
-        Returns:
-            操作成功后的 Agent 消息列表。
-        """
-        return await run_with_retry(
-            op=op,
-            retry_enabled=self.retry_enabled,
-            max_retries=self.max_retries,
-            retry_base_delay_ms=self.retry_base_delay_ms,
-            get_final_assistant=lambda: next(
-                (m for m in reversed(self.agent.state.messages) if isinstance(m, AssistantMessage)),
-                None,
-            ),
-            append_event=self.store.append_event,
-        )
-
-    @staticmethod
-    def _should_retry(message: AssistantMessage | None) -> bool:
-        """判断给定的助手消息是否满足重试条件。"""
-        return should_retry(message)

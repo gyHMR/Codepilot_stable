@@ -11,9 +11,7 @@ from __future__ import annotations
 import asyncio
 from typing import AsyncIterator, Optional, cast
 
-from codepilot.protocols import LLMStreamEvent, LLMStreamEventType
-
-from .types import AssistantMessage
+from codepilot.protocols import AssistantMessage, LLMStreamEvent, LLMStreamEventType
 
 
 _SENTINEL = object()

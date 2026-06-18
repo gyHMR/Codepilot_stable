@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from codepilot.llm.event_stream import AssistantMessageEventStream
-from codepilot.llm.stream import complete_simple, stream_simple
-from codepilot.llm.types import (
+from codepilot.llm.api_registry import complete_simple, stream_simple
+from codepilot.protocols import (
     AssistantMessage,
     Context,
     ImageContent,
@@ -16,7 +16,7 @@ from codepilot.llm.types import (
     SimpleStreamOptions,
     UserMessage,
 )
-from codepilot.protocols.errors import LLMErrorInfo
+from codepilot.protocols import LLMErrorInfo
 
 from .events import AgentEventEmitter, maybe_await
 from .types import AgentContext, AgentLoopConfig

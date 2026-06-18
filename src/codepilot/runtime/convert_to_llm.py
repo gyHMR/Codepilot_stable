@@ -10,7 +10,7 @@ convertToLlm：把 AgentMessage 列表转换为 LLM 可直接消费的 Message �
 4) 清理空消息。
 """
 
-from codepilot.llm.types import (
+from codepilot.protocols import (
     AssistantMessage,
     ImageContent,
     Message,
@@ -142,6 +142,12 @@ def _process_tool_result(msg: ToolResultMessage, *, max_chars: int) -> ToolResul
         content=new_content,
         status=msg.status,
         is_error=msg.is_error,
+        error_code=msg.error_code,
+        exit_code=msg.exit_code,
+        affected_paths=list(msg.affected_paths),
+        workspace_changed=msg.workspace_changed,
+        diff_summary=msg.diff_summary,
+        verification=dict(msg.verification) if msg.verification else None,
         details=msg.details,
         timestamp=msg.timestamp,
         metadata=dict(msg.metadata),

@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from codepilot.llm.types import AssistantMessage, Message, TextContent, ToolResultMessage, UserMessage
+from codepilot.protocols import (
+    AssistantMessage,
+    Message,
+    TextContent,
+    ToolResultMessage,
+    UserMessage,
+)
 
 COMPACTION_SYSTEM_PROMPT = """你是一个上下文压缩助手。请根据以下对话历史生成一份简明摘要。
 要求：

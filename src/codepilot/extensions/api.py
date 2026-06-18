@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from codepilot.core import AgentTool
+from codepilot.tools import AgentTool
 
 from .types import AfterHook, BeforeHook, CommandHandler, LifecycleHook, LoadedExtensions, RegisteredCommand
 

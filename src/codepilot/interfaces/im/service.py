@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from codepilot.llm.types import AssistantMessage, TextContent
+from codepilot.protocols import AssistantMessage, TextContent
 from codepilot.extensions.types import ExtensionCommandContext
 from codepilot.runtime import CreateAgentSessionOptions, create_agent_session
 from codepilot.runtime.command_registry import format_commands_for_help, resolve_registered_command

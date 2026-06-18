@@ -7,7 +7,7 @@ from __future__ import annotations
 判定是否超出上下文窗口，便于 Agent 侧在调用前主动压缩。
 """
 
-from .types import (
+from codepilot.protocols import (
     AssistantMessage,
     Context,
     ImageContent,

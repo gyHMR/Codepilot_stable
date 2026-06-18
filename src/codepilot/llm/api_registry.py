@@ -12,7 +12,13 @@ from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from .event_stream import AssistantMessageEventStream
-from .types import Context, Model, SimpleStreamOptions, StreamOptions
+from codepilot.protocols import (
+    AssistantMessage,
+    Context,
+    Model,
+    SimpleStreamOptions,
+    StreamOptions,
+)
 
 StreamFn = Callable[[Model, Context, StreamOptions | None], AssistantMessageEventStream]
 SimpleStreamFn = Callable[[Model, Context, SimpleStreamOptions | None], AssistantMessageEventStream]
@@ -71,3 +77,58 @@ def get_api_provider(api: str) -> ApiProvider | None:
 def clear_api_providers() -> None:
     """清空注册中心（通常用于测试或重置）。"""
     _REGISTRY.clear()
+
+
+def _resolve_provider(api: str) -> ApiProvider:
+    provider = get_api_provider(api)
+    if provider is None:
+        raise RuntimeError(f"No API provider registered for api: {api}")
+    return provider
+
+
+def stream(
+    model: Model,
+    context: Context,
+    options: StreamOptions | None = None,
+) -> AssistantMessageEventStream:
+    return _resolve_provider(model.api).stream(model, context, options)
+
+
+async def complete(
+    model: Model,
+    context: Context,
+    options: StreamOptions | None = None,
+) -> AssistantMessage:
+    return await stream(model, context, options).result()
+
+
+def stream_simple(
+    model: Model,
+    context: Context,
+    options: SimpleStreamOptions | None = None,
+    *,
+    reasoning: str | None = None,
+) -> AssistantMessageEventStream:
+    effective_options = options or SimpleStreamOptions()
+    if reasoning is not None:
+        effective_options.reasoning = reasoning  # type: ignore[assignment]
+    return _resolve_provider(model.api).stream_simple(
+        model,
+        context,
+        effective_options,
+    )
+
+
+async def complete_simple(
+    model: Model,
+    context: Context,
+    options: SimpleStreamOptions | None = None,
+    *,
+    reasoning: str | None = None,
+) -> AssistantMessage:
+    return await stream_simple(
+        model,
+        context,
+        options,
+        reasoning=reasoning,
+    ).result()

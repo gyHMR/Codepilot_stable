@@ -15,7 +15,7 @@ import json
 import sys
 from typing import Any, Callable
 
-from codepilot.llm.types import AssistantMessage, TextContent
+from codepilot.protocols import AssistantMessage, TextContent
 from codepilot.core import AgentEvent
 
 from codepilot.runtime.command_registry import format_commands_for_help, handle_runtime_command, list_runtime_commands

@@ -16,8 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from codepilot.llm.types import Message
+from codepilot.protocols import AgentRunResult, Message
 from codepilot.observability import EventRecorder
+from codepilot.observability.events import normalize_event_value
 
 from .serde import message_from_dict, message_to_dict
 
@@ -39,6 +40,7 @@ class SessionStore:
         self.session_file = self.root / "session.jsonl"
         self.context_file = self.root / "context.jsonl"
         self.events_file = self.root / "events.jsonl"
+        self.runs_file = self.root / "runs.jsonl"
         self.event_recorder = EventRecorder(self.events_file)
 
     def ensure_initialized(self, *, model_id: str, provider: str, system_prompt: str) -> None:
@@ -70,6 +72,8 @@ class SessionStore:
             self.context_file.write_text("", encoding="utf-8")
         if not self.events_file.exists():
             self.events_file.write_text("", encoding="utf-8")
+        if not self.runs_file.exists():
+            self.runs_file.write_text("", encoding="utf-8")
 
     def touch_updated_at(self) -> None:
         if not self.meta_file.exists():
@@ -102,6 +106,22 @@ class SessionStore:
 
     def summarize_events(self) -> dict[str, Any]:
         return self.event_recorder.summarize()
+
+    def append_run_result(self, result: AgentRunResult) -> None:
+        record = normalize_event_value(result)
+        with self.runs_file.open("a", encoding="utf-8") as fp:
+            fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self.touch_updated_at()
+
+    def load_run_results(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        if not self.runs_file.exists():
+            return []
+        records = [
+            json.loads(line)
+            for line in self.runs_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        return records[-limit:] if limit is not None else records
 
     def rewrite_context_messages(self, messages: list[Message]) -> None:
         lines = []

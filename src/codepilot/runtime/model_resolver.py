@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from codepilot.llm.models import get_model
-from codepilot.llm.types import Model
+from codepilot.protocols import Model
 
 from .resources import WorkspaceResources
 from .types import CreateAgentSessionOptions

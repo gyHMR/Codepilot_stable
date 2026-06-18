@@ -50,6 +50,12 @@ class ToolResult:
     is_error: bool = False
     approved: bool = True
     approval_id: str | None = None
+    error_code: str | None = None
+    exit_code: int | None = None
+    affected_paths: list[str] = field(default_factory=list)
+    workspace_changed: bool | None = None
+    diff_summary: str | None = None
+    verification: dict[str, Any] | None = None
     details: Any = None
     metadata: dict[str, Any] = field(default_factory=dict)
 

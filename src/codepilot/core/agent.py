@@ -9,15 +9,23 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
-from codepilot.llm.types import ImageContent, Message, Model, TextContent, ThinkingLevel, UserMessage
+from codepilot.protocols import (
+    AgentEvent,
+    AgentEventSink,
+    AgentRunResult,
+    ImageContent,
+    Message,
+    Model,
+    TextContent,
+    ThinkingLevel,
+    UserMessage,
+)
 
-from .agent_loop import run_agent_loop, run_agent_loop_continue
+from .agent_loop import run_agent_loop_continue_result, run_agent_loop_result
 from .types import (
     AfterToolCallContext,
     AfterToolCallResult,
     AgentContext,
-    AgentEvent,
-    AgentEventSink,
     AgentLoopConfig,
     AgentMessage,
     AgentState,
@@ -83,6 +91,7 @@ class AgentOptions:
         after_tool_call: 工具调用后的拦截钩子，可用于结果后处理。
         max_tool_iterations: 单次运行允许的最大工具反馈迭代次数。
         max_tool_calls_per_turn: 单轮允许的最大工具调用数量，None 表示不限制。
+        repeated_tool_call_limit: 连续重复相同工具调用的允许次数。
         session_id: 会话标识，用于关联日志和持久化数据。
     """
     model: Model
@@ -105,6 +114,10 @@ class AgentOptions:
     max_tool_iterations: int = 12
     max_tool_calls_per_turn: Optional[int] = None
     allow_unmanaged_tools: bool = False
+    repeated_tool_call_limit: int = 3
+    retry_enabled: bool = True
+    max_model_retries: int = 2
+    retry_base_delay_ms: int = 1200
     session_id: Optional[str] = None
 
 
@@ -140,7 +153,8 @@ class Agent:
         self._listeners: list[AgentEventSink] = []
 
         # 当前正在运行的流式任务（asyncio.Task），同一时刻最多只有一个
-        self._stream_task: asyncio.Task[list[AgentMessage]] | None = None
+        self._stream_task: asyncio.Task[AgentRunResult] | None = None
+        self._last_run_result: AgentRunResult | None = None
         # 引导消息队列：在 Agent 循环的下一轮迭代中注入，用于中途纠正方向
         self._steering_queue: list[AgentMessage] = []
         # 后续消息队列：在当前轮次结束后追加，用于补充上下文
@@ -150,6 +164,10 @@ class Agent:
     def state(self) -> AgentState:
         """获取当前 Agent 的运行状态（只读访问）。"""
         return self._state
+
+    @property
+    def last_run_result(self) -> AgentRunResult | None:
+        return self._last_run_result
 
     # ── 状态修改方法 ────────────────────────────────────────────
 
@@ -232,7 +250,26 @@ class Agent:
         else:
             prompt = message
 
-        return await self._start_run(prompts=[prompt], continue_mode=False)
+        result = await self._start_run_result(prompts=[prompt], continue_mode=False)
+        return result.messages
+
+    async def run(
+        self,
+        message: str | UserMessage,
+        images: list[str] | None = None,
+    ) -> AgentRunResult:
+        """Start a new Run and return its structured result."""
+
+        if self._state.is_streaming:
+            raise RuntimeError("Agent is already running")
+        if isinstance(message, str):
+            content: list[TextContent | ImageContent] = [TextContent(text=message)]
+            for image in images or []:
+                content.append(ImageContent(data=image))
+            prompt = UserMessage(content=content)
+        else:
+            prompt = message
+        return await self._start_run_result(prompts=[prompt], continue_mode=False)
 
     async def continue_run(self) -> list[AgentMessage]:
         """继续上一次未完成的 Agent 运行。
@@ -248,7 +285,13 @@ class Agent:
         """
         if self._state.is_streaming:
             raise RuntimeError("Agent is already running")
-        return await self._start_run(prompts=[], continue_mode=True)
+        result = await self._start_run_result(prompts=[], continue_mode=True)
+        return result.messages
+
+    async def continue_run_result(self) -> AgentRunResult:
+        if self._state.is_streaming:
+            raise RuntimeError("Agent is already running")
+        return await self._start_run_result(prompts=[], continue_mode=True)
 
     async def wait_for_idle(self) -> None:
         """等待当前流式任务完成，使 Agent 进入空闲状态。"""
@@ -262,7 +305,11 @@ class Agent:
 
     # ── 内部方法 ────────────────────────────────────────────────
 
-    async def _start_run(self, prompts: list[AgentMessage], continue_mode: bool) -> list[AgentMessage]:
+    async def _start_run_result(
+        self,
+        prompts: list[AgentMessage],
+        continue_mode: bool,
+    ) -> AgentRunResult:
         """启动一次 Agent 运行的核心方法。
 
         流程：
@@ -300,6 +347,10 @@ class Agent:
             max_tool_iterations=self._options.max_tool_iterations,
             max_tool_calls_per_turn=self._options.max_tool_calls_per_turn,
             allow_unmanaged_tools=self._options.allow_unmanaged_tools,
+            repeated_tool_call_limit=self._options.repeated_tool_call_limit,
+            retry_enabled=self._options.retry_enabled,
+            max_model_retries=self._options.max_model_retries,
+            retry_base_delay_ms=self._options.retry_base_delay_ms,
         )
 
         # 构建上下文快照（使用副本，避免循环过程中被外部修改）
@@ -311,17 +362,27 @@ class Agent:
 
         # 根据模式选择对应的循环入口
         if continue_mode:
-            coro = run_agent_loop_continue(context=context, config=cfg, emit=self._dispatch_event)
+            coro = run_agent_loop_continue_result(
+                context=context,
+                config=cfg,
+                emit=self._dispatch_event,
+            )
         else:
-            coro = run_agent_loop(prompts=prompts, context=context, config=cfg, emit=self._dispatch_event)
+            coro = run_agent_loop_result(
+                prompts=prompts,
+                context=context,
+                config=cfg,
+                emit=self._dispatch_event,
+            )
 
         # 创建异步任务并等待完成
         self._stream_task = asyncio.create_task(coro)
         try:
-            new_messages = await self._stream_task
+            result = await self._stream_task
             # 将本次产生的新消息追加到 Agent 的消息历史中
-            self._state.messages.extend(new_messages)
-            return new_messages
+            self._state.messages.extend(result.messages)
+            self._last_run_result = result
+            return result
         except asyncio.CancelledError:
             self._state.error = "aborted"
             raise
@@ -366,6 +427,10 @@ class Agent:
                 self._state.pending_tool_calls.remove(tool_call_id)
         elif event_type == "error":
             self._state.error = event.get("error", "unknown error")
+        elif event_type == "agent_end":
+            result = event.get("result")
+            if result is not None and result.status == "completed":
+                self._state.error = None
 
         # 将事件广播给所有已注册的监听器（兼容同步/异步回调）
         for listener in list(self._listeners):

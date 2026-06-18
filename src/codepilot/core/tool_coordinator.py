@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Awaitable
 
-from codepilot.llm.types import AssistantMessage, TextContent, ToolCall, ToolResultMessage
+from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
 
 from .events import AgentEventEmitter, maybe_await, now_ms
 from .types import (
@@ -383,7 +383,14 @@ class ToolCallCoordinator:
             details=result.details,
             is_error=is_error,
             status=result.status,
+            error_code=result.error_code,
+            exit_code=result.exit_code,
+            affected_paths=list(result.affected_paths),
+            workspace_changed=result.workspace_changed,
+            diff_summary=result.diff_summary,
+            verification=dict(result.verification) if result.verification else None,
             timestamp=now_ms(),
+            metadata=dict(result.metadata),
         )
         await self._emitter.emit({"type": "message_start", "message": message})
         await self._emitter.emit({"type": "message_end", "message": message})

@@ -7,16 +7,19 @@ from .api_registry import (
     LLMProvider,
     LLMProviderDescriptor,
     clear_api_providers,
+    complete,
+    complete_simple,
     get_api_provider,
     register_api_provider,
+    stream,
+    stream_simple,
 )
 from .env_api_keys import get_env_api_key
 from .errors import LLMErrorInfo, LLMErrorKind
 from .event_stream import AssistantMessageEventStream, LLMStreamEvent, LLMStreamEventType
 from .models import get_model, get_models, get_providers
 from .overflow import estimate_context_tokens, estimate_message_tokens, is_context_overflow, overflow_ratio
-from .stream import complete, complete_simple, stream, stream_simple
-from .types import (
+from codepilot.protocols import (
     Api,
     AssistantMessage,
     Context,

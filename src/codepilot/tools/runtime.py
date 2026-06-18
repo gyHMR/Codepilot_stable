@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
-from codepilot.llm.types import TextContent
+from codepilot.protocols import TextContent
 
 from .approval import ApprovalProvider, DenyApprovalProvider
 from .permissions import PermissionPolicy, ToolDecision, ToolRequest
@@ -25,6 +25,7 @@ def _tool_result(
     message: str,
     *,
     status: ToolResultStatus,
+    error_code: str | None = None,
     details: dict[str, Any] | None = None,
     is_error: bool = True,
 ) -> AgentToolResult:
@@ -34,6 +35,7 @@ def _tool_result(
         details=merged_details,
         is_error=is_error,
         status=status,
+        error_code=error_code,
     )
 
 
@@ -124,6 +126,7 @@ class ToolRuntime:
             result = _tool_result(
                 f"Tool {request.name} not found",
                 status="error",
+                error_code="tool_not_found",
                 details={"tool": request.name, "reason": "tool_not_found"},
             )
             result.tool_call_id = request.tool_call_id
@@ -158,6 +161,7 @@ class ToolRuntime:
                 result = _tool_result(
                     approval.reason or "Tool execution requires approval",
                     status="approval_required",
+                    error_code="approval_required",
                     details={
                         "tool": request.name,
                         "reason": decision.reason,
@@ -201,6 +205,7 @@ class ToolRuntime:
             result = _tool_result(
                 str(exc),
                 status="error",
+                error_code="tool_exception",
                 details={"tool": request.name, "reason": "tool_exception", "error_kind": type(exc).__name__},
             )
             result.tool_call_id = request.tool_call_id
@@ -216,6 +221,7 @@ class ToolRuntime:
         result = _tool_result(
             decision.reason or "Tool execution was blocked",
             status="denied",
+            error_code=decision.reason or "tool_denied",
             details={
                 "tool": request.name,
                 "reason": decision.reason,

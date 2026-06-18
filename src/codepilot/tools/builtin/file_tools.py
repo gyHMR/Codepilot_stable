@@ -2,9 +2,18 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from codepilot.llm.types import TextContent
+from codepilot.protocols import TextContent
 from codepilot.tools.sandbox import WorkspaceSandbox
 from codepilot.tools.types import AgentTool, AgentToolResult
+
+
+def _error_result(message: str, error_code: str, **details: Any) -> AgentToolResult:
+    return AgentToolResult(
+        content=[TextContent(text=message)],
+        status="error",
+        error_code=error_code,
+        details=details,
+    )
 
 
 def _replace_nth(text: str, old: str, new: str, nth: int) -> str:
@@ -37,9 +46,9 @@ def create_file_tools(
         max_entries = int(params.get("max_entries", 100))
         target = sandbox.resolve_path(path_text)
         if not target.exists():
-            return AgentToolResult(content=[TextContent(text=f"Path not found: {path_text}")], details={})
+            return _error_result(f"Path not found: {path_text}", "path_not_found")
         if not target.is_dir():
-            return AgentToolResult(content=[TextContent(text=f"Not a directory: {path_text}")], details={})
+            return _error_result(f"Not a directory: {path_text}", "not_a_directory")
 
         items = sorted(target.iterdir(), key=lambda p: p.name)[:max_entries]
         lines = []
@@ -54,12 +63,12 @@ def create_file_tools(
         path_text = str(params.get("path", ""))
         max_chars = int(params.get("max_chars", 4000))
         if not path_text:
-            return AgentToolResult(content=[TextContent(text="Missing path")], details={})
+            return _error_result("Missing path", "missing_path")
         target = sandbox.resolve_path(path_text)
         if not target.exists():
-            return AgentToolResult(content=[TextContent(text=f"Path not found: {path_text}")], details={})
+            return _error_result(f"Path not found: {path_text}", "path_not_found")
         if not target.is_file():
-            return AgentToolResult(content=[TextContent(text=f"Not a file: {path_text}")], details={})
+            return _error_result(f"Not a file: {path_text}", "not_a_file")
 
         text = target.read_text(encoding="utf-8", errors="replace")
         if len(text) > max_chars:
@@ -72,14 +81,35 @@ def create_file_tools(
         content = str(params.get("content", ""))
         overwrite = bool(params.get("overwrite", True))
         if not path_text:
-            return AgentToolResult(content=[TextContent(text="Missing path")], details={})
+            return _error_result("Missing path", "missing_path")
 
         target = sandbox.resolve_path(path_text)
         if target.exists() and not overwrite:
-            return AgentToolResult(content=[TextContent(text=f"File exists: {path_text}")], details={})
+            return _error_result(f"File exists: {path_text}", "file_exists")
+        original = target.read_text(encoding="utf-8", errors="replace") if target.exists() else None
+        changed = original != content
+        relative_path = target.relative_to(workspace).as_posix()
+        if not changed:
+            return AgentToolResult(
+                content=[TextContent(text=f"File unchanged: {relative_path}")],
+                affected_paths=[relative_path],
+                workspace_changed=False,
+                diff_summary="No content change",
+                details={"changed": False},
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-        return AgentToolResult(content=[TextContent(text=f"Wrote file: {path_text}")], details={})
+        action = "created" if original is None else "updated"
+        return AgentToolResult(
+            content=[TextContent(text=f"Wrote file: {relative_path}")],
+            affected_paths=[relative_path],
+            workspace_changed=True,
+            diff_summary=(
+                f"{action} {relative_path}: "
+                f"{len(original or '')} -> {len(content)} characters"
+            ),
+            details={"changed": True, "action": action},
+        )
 
     async def edit_tool(tool_call_id: str, params: dict[str, Any], signal=None, on_update=None) -> AgentToolResult:
         _ = tool_call_id, signal, on_update
@@ -90,32 +120,48 @@ def create_file_tools(
         occurrence_index_raw = params.get("occurrence_index")
         expected_occurrences_raw = params.get("expected_occurrences")
         if not path_text:
-            return AgentToolResult(content=[TextContent(text="Missing path")], details={})
+            return _error_result("Missing path", "missing_path")
         if old_text == "":
-            return AgentToolResult(content=[TextContent(text="old_text cannot be empty")], details={})
+            return _error_result("old_text cannot be empty", "empty_old_text")
         occurrence_index = None if occurrence_index_raw is None else int(occurrence_index_raw)
         expected_occurrences = None if expected_occurrences_raw is None else int(expected_occurrences_raw)
         if occurrence_index is not None and occurrence_index <= 0:
-            return AgentToolResult(content=[TextContent(text="occurrence_index must be >= 1")], details={})
+            return _error_result(
+                "occurrence_index must be >= 1",
+                "invalid_occurrence_index",
+            )
         if expected_occurrences is not None and expected_occurrences < 0:
-            return AgentToolResult(content=[TextContent(text="expected_occurrences must be >= 0")], details={})
+            return _error_result(
+                "expected_occurrences must be >= 0",
+                "invalid_expected_occurrences",
+            )
         target = sandbox.resolve_path(path_text)
         if not target.exists() or not target.is_file():
-            return AgentToolResult(content=[TextContent(text=f"Path not found or not file: {path_text}")], details={})
+            return _error_result(
+                f"Path not found or not file: {path_text}",
+                "path_not_file",
+            )
 
         original = target.read_text(encoding="utf-8", errors="replace")
         count = original.count(old_text)
         if expected_occurrences is not None and count != expected_occurrences:
-            return AgentToolResult(
-                content=[TextContent(text=f"Expected {expected_occurrences} matches, but found {count}")],
-                details={"matches": count, "expected_occurrences": expected_occurrences},
+            return _error_result(
+                f"Expected {expected_occurrences} matches, but found {count}",
+                "unexpected_match_count",
+                matches=count,
+                expected_occurrences=expected_occurrences,
             )
         if count == 0:
-            return AgentToolResult(content=[TextContent(text="No match found")], details={"replacements": 0})
+            return _error_result(
+                "No match found",
+                "no_match",
+                replacements=0,
+            )
         if not replace_all and count > 1 and occurrence_index is None and edit_require_unique_match:
-            return AgentToolResult(
-                content=[TextContent(text="Multiple matches found; set replace_all=true or provide more unique old_text")],
-                details={"matches": count},
+            return _error_result(
+                "Multiple matches found; set replace_all=true or provide more unique old_text",
+                "multiple_matches",
+                matches=count,
             )
         if replace_all:
             updated = original.replace(old_text, new_text)
@@ -123,17 +169,26 @@ def create_file_tools(
         else:
             if occurrence_index is not None:
                 if occurrence_index > count:
-                    return AgentToolResult(
-                        content=[TextContent(text=f"occurrence_index={occurrence_index} is out of range (matches={count})")],
-                        details={"matches": count, "occurrence_index": occurrence_index},
+                    return _error_result(
+                        f"occurrence_index={occurrence_index} is out of range (matches={count})",
+                        "occurrence_out_of_range",
+                        matches=count,
+                        occurrence_index=occurrence_index,
                     )
                 updated = _replace_nth(original, old_text, new_text, occurrence_index)
             else:
                 updated = original.replace(old_text, new_text, 1)
             replaced = 1
         target.write_text(updated, encoding="utf-8")
+        relative_path = target.relative_to(workspace).as_posix()
         return AgentToolResult(
-            content=[TextContent(text=f"Edited file: {path_text} (replacements={replaced})")],
+            content=[TextContent(text=f"Edited file: {relative_path} (replacements={replaced})")],
+            affected_paths=[relative_path],
+            workspace_changed=updated != original,
+            diff_summary=(
+                f"edited {relative_path}: {replaced} replacement"
+                f"{'s' if replaced != 1 else ''}"
+            ),
             details={"replacements": replaced},
         )
 

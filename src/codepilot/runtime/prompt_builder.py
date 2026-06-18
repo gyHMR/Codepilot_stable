@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from codepilot.core import AgentTool
+from codepilot.tools import AgentTool
 
 from .context_builder import RuntimeContextSources
 from .system_prompt import SystemPromptBuildOptions, build_system_prompt

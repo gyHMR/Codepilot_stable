@@ -52,6 +52,12 @@ class ToolResultMessage:
     content: list[ToolResultBlock] = field(default_factory=list)
     status: ToolResultStatus = "success"
     is_error: bool = False
+    error_code: str | None = None
+    exit_code: int | None = None
+    affected_paths: list[str] = field(default_factory=list)
+    workspace_changed: bool | None = None
+    diff_summary: str | None = None
+    verification: dict[str, object] | None = None
     details: object = None
     timestamp: int = 0
     metadata: dict[str, object] = field(default_factory=dict)

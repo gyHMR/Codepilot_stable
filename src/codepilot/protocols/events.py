@@ -5,6 +5,7 @@ from typing import Any, Awaitable, Callable, Literal, TypedDict
 from .errors import ErrorInfo
 from .llm import LLMStreamEvent
 from .messages import AssistantMessage, Message, ToolResultMessage
+from .runs import AgentRunCounters, AgentRunResult, AgentRunStatus, AgentRunStopReason
 from .tools import ToolResult, ToolResultStatus
 
 
@@ -16,6 +17,7 @@ RuntimeEventType = Literal[
     "message_start",
     "message_update",
     "message_end",
+    "model_retry_start",
     "tool_execution_start",
     "tool_execution_update",
     "tool_approval_required",
@@ -47,6 +49,10 @@ class AgentStartEvent(AgentEventBase):
 class AgentEndEvent(AgentEventBase):
     type: Literal["agent_end"]
     messages: list[Message]
+    status: AgentRunStatus
+    stopReason: AgentRunStopReason
+    counters: AgentRunCounters
+    result: AgentRunResult
 
 
 class TurnStartEvent(AgentEventBase):
@@ -73,6 +79,14 @@ class MessageUpdateEvent(AgentEventBase):
 class MessageEndEvent(AgentEventBase):
     type: Literal["message_end"]
     message: Message
+
+
+class ModelRetryStartEvent(AgentEventBase):
+    type: Literal["model_retry_start"]
+    attempt: int
+    maxAttempts: int
+    delayMs: int
+    error: ErrorInfo
 
 
 class ToolExecutionStartEvent(AgentEventBase):
@@ -123,6 +137,7 @@ AgentEvent = (
     | MessageStartEvent
     | MessageUpdateEvent
     | MessageEndEvent
+    | ModelRetryStartEvent
     | ToolExecutionStartEvent
     | ToolExecutionUpdateEvent
     | ToolExecutionEndEvent
@@ -143,6 +158,7 @@ __all__ = [
     "MessageEndEvent",
     "MessageStartEvent",
     "MessageUpdateEvent",
+    "ModelRetryStartEvent",
     "RuntimeEvent",
     "RuntimeEventType",
     "ToolExecutionEndEvent",

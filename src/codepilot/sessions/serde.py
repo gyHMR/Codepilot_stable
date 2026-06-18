@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 from dataclasses import asdict
 
-from codepilot.llm.types import (
+from codepilot.protocols import (
     AssistantMessage,
     Cost,
     ImageContent,
@@ -23,7 +23,6 @@ from codepilot.llm.types import (
     Usage,
     UserMessage,
 )
-from codepilot.protocols.errors import LLMErrorInfo
 
 
 def _user_block_to_dict(block: TextContent | ImageContent) -> dict[str, Any]:
@@ -99,6 +98,12 @@ def message_to_dict(message: Message) -> dict[str, Any]:
             "content": [_tool_result_block_to_dict(b) for b in message.content],
             "status": message.status,
             "is_error": message.is_error,
+            "error_code": message.error_code,
+            "exit_code": message.exit_code,
+            "affected_paths": message.affected_paths,
+            "workspace_changed": message.workspace_changed,
+            "diff_summary": message.diff_summary,
+            "verification": message.verification,
             "details": message.details,
             "timestamp": message.timestamp,
             "metadata": message.metadata,
@@ -201,6 +206,24 @@ def message_from_dict(data: dict[str, Any]) -> Message:
             content=[_tool_result_block_from_dict(i) for i in data.get("content", []) if isinstance(i, dict)],
             status=data.get("status", "error" if data.get("is_error") else "success"),
             is_error=bool(data.get("is_error", False)),
+            error_code=data.get("error_code"),
+            exit_code=data.get("exit_code"),
+            affected_paths=[
+                str(path)
+                for path in data.get("affected_paths", [])
+                if isinstance(path, str)
+            ],
+            workspace_changed=(
+                data.get("workspace_changed")
+                if isinstance(data.get("workspace_changed"), bool)
+                else None
+            ),
+            diff_summary=data.get("diff_summary"),
+            verification=(
+                data.get("verification")
+                if isinstance(data.get("verification"), dict)
+                else None
+            ),
             details=data.get("details"),
             timestamp=int(data.get("timestamp", 0)),
             metadata=data.get("metadata", {}) if isinstance(data.get("metadata"), dict) else {},

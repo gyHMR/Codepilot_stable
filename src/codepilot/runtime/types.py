@@ -9,18 +9,18 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Optional
 
 from codepilot.llm.models import get_model
-from codepilot.llm.types import Message, Model
+from codepilot.protocols import Message, Model
 from codepilot.core import (
     AfterToolCallContext,
     AfterToolCallResult,
     AgentMessage,
-    AgentTool,
     BeforeToolCallContext,
     BeforeToolCallResult,
     ToolExecutionMode,
 )
 from codepilot.extensions.types import LifecycleHook, RegisteredCommand
 from codepilot.sessions.types import AgentSessionOptions, ConvertToLlmFn
+from codepilot.tools import AgentTool
 
 
 @dataclass
