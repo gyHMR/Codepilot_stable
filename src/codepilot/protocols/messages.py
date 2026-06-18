@@ -6,7 +6,7 @@ from typing import Optional, Union
 from .content import ImageContent, TextContent, ThinkingContent
 from .errors import LLMErrorInfo
 from .llm import Api, Provider, StopReason, Usage
-from .tools import Tool, ToolCall
+from .tools import Tool, ToolCall, ToolResultStatus
 
 
 AssistantBlock = Union[TextContent, ThinkingContent, ToolCall]
@@ -50,6 +50,7 @@ class ToolResultMessage:
     tool_call_id: str = ""
     tool_name: str = ""
     content: list[ToolResultBlock] = field(default_factory=list)
+    status: ToolResultStatus = "success"
     is_error: bool = False
     details: object = None
     timestamp: int = 0

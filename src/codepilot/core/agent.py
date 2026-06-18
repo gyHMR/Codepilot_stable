@@ -81,6 +81,8 @@ class AgentOptions:
         get_api_key: 获取 API Key 的回调函数，用于动态获取密钥。
         before_tool_call: 工具调用前的拦截钩子，可用于权限校验或参数修改。
         after_tool_call: 工具调用后的拦截钩子，可用于结果后处理。
+        max_tool_iterations: 单次运行允许的最大工具反馈迭代次数。
+        max_tool_calls_per_turn: 单轮允许的最大工具调用数量，None 表示不限制。
         session_id: 会话标识，用于关联日志和持久化数据。
     """
     model: Model
@@ -100,6 +102,8 @@ class AgentOptions:
     after_tool_call: Optional[
         Callable[[AfterToolCallContext, Any | None], AfterToolCallResult | None | Awaitable[AfterToolCallResult | None]]
     ] = None
+    max_tool_iterations: int = 12
+    max_tool_calls_per_turn: Optional[int] = None
     session_id: Optional[str] = None
 
 
@@ -292,6 +296,8 @@ class Agent:
             after_tool_call=self._options.after_tool_call,
             reasoning=_resolve_reasoning(self._state.thinking_level),
             session_id=self._options.session_id,
+            max_tool_iterations=self._options.max_tool_iterations,
+            max_tool_calls_per_turn=self._options.max_tool_calls_per_turn,
         )
 
         # 构建上下文快照（使用副本，避免循环过程中被外部修改）

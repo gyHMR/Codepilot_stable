@@ -11,6 +11,9 @@ Minimal Agent orchestration core:
 
 from .agent import Agent, AgentOptions
 from .agent_loop import run_agent_loop, run_agent_loop_continue
+from .events import AgentEventEmitter
+from .llm_runner import LLMStreamRunner
+from .tool_coordinator import ToolCallCoordinator
 from .types import (
     AfterToolCallContext,
     AfterToolCallResult,
@@ -43,6 +46,9 @@ __all__ = [
     "AgentOptions",
     "run_agent_loop",
     "run_agent_loop_continue",
+    "AgentEventEmitter",
+    "LLMStreamRunner",
+    "ToolCallCoordinator",
     "AfterToolCallContext",
     "AfterToolCallResult",
     "AgentContext",

@@ -8,7 +8,7 @@ from .errors import LLMErrorInfo
 
 Api = str
 Provider = str
-StopReason = Literal["stop", "length", "toolUse", "error", "aborted"]
+StopReason = Literal["stop", "length", "toolUse", "error", "aborted", "max_iterations"]
 ThinkingLevel = Literal["minimal", "low", "medium", "high", "xhigh"]
 LLMStreamEventType = Literal[
     "start",

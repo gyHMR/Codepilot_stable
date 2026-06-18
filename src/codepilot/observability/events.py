@@ -38,6 +38,7 @@ def normalize_event_value(value: Any) -> Any:
             "content": [normalize_event_value(block) for block in value.content],
             "details": normalize_event_value(value.details),
             "is_error": value.is_error,
+            "status": value.status,
             "approved": value.approved,
             "approval_id": value.approval_id,
         }

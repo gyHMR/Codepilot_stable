@@ -128,6 +128,8 @@ class AgentLoopConfig:
     ] = None
     reasoning: Optional[ThinkingLevel] = None
     session_id: Optional[str] = None
+    max_tool_iterations: int = 12
+    max_tool_calls_per_turn: Optional[int] = None
 
 
 @dataclass
@@ -211,6 +213,7 @@ class ToolExecutionEndEvent(AgentEventBase):
     toolCallId: str
     toolName: str
     result: AgentToolResult
+    status: ToolResultStatus
     isError: bool
     approved: bool
     approvalId: str | None
