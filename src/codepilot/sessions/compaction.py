@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any
+
+from codepilot.llm.overflow import estimate_context_tokens
 from codepilot.protocols import (
     AssistantMessage,
     Message,
@@ -16,6 +20,40 @@ COMPACTION_SYSTEM_PROMPT = """你是一个上下文压缩助手。请根据以�
 4. 移除重复和冗余信息
 5. 用简洁的要点形式输出
 6. 使用中文"""
+
+
+@dataclass(frozen=True)
+class ContextCompactionResult:
+    messages: list[Message]
+    report: dict[str, Any]
+
+
+def build_compacted_context(
+    *,
+    messages: list[Message],
+    summary_text: str,
+    retain_recent_messages: int,
+    reason: str,
+    system_prompt: str = "",
+) -> ContextCompactionResult:
+    retain = max(2, min(retain_recent_messages, len(messages) - 1))
+    older = messages[:-retain]
+    recent = messages[-retain:]
+    summary_message = UserMessage(
+        content=[TextContent(text=f"[Context Summary]\n{summary_text}")],
+    )
+    compacted = [summary_message, *recent]
+    tokens_before = estimate_context_tokens(messages, system_prompt)
+    tokens_after = estimate_context_tokens(compacted, system_prompt)
+    report = {
+        "reason": reason,
+        "tokens_before": tokens_before,
+        "tokens_after": tokens_after,
+        "retained_messages": retain,
+        "truncated_tool_results": sum(isinstance(msg, ToolResultMessage) for msg in older),
+        "summary_created": bool(summary_text.strip()),
+    }
+    return ContextCompactionResult(messages=compacted, report=report)
 
 
 def format_messages_for_summary(messages: list[Message], *, limit: int = 40, text_limit: int = 180) -> str:

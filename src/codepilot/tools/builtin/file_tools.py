@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from codepilot.protocols import TextContent
-from codepilot.tools.sandbox import WorkspaceSandbox
+from codepilot.tools.sandbox import WorkspaceSandbox, file_state_for_path
 from codepilot.tools.types import AgentTool, AgentToolResult
 
 
@@ -73,7 +73,12 @@ def create_file_tools(
         text = target.read_text(encoding="utf-8", errors="replace")
         if len(text) > max_chars:
             text = text[:max_chars] + "\n...<truncated>..."
-        return AgentToolResult(content=[TextContent(text=text)], details={})
+        state = file_state_for_path(workspace, path_text)
+        return AgentToolResult(
+            content=[TextContent(text=text)],
+            details={"file_state": state},
+            metadata={"file_state": state},
+        )
 
     async def write_tool(tool_call_id: str, params: dict[str, Any], signal=None, on_update=None) -> AgentToolResult:
         _ = tool_call_id, signal, on_update
@@ -90,16 +95,19 @@ def create_file_tools(
         changed = original != content
         relative_path = target.relative_to(workspace).as_posix()
         if not changed:
+            state = file_state_for_path(workspace, relative_path)
             return AgentToolResult(
                 content=[TextContent(text=f"File unchanged: {relative_path}")],
                 affected_paths=[relative_path],
                 workspace_changed=False,
                 diff_summary="No content change",
-                details={"changed": False},
+                details={"changed": False, "file_state": state},
+                metadata={"file_state": state},
             )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         action = "created" if original is None else "updated"
+        state = file_state_for_path(workspace, relative_path)
         return AgentToolResult(
             content=[TextContent(text=f"Wrote file: {relative_path}")],
             affected_paths=[relative_path],
@@ -108,7 +116,8 @@ def create_file_tools(
                 f"{action} {relative_path}: "
                 f"{len(original or '')} -> {len(content)} characters"
             ),
-            details={"changed": True, "action": action},
+            details={"changed": True, "action": action, "file_state": state},
+            metadata={"file_state": state},
         )
 
     async def edit_tool(tool_call_id: str, params: dict[str, Any], signal=None, on_update=None) -> AgentToolResult:
@@ -181,6 +190,7 @@ def create_file_tools(
             replaced = 1
         target.write_text(updated, encoding="utf-8")
         relative_path = target.relative_to(workspace).as_posix()
+        state = file_state_for_path(workspace, relative_path)
         return AgentToolResult(
             content=[TextContent(text=f"Edited file: {relative_path} (replacements={replaced})")],
             affected_paths=[relative_path],
@@ -189,7 +199,8 @@ def create_file_tools(
                 f"edited {relative_path}: {replaced} replacement"
                 f"{'s' if replaced != 1 else ''}"
             ),
-            details={"replacements": replaced},
+            details={"replacements": replaced, "file_state": state},
+            metadata={"file_state": state},
         )
 
     if allow("ls") or allow("list_dir"):

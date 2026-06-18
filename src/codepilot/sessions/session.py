@@ -31,7 +31,12 @@ from .branching import fork_session as branch_fork_session
 from .branching import switch_session as branch_switch_session
 from .branching import switch_to_entry as branch_switch_to_entry
 from .checkpoint import SessionCheckpoint, record_checkpoint
-from .compaction import COMPACTION_SYSTEM_PROMPT, fallback_summary, format_messages_for_summary
+from .compaction import (
+    COMPACTION_SYSTEM_PROMPT,
+    build_compacted_context,
+    fallback_summary,
+    format_messages_for_summary,
+)
 from .store import SessionStore, new_session_id
 from .types import AgentSessionOptions
 
@@ -196,6 +201,7 @@ class AgentSession:
             本次交互产生的 Agent 消息列表。
         """
         await self._run_lifecycle_hooks(text=text, is_continue=False, hooks=self.before_prompt_hooks)
+        self._check_context_freshness()
         await self._check_and_compact_before_prompt()
         result = await self.agent.prompt(text, images=images)
         self._persist_last_run_result()
@@ -212,6 +218,7 @@ class AgentSession:
         Returns:
             本次交互产生的 Agent 消息列表。
         """
+        self._check_context_freshness()
         await self._check_and_compact_before_prompt()
         result = await self.agent.prompt(message)
         self._persist_last_run_result()
@@ -244,6 +251,7 @@ class AgentSession:
             is_continue=False,
             hooks=self.before_prompt_hooks,
         )
+        self._check_context_freshness()
         await self._check_and_compact_before_prompt()
         result = await self.agent.run(text, images=images)
         self.store.append_run_result(result)
@@ -341,6 +349,36 @@ class AgentSession:
         if result is not None:
             self.store.append_run_result(result)
 
+    def _check_context_freshness(self) -> None:
+        freshness = self.store.run_store.evaluate_freshness()
+        if not freshness.checked_paths and freshness.status == "valid":
+            return
+        payload = freshness.to_event_payload()
+        self.store.append_event(
+            {
+                "type": "context_freshness_checked",
+                "sessionId": self.session_id,
+                "freshness": payload,
+            }
+        )
+        if freshness.status == "valid":
+            return
+        lines = [
+            "[Context Freshness]",
+            f"status={freshness.status}",
+        ]
+        if freshness.changed_paths:
+            lines.append("changed_files=" + ", ".join(freshness.changed_paths))
+        if freshness.missing_paths:
+            lines.append("missing_files=" + ", ".join(freshness.missing_paths))
+        lines.append("旧工具结果可能已过期；依赖这些文件前请重新读取。")
+        self.agent.add_steering_message(
+            UserMessage(
+                content=[TextContent(text="\n".join(lines))],
+                metadata={"context_freshness": payload},
+            )
+        )
+
     async def _run_lifecycle_hooks(
         self,
         *,
@@ -422,7 +460,6 @@ class AgentSession:
 
         # 分割：旧消息（待压缩）和近期消息（保留原样）
         older = messages[:-retain]
-        recent = messages[-retain:]
 
         # 生成摘要：优先使用自定义构建器，否则调用 LLM
         if self.summary_builder:
@@ -434,30 +471,34 @@ class AgentSession:
         if not summary_text:
             summary_text = self._fallback_summary(older)
 
-        # 构造压缩后的消息列表：摘要 + 最近消息
-        summary_message = UserMessage(
-            content=[TextContent(text=f"[Context Summary]\n{summary_text}")],
+        reason = "overflow" if force else ("token_threshold" if over_token_limit else "message_threshold")
+        compacted_context = build_compacted_context(
+            messages=messages,
+            summary_text=summary_text,
+            retain_recent_messages=self.retain_recent_messages,
+            reason=reason,
+            system_prompt=self.agent.state.system_prompt,
         )
-        compacted = [summary_message, *recent]
 
         # 更新 Agent 状态和持久化存储
-        self.agent.set_messages(compacted)
-        self.store.rewrite_context_messages(compacted)
+        self.agent.set_messages(compacted_context.messages)
+        self.store.rewrite_context_messages(compacted_context.messages)
         # 记录压缩事件，便于调试和审计
         self.store.append_event(
             {
                 "type": "context_compacted",
                 "sessionId": self.session_id,
                 "before_count": len(messages),
-                "after_count": len(compacted),
+                "after_count": len(compacted_context.messages),
                 "retained_recent": retain,
                 "estimated_tokens_before": estimated_tokens,
-                "reason": "overflow" if force else ("token_threshold" if over_token_limit else "message_threshold"),
+                "reason": reason,
+                "report": compacted_context.report,
             }
         )
         logger.info(
             "context compacted session_id=%s before=%d after=%d",
-            self.session_id, len(messages), len(compacted),
+            self.session_id, len(messages), len(compacted_context.messages),
         )
 
     async def _llm_summary(self, messages: list[Message]) -> str:

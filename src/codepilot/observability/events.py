@@ -29,6 +29,7 @@ AGENT_EVENT_TYPES = {
 SESSION_EVENT_TYPES = {
     "auto_retry_start",
     "context_compacted",
+    "context_freshness_checked",
     "session_forked",
     "session_switch_entry",
 }

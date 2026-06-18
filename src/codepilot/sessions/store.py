@@ -20,6 +20,7 @@ from codepilot.protocols import AgentRunResult, Message
 from codepilot.observability import EventRecorder
 from codepilot.observability.events import normalize_event_value
 
+from .run_store import RunStore
 from .serde import message_from_dict, message_to_dict
 
 
@@ -42,6 +43,7 @@ class SessionStore:
         self.events_file = self.root / "events.jsonl"
         self.runs_file = self.root / "runs.jsonl"
         self.event_recorder = EventRecorder(self.events_file)
+        self.run_store = RunStore(self.workspace_dir, self.session_id)
 
     def ensure_initialized(self, *, model_id: str, provider: str, system_prompt: str) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -99,6 +101,7 @@ class SessionStore:
 
     def append_event(self, event: dict[str, Any]) -> None:
         self.event_recorder.append(event)
+        self.run_store.append_event(event)
         self.touch_updated_at()
 
     def load_events(self, *, limit: int | None = None) -> list[dict[str, Any]]:
@@ -108,12 +111,16 @@ class SessionStore:
         return self.event_recorder.summarize()
 
     def append_run_result(self, result: AgentRunResult) -> None:
+        self.run_store.append_run_result(result)
         record = normalize_event_value(result)
         with self.runs_file.open("a", encoding="utf-8") as fp:
             fp.write(json.dumps(record, ensure_ascii=False) + "\n")
         self.touch_updated_at()
 
     def load_run_results(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        records = self.run_store.load_run_results(limit=limit)
+        if records:
+            return records
         if not self.runs_file.exists():
             return []
         records = [
@@ -129,7 +136,6 @@ class SessionStore:
             lines.append(json.dumps({"ts": _utc_now_iso(), "message": message_to_dict(msg)}, ensure_ascii=False))
         self.context_file.write_text(("\n".join(lines) + ("\n" if lines else "")), encoding="utf-8")
         self.touch_updated_at()
-        self.rewrite_session_messages(messages)
 
     def load_context_messages(self) -> list[Message]:
         if not self.context_file.exists():
@@ -404,6 +410,7 @@ class SessionStore:
         )
 
         messages = self.load_session_messages(leaf_id=from_entry_id)
+        target.rewrite_session_messages(messages)
         target.rewrite_context_messages(messages)
 
         tmeta = target.read_meta() or {}
