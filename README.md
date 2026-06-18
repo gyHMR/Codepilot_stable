@@ -14,7 +14,7 @@ Codepilot uses a single `codepilot` Python namespace:
 - `core` owns one complete Run, including model attempts, tool-loop guards, retry, stop semantics, and RunResult.
 - `observability` normalizes JSONL events and prepares summaries for Web Console and future eval reports.
 
-Runtime compatibility modules from older import paths have been removed. New code should import from the module that owns the responsibility.
+Older runtime import paths have been removed. New code should import from the module that owns the responsibility.
 
 ## Local CLI
 

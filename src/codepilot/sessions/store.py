@@ -242,7 +242,7 @@ class SessionStore:
         meta = self.read_meta() or {}
         current = leaf_id or meta.get("leaf_id")
         if not isinstance(current, str) or current not in by_id:
-            # Fall back to the latest entry for compatibility with older data.
+            # If the leaf marker is missing, open the latest recorded entry.
             current = str(entries[-1].get("id"))
 
         chain: list[dict[str, Any]] = []

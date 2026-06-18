@@ -37,8 +37,8 @@ class ToolRegistry:
 
 def infer_tool_metadata(tool: AgentTool) -> ToolMetadata:
     name = tool.name
-    read_only = name in {"read", "read_file", "grep", "find", "ls", "list_dir"}
-    mutating = name in {"write", "write_file", "edit", "bash"}
+    read_only = name in {"read", "grep", "find", "ls"}
+    mutating = name in {"write", "edit", "bash"}
     category = _infer_category(name)
     external = category in {"extension", "mcp"}
     return ToolMetadata(
@@ -56,7 +56,7 @@ def infer_tool_metadata(tool: AgentTool) -> ToolMetadata:
 
 
 def _infer_category(name: str) -> str:
-    if name in {"read", "read_file", "write", "write_file", "edit", "ls", "list_dir"}:
+    if name in {"read", "write", "edit", "ls"}:
         return "filesystem"
     if name in {"grep", "find"}:
         return "search"

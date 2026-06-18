@@ -31,12 +31,10 @@ def build_runtime_system_prompt(
 
 
 def _canonical_tool_names(tools: list[AgentTool]) -> list[str]:
-    aliases = {"list_dir": "ls", "read_file": "read", "write_file": "write"}
     names: list[str] = []
     seen: set[str] = set()
     for tool in tools:
-        name = aliases.get(tool.name, tool.name)
-        if name not in seen:
-            seen.add(name)
-            names.append(name)
+        if tool.name not in seen:
+            seen.add(tool.name)
+            names.append(tool.name)
     return names

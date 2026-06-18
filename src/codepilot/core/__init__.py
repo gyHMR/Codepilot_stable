@@ -13,8 +13,6 @@ from .agent import Agent, AgentOptions
 from .agent_loop import (
     run_agent_loop,
     run_agent_loop_continue,
-    run_agent_loop_continue_result,
-    run_agent_loop_result,
 )
 from .events import AgentEventEmitter
 from .llm_runner import LLMStreamRunner
@@ -56,8 +54,6 @@ __all__ = [
     "AgentOptions",
     "run_agent_loop",
     "run_agent_loop_continue",
-    "run_agent_loop_result",
-    "run_agent_loop_continue_result",
     "AgentEventEmitter",
     "LLMStreamRunner",
     "ToolCallCoordinator",

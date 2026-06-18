@@ -12,6 +12,6 @@ def get_env_api_key(provider: str) -> str | None:
         return os.getenv("ANTHROPIC_API_KEY")
     if provider == "deepseek":
         return os.getenv("DEEPSEEK_API_KEY")
-    if provider in {"openai", "openai-compatible", "openai-standard"}:
+    if provider in {"openai", "openai-compatible"}:
         return os.getenv("OPENAI_API_KEY")
     return None

@@ -89,7 +89,7 @@ async def run_print(
 
     流程：
     1. 订阅会话事件（流式文本 delta、工具执行状态）
-    2. 调用 session.prompt() 发送用户输入给 Agent
+    2. 调用 session.run() 发送用户输入给 Agent
     3. 实时收集流式输出片段
     4. 输出最终结果和元信息（停止原因、错误信息）
 
@@ -106,7 +106,7 @@ async def run_print(
     renderer = CliEventRenderer(output=output, show_tool_events=show_tool_events)
     unsubscribe = session.subscribe(renderer.handle_event)
     try:
-        await session.prompt(prompt)
+        await session.run(prompt)
     finally:
         unsubscribe()
 
@@ -305,7 +305,7 @@ async def run_rpc(
                 if cmd == "prompt":
                     # 发送用户输入给 Agent
                     text = str(req.get("text", ""))
-                    await session.prompt(text)
+                    await session.run(text)
                     _emit_ok(req_id=req_id, command="prompt")
 
                 elif cmd == "continue":

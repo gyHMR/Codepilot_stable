@@ -88,17 +88,8 @@ _MODELS: dict[str, dict[str, Model]] = {
     },
 }
 
-_PROVIDER_ALIASES = {
-    "openai-standard": "openai",
-}
-
-
 def get_model(provider: str, model_id: str) -> Model:
     """获取单个模型，找不到会抛 KeyError。"""
-    original_provider = provider
-    provider = _PROVIDER_ALIASES.get(provider, provider)
-    if original_provider == "openai-standard" and model_id.startswith("deepseek"):
-        provider = "deepseek"
     try:
         return _MODELS[provider][model_id]
     except KeyError as exc:
@@ -107,9 +98,6 @@ def get_model(provider: str, model_id: str) -> Model:
 
 def get_models(provider: str) -> list[Model]:
     """获取某 provider 的全部模型。"""
-    if provider == "openai-standard":
-        return [*_MODELS.get("openai", {}).values(), *_MODELS.get("deepseek", {}).values()]
-    provider = _PROVIDER_ALIASES.get(provider, provider)
     return list(_MODELS.get(provider, {}).values())
 
 

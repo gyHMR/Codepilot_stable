@@ -6,7 +6,7 @@ agent_core 的类型定义。
 这一层关注“编排”而不是“具体 provider 实现”：
 1) 维护 Agent 状态；
 2) 定义循环配置；
-3) re-export tools/protocols 拥有的跨层类型，保持兼容。
+3) 引用 tools/protocols 拥有的跨层类型，保持依赖方向清晰。
 """
 
 from dataclasses import dataclass, field

@@ -29,16 +29,6 @@ def register_builtin_api_providers() -> None:
             provider_id="openai-compatible",
         )
     )
-    # Compatibility alias for older configs and learning docs.
-    register_api_provider(
-        ApiProvider(
-            api="openai-standard",
-            stream=stream_openai_compatible,
-            stream_simple=stream_simple_openai_compatible,
-            name="OpenAI-compatible Chat Completions (legacy alias)",
-            provider_id="openai-compatible",
-        )
-    )
 
 
 def reset_api_providers() -> None:

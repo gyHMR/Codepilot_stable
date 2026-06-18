@@ -203,7 +203,7 @@ def create_file_tools(
             metadata={"file_state": state},
         )
 
-    if allow("ls") or allow("list_dir"):
+    if allow("ls"):
         tools.append(
             AgentTool(
                 name="ls",
@@ -221,25 +221,8 @@ def create_file_tools(
                 execute=ls_tool,
             )
         )
-        tools.append(
-            AgentTool(
-                name="list_dir",
-                label="List Directory (compat)",
-                description="兼容别名：等价于 ls。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "相对 workspace 的目录路径"},
-                        "max_entries": {"type": "number", "description": "最多返回条目数，默认 100"},
-                    },
-                    "required": [],
-                    "additionalProperties": False,
-                },
-                execute=ls_tool,
-            )
-        )
 
-    if allow("read") or allow("read_file"):
+    if allow("read"):
         tools.append(
             AgentTool(
                 name="read",
@@ -257,48 +240,13 @@ def create_file_tools(
                 execute=read_tool,
             )
         )
-        tools.append(
-            AgentTool(
-                name="read_file",
-                label="Read File (compat)",
-                description="兼容别名：等价于 read。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "相对 workspace 的文件路径"},
-                        "max_chars": {"type": "number", "description": "最大返回字符数，默认 4000"},
-                    },
-                    "required": ["path"],
-                    "additionalProperties": False,
-                },
-                execute=read_tool,
-            )
-        )
 
-    if allow("write") or allow("write_file"):
+    if allow("write"):
         tools.append(
             AgentTool(
                 name="write",
                 label="Write File",
                 description="写入文本文件。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "相对 workspace 的文件路径"},
-                        "content": {"type": "string", "description": "写入内容"},
-                        "overwrite": {"type": "boolean", "description": "是否覆盖已存在文件，默认 true"},
-                    },
-                    "required": ["path", "content"],
-                    "additionalProperties": False,
-                },
-                execute=write_tool,
-            )
-        )
-        tools.append(
-            AgentTool(
-                name="write_file",
-                label="Write File (compat)",
-                description="兼容别名：等价于 write。",
                 parameters={
                     "type": "object",
                     "properties": {

@@ -5,7 +5,7 @@ from __future__ import annotations
 主要职责：
 1) 管理工作区会话目录。
 2) 持久化 Agent 事件和消息。
-3) 提供稳定的 prompt（发送提示）和 continue（继续运行）入口。
+3) 提供稳定的 run（发送任务）和 continue（继续运行）入口。
 4) 执行上下文溢出检测与压缩（compaction）。
 """
 
@@ -17,6 +17,7 @@ from typing import Callable
 from codepilot.llm.overflow import estimate_context_tokens, is_context_overflow
 from codepilot.llm.api_registry import complete_simple
 from codepilot.protocols import (
+    AgentRunResult,
     AssistantMessage,
     Context,
     Message,
@@ -183,57 +184,15 @@ class AgentSession:
             "total_cost": total_cost,
         }
 
-    async def prompt(self, text: str, *, images: list[str] | None = None) -> list[AgentMessage]:
-        """向 Agent 发送用户提示词并获取回复。
-
-        执行流程：
-        1. 运行 before_prompt 钩子
-        2. 检测上下文是否溢出，必要时触发压缩
-        3. 调用 Agent 执行（含重试机制）
-        4. 执行后再次检查并压缩上下文
-        5. 运行 after_prompt 钩子
-
-        Args:
-            text: 用户输入的文本。
-            images: 可选的图片路径列表（base64 或 URL）。
-
-        Returns:
-            本次交互产生的 Agent 消息列表。
-        """
-        await self._run_lifecycle_hooks(text=text, is_continue=False, hooks=self.before_prompt_hooks)
-        self._check_context_freshness()
-        await self._check_and_compact_before_prompt()
-        result = await self.agent.prompt(text, images=images)
-        self._persist_last_run_result()
-        await self._compact_context_if_needed()
-        await self._run_lifecycle_hooks(text=text, is_continue=False, hooks=self.after_prompt_hooks)
-        return result
-
-    async def prompt_message(self, message: UserMessage) -> list[AgentMessage]:
-        """直接发送一个 UserMessage 对象给 Agent（不经过生命周期钩子）。
-
-        Args:
-            message: 构造好的 UserMessage 实例。
-
-        Returns:
-            本次交互产生的 Agent 消息列表。
-        """
-        self._check_context_freshness()
-        await self._check_and_compact_before_prompt()
-        result = await self.agent.prompt(message)
-        self._persist_last_run_result()
-        await self._compact_context_if_needed()
-        return result
-
-    async def continue_run(self) -> list[AgentMessage]:
+    async def continue_run(self) -> AgentRunResult:
         """继续上一次未完成的 Agent 运行（例如工具调用后的延续）。
 
         Returns:
-            继续运行产生的 Agent 消息列表。
+            继续运行产生的结构化 Run 结果。
         """
         await self._run_lifecycle_hooks(text="", is_continue=True, hooks=self.before_prompt_hooks)
         result = await self.agent.continue_run()
-        self._persist_last_run_result()
+        self.store.append_run_result(result)
         await self._compact_context_if_needed()
         await self._run_lifecycle_hooks(text="", is_continue=True, hooks=self.after_prompt_hooks)
         return result
@@ -343,11 +302,6 @@ class AgentSession:
         if event["type"] == "message_end":
             message = event["message"]
             self.store.append_context_message(message)
-
-    def _persist_last_run_result(self) -> None:
-        result = self.agent.last_run_result
-        if result is not None:
-            self.store.append_run_result(result)
 
     def _check_context_freshness(self) -> None:
         freshness = self.store.run_store.evaluate_freshness()

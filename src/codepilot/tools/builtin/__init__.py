@@ -70,13 +70,6 @@ _BUILTIN_TOOL_METADATA: dict[str, ToolMetadata] = {
         risk_level="low",
         resource_scope=("workspace",),
     ),
-    "list_dir": _builtin_metadata(
-        "list_dir",
-        category="filesystem",
-        read_only=True,
-        risk_level="low",
-        resource_scope=("workspace",),
-    ),
     "read": _builtin_metadata(
         "read",
         category="filesystem",
@@ -84,22 +77,8 @@ _BUILTIN_TOOL_METADATA: dict[str, ToolMetadata] = {
         risk_level="low",
         resource_scope=("workspace",),
     ),
-    "read_file": _builtin_metadata(
-        "read_file",
-        category="filesystem",
-        read_only=True,
-        risk_level="low",
-        resource_scope=("workspace",),
-    ),
     "write": _builtin_metadata(
         "write",
-        category="filesystem",
-        read_only=False,
-        risk_level="medium",
-        resource_scope=("workspace",),
-    ),
-    "write_file": _builtin_metadata(
-        "write_file",
         category="filesystem",
         read_only=False,
         risk_level="medium",

@@ -241,7 +241,7 @@ class IMService:
     async def _prompt_simple(self, session: AgentSession, text: str) -> str:
         """Run a non-streaming prompt and extract the final text."""
         try:
-            await session.prompt(text)
+            await session.run(text)
             return self._extract_last_assistant_text(session)
         except Exception as exc:
             logger.exception("agent prompt failed: %s", exc)
@@ -292,7 +292,7 @@ class IMService:
 
         unsub = session.subscribe(_on_event)
         try:
-            await session.prompt(text)
+            await session.run(text)
             final_text = self._extract_last_assistant_text(session) or accumulated_text
         except Exception as exc:
             logger.exception("agent prompt failed: %s", exc)

@@ -87,7 +87,6 @@ class Model:
     max_tokens: int
     cost: Cost = field(default_factory=Cost)
     headers: dict[str, str] | None = None
-    compat: dict[str, Any] | None = None
     capabilities: ModelCapabilities | None = None
 
     def __post_init__(self) -> None:

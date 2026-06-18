@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """
 对外 Agent 封装：
-提供 prompt/continue、状态管理、事件订阅、串行调度入口。
+提供 run/continue、状态管理、事件订阅、串行调度入口。
 """
 
 import asyncio
@@ -21,7 +21,7 @@ from codepilot.protocols import (
     UserMessage,
 )
 
-from .agent_loop import run_agent_loop_continue_result, run_agent_loop_result
+from .agent_loop import run_agent_loop, run_agent_loop_continue
 from .types import (
     AfterToolCallContext,
     AfterToolCallResult,
@@ -128,7 +128,7 @@ class Agent:
 
     职责：
     - 管理 Agent 的运行状态（消息列表、流式状态、错误信息等）。
-    - 提供 prompt（发送新提示）和 continue_run（继续未完成运行）两个入口。
+    - 提供 run（发送新任务）和 continue_run（继续未完成运行）两个入口。
     - 通过事件订阅机制向外部通知运行过程中的各类事件。
     - 保证同一时刻只有一个流式任务在运行（串行调度）。
     - 支持运行中的中断（abort）和引导消息注入（steering）。
@@ -224,35 +224,6 @@ class Agent:
 
     # ── 公共运行入口 ────────────────────────────────────────────
 
-    async def prompt(self, message: str | UserMessage, images: list[str] | None = None) -> list[AgentMessage]:
-        """向 Agent 发送一条用户提示并等待回复。
-
-        Args:
-            message: 用户输入，可以是纯文本字符串或 UserMessage 对象。
-            images: 可选的图片列表（base64 编码或 URL），仅当 message 为字符串时生效。
-
-        Returns:
-            本次交互产生的新 AgentMessage 列表。
-
-        Raises:
-            RuntimeError: 当 Agent 已有流式任务正在运行时抛出。
-        """
-        # 防止并发调用：同一时刻只允许一个流式任务
-        if self._state.is_streaming:
-            raise RuntimeError("Agent is already running")
-
-        # 将字符串输入封装为 UserMessage，附带可选图片
-        if isinstance(message, str):
-            content: list[TextContent | ImageContent] = [TextContent(text=message)]
-            for image in images or []:
-                content.append(ImageContent(data=image))
-            prompt = UserMessage(content=content)
-        else:
-            prompt = message
-
-        result = await self._start_run_result(prompts=[prompt], continue_mode=False)
-        return result.messages
-
     async def run(
         self,
         message: str | UserMessage,
@@ -269,29 +240,23 @@ class Agent:
             prompt = UserMessage(content=content)
         else:
             prompt = message
-        return await self._start_run_result(prompts=[prompt], continue_mode=False)
+        return await self._start_run(prompts=[prompt], continue_mode=False)
 
-    async def continue_run(self) -> list[AgentMessage]:
+    async def continue_run(self) -> AgentRunResult:
         """继续上一次未完成的 Agent 运行。
 
         典型场景：Agent 返回了工具调用请求但尚未执行完毕，
         调用此方法可继续执行工具并让 Agent 继续推理。
 
         Returns:
-            继续运行产生的新 AgentMessage 列表。
+            继续运行产生的结构化 Run 结果。
 
         Raises:
             RuntimeError: 当 Agent 已有流式任务正在运行时抛出。
         """
         if self._state.is_streaming:
             raise RuntimeError("Agent is already running")
-        result = await self._start_run_result(prompts=[], continue_mode=True)
-        return result.messages
-
-    async def continue_run_result(self) -> AgentRunResult:
-        if self._state.is_streaming:
-            raise RuntimeError("Agent is already running")
-        return await self._start_run_result(prompts=[], continue_mode=True)
+        return await self._start_run(prompts=[], continue_mode=True)
 
     async def wait_for_idle(self) -> None:
         """等待当前流式任务完成，使 Agent 进入空闲状态。"""
@@ -305,7 +270,7 @@ class Agent:
 
     # ── 内部方法 ────────────────────────────────────────────────
 
-    async def _start_run_result(
+    async def _start_run(
         self,
         prompts: list[AgentMessage],
         continue_mode: bool,
@@ -325,7 +290,7 @@ class Agent:
             continue_mode: True 表示继续上一轮运行，False 表示发起新对话。
 
         Returns:
-            本次运行产生的新 AgentMessage 列表。
+            本次运行产生的结构化 Run 结果。
         """
         self._state.is_streaming = True
         self._state.stream_message = None
@@ -362,13 +327,13 @@ class Agent:
 
         # 根据模式选择对应的循环入口
         if continue_mode:
-            coro = run_agent_loop_continue_result(
+            coro = run_agent_loop_continue(
                 context=context,
                 config=cfg,
                 emit=self._dispatch_event,
             )
         else:
-            coro = run_agent_loop_result(
+            coro = run_agent_loop(
                 prompts=prompts,
                 context=context,
                 config=cfg,

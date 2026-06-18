@@ -27,27 +27,6 @@ async def run_agent_loop(
     emit: AgentEventSink,
     signal: Any | None = None,
     stream_fn: StreamFn | None = None,
-) -> list[AgentMessage]:
-    """Compatibility entry returning only messages."""
-
-    result = await run_agent_loop_result(
-        prompts,
-        context,
-        config,
-        emit,
-        signal=signal,
-        stream_fn=stream_fn,
-    )
-    return result.messages
-
-
-async def run_agent_loop_result(
-    prompts: list[AgentMessage],
-    context: AgentContext,
-    config: AgentLoopConfig,
-    emit: AgentEventSink,
-    signal: Any | None = None,
-    stream_fn: StreamFn | None = None,
     *,
     run_id: str | None = None,
 ) -> AgentRunResult:
@@ -84,25 +63,6 @@ async def run_agent_loop_result(
 
 
 async def run_agent_loop_continue(
-    context: AgentContext,
-    config: AgentLoopConfig,
-    emit: AgentEventSink,
-    signal: Any | None = None,
-    stream_fn: StreamFn | None = None,
-) -> list[AgentMessage]:
-    """Compatibility entry returning only continuation messages."""
-
-    result = await run_agent_loop_continue_result(
-        context,
-        config,
-        emit,
-        signal=signal,
-        stream_fn=stream_fn,
-    )
-    return result.messages
-
-
-async def run_agent_loop_continue_result(
     context: AgentContext,
     config: AgentLoopConfig,
     emit: AgentEventSink,
@@ -308,7 +268,6 @@ async def _run_loop(
                         code="run.repeated_tool_call",
                         message="Stopped after repeated identical tool calls",
                         stop_reason="repeated_tool_call",
-                        legacy_error="repeated_tool_call",
                     )
                 if state.counters.tool_iterations >= config.max_tool_iterations:
                     assistant.stop_reason = "max_iterations"
@@ -323,7 +282,6 @@ async def _run_loop(
                             f"max_tool_iterations={config.max_tool_iterations}"
                         ),
                         stop_reason="max_iterations",
-                        legacy_error="max_tool_iterations",
                     )
 
                 state.counters.tool_iterations += 1
@@ -386,7 +344,6 @@ async def _stop_with_error(
     code: str,
     message: str,
     stop_reason: AgentRunStopReason,
-    legacy_error: str,
 ) -> AgentRunResult:
     assistant.error_message = message
     error = ErrorInfo(
@@ -398,7 +355,7 @@ async def _stop_with_error(
     await emitter.emit(
         {
             "type": "error",
-            "error": legacy_error,
+            "error": code,
             "message": message,
             "source": "runtime",
             "code": code,
@@ -460,4 +417,3 @@ def _last_assistant(messages: list[AgentMessage]) -> AssistantMessage | None:
         (message for message in reversed(messages) if isinstance(message, AssistantMessage)),
         None,
     )
-

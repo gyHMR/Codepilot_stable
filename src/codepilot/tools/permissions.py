@@ -6,8 +6,8 @@ from typing import Any, Literal
 
 from .types import ToolMetadata
 
-READ_ONLY_TOOL_NAMES = {"read", "read_file", "grep", "find", "ls", "list_dir"}
-MUTATING_TOOL_NAMES = {"write", "write_file", "edit", "bash"}
+READ_ONLY_TOOL_NAMES = {"read", "grep", "find", "ls"}
+MUTATING_TOOL_NAMES = {"write", "edit", "bash"}
 
 ToolDecisionKind = Literal["allow", "deny", "approval_required"]
 
