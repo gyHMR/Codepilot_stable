@@ -16,7 +16,6 @@ from codepilot.protocols import (
     Message,
     TextContent,
     ThinkingContent,
-    ToolCall,
     ToolResultMessage,
     UserMessage,
 )

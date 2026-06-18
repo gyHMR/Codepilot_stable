@@ -24,9 +24,9 @@ class WebCreateSessionRequest:
     workspace_dir: str
     provider: str | None = None
     model_id: str | None = None
-    system_prompt: str = ""
+    system_prompt: str | None = None
     session_id: str | None = None
-    read_only_mode: bool = False
+    read_only_mode: bool | None = None
     load_workspace_resources: bool = True
 
 

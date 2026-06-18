@@ -100,27 +100,42 @@ def build_parser() -> argparse.ArgumentParser:
     # ── 模型配置 ──────────────────────────────────────────────
     parser.add_argument("--provider", default=None, help="Model provider, e.g. anthropic/openai/deepseek")
     parser.add_argument("--model-id", default=None, help="Model id")
-    parser.add_argument("--system-prompt", default="", help="System prompt")
-    parser.add_argument("--thinking-level", default="off", help="Thinking level: off/minimal/low/medium/high/xhigh")
+    parser.add_argument("--system-prompt", default=None, help="System prompt")
+    parser.add_argument("--thinking-level", default=None, help="Thinking level: off/minimal/low/medium/high/xhigh")
 
     # ── 工具执行与上下文管理 ──────────────────────────────────
     # parallel: 并行执行工具调用（默认，更快）
     # sequential: 顺序执行工具调用（更安全）
-    parser.add_argument("--tool-execution", choices=["parallel", "sequential"], default="parallel")
+    parser.add_argument("--tool-execution", choices=["parallel", "sequential"], default=None)
     parser.add_argument("--max-context-messages", type=int, default=None, help="Compaction message threshold")
     parser.add_argument("--max-context-tokens", type=int, default=None, help="Compaction token threshold (approx)")
-    parser.add_argument("--retain-recent-messages", type=int, default=24, help="Keep recent messages when compacting")
+    parser.add_argument("--retain-recent-messages", type=int, default=None, help="Keep recent messages when compacting")
 
     # ── 重试策略 ──────────────────────────────────────────────
-    parser.add_argument("--no-retry", action="store_true", help="Disable automatic retry on transient errors")
-    parser.add_argument("--max-retries", type=int, default=2, help="Maximum retry count")
-    parser.add_argument("--retry-base-delay-ms", type=int, default=1200, help="Retry base delay in milliseconds")
+    parser.add_argument(
+        "--no-retry",
+        action="store_true",
+        default=None,
+        help="Disable automatic retry on transient errors",
+    )
+    parser.add_argument("--max-retries", type=int, default=None, help="Maximum retry count")
+    parser.add_argument("--retry-base-delay-ms", type=int, default=None, help="Retry base delay in milliseconds")
 
     # ── 安全限制 ──────────────────────────────────────────────
     # 只读模式：禁用写入、编辑、bash 等修改性操作
-    parser.add_argument("--read-only", action="store_true", help="Enable read-only mode (disable write/edit/bash)")
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        default=None,
+        help="Enable read-only mode (disable write/edit/bash)",
+    )
     # 允许执行危险 bash 命令（默认会阻止 rm -rf 等危险操作）
-    parser.add_argument("--allow-dangerous-bash", action="store_true", help="Disable dangerous bash blocking")
+    parser.add_argument(
+        "--allow-dangerous-bash",
+        action="store_true",
+        default=None,
+        help="Disable dangerous bash blocking",
+    )
     # bash 命令白名单正则（可多次指定，匹配的命令允许执行）
     parser.add_argument(
         "--bash-allow-pattern",
@@ -139,6 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--relaxed-edit",
         action="store_true",
+        default=None,
         help="Disable strict unique-match requirement for edit tool",
     )
 
@@ -192,14 +208,14 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         max_context_messages=args.max_context_messages,  # 上下文消息数阈值
         max_context_tokens=args.max_context_tokens,      # 上下文 token 数阈值
         retain_recent_messages=args.retain_recent_messages,  # 压缩时保留的最近消息数
-        retry_enabled=not bool(args.no_retry),        # 是否启用自动重试
+        retry_enabled=None if args.no_retry is None else False,  # 是否启用自动重试
         max_retries=args.max_retries,                  # 最大重试次数
         retry_base_delay_ms=args.retry_base_delay_ms,  # 重试基础延迟（毫秒）
-        read_only_mode=bool(args.read_only),           # 只读模式
-        block_dangerous_bash=not bool(args.allow_dangerous_bash),  # 是否阻止危险 bash
+        read_only_mode=args.read_only,                 # 只读模式
+        block_dangerous_bash=None if args.allow_dangerous_bash is None else False,  # 是否阻止危险 bash
         bash_allow_patterns=args.bash_allow_pattern,   # bash 白名单模式
         bash_block_patterns=args.bash_block_pattern,   # bash 黑名单模式
-        edit_require_unique_match=not bool(args.relaxed_edit),  # 编辑是否要求唯一匹配
+        edit_require_unique_match=None if args.relaxed_edit is None else False,  # 编辑是否要求唯一匹配
         load_workspace_resources=not bool(args.disable_workspace_resources),  # 是否加载工作区资源
     )
 

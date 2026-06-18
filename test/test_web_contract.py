@@ -25,6 +25,15 @@ def test_web_contract_keeps_browser_as_interface_only() -> None:
     assert any(route["path"] == "/api/sessions/{session_id}/messages" for route in contract["routes"])
 
 
+def test_web_create_session_defaults_leave_runtime_config_unspecified() -> None:
+    from codepilot.interfaces.web import WebCreateSessionRequest
+
+    request = WebCreateSessionRequest(workspace_dir=".")
+
+    assert request.system_prompt is None
+    assert request.read_only_mode is None
+
+
 def test_web_backend_can_list_created_sessions_without_server(tmp_path) -> None:
     from codepilot.interfaces.web import WebCreateSessionRequest, create_web_app
 

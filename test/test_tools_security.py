@@ -270,7 +270,7 @@ def test_unknown_external_tool_metadata_is_conservative() -> None:
 def test_read_only_tool_assembly_filters_by_metadata(tmp_path: Path) -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
-    from codepilot.runtime.config_loader import RuntimeConfig
+    from codepilot.runtime.config import RuntimeConfig
     from codepilot.runtime.tool_assembler import assemble_tools
     from codepilot.runtime.types import CreateAgentSessionOptions
 

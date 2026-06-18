@@ -35,6 +35,16 @@ def test_compaction_preserves_full_session_history(tmp_path: Path) -> None:
     asyncio.run(_run_history_preservation_case(tmp_path))
 
 
+def test_compaction_prompt_preserves_working_context_facts() -> None:
+    from codepilot.sessions.compaction import COMPACTION_SYSTEM_PROMPT
+
+    assert "当前任务目标" in COMPACTION_SYSTEM_PROMPT
+    assert "关键文件" in COMPACTION_SYSTEM_PROMPT
+    assert "失败原因" in COMPACTION_SYSTEM_PROMPT
+    assert "验证" in COMPACTION_SYSTEM_PROMPT
+    assert "下一步" in COMPACTION_SYSTEM_PROMPT
+
+
 async def _run_compaction_case(tmp_path: Path) -> None:
     from codepilot.protocols import AssistantMessage, TextContent, UserMessage
     from codepilot.runtime.types import AgentSessionOptions

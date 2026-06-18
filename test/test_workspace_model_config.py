@@ -55,8 +55,7 @@ def test_runtime_resolves_workspace_model_and_key(tmp_path) -> None:
     _write_model_config(tmp_path)
     resolved = resolve_model(
         CreateAgentSessionOptions(workspace_dir=tmp_path),
-        resources=WorkspaceResourceLoader(tmp_path).load(),
-        restored_meta=None,
+        inputs=_runtime_inputs(tmp_path),
     )
 
     assert resolved.model.provider == "deepseek"
@@ -89,3 +88,128 @@ def test_cli_exposes_local_config_commands() -> None:
     args = build_parser().parse_args(["--init-config"])
 
     assert args.init_config is True
+
+
+def test_cli_defaults_leave_runtime_config_unspecified() -> None:
+    args = build_parser().parse_args(["--mode", "print", "--prompt", "hello"])
+
+    assert args.system_prompt is None
+    assert args.thinking_level is None
+    assert args.tool_execution is None
+    assert args.retain_recent_messages is None
+    assert args.no_retry is None
+    assert args.read_only is None
+    assert args.allow_dangerous_bash is None
+    assert args.relaxed_edit is None
+
+
+def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> None:
+    from codepilot.runtime.config import read_restored_session_meta, resolve_runtime_config
+    from codepilot.sessions.store import SessionStore
+
+    root = tmp_path / ".codepilot"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "settings.json").write_text(
+        json.dumps(
+            {
+                "provider": "openai",
+                "model_id": "gpt-4o-mini",
+                "system_prompt": "workspace prompt",
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = SessionStore(tmp_path, "session_restore")
+    store.ensure_initialized(model_id="deepseek-v4-pro", provider="deepseek", system_prompt="restored prompt")
+
+    options = CreateAgentSessionOptions(workspace_dir=tmp_path, session_id="session_restore")
+    inputs = _runtime_inputs(tmp_path, session_id="session_restore")
+    resolved = resolve_model(options, inputs=inputs)
+    config = resolve_runtime_config(options, inputs=inputs)
+
+    assert read_restored_session_meta(tmp_path, "session_restore") is not None
+    assert resolved.model.provider == "deepseek"
+    assert resolved.model.id == "deepseek-v4-pro"
+    assert config.system_prompt == "restored prompt"
+    assert config.sources["system_prompt"] == "restored_session"
+
+
+def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> None:
+    from codepilot.runtime.config import resolve_runtime_config
+
+    root = tmp_path / ".codepilot"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "settings.json").write_text(
+        json.dumps(
+            {
+                "retry_enabled": True,
+                "read_only_mode": True,
+                "block_dangerous_bash": True,
+                "prompt_debug_sources": True,
+                "bash_allow_patterns": ["pytest"],
+                "extension_paths": ["workspace-extension"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = resolve_runtime_config(
+        CreateAgentSessionOptions(
+            workspace_dir=tmp_path,
+            retry_enabled=False,
+            read_only_mode=False,
+            block_dangerous_bash=False,
+            prompt_debug_sources=False,
+            bash_allow_patterns=[],
+            extension_paths=[],
+        ),
+        inputs=_runtime_inputs(tmp_path),
+    )
+
+    assert config.retry_enabled is False
+    assert config.read_only_mode is False
+    assert config.block_dangerous_bash is False
+    assert config.prompt_debug_sources is False
+    assert config.bash_allow_patterns == []
+    assert config.extension_paths == []
+    assert config.sources["retry_enabled"] == "options"
+    assert config.sources["bash_allow_patterns"] == "options"
+
+
+def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
+    from codepilot.runtime.config import resolve_runtime_config
+
+    root = tmp_path / ".codepilot"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "settings.json").write_text(
+        json.dumps({"retain_recent_messages": 8, "tool_execution": "sequential"}),
+        encoding="utf-8",
+    )
+
+    config = resolve_runtime_config(
+        CreateAgentSessionOptions(workspace_dir=tmp_path),
+        inputs=_runtime_inputs(tmp_path),
+    )
+
+    assert config.retain_recent_messages == 8
+    assert config.tool_execution == "sequential"
+    assert config.max_retries == 2
+    assert config.sources["retain_recent_messages"] == "workspace"
+    assert config.sources["tool_execution"] == "workspace"
+    assert config.sources["max_retries"] == "default"
+
+
+def _runtime_inputs(tmp_path, *, session_id: str | None = None):
+    from codepilot.runtime.config import RuntimeInputs
+
+    return RuntimeInputs(
+        workspace=tmp_path,
+        resources=WorkspaceResourceLoader(tmp_path).load(),
+        restored_meta=(
+            __import__("codepilot.sessions.store", fromlist=["SessionStore"])
+            .SessionStore(tmp_path, session_id)
+            .read_meta()
+            if session_id
+            else None
+        ),
+    )

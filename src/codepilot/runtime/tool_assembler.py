@@ -17,15 +17,13 @@ from codepilot.tools.registry import ToolRegistry
 from codepilot.tools.runtime import ToolRuntime
 from codepilot.tools.types import AgentTool
 
-from .config_loader import RuntimeConfig
+from .config import RuntimeConfig
 from .types import CreateAgentSessionOptions
 
 
 @dataclass(frozen=True)
 class AssembledTools:
     tools: list[AgentTool]
-    registry: ToolRegistry
-    runtime: ToolRuntime
     loaded_extensions: LoadedExtensions
     loaded_skills: LoadedExtensions
 
@@ -75,8 +73,6 @@ def assemble_tools(
 
     return AssembledTools(
         tools=runtime.as_agent_tools(),
-        registry=registry,
-        runtime=runtime,
         loaded_extensions=loaded_extensions,
         loaded_skills=loaded_skills,
     )

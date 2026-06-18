@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Optional
 
-from codepilot.llm.models import get_model
 from codepilot.protocols import Message, Model
 from codepilot.core import (
     AfterToolCallContext,
@@ -41,32 +40,32 @@ class CreateAgentSessionOptions:
     provider: Optional[str] = None
     model_id: Optional[str] = None
     get_api_key: Optional[Callable[[str], str | None | Awaitable[str | None]]] = None
-    system_prompt: str = ""
+    system_prompt: Optional[str] = None
     tools: list[AgentTool] = field(default_factory=list)
     session_id: Optional[str] = None
     messages: list[AgentMessage] = field(default_factory=list)
-    thinking_level: str = "off"
-    tool_execution: ToolExecutionMode = "parallel"
+    thinking_level: Optional[str] = None
+    tool_execution: Optional[ToolExecutionMode] = None
     load_workspace_resources: bool = True
     enabled_builtin_tools: Optional[list[str]] = None
     max_context_messages: Optional[int] = None
     max_context_tokens: Optional[int] = None
-    retain_recent_messages: int = 24
+    retain_recent_messages: Optional[int] = None
     summary_builder: Optional[Callable[[list[Message]], str]] = None
-    retry_enabled: bool = True
-    max_retries: int = 2
-    retry_base_delay_ms: int = 1200
-    read_only_mode: bool = False
-    block_dangerous_bash: bool = True
+    retry_enabled: Optional[bool] = None
+    max_retries: Optional[int] = None
+    retry_base_delay_ms: Optional[int] = None
+    read_only_mode: Optional[bool] = None
+    block_dangerous_bash: Optional[bool] = None
     bash_allow_patterns: Optional[list[str]] = None
     bash_block_patterns: Optional[list[str]] = None
-    edit_require_unique_match: bool = True
+    edit_require_unique_match: Optional[bool] = None
     prompt_guidelines: Optional[list[str]] = None
     append_system_prompt: Optional[str] = None
     tool_snippets: Optional[dict[str, str]] = None
     extension_paths: Optional[list[str]] = None
     skill_paths: Optional[list[str]] = None
-    prompt_debug_sources: bool = False
+    prompt_debug_sources: Optional[bool] = None
     mcp_servers: Optional[list[dict[str, Any]]] = None
     mcp_client: Any | None = None
     extension_commands: dict[str, RegisteredCommand] = field(default_factory=dict)
@@ -78,14 +77,6 @@ class CreateAgentSessionOptions:
     after_tool_call: Optional[
         Callable[[AfterToolCallContext, Any | None], AfterToolCallResult | None | Awaitable[AfterToolCallResult | None]]
     ] = None
-
-    def resolve_model(self) -> Model:
-        if self.model is not None:
-            return self.model
-        if self.provider and self.model_id:
-            return get_model(self.provider, self.model_id)
-        raise ValueError("Model is required: provide model or provider+model_id")
-
 
 RunMode = Literal["print", "interactive", "rpc"]
 OutputFn = Callable[[str], None]

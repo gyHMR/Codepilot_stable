@@ -5,13 +5,13 @@ coding_agent 工厂入口。
 """
 
 from codepilot.sessions.session import AgentSession
+from codepilot.core.message_conversion import convert_to_llm
 
-from .config_loader import load_workspace_resources, read_restored_session_meta, resolve_runtime_config
-from .context_builder import build_runtime_context_sources
-from .convert_to_llm import convert_to_llm
+from .config import load_runtime_inputs, resolve_runtime_config
+from .context import build_runtime_context
 from .hook_pipeline import compose_after_tool_call, compose_before_tool_call, compose_lifecycle_hooks
 from .model_resolver import resolve_model
-from .prompt_builder import build_runtime_system_prompt
+from .prompt import build_runtime_system_prompt
 from .tool_assembler import assemble_tools
 from .types import AgentSessionOptions, CreateAgentSessionOptions
 
@@ -26,14 +26,19 @@ def create_agent_session(options: AgentSessionOptions | CreateAgentSessionOption
     if isinstance(options, AgentSessionOptions):
         return AgentSession(options)
 
-    workspace, resources = load_workspace_resources(options)
-    restored_meta = read_restored_session_meta(workspace, options.session_id)
-    resolved_model = resolve_model(options, resources, restored_meta)
-    model = resolved_model.model
-    config = resolve_runtime_config(options, resources, restored_meta)
-    assembled_tools = assemble_tools(workspace, options, config)
-    context_sources = build_runtime_context_sources(
-        workspace,
+    concrete = build_agent_session_options(options)
+    return AgentSession(concrete)
+
+
+def build_agent_session_options(options: CreateAgentSessionOptions) -> AgentSessionOptions:
+    """Resolve friendly runtime options into concrete session options."""
+
+    inputs = load_runtime_inputs(options)
+    resolved_model = resolve_model(options, inputs)
+    config = resolve_runtime_config(options, inputs)
+    assembled_tools = assemble_tools(inputs.workspace, options, config)
+    runtime_context = build_runtime_context(
+        inputs.workspace,
         config,
         assembled_tools.loaded_extensions,
         assembled_tools.loaded_skills,
@@ -41,8 +46,8 @@ def create_agent_session(options: AgentSessionOptions | CreateAgentSessionOption
     system_prompt = build_runtime_system_prompt(
         base_system_prompt=config.system_prompt,
         tools=assembled_tools.tools,
-        context_sources=context_sources,
-        workspace=workspace,
+        runtime_context=runtime_context,
+        workspace=inputs.workspace,
     )
 
     before_tool_call = compose_before_tool_call(
@@ -62,9 +67,9 @@ def create_agent_session(options: AgentSessionOptions | CreateAgentSessionOption
         assembled_tools.loaded_extensions.after_prompt_hooks,
     )
 
-    concrete = AgentSessionOptions(
-        model=model,
-        workspace_dir=workspace,
+    return AgentSessionOptions(
+        model=resolved_model.model,
+        workspace_dir=inputs.workspace,
         system_prompt=system_prompt,
         tools=assembled_tools.tools,
         session_id=options.session_id,
@@ -90,4 +95,3 @@ def create_agent_session(options: AgentSessionOptions | CreateAgentSessionOption
         before_tool_call=before_tool_call,
         after_tool_call=after_tool_call,
     )
-    return AgentSession(concrete)

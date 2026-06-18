@@ -16,6 +16,7 @@ from .agent_loop import (
 )
 from .events import AgentEventEmitter
 from .llm_runner import LLMStreamRunner
+from .message_conversion import convert_to_llm
 from .tool_coordinator import ToolCallCoordinator
 from codepilot.protocols import (
     AgentEndEvent,
@@ -56,6 +57,7 @@ __all__ = [
     "run_agent_loop_continue",
     "AgentEventEmitter",
     "LLMStreamRunner",
+    "convert_to_llm",
     "ToolCallCoordinator",
     "AfterToolCallContext",
     "AfterToolCallResult",

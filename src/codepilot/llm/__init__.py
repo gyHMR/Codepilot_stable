@@ -1,5 +1,12 @@
 """
-Codepilot LLM public exports.
+Codepilot LLM 公共导出模块。
+
+本模块是 LLM 子包的统一入口，集中导出：
+- 类型定义（Model、Message、Tool 等协议类型）
+- API 注册中心（register/get/clear provider）
+- 流式调用函数（stream、complete）
+- 上下文溢出检测工具
+- 环境变量 API Key 读取
 """
 
 from .api_registry import (
@@ -45,24 +52,25 @@ from codepilot.protocols import (
 
 def register_builtin_api_providers() -> None:
     """
-    Lazily import providers to avoid loading optional HTTP dependencies when
-    callers only import the LLM package for types.
-    """
+    注册内置的 API provider（延迟导入）。
 
+    延迟导入是为了避免在仅使用类型定义时加载 HTTP 依赖，
+    使得纯类型导入和小型单元测试不会因缺少可选依赖而失败。
+    """
     from .providers.register_builtins import register_builtin_api_providers as _register
 
     _register()
 
 
 def reset_api_providers() -> None:
-    """Reset provider registration through the lazily imported provider module."""
-
+    """重置 provider 注册（通过延迟导入的 provider 模块执行）。"""
     from .providers.register_builtins import reset_api_providers as _reset
 
     _reset()
 
 
 __all__ = [
+    # ── 类型定义 ──
     "ApiProvider",
     "Api",
     "AssistantMessage",
@@ -91,6 +99,7 @@ __all__ = [
     "ToolResultMessage",
     "Usage",
     "UserMessage",
+    # ── 函数 ──
     "clear_api_providers",
     "complete",
     "complete_simple",
@@ -110,8 +119,8 @@ __all__ = [
     "stream_simple",
 ]
 
-# Keep `import codepilot.llm` lightweight. If optional provider dependencies
-# are unavailable, type-only imports and small unit tests should still work.
+# 模块加载时自动注册内置 provider。
+# 使用 try/except 包裹，确保可选依赖缺失时不会阻断整个包的导入。
 try:
     register_builtin_api_providers()
 except ModuleNotFoundError:
