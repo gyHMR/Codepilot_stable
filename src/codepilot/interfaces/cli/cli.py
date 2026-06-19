@@ -90,38 +90,159 @@ def _check_model_config(workspace: str | Path) -> None:
 
 def _show_config(workspace: str | Path) -> None:
     """显示当前配置（脱敏）。"""
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+
+    console = Console()
     loader = WorkspaceResourceLoader(workspace)
     loaded = loader.load()
     model = loaded.model
     settings = loaded.settings
 
-    print("=== Model Config ===")
-    if model:
-        print(f"  provider   = {model.provider}")
-        print(f"  model_id   = {model.model_id}")
-        print(f"  base_url   = {model.base_url}")
-        print(f"  api        = {model.api}")
-        if model.api_key_env and os.getenv(model.api_key_env):
-            print(f"  credential = env:{model.api_key_env}")
-        elif model.api_key:
-            print("  credential = local-file")
-        else:
-            print("  credential = MISSING")
-    else:
-        print("  (not configured)")
+    # 模型配置表格
+    model_table = Table(show_header=True, box=None, padding=(0, 2))
+    model_table.add_column("Key", style="bold cyan", width=12)
+    model_table.add_column("Value")
 
-    print("\n=== Settings ===")
+    if model:
+        model_table.add_row("provider", model.provider)
+        model_table.add_row("model_id", model.model_id)
+        model_table.add_row("base_url", model.base_url)
+        model_table.add_row("api", model.api)
+        if model.api_key_env and os.getenv(model.api_key_env):
+            model_table.add_row("credential", f"env:{model.api_key_env}")
+        elif model.api_key:
+            model_table.add_row("credential", "local-file (do not commit)")
+        else:
+            model_table.add_row("credential", "[red]MISSING[/red]")
+    else:
+        model_table.add_row("status", "[dim](not configured)[/dim]")
+
+    console.print(Panel(model_table, title="[bold]Model Config[/bold]", border_style="blue"))
+
+    # 设置表格（只显示非 None 的配置）
+    settings_table = Table(show_header=True, box=None, padding=(0, 2))
+    settings_table.add_column("Key", style="bold cyan", width=25)
+    settings_table.add_column("Value")
+
     if settings:
-        # 显示 settings 的键值，隐藏敏感信息
         import dataclasses
         if dataclasses.is_dataclass(settings):
             for field in dataclasses.fields(settings):
                 value = getattr(settings, field.name)
+                # 跳过 None 值和敏感信息
+                if value is None:
+                    continue
                 if "key" in field.name.lower() or "secret" in field.name.lower():
                     continue
-                print(f"  {field.name} = {value}")
+                settings_table.add_row(field.name, str(value))
+
+    if settings_table.row_count == 0:
+        settings_table.add_row("status", "[dim](using defaults)[/dim]")
+
+    console.print(Panel(settings_table, title="[bold]Settings[/bold]", border_style="blue"))
+
+
+def _explain_config(workspace: str | Path, key: str | None) -> None:
+    """解释配置项的来源。
+
+    使用 RuntimeConfigResolver 追踪每个配置项的最终值和来源。
+    """
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+
+    console = Console()
+
+    if not key:
+        console.print("[red]Usage: codepilot config explain <key>[/red]")
+        console.print("Available keys: model, provider, model_id, thinking_level, tool_execution, etc.")
+        return
+
+    # 加载配置并解析来源
+    from codepilot.runtime.config import load_runtime_inputs, resolve_runtime_config
+    from codepilot.runtime.types import CreateAgentSessionOptions
+
+    options = CreateAgentSessionOptions(workspace_dir=workspace)
+    inputs = load_runtime_inputs(options)
+    resolved = resolve_runtime_config(options, inputs)
+
+    # 特殊处理 model 相关配置
+    if key in ("model", "provider", "model_id"):
+        _explain_model_config(workspace, key, resolved, inputs)
+        return
+
+    # 通用配置项解释
+    if key in resolved.sources:
+        source = resolved.sources[key]
+        value = getattr(resolved, key, None)
+
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column("Field", style="bold", width=12)
+        table.add_column("Value")
+        table.add_row("Key", key)
+        table.add_row("Value", str(value))
+        table.add_row("Source", _format_source(source))
+        console.print(Panel(table, title=f"[bold]Config: {key}[/bold]", border_style="blue"))
     else:
-        print("  (using defaults)")
+        console.print(f"[red]Unknown config key: {key}[/red]")
+
+
+def _explain_model_config(
+    workspace: str | Path,
+    key: str,
+    resolved: Any,
+    inputs: Any,
+) -> None:
+    """解释模型相关配置的来源。"""
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+
+    console = Console()
+    loader = WorkspaceResourceLoader(workspace)
+    loaded = loader.load()
+    model = loaded.model
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("Field", style="bold", width=12)
+    table.add_column("Value")
+
+    if key == "model":
+        # 显示完整的模型标识
+        if model:
+            model_id = f"{model.provider}/{model.model_id}"
+            table.add_row("Value", model_id)
+            table.add_row("Source", "project:.codepilot/model.local.json")
+        else:
+            table.add_row("Value", "(not configured)")
+            table.add_row("Source", "default")
+    elif key == "provider":
+        if model:
+            table.add_row("Value", model.provider)
+            table.add_row("Source", "project:.codepilot/model.local.json")
+        else:
+            table.add_row("Value", "(not configured)")
+    elif key == "model_id":
+        if model:
+            table.add_row("Value", model.model_id)
+            table.add_row("Source", "project:.codepilot/model.local.json")
+        else:
+            table.add_row("Value", "(not configured)")
+
+    console.print(Panel(table, title=f"[bold]Config: {key}[/bold]", border_style="blue"))
+
+
+def _format_source(source: str) -> str:
+    """格式化配置来源显示。"""
+    source_map = {
+        "options": "CLI argument",
+        "restored_session": "restored session",
+        "workspace": "project:.codepilot/settings.json",
+        "default": "built-in default",
+    }
+    return source_map.get(source, source)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -442,8 +563,7 @@ async def _run_from_args(args: argparse.Namespace) -> int:
             _check_model_config(workspace)
             return 0
         if args.config_action == "explain":
-            # TODO: 实现 config explain
-            print(f"config explain {args.config_key} - not implemented yet")
+            _explain_config(workspace, args.config_key)
             return 0
 
     # ── 处理旧的 init-config / check-config 参数 ────────────────

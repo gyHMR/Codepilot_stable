@@ -1,6 +1,6 @@
 [project]
 name = "codepilot"
-version = "0.2.0"
+version = "0.3.0"
 description = "Codepilot: local coding agent focused on CLI workflows and a future Web console"
 readme = "README.md"
 requires-python = ">=3.10"

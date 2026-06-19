@@ -6,8 +6,13 @@ Runtime 对外类型定义模块。
 定义了创建 Agent 会话所需的配置选项 CreateAgentSessionOptions，
 以及运行模式、输出/输入函数等辅助类型。
 
-CreateAgentSessionOptions 是面向上层接口的"友好"配置类，
-支持多种模型指定方式（直接传 Model、传 provider+model_id、从会话恢复）。
+配置分组（阶段二引入）：
+- ModelSelection: 模型选择（provider/model_id）
+- AgentPolicy: Agent 策略（thinking_level、retry 等）
+- ContextPolicy: 上下文管理策略（消息数、token 数等）
+- ToolPolicy: 工具策略（执行模式、权限等）
+
+CreateAgentSessionOptions 保持向后兼容，内部可从分组构建。
 """
 
 from dataclasses import dataclass, field
@@ -26,6 +31,79 @@ from codepilot.core import (
 from codepilot.extensions.types import LifecycleHook, RegisteredCommand
 from codepilot.sessions.types import AgentSessionOptions, ConvertToLlmFn
 from codepilot.tools import AgentTool
+
+
+# ── 配置分组（阶段二引入） ────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ModelSelection:
+    """模型选择配置。
+
+    描述使用哪个模型以及如何连接。
+
+    Attributes:
+        provider: provider 名称（如 deepseek、openai）。
+        model_id: 模型 ID（如 deepseek-chat）。
+    """
+    provider: str | None = None
+    model_id: str | None = None
+
+    @property
+    def display_id(self) -> str:
+        """返回显示用的模型标识（provider/model_id）。"""
+        if self.provider and self.model_id:
+            return f"{self.provider}/{self.model_id}"
+        return self.model_id or "(not configured)"
+
+
+@dataclass(frozen=True)
+class AgentPolicy:
+    """Agent 策略配置。
+
+    控制 Agent 的推理、重试等行为。
+
+    Attributes:
+        thinking_level: 推理级别（off/minimal/low/medium/high/xhigh）。
+        retry_enabled: 是否启用重试。
+        max_retries: 最大重试次数。
+        retry_base_delay_ms: 重试基础延迟（毫秒）。
+    """
+    thinking_level: str = "off"
+    retry_enabled: bool = True
+    max_retries: int = 2
+    retry_base_delay_ms: int = 1200
+
+
+@dataclass(frozen=True)
+class ContextPolicy:
+    """上下文管理策略。
+
+    控制上下文窗口的溢出检测和压缩行为。
+
+    Attributes:
+        max_messages: 消息数量上限（None 表示不限制）。
+        max_tokens: token 数量上限（None 表示不限制）。
+        retain_recent_messages: 压缩时保留的最近消息数。
+    """
+    max_messages: int | None = None
+    max_tokens: int | None = None
+    retain_recent_messages: int = 24
+
+
+@dataclass(frozen=True)
+class ToolPolicy:
+    """工具策略配置。
+
+    控制工具的执行模式和权限。
+
+    Attributes:
+        execution: 工具执行模式（parallel/sequential）。
+        permission_mode: 权限模式（read-only/workspace-write）。
+        block_dangerous_bash: 是否阻止危险 bash 命令。
+    """
+    execution: ToolExecutionMode = "parallel"
+    permission_mode: str = "workspace-write"
+    block_dangerous_bash: bool = True
 
 
 @dataclass
