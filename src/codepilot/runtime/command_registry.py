@@ -62,12 +62,14 @@ def builtin_commands() -> list[RuntimeCommand]:
     """返回内置命令列表。"""
     return [
         RuntimeCommand(name="help", description="显示可用命令", source="builtin"),
+        RuntimeCommand(name="status", description="查看模型、工作区、会话和权限状态", source="builtin"),
         RuntimeCommand(name="session", description="查看当前会话与叶子节点", source="builtin"),
         RuntimeCommand(name="tree", description="查看当前会话树", source="builtin"),
         RuntimeCommand(name="fork", description="从指定节点分叉新会话", source="builtin"),
         RuntimeCommand(name="new", description="等价于从当前叶子分叉新会话", source="builtin"),
         RuntimeCommand(name="switch", description="切换到指定叶子节点", source="builtin"),
-        RuntimeCommand(name="clear", description="IM 中等价于 /new", source="builtin"),
+        RuntimeCommand(name="clear", description="清空上下文，创建新会话", source="builtin"),
+        RuntimeCommand(name="exit", description="退出 Codepilot", source="builtin"),
     ]
 
 
@@ -137,6 +139,26 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
     if cmd == "/help":
         return RuntimeCommandResult(handled=True, output_lines=[format_commands_for_help(session)])
 
+    # /status: 显示当前状态（模型、工作区、会话、权限）
+    if cmd == "/status":
+        model = session.agent.state.model
+        model_id = f"{model.provider}/{model.id}" if model.provider else model.id
+        workspace = str(session.workspace_dir)
+        session_id = session.session_id
+        leaf_id = session.get_leaf_id() or "N/A"
+        message_count = len(session.messages)
+
+        lines = [
+            "=== Status ===",
+            f"  Model      : {model_id}",
+            f"  Workspace  : {workspace}",
+            f"  Session    : {session_id}",
+            f"  Leaf       : {leaf_id}",
+            f"  Messages   : {message_count}",
+            f"  Permission : workspace-write",  # TODO: 从配置读取
+        ]
+        return RuntimeCommandResult(handled=True, output_lines=lines)
+
     # /session: 显示当前会话信息
     if cmd == "/session":
         return RuntimeCommandResult(
@@ -188,6 +210,13 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
             output_lines=[f"switched leaf -> {session.get_leaf_id()}"],
         )
 
+    # /exit: 退出 CLI（由上层处理实际退出逻辑）
+    if cmd == "/exit":
+        return RuntimeCommandResult(
+            handled=True,
+            output_lines=["Bye."],
+        )
+
     # 尝试匹配扩展注册的自定义命令
     reg = resolve_registered_command(session, cmd)
     if reg:
@@ -207,5 +236,8 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
             output_lines=[str(value)] if value else [],
         )
 
-    # 未匹配任何命令
-    return RuntimeCommandResult(handled=False)
+    # 未匹配任何命令：返回明确错误，不发送给模型
+    return RuntimeCommandResult(
+        handled=True,
+        output_lines=[f"Unknown command: {cmd}", "Type /help to see available commands."],
+    )

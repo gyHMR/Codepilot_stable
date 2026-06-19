@@ -46,9 +46,10 @@ test_tmp_runs/
 *.key
 
 TODOLIST/
-docs/
+.agents
 .codex/
 .codegraph/
 .codepilot/
 Planing/
 Agents.md
+docs/

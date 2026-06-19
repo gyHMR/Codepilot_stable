@@ -1,81 +1,463 @@
 from __future__ import annotations
 
 """
-运行模式入口。
+运行模式入口与终端渲染。
 
-当前支持：
+负责将 AgentEvent 转换为人类可读的终端输出，支持三种运行模式：
 - print: 单次问答，输出文本与工具事件
 - interactive: 交互式 REPL
 - rpc: 极简 JSON-RPC 模式，供外部程序调用
+
+设计原则：
+- TerminalRenderer 只负责渲染，不修改 Session 或执行工具
+- 流式文本实时输出，不收集后打印
+- 默认隐藏内部调试字段，--verbose 下显示
+- print/rpc 模式不被人类界面输出污染
+- 使用 rich 库美化交互模式的输出
 """
 
 from dataclasses import dataclass, field
 from dataclasses import asdict, is_dataclass
 import json
 import sys
+import time
 from typing import Any, Callable
 
 from codepilot.protocols import AssistantMessage, TextContent
 from codepilot.core import AgentEvent
 
-from codepilot.runtime.command_registry import format_commands_for_help, handle_runtime_command, list_runtime_commands
+from codepilot.runtime.command_registry import handle_runtime_command, list_runtime_commands
 from codepilot.runtime.types import InputFn, OutputFn, RunMode
 from codepilot.sessions.session import AgentSession
 
 
-@dataclass
-class RunOptions:
-    """运行配置选项。
+# ── 启动状态数据结构 ──────────────────────────────────────────────
 
-    封装了启动 Agent 运行循环所需的全部参数。
+@dataclass(frozen=True)
+class CliStartupState:
+    """CLI 启动时需要展示的状态信息。
+
+    Attributes:
+        version: Codepilot 版本号。
+        model_id: 当前模型 ID（如 deepseek/deepseek-chat）。
+        workspace: 工作区目录路径。
+        session_id: 会话 ID（新建或恢复）。
+        permission_mode: 权限模式（如 workspace-write、read-only）。
+        warnings: 启动警告列表（如凭证缺失、只读模式）。
     """
-    mode: RunMode                                    # 运行模式：print / interactive / rpc
-    session: AgentSession                            # Agent 会话实例
-    prompt: str | None = None                        # print 模式下的用户输入
-    output: OutputFn = print                         # 输出函数，默认为 print
-    input_fn: InputFn = input                        # 输入函数，默认为 input
-    show_tool_events: bool = True                    # 是否显示工具执行事件
-    exit_commands: tuple[str, ...] = field(default_factory=lambda: ("exit", "quit", ":q"))  # 退出命令列表
+    version: str
+    model_id: str
+    workspace: str
+    session_id: str
+    permission_mode: str = "workspace-write"
+    warnings: list[str] = field(default_factory=list)
 
 
-def _extract_assistant_text(message: AssistantMessage) -> str:
-    """从 AssistantMessage 中提取纯文本内容。
+# ── 终端渲染器（使用 rich） ──────────────────────────────────────
 
-    将消息中所有 TextContent 块拼接为一个字符串。
+class TerminalRenderer:
+    """将 AgentEvent 转换为终端输出（使用 rich 库美化）。
+
+    职责：
+    - 渲染启动摘要面板
+    - 实时输出流式文本（text_delta）
+    - 显示工具执行状态（紧凑格式）
+    - 渲染错误信息
+    - 处理 verbose 模式下的调试信息
+
+    不负责：
+    - 修改 Session 状态
+    - 执行工具
+    - 解析配置
     """
-    return "".join(block.text for block in message.content if isinstance(block, TextContent)).strip()
 
+    def __init__(
+        self,
+        *,
+        output: OutputFn | None = None,
+        verbose: bool = False,
+        use_rich: bool = True,
+    ) -> None:
+        self.verbose = verbose
+        self.use_rich = use_rich
+        self._stream_started = False
+        self._current_tool: str | None = None
+        self._tool_start_time: float = 0
 
-class CliEventRenderer:
-    """Render Agent events for human-oriented CLI output."""
+        if use_rich:
+            from rich.console import Console
+            from rich.theme import Theme
 
-    def __init__(self, *, output: OutputFn, show_tool_events: bool = True) -> None:
-        self.output = output
-        self.show_tool_events = show_tool_events
-        self.deltas: list[str] = []
+            # 自定义主题
+            theme = Theme({
+                "info": "cyan",
+                "warning": "yellow",
+                "error": "bold red",
+                "success": "green",
+                "tool": "blue",
+                "model": "magenta",
+                "path": "cyan",
+            })
+            self._console = Console(theme=theme)
+            self._output = None  # 使用 rich console
+        else:
+            self._console = None
+            self._output = output or print
+
+    def _print(self, text: str = "", **kwargs: Any) -> None:
+        """统一输出方法。"""
+        if self._console:
+            self._console.print(text, **kwargs)
+        else:
+            self._output(text)
+
+    def render_startup(self, state: CliStartupState) -> None:
+        """渲染启动摘要面板。
+
+        使用 rich Panel 展示当前运行环境。
+        """
+        if self._console:
+            self._render_rich_startup(state)
+        else:
+            self._render_plain_startup(state)
+
+    def _render_rich_startup(self, state: CliStartupState) -> None:
+        """使用 rich 渲染启动面板。"""
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich.text import Text
+
+        # 创建信息表格
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column(style="bold cyan", width=12)
+        table.add_column()
+
+        # 截断过长的路径
+        workspace = state.workspace
+        if len(workspace) > 45:
+            workspace = "..." + workspace[-42:]
+
+        # 截断 session_id
+        session_display = state.session_id
+        if len(session_display) > 12:
+            session_display = session_display[:10] + ".."
+
+        table.add_row("Model", Text(state.model_id, style="magenta"))
+        table.add_row("Workspace", Text(workspace, style="path"))
+        table.add_row("Session", Text(session_display, style="green"))
+        table.add_row("Permission", Text(state.permission_mode, style="yellow"))
+
+        # 创建面板
+        panel = Panel(
+            table,
+            title=f"[bold]Codepilot {state.version}[/bold]",
+            border_style="blue",
+            padding=(1, 2),
+        )
+        self._console.print(panel)
+
+        # 显示警告
+        for warning in state.warnings:
+            self._console.print(f"⚠️  [warning]{warning}[/warning]")
+
+        if state.warnings:
+            self._console.print()
+
+        self._console.print("💡 输入 [bold]/help[/bold] 查看命令，[bold]Ctrl+C[/bold] 取消当前任务")
+        self._console.print()
+
+    def _render_plain_startup(self, state: CliStartupState) -> None:
+        """使用纯文本渲染启动面板。"""
+        workspace = state.workspace
+        if len(workspace) > 40:
+            workspace = "..." + workspace[-37:]
+
+        model_display = state.model_id
+        if len(model_display) > 35:
+            model_display = model_display[:32] + "..."
+
+        session_display = state.session_id
+        if len(session_display) > 10:
+            session_display = session_display[:8] + ".."
+
+        self._print()
+        self._print(f"╭─ Codepilot {state.version} ─────────────────────────────╮")
+        self._print(f"│ Model       {model_display:<35} │")
+        self._print(f"│ Workspace   {workspace:<35} │")
+        self._print(f"│ Session     {session_display:<35} │")
+        self._print(f"│ Permission  {state.permission_mode:<35} │")
+        self._print("╰─────────────────────────────────────────────╯")
+        self._print()
+
+        for warning in state.warnings:
+            self._print(f"Warning: {warning}")
+        if state.warnings:
+            self._print()
+
+        self._print("Tip: 输入 /help 查看命令，Ctrl+C 取消当前任务")
 
     def handle_event(self, event: AgentEvent) -> None:
-        t = event["type"]
+        """处理 Agent 事件，转换为终端输出。"""
+        event_type = event.get("type")
 
-        if self.show_tool_events and t in {"tool_execution_start", "tool_execution_end"}:
-            self.output(f"[tool-event] {t}: {event.get('toolName', '')}")
+        # 流式文本更新
+        if event_type == "message_update":
+            self._handle_text_delta(event)
             return
 
-        if t == "message_update":
+        # 工具执行开始
+        if event_type == "tool_execution_start":
+            self._handle_tool_start(event)
+            return
+
+        # 工具执行结束
+        if event_type == "tool_execution_end":
+            self._handle_tool_end(event)
+            return
+
+        # 错误事件
+        if event_type == "error":
+            self._handle_error(event)
+            return
+
+        # 模型重试
+        if event_type == "model_retry_start" and self.verbose:
+            attempt = event.get("attempt", 0)
+            max_attempts = event.get("maxAttempts", 0)
+            self._print(f"🔄 [info]Retry attempt {attempt}/{max_attempts}[/info]")
+
+        # verbose 模式下显示其他事件
+        if self.verbose and event_type not in {"turn_start", "turn_end", "agent_start", "agent_end"}:
+            self._print(f"[dim]event: {event_type}[/dim]")
+
+    def _handle_text_delta(self, event: AgentEvent) -> None:
+        """处理流式文本更新事件。"""
+        assistant_event = event.get("assistantMessageEvent") or {}
+        if assistant_event.get("type") != "text_delta":
+            return
+
+        delta = str(assistant_event.get("delta", ""))
+        if not delta:
+            return
+
+        # 首次输出时添加换行
+        if not self._stream_started:
+            if self._console:
+                self._console.print()
+            else:
+                self._print()
+            self._stream_started = True
+
+        # 实时输出文本增量
+        if self._console:
+            self._console.print(delta, end="")
+        else:
+            sys.stdout.write(delta)
+            sys.stdout.flush()
+
+    def _handle_tool_start(self, event: AgentEvent) -> None:
+        """处理工具执行开始事件。"""
+        tool_name = event.get("toolName", "unknown")
+        args = event.get("args", {})
+        target = self._extract_tool_target(tool_name, args)
+
+        # 结束之前的流式文本
+        if self._stream_started:
+            self._print()
+            self._stream_started = False
+
+        # 显示工具开始
+        if self._console:
+            from rich.text import Text
+            text = Text()
+            text.append("● ", style="bold blue")
+            text.append(tool_name, style="bold")
+            if target:
+                text.append(f" {target}", style="dim")
+            self._console.print(text)
+        else:
+            self._print(f"● {tool_name} {target}")
+
+        self._current_tool = tool_name
+        self._tool_start_time = time.time()
+
+    def _handle_tool_end(self, event: AgentEvent) -> None:
+        """处理工具执行结束事件。"""
+        is_error = event.get("isError", False)
+        error_reason = event.get("errorReason")
+
+        # 计算耗时
+        elapsed = time.time() - self._tool_start_time if self._tool_start_time else 0
+        elapsed_str = f"{elapsed:.1f}s" if elapsed >= 1 else f"{elapsed * 1000:.0f}ms"
+
+        if self._console:
+            from rich.text import Text
+            text = Text()
+            text.append("  ")
+            if is_error:
+                text.append("✗ ", style="bold red")
+                text.append(error_reason or "failed", style="red")
+            else:
+                text.append("✓ ", style="bold green")
+                text.append(f"Completed in {elapsed_str}", style="dim")
+            self._console.print(text)
+        else:
+            if is_error:
+                self._print(f"  × {error_reason or 'failed'}")
+            else:
+                self._print(f"  Completed in {elapsed_str}")
+
+        self._current_tool = None
+        self._tool_start_time = 0
+
+    def _handle_error(self, event: AgentEvent) -> None:
+        """处理错误事件。"""
+        error = event.get("error", "unknown error")
+        message = event.get("message", "")
+        provider = event.get("provider", "")
+        model = event.get("model", "")
+
+        # 结束之前的流式文本
+        if self._stream_started:
+            self._print()
+            self._stream_started = False
+
+        if self._console:
+            from rich.panel import Panel
+            from rich.text import Text
+
+            # 构建错误内容
+            content = Text()
+            content.append(error, style="bold red")
+            if message:
+                content.append(f"\n{message}")
+            if provider:
+                content.append(f"\nProvider: {provider}", style="dim")
+            if model:
+                content.append(f"\nModel: {model}", style="dim")
+
+            panel = Panel(
+                content,
+                title="[bold red]Error[/bold red]",
+                border_style="red",
+                padding=(1, 2),
+            )
+            self._console.print(panel)
+        else:
+            self._print()
+            self._print(f"Error: {error}")
+            if message:
+                self._print(f"  {message}")
+            if provider:
+                self._print(f"  Provider: {provider}")
+            if model:
+                self._print(f"  Model: {model}")
+
+    def _extract_tool_target(self, tool_name: str, args: dict[str, Any]) -> str:
+        """提取工具调用的目标信息。"""
+        if tool_name in {"Read", "Write", "Edit"}:
+            return str(args.get("file_path", ""))
+        if tool_name == "Grep":
+            pattern = args.get("pattern", "")
+            path = args.get("path", "")
+            return f'"{pattern}" {path}' if path else f'"{pattern}"'
+        if tool_name == "Glob":
+            return str(args.get("pattern", ""))
+        if tool_name == "Bash":
+            cmd = args.get("command", "")
+            if len(cmd) > 50:
+                cmd = cmd[:47] + "..."
+            return cmd
+        return ""
+
+    def render_final(self, final_assistant: AssistantMessage | None) -> None:
+        """渲染最终结果。"""
+        # 如果没有流式输出，提取并显示文本
+        if not self._stream_started and final_assistant is not None:
+            text = self._extract_assistant_text(final_assistant)
+            if text:
+                self._print(text)
+            elif self.verbose:
+                self._print("[dim](empty response)[/dim]")
+
+        # 确保流式输出后有换行
+        if self._stream_started:
+            self._print()
+            self._stream_started = False
+
+        # verbose 模式下显示元信息
+        if self.verbose and final_assistant is not None:
+            if final_assistant.stop_reason:
+                self._print(f"[dim]stop_reason: {final_assistant.stop_reason}[/dim]")
+            if final_assistant.error_message:
+                self._print(f"[dim]error: {final_assistant.error_message}[/dim]")
+
+    def _extract_assistant_text(self, message: AssistantMessage) -> str:
+        """从 AssistantMessage 中提取纯文本内容。"""
+        return "".join(
+            block.text for block in message.content if isinstance(block, TextContent)
+        ).strip()
+
+    def reset(self) -> None:
+        """重置渲染器状态。"""
+        self._stream_started = False
+        self._current_tool = None
+        self._tool_start_time = 0
+
+
+# ── 简单渲染器（用于 print 模式） ────────────────────────────────
+
+class SimpleRenderer:
+    """简单的终端渲染器，用于 print 模式。
+
+    不使用 rich，输出纯文本，适合管道消费。
+    """
+
+    def __init__(self, output: OutputFn = print) -> None:
+        self.output = output
+        self._stream_started = False
+
+    def handle_event(self, event: AgentEvent) -> None:
+        """处理事件，只收集文本 delta。"""
+        event_type = event.get("type")
+        if event_type == "message_update":
             assistant_event = event.get("assistantMessageEvent") or {}
             if assistant_event.get("type") == "text_delta":
                 delta = str(assistant_event.get("delta", ""))
-                self.deltas.append(delta)
+                if delta:
+                    self.output(delta, end="")
+                    self._stream_started = True
 
     def render_final(self, final_assistant: AssistantMessage | None) -> None:
-        if self.deltas:
-            self.output("".join(self.deltas).strip())
+        """渲染最终结果。"""
+        if self._stream_started:
+            self.output()
         elif final_assistant is not None:
-            self.output(_extract_assistant_text(final_assistant) or "(empty)")
+            text = "".join(
+                block.text for block in final_assistant.content
+                if isinstance(block, TextContent)
+            ).strip()
+            if text:
+                self.output(text)
 
-        if final_assistant is not None:
-            self.output(f"[assistant.stop_reason] {final_assistant.stop_reason}")
-            self.output(f"[assistant.error_message] {final_assistant.error_message}")
+    def reset(self) -> None:
+        """重置状态。"""
+        self._stream_started = False
+
+
+# ── 运行模式实现 ──────────────────────────────────────────────────
+
+@dataclass
+class RunOptions:
+    """运行配置选项。"""
+    mode: RunMode
+    session: AgentSession
+    prompt: str | None = None
+    output: OutputFn = print
+    input_fn: InputFn = input
+    verbose: bool = False
+    no_color: bool = False
+    exit_commands: tuple[str, ...] = field(default_factory=lambda: ("exit", "quit", ":q"))
 
 
 async def run_print(
@@ -83,36 +465,28 @@ async def run_print(
     prompt: str,
     *,
     output: OutputFn = print,
-    show_tool_events: bool = True,
 ) -> AssistantMessage | None:
     """单次问答模式。
 
     流程：
-    1. 订阅会话事件（流式文本 delta、工具执行状态）
-    2. 调用 session.run() 发送用户输入给 Agent
-    3. 实时收集流式输出片段
-    4. 输出最终结果和元信息（停止原因、错误信息）
-
-    参数:
-        session: Agent 会话实例
-        prompt: 用户输入的文本
-        output: 输出函数
-        show_tool_events: 是否显示工具执行事件
-
-    返回:
-        最后一条 Assistant 消息，若无则返回 None
+    1. 创建渲染器
+    2. 订阅会话事件
+    3. 调用 session.run() 发送用户输入
+    4. 实时渲染流式输出
+    5. 渲染最终结果
     """
-    # 订阅事件，执行完毕后取消订阅
-    renderer = CliEventRenderer(output=output, show_tool_events=show_tool_events)
+    # print 模式使用简单渲染器，不依赖 rich
+    renderer = SimpleRenderer(output=output)
     unsubscribe = session.subscribe(renderer.handle_event)
     try:
         await session.run(prompt)
     finally:
         unsubscribe()
 
-    # 获取最后一条 Assistant 消息
-    final_assistant = next((m for m in reversed(session.messages) if isinstance(m, AssistantMessage)), None)
-
+    final_assistant = next(
+        (m for m in reversed(session.messages) if isinstance(m, AssistantMessage)),
+        None,
+    )
     renderer.render_final(final_assistant)
     return final_assistant
 
@@ -122,31 +496,44 @@ async def run_interactive(
     *,
     input_fn: InputFn = input,
     output: OutputFn = print,
-    show_tool_events: bool = True,
+    verbose: bool = False,
+    no_color: bool = False,
     exit_commands: tuple[str, ...] = ("exit", "quit", ":q"),
 ) -> None:
     """交互式 REPL 模式。
 
-    持续读取用户输入并调用 Agent 处理，直到命中退出命令。
-    支持以 "/" 开头的内置命令（如 /help, /tree, /fork 等）。
-
     流程：
-    1. 打印欢迎信息和可用命令
+    1. 渲染启动摘要
     2. 循环读取用户输入
     3. "/" 开头 → 交给命令处理器
-    4. 普通文本 → 调用 run_print 发送给 Agent
+    4. 普通文本 → 调用 Agent 处理
+    5. 捕获 KeyboardInterrupt，安全回到输入循环
     """
-    output("Entering interactive mode. Type 'exit' or '/exit' to quit.")
-    output(format_commands_for_help(session))
+    # 交互模式使用 rich 渲染器
+    renderer = TerminalRenderer(verbose=verbose, use_rich=not no_color)
+    startup_state = _build_startup_state(session)
+    renderer.render_startup(state=startup_state)
+
     current_session = session
 
     while True:
-        text = input_fn("you> ").strip()
+        try:
+            if renderer._console:
+                # 使用 rich 的 prompt
+                text = renderer._console.input("[bold green]>[/bold green] ")
+            else:
+                text = input_fn("> ")
+            text = text.strip()
+        except EOFError:
+            # Ctrl+D 退出
+            renderer._print("\nBye.")
+            return
+
         bare = text.lstrip("/")
 
         # 检查退出命令
-        if bare in exit_commands:
-            output("Bye.")
+        if bare in exit_commands or text == "/exit":
+            renderer._print("Bye.")
             return
 
         # 空输入跳过
@@ -155,29 +542,76 @@ async def run_interactive(
 
         # "/" 开头的命令交给交互命令处理器
         if text.startswith("/"):
-            command_result = await handle_runtime_command(current_session, text)
-            for line in command_result.output_lines:
-                output(line)
-            # 如果命令返回了新会话（如 /fork, /clear），切换到新会话
-            if command_result.switched_session is not None:
-                current_session.close()
-                current_session = command_result.switched_session
-            if command_result.handled:
+            try:
+                command_result = await handle_runtime_command(current_session, text)
+                for line in command_result.output_lines:
+                    renderer._print(line)
+                # 如果命令返回了新会话（如 /fork, /clear），切换到新会话
+                if command_result.switched_session is not None:
+                    current_session.close()
+                    current_session = command_result.switched_session
+                if command_result.handled:
+                    continue
+            except Exception as exc:
+                renderer._print(f"[error]Command error: {exc}[/error]")
                 continue
 
         # 普通文本 → 发送给 Agent 处理
-        await run_print(current_session, text, output=output, show_tool_events=show_tool_events)
+        try:
+            renderer.reset()
+            # 交互模式下，流式文本由 renderer 的 handle_event 处理
+            # run_print 内部的 SimpleRenderer 只用于 print 模式
+            # 这里直接订阅 renderer 的事件并调用 session.run
+            unsubscribe = current_session.subscribe(renderer.handle_event)
+            try:
+                await current_session.run(text)
+            finally:
+                unsubscribe()
+
+            final_assistant = next(
+                (m for m in reversed(current_session.messages) if isinstance(m, AssistantMessage)),
+                None,
+            )
+            renderer.render_final(final_assistant)
+        except KeyboardInterrupt:
+            # Ctrl+C 取消当前运行，不退出 CLI
+            renderer._print("\n[yellow][cancelled][/yellow]")
+            continue
+        except Exception as exc:
+            renderer._print(f"\n[error]Error: {exc}[/error]")
+            if verbose:
+                import traceback
+                traceback.print_exc()
+            continue
+
+
+def _build_startup_state(session: AgentSession) -> CliStartupState:
+    """从 AgentSession 构建启动状态信息。"""
+    model = session.agent.state.model
+    model_id = f"{model.provider}/{model.id}" if model.provider else model.id
+
+    workspace = str(session.workspace_dir)
+    session_id = session.session_id
+
+    permission_mode = "workspace-write"
+    # TODO: 从 session 配置中读取实际权限模式
+
+    warnings = []
+    # TODO: 检查凭证是否配置
+    # TODO: 检查是否为只读模式
+
+    return CliStartupState(
+        version="0.3",
+        model_id=model_id,
+        workspace=workspace,
+        session_id=session_id,
+        permission_mode=permission_mode,
+        warnings=warnings,
+    )
 
 
 async def run(options: RunOptions) -> AssistantMessage | None:
-    """统一运行入口。
-
-    根据 mode 路由到对应的运行模式：
-    - print:       单次问答，需要提供 prompt
-    - interactive: 交互式 REPL（默认）
-    - rpc:         JSON-RPC 模式，供外部程序调用
-    """
-    # print 模式：单次问答
+    """统一运行入口。"""
     if options.mode == "print":
         if not options.prompt:
             raise ValueError("print mode requires prompt")
@@ -185,20 +619,19 @@ async def run(options: RunOptions) -> AssistantMessage | None:
             options.session,
             options.prompt,
             output=options.output,
-            show_tool_events=options.show_tool_events,
         )
 
-    # rpc 模式：JSON-RPC 协议
     if options.mode == "rpc":
         await run_rpc(options.session, output=options.output)
         return None
 
-    # interactive 模式（默认）：交互式 REPL
+    # interactive 模式（默认）
     await run_interactive(
         options.session,
         input_fn=options.input_fn,
         output=options.output,
-        show_tool_events=options.show_tool_events,
+        verbose=options.verbose,
+        no_color=options.no_color,
         exit_commands=options.exit_commands,
     )
     return None
@@ -212,29 +645,10 @@ async def run_rpc(
     """极简 RPC 模式（JSONL 协议）。
 
     通过 stdin/stdout 以 JSON 行格式与外部程序通信。
-    每行是一个 JSON 对象，包含 type 字段标识请求类型。
-
-    支持的请求类型：
-    - {"type":"prompt","text":"..."}     发送用户输入
-    - {"type":"continue"}                继续上一次未完成的运行
-    - {"type":"state"}                   查询当前会话状态
-    - {"type":"list_entries"}            列出所有 entry
-    - {"type":"show_tree"}               显示会话树
-    - {"type":"entry_path","entry_id":".."}  获取 entry 的路径
-    - {"type":"fork_entry","entry_id":".."}  从 entry 分叉新会话
-    - {"type":"switch_entry","entry_id":".."} 切换到指定 entry
-    - {"type":"get_commands"}            获取所有注册命令
-    - {"type":"shutdown"}                关闭 RPC 连接
-
-    响应格式：
-    - {"type":"response","id":"...","command":"...","status":"ok","data":{...}}
-    - {"type":"response","id":"...","command":"...","status":"error","error":{...}}
-    - {"type":"event","event":{...}}   Agent 事件推送
+    不输出任何人类界面内容，只输出严格 JSONL。
     """
-    # ── 辅助函数 ──────────────────────────────────────────────
 
     def _json_default(value: Any) -> Any:
-        """JSON 序列化时的默认转换器，处理 dataclass 和 set 类型。"""
         if is_dataclass(value):
             return asdict(value)
         if isinstance(value, set):
@@ -242,23 +656,18 @@ async def run_rpc(
         return str(value)
 
     def _emit(obj: dict[str, Any]) -> None:
-        """向 stdout 输出一行 JSON。"""
         output(json.dumps(obj, ensure_ascii=False, default=_json_default))
 
     def _emit_error(*, req_id: Any, command: Any, code: str, message: str) -> None:
-        """输出错误响应。"""
-        _emit(
-            {
-                "type": "response",
-                "id": req_id,
-                "command": command,
-                "status": "error",
-                "error": {"code": code, "message": message},
-            }
-        )
+        _emit({
+            "type": "response",
+            "id": req_id,
+            "command": command,
+            "status": "error",
+            "error": {"code": code, "message": message},
+        })
 
     def _emit_ok(*, req_id: Any, command: str, data: dict[str, Any] | None = None) -> None:
-        """输出成功响应。"""
         payload: dict[str, Any] = {
             "type": "response",
             "id": req_id,
@@ -269,8 +678,7 @@ async def run_rpc(
             payload["data"] = data
         _emit(payload)
 
-    # ── 事件订阅 ──────────────────────────────────────────────
-    # 将 Agent 事件实时推送给调用方
+    # 订阅事件，实时推送给调用方
     unsubscribe = session.subscribe(
         lambda event: _emit({"type": "event", "event": event})
     )
@@ -279,13 +687,11 @@ async def run_rpc(
     _emit({"type": "rpc_ready", "session_id": session.session_id, "protocol_version": "1.2"})
 
     try:
-        # ── 主循环：逐行读取 stdin 并处理请求 ────────────────
         for raw in sys.stdin:
             line = raw.strip()
             if not line:
                 continue
 
-            # 解析 JSON
             try:
                 req = json.loads(line)
             except Exception as exc:
@@ -296,25 +702,20 @@ async def run_rpc(
                 _emit_error(req_id=None, command=None, code="invalid_request", message="Request must be object")
                 continue
 
-            cmd = req.get("type")   # 请求类型
-            req_id = req.get("id")  # 请求 ID，用于关联响应
+            cmd = req.get("type")
+            req_id = req.get("id")
 
             try:
-                # ── 请求路由 ──────────────────────────────────
-
                 if cmd == "prompt":
-                    # 发送用户输入给 Agent
                     text = str(req.get("text", ""))
                     await session.run(text)
                     _emit_ok(req_id=req_id, command="prompt")
 
                 elif cmd == "continue":
-                    # 继续上一次未完成的运行（如工具调用后）
                     await session.continue_run()
                     _emit_ok(req_id=req_id, command="continue")
 
                 elif cmd == "state":
-                    # 查询当前会话状态
                     _emit_ok(
                         req_id=req_id,
                         command="state",
@@ -327,7 +728,6 @@ async def run_rpc(
                     )
 
                 elif cmd == "list_entries":
-                    # 列出所有 entry（扁平列表，含导航信息）
                     _emit_ok(
                         req_id=req_id,
                         command="list_entries",
@@ -340,7 +740,6 @@ async def run_rpc(
                     )
 
                 elif cmd == "show_tree":
-                    # 显示会话树结构（按 parent_id 组织）
                     _emit_ok(
                         req_id=req_id,
                         command="show_tree",
@@ -352,18 +751,20 @@ async def run_rpc(
                     )
 
                 elif cmd == "entry_path":
-                    # 获取指定 entry 从根到该节点的路径
                     entry_id = str(req.get("entry_id", ""))
                     if not entry_id:
                         raise ValueError("entry_path requires entry_id")
                     _emit_ok(
                         req_id=req_id,
                         command="entry_path",
-                        data={"session_id": session.session_id, "entry_id": entry_id, "path": session.get_entry_path(entry_id)},
+                        data={
+                            "session_id": session.session_id,
+                            "entry_id": entry_id,
+                            "path": session.get_entry_path(entry_id),
+                        },
                     )
 
                 elif cmd == "fork_entry":
-                    # 从指定 entry 分叉出新会话
                     entry_id = str(req.get("entry_id", ""))
                     if not entry_id:
                         raise ValueError("fork_entry requires entry_id")
@@ -382,7 +783,6 @@ async def run_rpc(
                         forked.close()
 
                 elif cmd == "switch_entry":
-                    # 切换当前会话的叶子节点到指定 entry
                     entry_id = str(req.get("entry_id", ""))
                     if not entry_id:
                         raise ValueError("switch_entry requires entry_id")
@@ -398,7 +798,6 @@ async def run_rpc(
                     )
 
                 elif cmd == "get_commands":
-                    # 获取所有注册的扩展命令
                     _emit_ok(
                         req_id=req_id,
                         command="get_commands",
@@ -412,17 +811,13 @@ async def run_rpc(
                     )
 
                 elif cmd == "shutdown":
-                    # 关闭 RPC 连接
                     _emit_ok(req_id=req_id, command="shutdown")
                     return
 
                 else:
-                    # 未知命令
                     _emit_error(req_id=req_id, command=cmd, code="unknown_command", message="Unknown command")
 
             except Exception as exc:
-                # 命令执行异常
                 _emit_error(req_id=req_id, command=cmd, code="execution_error", message=str(exc))
     finally:
-        # 确保取消事件订阅
         unsubscribe()
