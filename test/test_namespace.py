@@ -21,7 +21,6 @@ def test_codepilot_namespace_imports() -> None:
     import codepilot.tools
 
     cli_main = import_module("codepilot.interfaces.cli.main")
-    im_cli = import_module("codepilot.interfaces.im.cli")
     web_api = import_module("codepilot.interfaces.web.api")
 
     assert codepilot.core is not None
@@ -31,8 +30,15 @@ def test_codepilot_namespace_imports() -> None:
     assert codepilot.sessions is not None
     assert codepilot.tools is not None
     assert cli_main.main is not None
-    assert im_cli.main is not None
     assert web_api.describe_web_contract is not None
+
+
+def test_im_interface_source_package_is_removed() -> None:
+    im_dir = SRC / "codepilot" / "interfaces" / "im"
+    remaining_sources = sorted(path.name for path in im_dir.glob("*.py")) if im_dir.exists() else []
+
+    assert remaining_sources == []
+    assert find_spec("codepilot.interfaces.im.cli") is None
 
 
 def test_cli_parser_builds() -> None:
@@ -43,6 +49,16 @@ def test_cli_parser_builds() -> None:
 
     assert args.mode == "print"
     assert args.prompt == "hello"
+
+
+def test_sessions_memory_api_is_global_only() -> None:
+    import codepilot.sessions as sessions
+
+    assert "load_global_memory" in sessions.__all__
+    assert "save_global_memory" in sessions.__all__
+    assert "load_channel_memory" not in sessions.__all__
+    assert "load_merged_memory" not in sessions.__all__
+    assert "save_channel_memory" not in sessions.__all__
 
 
 def test_no_legacy_top_level_imports() -> None:
