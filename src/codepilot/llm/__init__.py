@@ -21,7 +21,7 @@ from .api_registry import (
     stream,
     stream_simple,
 )
-from .env_api_keys import get_env_api_key
+from .env_api_keys import get_env_api_key, get_env_api_key_name
 from .errors import LLMErrorInfo, LLMErrorKind
 from .event_stream import AssistantMessageEventStream, LLMStreamEvent, LLMStreamEventType
 from .models import get_model, get_models, get_providers
@@ -109,6 +109,7 @@ __all__ = [
     "overflow_ratio",
     "get_api_provider",
     "get_env_api_key",
+    "get_env_api_key_name",
     "get_model",
     "get_models",
     "get_providers",

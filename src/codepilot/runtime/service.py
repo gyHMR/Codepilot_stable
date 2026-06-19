@@ -558,7 +558,7 @@ class RuntimeService:
         raise NotImplementedError("Tool approval flow is not implemented yet")
 
     def close_session(self, session_id: str) -> None:
-        """关闭并移除指定会话。"""
+        """同步关闭空闲会话；运行中的会话应使用 aclose_session。"""
         active_run = self._active_runs.get(session_id)
         if active_run is not None and (
             active_run.task is None or not active_run.task.done()
@@ -576,14 +576,32 @@ class RuntimeService:
         if session is not None:
             session.close()
 
-    def close_all(self) -> None:
-        """关闭并移除所有会话。"""
-        # 退出进程前先请求取消；正常调用方应先等待运行结束。
-        for active_run in self._active_runs.values():
-            if active_run.task is not None and not active_run.task.done():
-                active_run.task.cancel()
-        self._active_runs.clear()
+    async def aclose_session(self, session_id: str) -> None:
+        """取消并等待当前运行结束，然后关闭指定会话。"""
 
-        # 关闭所有会话
+        await self.cancel_run(session_id)
+        self.close_session(session_id)
+
+    def close_all(self) -> None:
+        """同步关闭所有空闲会话；存在运行任务时拒绝关闭。"""
+
+        running_session_ids = [
+            session_id
+            for session_id, active_run in self._active_runs.items()
+            if active_run.task is None or not active_run.task.done()
+        ]
+        if running_session_ids:
+            raise SessionBusyError(
+                "Cannot close RuntimeService with running sessions: "
+                + ", ".join(sorted(running_session_ids))
+            )
+        for session_id in list(self._sessions):
+            self.close_session(session_id)
+
+    async def aclose_all(self) -> None:
+        """取消并等待全部运行任务结束，然后关闭所有会话。"""
+
+        for session_id in list(self._active_runs):
+            await self.cancel_run(session_id)
         for session_id in list(self._sessions):
             self.close_session(session_id)

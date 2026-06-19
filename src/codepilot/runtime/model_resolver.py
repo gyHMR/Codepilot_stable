@@ -20,7 +20,7 @@ from codepilot.llm.models import get_model
 from codepilot.protocols import Model
 
 from .config import RuntimeInputs
-from .types import CreateAgentSessionOptions
+from .types import ConfigValueSource, CreateAgentSessionOptions
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,7 @@ class ResolvedModel:
 
     model: Model
     get_api_key: Callable[[str], str | None | Awaitable[str | None]] | None = None
+    source: ConfigValueSource = ConfigValueSource(kind="default")
 
 
 def resolve_model(
@@ -64,13 +65,18 @@ def resolve_model(
     # 优先级 1：直接指定的模型对象
     model = options.model
     if model is not None:
-        return ResolvedModel(model=model, get_api_key=options.get_api_key)
+        return ResolvedModel(
+            model=model,
+            get_api_key=options.get_api_key,
+            source=ConfigValueSource(kind="cli"),
+        )
 
     # 优先级 2：provider + model_id（从内置目录查找）
     if options.provider and options.model_id:
         return ResolvedModel(
             model=get_model(options.provider, options.model_id),
             get_api_key=options.get_api_key,
+            source=ConfigValueSource(kind="cli"),
         )
 
     # 优先级 3：恢复的会话元数据
@@ -81,6 +87,10 @@ def resolve_model(
         return ResolvedModel(
             model=get_model(provider, model_id),
             get_api_key=options.get_api_key,
+            source=ConfigValueSource(
+                kind="session",
+                location=options.session_id,
+            ),
         )
 
     # 优先级 4：工作区 model.local.json
@@ -88,6 +98,10 @@ def resolve_model(
         return ResolvedModel(
             model=resources.model.to_model(),
             get_api_key=options.get_api_key or resources.model.build_api_key_resolver(),
+            source=ConfigValueSource(
+                kind="project",
+                location=".codepilot/model.local.json",
+            ),
         )
 
     # 优先级 5：工作区 settings.json
@@ -95,6 +109,10 @@ def resolve_model(
         return ResolvedModel(
             model=get_model(resources.settings.provider, resources.settings.model_id),
             get_api_key=options.get_api_key,
+            source=ConfigValueSource(
+                kind="project",
+                location=".codepilot/settings.json",
+            ),
         )
 
     # 所有来源均未匹配

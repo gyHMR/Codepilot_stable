@@ -27,8 +27,12 @@ from pathlib import Path
 from typing import Sequence
 
 from codepilot.runtime.resources import WorkspaceResourceLoader
+from codepilot.runtime.factory import (
+    UnknownRuntimeConfigKeyError,
+    explain_runtime_config,
+)
 from codepilot.runtime.service import RuntimeService
-from codepilot.runtime.types import CreateAgentSessionOptions
+from codepilot.runtime.types import ConfigValueSource, CreateAgentSessionOptions
 
 from .runner import RunOptions, run
 
@@ -144,7 +148,7 @@ def _show_config(workspace: str | Path) -> None:
     console.print(Panel(settings_table, title="[bold]Settings[/bold]", border_style="blue"))
 
 
-def _explain_config(workspace: str | Path, key: str | None) -> None:
+def _explain_config(options: CreateAgentSessionOptions, key: str | None) -> None:
     """解释配置项的来源。
 
     使用 RuntimeConfigResolver 追踪每个配置项的最终值和来源。
@@ -160,98 +164,32 @@ def _explain_config(workspace: str | Path, key: str | None) -> None:
         console.print("Available keys: model, provider, model_id, thinking_level, tool_execution, etc.")
         return
 
-    # 加载配置并解析来源
-    from codepilot.runtime.config import load_runtime_inputs, resolve_runtime_config
-    from codepilot.runtime.types import CreateAgentSessionOptions
-
-    options = CreateAgentSessionOptions(workspace_dir=workspace)
-    inputs = load_runtime_inputs(options)
-    resolved = resolve_runtime_config(options, inputs)
-
-    # 特殊处理 model 相关配置
-    if key in ("model", "provider", "model_id"):
-        _explain_model_config(workspace, key, resolved, inputs)
-        return
-
-    # 通用配置项解释
-    if key in resolved.sources:
-        source = resolved.sources[key]
-        value = getattr(resolved, key, None)
-
+    try:
+        resolved = explain_runtime_config(options, key)
+    except UnknownRuntimeConfigKeyError:
+        console.print(f"[red]Unknown config key: {key}[/red]")
+    except KeyError as exc:
+        raise ValueError(str(exc).strip("'")) from exc
+    else:
         table = Table(show_header=False, box=None, padding=(0, 2))
         table.add_column("Field", style="bold", width=12)
         table.add_column("Value")
         table.add_row("Key", key)
-        table.add_row("Value", str(value))
-        table.add_row("Source", _format_source(source))
+        table.add_row("Value", str(resolved.value))
+        table.add_row("Source", _format_source(resolved.source))
         console.print(Panel(table, title=f"[bold]Config: {key}[/bold]", border_style="blue"))
-    else:
-        console.print(f"[red]Unknown config key: {key}[/red]")
 
 
-def _explain_model_config(
-    workspace: str | Path,
-    key: str,
-    resolved: Any,
-    inputs: Any,
-) -> None:
-    """解释模型相关配置的来源。
-
-    注意：当前实现基于 resolved 配置和工作区资源，
-    但 CLI 覆盖需要从 options 获取（这里无法访问）。
-    完整实现需要 Runtime 提供统一的 ResolvedRuntimeProfile。
-    """
-    from rich.console import Console
-    from rich.table import Table
-    from rich.panel import Panel
-
-    console = Console()
-    loader = WorkspaceResourceLoader(workspace)
-    loaded = loader.load()
-    model = loaded.model
-
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column("Field", style="bold", width=12)
-    table.add_column("Value")
-
-    # 从 resolved 配置获取最终值
-    # 注意：这里无法获取 CLI 覆盖，因为 _explain_config 没有接收 options
-    if key == "model":
-        if model:
-            final_value = f"{model.provider}/{model.model_id}"
-            source = "project:.codepilot/model.local.json"
-        else:
-            final_value = "(not configured)"
-            source = "built-in default"
-        table.add_row("Value", final_value)
-        table.add_row("Source", source)
-    elif key == "provider":
-        if model:
-            table.add_row("Value", model.provider)
-            table.add_row("Source", "project:.codepilot/model.local.json")
-        else:
-            table.add_row("Value", "(not configured)")
-            table.add_row("Source", "built-in default")
-    elif key == "model_id":
-        if model:
-            table.add_row("Value", model.model_id)
-            table.add_row("Source", "project:.codepilot/model.local.json")
-        else:
-            table.add_row("Value", "(not configured)")
-            table.add_row("Source", "built-in default")
-
-    console.print(Panel(table, title=f"[bold]Config: {key}[/bold]", border_style="blue"))
-
-
-def _format_source(source: str) -> str:
+def _format_source(source: ConfigValueSource) -> str:
     """格式化配置来源显示。"""
     source_map = {
-        "options": "CLI argument",
-        "restored_session": "restored session",
-        "workspace": "project:.codepilot/settings.json",
+        "cli": "CLI argument",
+        "session": "restored session",
+        "project": "project",
         "default": "built-in default",
     }
-    return source_map.get(source, source)
+    label = source_map.get(source.kind, source.kind)
+    return f"{label}:{source.location}" if source.location else label
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -407,7 +345,21 @@ async def _run_from_args(args: argparse.Namespace) -> int:
             _check_model_config(workspace)
             return 0
         if args.config_action == "explain":
-            _explain_config(workspace, args.config_key)
+            provider, model_id = _resolve_model_id(args)
+            _explain_config(
+                CreateAgentSessionOptions(
+                    workspace_dir=workspace,
+                    provider=provider,
+                    model_id=model_id,
+                    session_id=args.session_id,
+                    read_only_mode=(
+                        args.permission_mode == "read-only"
+                        if args.permission_mode is not None
+                        else None
+                    ),
+                ),
+                args.config_key,
+            )
             return 0
 
     # ── 解析运行模式和模型 ──────────────────────────────────────
@@ -444,7 +396,7 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         )
     finally:
         # 关闭所有会话（包括 fork 出来的新会话）
-        runtime.close_all()
+        await runtime.aclose_all()
 
     return 0
 

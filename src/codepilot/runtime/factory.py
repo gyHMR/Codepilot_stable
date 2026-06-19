@@ -19,14 +19,16 @@ Agent 会话工厂模块。
 """
 
 from dataclasses import replace
+import os
 
 from codepilot.sessions.session import AgentSession
 from codepilot.core.message_conversion import convert_to_llm
+from codepilot.llm.env_api_keys import get_env_api_key_name
 
-from .config import load_runtime_inputs, resolve_runtime_config
+from .config import RuntimeInputs, load_runtime_inputs, resolve_runtime_config
 from .context import build_runtime_context, build_repository_bootstrap
 from .hook_pipeline import compose_after_tool_call, compose_before_tool_call, compose_lifecycle_hooks
-from .model_resolver import resolve_model
+from .model_resolver import ResolvedModel, resolve_model
 from .prompt import build_runtime_system_prompt
 from .tool_assembler import assemble_tools
 from .types import (
@@ -34,10 +36,15 @@ from .types import (
     CapabilityCatalog,
     ConfigValueSource,
     CreateAgentSessionOptions,
+    ResolvedConfigValue,
     ResolvedRuntimeProfile,
     RuntimeAssembly,
     RuntimeDiagnostic,
 )
+
+
+class UnknownRuntimeConfigKeyError(KeyError):
+    """请求解释的配置项不属于 Runtime 配置。"""
 
 
 def create_agent_session(options: CreateAgentSessionOptions) -> AgentSession:
@@ -75,13 +82,22 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
     resolved_model = resolve_model(options, inputs)
 
     # 确定凭证来源
-    credential_source, credential_location = _resolve_credential_source(options, inputs)
+    credential_source, credential_location = _resolve_credential_source(
+        options,
+        inputs,
+        resolved_model,
+    )
 
     # 步骤 3：解析运行时配置
     config = resolve_runtime_config(options, inputs)
 
     # 构建配置来源
     sources = _build_config_sources(config.sources)
+    sources.update({
+        "model": resolved_model.source,
+        "provider": resolved_model.source,
+        "model_id": resolved_model.source,
+    })
 
     # 构建 ResolvedRuntimeProfile
     profile = ResolvedRuntimeProfile(
@@ -189,7 +205,8 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
 
 def _resolve_credential_source(
     options: CreateAgentSessionOptions,
-    inputs: Any,
+    inputs: RuntimeInputs,
+    resolved_model: ResolvedModel,
 ) -> tuple[str, str | None]:
     """解析凭证来源。
 
@@ -198,19 +215,60 @@ def _resolve_credential_source(
     """
     resources = inputs.resources
 
-    # 检查环境变量
     if options.get_api_key:
         return "caller", "get_api_key function"
 
-    if resources and resources.model:
+    if (
+        resources
+        and resources.model
+        and resolved_model.source.location == ".codepilot/model.local.json"
+    ):
         if resources.model.api_key_env:
-            import os
             if os.getenv(resources.model.api_key_env):
                 return "env", resources.model.api_key_env
         if resources.model.api_key:
             return "local-file", ".codepilot/model.local.json"
 
+    env_name = get_env_api_key_name(resolved_model.model.provider)
+    if env_name and os.getenv(env_name):
+        return "env", env_name
+    if resolved_model.model.api == "openai-compatible":
+        fallback_env_name = get_env_api_key_name("openai")
+        if fallback_env_name and os.getenv(fallback_env_name):
+            return "env", fallback_env_name
+
     return "missing", None
+
+
+def explain_runtime_config(
+    options: CreateAgentSessionOptions,
+    key: str,
+) -> ResolvedConfigValue:
+    """解析单个配置项的最终值和来源，供 CLI 等接口展示。"""
+
+    inputs = load_runtime_inputs(options)
+    if key in {"model", "provider", "model_id"}:
+        resolved_model = resolve_model(options, inputs)
+        model = resolved_model.model
+        values = {
+            "model": f"{model.provider}/{model.id}" if model.provider else model.id,
+            "provider": model.provider,
+            "model_id": model.id,
+        }
+        return ResolvedConfigValue(
+            key=key,
+            value=values[key],
+            source=resolved_model.source,
+        )
+
+    config = resolve_runtime_config(options, inputs)
+    if key not in config.sources:
+        raise UnknownRuntimeConfigKeyError(key)
+    return ResolvedConfigValue(
+        key=key,
+        value=getattr(config, key),
+        source=_build_config_sources(config.sources)[key],
+    )
 
 
 def _build_config_sources(raw_sources: dict[str, str]) -> dict[str, ConfigValueSource]:

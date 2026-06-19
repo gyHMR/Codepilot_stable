@@ -172,7 +172,7 @@ class TestCliStartupState:
         assert state.warnings == ["Test warning"]
 
     def test_build_startup_state_defaults(self):
-        """测试默认值。"""
+        """默认使用 Runtime 状态中的警告。"""
         status = SessionStatus(
             session_id="test_session",
             model_id="test/model",
@@ -180,9 +180,25 @@ class TestCliStartupState:
             permission_mode="workspace-write",
             message_count=0,
             leaf_id="leaf",
+            warnings=["Runtime warning"],
         )
 
         state = build_startup_state(status)
+
+        assert state.warnings == ["Runtime warning"]
+
+    def test_build_startup_state_explicit_warnings_override_runtime_status(self):
+        status = SessionStatus(
+            session_id="test_session",
+            model_id="test/model",
+            workspace="/workspace",
+            permission_mode="workspace-write",
+            message_count=0,
+            leaf_id="leaf",
+            warnings=["Runtime warning"],
+        )
+
+        state = build_startup_state(status, warnings=[])
 
         assert state.warnings == []
 

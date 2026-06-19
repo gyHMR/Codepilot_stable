@@ -7,11 +7,18 @@ from __future__ import annotations
 import os
 
 
-def get_env_api_key(provider: str) -> str | None:
+def get_env_api_key_name(provider: str) -> str | None:
+    """返回 provider 对应的标准 API Key 环境变量名。"""
+
     if provider == "anthropic":
-        return os.getenv("ANTHROPIC_API_KEY")
+        return "ANTHROPIC_API_KEY"
     if provider == "deepseek":
-        return os.getenv("DEEPSEEK_API_KEY")
+        return "DEEPSEEK_API_KEY"
     if provider in {"openai", "openai-compatible"}:
-        return os.getenv("OPENAI_API_KEY")
+        return "OPENAI_API_KEY"
     return None
+
+
+def get_env_api_key(provider: str) -> str | None:
+    env_name = get_env_api_key_name(provider)
+    return os.getenv(env_name) if env_name else None

@@ -69,7 +69,7 @@ def build_startup_state(status: SessionStatus, warnings: list[str] | None = None
         workspace=status.workspace,
         session_id=status.session_id,
         permission_mode=status.permission_mode,
-        warnings=warnings or [],
+        warnings=warnings if warnings is not None else list(status.warnings or []),
     )
 
 
@@ -644,7 +644,7 @@ async def run_interactive(
                 # 如果命令导致会话切换（如 /fork, /clear）
                 if command_result.switched_session_id is not None:
                     # 关闭旧 Session
-                    runtime.close_session(current_session_id)
+                    await runtime.aclose_session(current_session_id)
                     # 更新当前会话 ID
                     current_session_id = command_result.switched_session_id
                     # 更新状态显示

@@ -11,7 +11,7 @@ Codepilot 运行时组装层（Runtime Assembly Layer）。
 """
 
 from .command_registry import format_commands_for_help, list_runtime_commands
-from .factory import assemble_runtime, create_agent_session
+from .factory import assemble_runtime, create_agent_session, explain_runtime_config
 from .prompt import build_default_system_prompt
 from .resources import WorkspaceModelConfig, WorkspaceResourceLoader, WorkspaceResources, WorkspaceSettings
 from .service import RuntimeService
@@ -23,6 +23,7 @@ __all__ = [
     "CreateAgentSessionOptions",
     "assemble_runtime",
     "create_agent_session",
+    "explain_runtime_config",
     # ── 运行时服务 ──
     "RuntimeService",
     "SessionHandle",

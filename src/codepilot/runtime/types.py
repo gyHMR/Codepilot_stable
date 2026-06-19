@@ -214,6 +214,15 @@ class ResolvedRuntimeProfile:
 
 
 @dataclass(frozen=True)
+class ResolvedConfigValue:
+    """供接口层展示的单个已解析配置值。"""
+
+    key: str
+    value: Any
+    source: ConfigValueSource
+
+
+@dataclass(frozen=True)
 class RegisteredTool:
     """已注册的工具信息。
 

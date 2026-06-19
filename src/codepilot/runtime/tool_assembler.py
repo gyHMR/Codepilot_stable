@@ -189,6 +189,14 @@ def assemble_tools(
 
     # 调用方工具
     for tool in options.tools:
+        if get_builtin_tool_metadata(tool.name) is not None:
+            diagnostics.append(RuntimeDiagnostic(
+                severity="warning",
+                code="tool.reserved_name",
+                message=f"Tool '{tool.name}' from caller uses a reserved builtin name",
+                source="caller",
+            ))
+            continue
         if tool.name in tool_map:
             prev_source = tool_map[tool.name][1]
             diagnostics.append(RuntimeDiagnostic(
@@ -200,6 +208,14 @@ def assemble_tools(
 
     # 扩展工具
     for tool in loaded_extensions.tools:
+        if get_builtin_tool_metadata(tool.name) is not None:
+            diagnostics.append(RuntimeDiagnostic(
+                severity="warning",
+                code="tool.reserved_name",
+                message=f"Tool '{tool.name}' from extension uses a reserved builtin name",
+                source="extension",
+            ))
+            continue
         if tool.name in tool_map:
             prev_source = tool_map[tool.name][1]
             diagnostics.append(RuntimeDiagnostic(
@@ -211,6 +227,14 @@ def assemble_tools(
 
     # MCP 工具
     for tool in mcp_tools:
+        if get_builtin_tool_metadata(tool.name) is not None:
+            diagnostics.append(RuntimeDiagnostic(
+                severity="warning",
+                code="tool.reserved_name",
+                message=f"Tool '{tool.name}' from MCP uses a reserved builtin name",
+                source="mcp",
+            ))
+            continue
         if tool.name in tool_map:
             prev_source = tool_map[tool.name][1]
             diagnostics.append(RuntimeDiagnostic(
@@ -228,7 +252,11 @@ def assemble_tools(
         if any(diag.severity == "error" for diag in tool_diagnostics):
             continue
 
-        metadata = get_builtin_tool_metadata(tool.name) or infer_tool_metadata(tool)
+        metadata = (
+            get_builtin_tool_metadata(tool.name)
+            if source == "builtin"
+            else infer_tool_metadata(tool)
+        )
 
         registered_tools.append(RegisteredTool(
             name=name,
