@@ -9,6 +9,8 @@ from __future__ import annotations
 - 追加段落（来自配置和扩展）
 - 工具说明片段
 - 长期记忆文本
+
+仓库采集结果由 RepositoryBootstrap 统一表示，避免在装配层重复定义。
 """
 
 import subprocess
@@ -32,6 +34,26 @@ _MANIFEST_PROJECT_TYPES = {
 _TEST_DIR_NAMES = {"test", "tests", "spec", "specs"}
 # 顶层目录列表的最大条目数
 _TOP_LEVEL_LIMIT = 30
+# 指令文件列表
+_INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md", "COPILOT.md", "INSTRUCTIONS.md"]
+
+
+@dataclass(frozen=True)
+class GitInfo:
+    """Git 仓库信息。
+
+    Attributes:
+        root: Git 根目录路径。
+        branch: 当前分支名（detached HEAD 时为 None）。
+        head_sha: HEAD 提交的短 SHA。
+        is_dirty: 工作区是否有未提交变更。
+        remote_url: 远程仓库 URL（可选）。
+    """
+    root: Path
+    branch: str | None = None
+    head_sha: str | None = None
+    is_dirty: bool = False
+    remote_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,17 +66,16 @@ class RepositoryBootstrap:
         manifest_files: 存在的清单文件名列表（如 ["pyproject.toml"]）。
         top_level_entries: 顶层目录和文件列表（目录带 "/" 后缀）。
         test_directories: 测试目录列表。
-        git_branch: 当前 Git 分支名，非 Git 仓库时为 None。
-        git_dirty: 工作区是否有未提交变更，非 Git 仓库时为 None。
+        instruction_files: 指令文件列表（如 AGENTS.md、CLAUDE.md）。
+        git: Git 仓库信息（非 Git 仓库时为 None）。
     """
-
     workspace_root: str
     project_type: str | None
     manifest_files: list[str]
     top_level_entries: list[str]
     test_directories: list[str]
-    git_branch: str | None
-    git_dirty: bool | None
+    instruction_files: list[str]
+    git: GitInfo | None = None
 
 
 @dataclass(frozen=True)
@@ -68,7 +89,6 @@ class RuntimeContext:
         tool_snippets: 工具说明片段字典（工具名 -> 说明文本）。
         memory_text: 长期记忆文本。
     """
-
     repository_context: str
     prompt_guidelines: list[str]
     append_sections: list[str]
@@ -79,7 +99,7 @@ class RuntimeContext:
 def build_repository_bootstrap(workspace: Path) -> RepositoryBootstrap:
     """扫描工作区目录，构建仓库引导信息。
 
-    检测项目类型（通过清单文件）、目录结构、测试目录和 Git 状态。
+    检测项目类型（通过清单文件）、目录结构、测试目录、指令文件和 Git 状态。
 
     Args:
         workspace: 工作区目录路径。
@@ -96,16 +116,104 @@ def build_repository_bootstrap(workspace: Path) -> RepositoryBootstrap:
         for entry in entries
         if entry.endswith("/") and entry[:-1] in _TEST_DIR_NAMES
     ]
-    git_branch, git_dirty = _git_status(root)
+    # 检测指令文件
+    instruction_files = [name for name in _INSTRUCTION_FILES if (root / name).is_file()]
+    # 获取 Git 信息
+    git_info = _build_git_info(root)
     return RepositoryBootstrap(
         workspace_root=str(root).replace("\\", "/"),
         project_type=project_type,
         manifest_files=manifest_files,
         top_level_entries=entries,
         test_directories=test_directories,
-        git_branch=git_branch,
-        git_dirty=git_dirty,
+        instruction_files=instruction_files,
+        git=git_info,
     )
+
+
+def _build_git_info(root: Path) -> GitInfo | None:
+    """构建 Git 仓库信息。
+
+    Returns:
+        GitInfo 对象，非 Git 仓库时返回 None。
+    """
+    try:
+        # 检查是否为 Git 仓库
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+
+        # 获取 Git 根目录
+        git_root_result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        git_root = Path(git_root_result.stdout.strip()) if git_root_result.returncode == 0 else root
+
+        # 获取当前分支
+        branch_result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        branch = branch_result.stdout.strip() or None
+
+        # 获取 HEAD SHA
+        head_result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        head_sha = head_result.stdout.strip() or None
+
+        # 检查工作区状态
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        is_dirty = bool(status_result.stdout.strip())
+
+        # 获取远程 URL
+        remote_result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        remote_url = remote_result.stdout.strip() or None
+
+        return GitInfo(
+            root=git_root,
+            branch=branch,
+            head_sha=head_sha,
+            is_dirty=is_dirty,
+            remote_url=remote_url,
+        )
+    except Exception:
+        return None
 
 
 def render_repository_context(bootstrap: RepositoryBootstrap) -> str:
@@ -121,20 +229,29 @@ def render_repository_context(bootstrap: RepositoryBootstrap) -> str:
     manifests = ", ".join(bootstrap.manifest_files) if bootstrap.manifest_files else "(none)"
     top_level = ", ".join(bootstrap.top_level_entries) if bootstrap.top_level_entries else "(empty)"
     tests = ", ".join(bootstrap.test_directories) if bootstrap.test_directories else "(none)"
-    branch = bootstrap.git_branch or "unknown"
-    dirty = "unknown" if bootstrap.git_dirty is None else ("modified" if bootstrap.git_dirty else "clean")
-    return "\n".join(
-        [
-            "## Repository Context",
-            f"- Workspace: {bootstrap.workspace_root}",
-            f"- Project type: {project_type}",
-            f"- Manifests: {manifests}",
-            f"- Top-level: {top_level}",
-            f"- Test directories: {tests}",
-            f"- Git branch: {branch}",
-            f"- Working tree: {dirty}",
-        ]
-    )
+    instructions = ", ".join(bootstrap.instruction_files) if bootstrap.instruction_files else "(none)"
+
+    lines = [
+        "## Repository Context",
+        f"- Workspace: {bootstrap.workspace_root}",
+        f"- Project type: {project_type}",
+        f"- Manifests: {manifests}",
+        f"- Top-level: {top_level}",
+        f"- Test directories: {tests}",
+        f"- Instruction files: {instructions}",
+    ]
+
+    # Git 信息
+    if bootstrap.git:
+        branch = bootstrap.git.branch or "detached HEAD"
+        dirty = "modified" if bootstrap.git.is_dirty else "clean"
+        lines.append(f"- Git branch: {branch}")
+        lines.append(f"- HEAD: {bootstrap.git.head_sha or 'unknown'}")
+        lines.append(f"- Working tree: {dirty}")
+    else:
+        lines.append("- Git: not a git repository")
+
+    return "\n".join(lines)
 
 
 def build_runtime_context(
@@ -199,37 +316,6 @@ def _project_type(manifest_files: list[str]) -> str | None:
         if manifest in manifest_files:
             return _MANIFEST_PROJECT_TYPES[manifest]
     return None
-
-
-def _git_status(root: Path) -> tuple[str | None, bool | None]:
-    """获取 Git 仓库状态（当前分支名和是否有未提交变更）。
-
-    Returns:
-        (分支名, 是否有变更) 元组；非 Git 仓库时返回 (None, None)。
-    """
-    try:
-        branch = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-        status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except Exception:
-        return None, None
-    if branch.returncode != 0 or status.returncode != 0:
-        return None, None
-    branch_text = branch.stdout.strip() or None
-    return branch_text, bool(status.stdout.strip())
 
 
 def _build_prompt_debug_lines(

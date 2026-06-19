@@ -11,21 +11,20 @@ Codepilot 运行时组装层（Runtime Assembly Layer）。
 """
 
 from .command_registry import format_commands_for_help, list_runtime_commands
-from .factory import build_agent_session_options, create_agent_session
-from .prompt import SystemPromptBuildOptions, build_default_system_prompt, build_system_prompt
+from .factory import assemble_runtime, create_agent_session
+from .prompt import build_default_system_prompt
 from .resources import WorkspaceModelConfig, WorkspaceResourceLoader, WorkspaceResources, WorkspaceSettings
-from .service import CreateSessionRequest, RuntimeService, SessionHandle, UserInput
-from .types import CreateAgentSessionOptions
+from .service import RuntimeService
+from .types import CreateAgentSessionOptions, SessionHandle, UserInput
 
 
 __all__ = [
     # ── 会话创建 ──
     "CreateAgentSessionOptions",
-    "build_agent_session_options",
+    "assemble_runtime",
     "create_agent_session",
     # ── 运行时服务 ──
     "RuntimeService",
-    "CreateSessionRequest",
     "SessionHandle",
     "UserInput",
     # ── 工作区资源 ──
@@ -35,8 +34,6 @@ __all__ = [
     "WorkspaceSettings",
     # ── 提示词构建 ──
     "build_default_system_prompt",
-    "build_system_prompt",
-    "SystemPromptBuildOptions",
     # ── 命令注册 ──
     "format_commands_for_help",
     "list_runtime_commands",

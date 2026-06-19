@@ -195,7 +195,12 @@ def _explain_model_config(
     resolved: Any,
     inputs: Any,
 ) -> None:
-    """解释模型相关配置的来源。"""
+    """解释模型相关配置的来源。
+
+    注意：当前实现基于 resolved 配置和工作区资源，
+    但 CLI 覆盖需要从 options 获取（这里无法访问）。
+    完整实现需要 Runtime 提供统一的 ResolvedRuntimeProfile。
+    """
     from rich.console import Console
     from rich.table import Table
     from rich.panel import Panel
@@ -209,27 +214,31 @@ def _explain_model_config(
     table.add_column("Field", style="bold", width=12)
     table.add_column("Value")
 
+    # 从 resolved 配置获取最终值
+    # 注意：这里无法获取 CLI 覆盖，因为 _explain_config 没有接收 options
     if key == "model":
-        # 显示完整的模型标识
         if model:
-            model_id = f"{model.provider}/{model.model_id}"
-            table.add_row("Value", model_id)
-            table.add_row("Source", "project:.codepilot/model.local.json")
+            final_value = f"{model.provider}/{model.model_id}"
+            source = "project:.codepilot/model.local.json"
         else:
-            table.add_row("Value", "(not configured)")
-            table.add_row("Source", "default")
+            final_value = "(not configured)"
+            source = "built-in default"
+        table.add_row("Value", final_value)
+        table.add_row("Source", source)
     elif key == "provider":
         if model:
             table.add_row("Value", model.provider)
             table.add_row("Source", "project:.codepilot/model.local.json")
         else:
             table.add_row("Value", "(not configured)")
+            table.add_row("Source", "built-in default")
     elif key == "model_id":
         if model:
             table.add_row("Value", model.model_id)
             table.add_row("Source", "project:.codepilot/model.local.json")
         else:
             table.add_row("Value", "(not configured)")
+            table.add_row("Source", "built-in default")
 
     console.print(Panel(table, title=f"[bold]Config: {key}[/bold]", border_style="blue"))
 
@@ -254,6 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Codepilot - Local AI Coding Agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
         epilog="""\
 Examples:
   codepilot                              Interactive mode (default)
@@ -336,206 +346,40 @@ Examples:
     # rpc 子命令
     subparsers.add_parser("rpc", help="Start RPC mode (JSONL protocol)")
 
-    # ── 高级参数（兼容旧接口） ──────────────────────────────────
-
-    advanced_group = parser.add_argument_group("advanced options (legacy)")
-
-    advanced_group.add_argument(
-        "--mode",
-        choices=["print", "interactive", "rpc"],
-        default=None,
-        help=argparse.SUPPRESS,  # 隐藏，使用子命令替代
-    )
-    advanced_group.add_argument(
-        "--provider",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--model-id",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--system-prompt",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--thinking-level",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--tool-execution",
-        choices=["parallel", "sequential"],
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--read-only",
-        action="store_true",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--no-tool-events",
-        action="store_true",
-        default=False,
-        help=argparse.SUPPRESS,
-    )
-    # --session-id 已在核心参数中定义为 --resume
-    advanced_group.add_argument(
-        "--init-config",
-        action="store_true",
-        default=False,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--check-config",
-        action="store_true",
-        default=False,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--max-context-messages",
-        type=int,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--max-context-tokens",
-        type=int,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--retain-recent-messages",
-        type=int,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--no-retry",
-        action="store_true",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--max-retries",
-        type=int,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--retry-base-delay-ms",
-        type=int,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--allow-dangerous-bash",
-        action="store_true",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--bash-allow-pattern",
-        action="append",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--bash-block-pattern",
-        action="append",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--relaxed-edit",
-        action="store_true",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--disable-workspace-resources",
-        action="store_true",
-        default=False,
-        help=argparse.SUPPRESS,
-    )
-
-    # 会话管理命令（保留兼容）
-    advanced_group.add_argument(
-        "--list-entries",
-        action="store_true",
-        default=False,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--show-tree",
-        action="store_true",
-        default=False,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--fork-entry",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    advanced_group.add_argument(
-        "--switch-entry",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-
     return parser
 
 
 def _resolve_run_mode(args: argparse.Namespace) -> str:
     """解析运行模式。
 
-    优先级：
-    1. -p 参数 → print 模式
-    2. rpc 子命令 → rpc 模式
-    3. --mode 参数（兼容）
-    4. 默认 → interactive 模式
+    优先级：-p 参数、rpc 子命令、默认交互模式。
     """
     if args.prompt:
         return "print"
     if args.command == "rpc":
         return "rpc"
-    if args.mode:
-        return args.mode
     return "interactive"
 
 
 def _resolve_model_id(args: argparse.Namespace) -> tuple[str | None, str | None]:
     """解析模型标识。
 
-    支持两种格式：
-    1. --model provider/model-id → 拆分为 provider 和 model_id
-    2. --provider + --model-id（兼容旧接口）
+    --model 必须使用 provider/model-id 格式。
 
     返回:
         (provider, model_id) 元组
     """
     if args.model:
         parts = args.model.split("/", 1)
-        if len(parts) == 2:
-            return parts[0], parts[1]
-        else:
-            # 没有 / 分隔符，整个作为 model_id
-            return None, args.model
-    return args.provider, args.model_id
+        if len(parts) != 2 or not all(part.strip() for part in parts):
+            raise ValueError("--model must use provider/model-id format")
+        return parts[0], parts[1]
+    return None, None
 
 
 def _resolve_permission_mode(args: argparse.Namespace) -> str:
     """解析权限模式。"""
-    if args.permission_mode:
-        return args.permission_mode
-    if args.read_only:
-        return "read-only"
-    return "workspace-write"
+    return args.permission_mode or "workspace-write"
 
 
 async def _run_from_args(args: argparse.Namespace) -> int:
@@ -566,16 +410,6 @@ async def _run_from_args(args: argparse.Namespace) -> int:
             _explain_config(workspace, args.config_key)
             return 0
 
-    # ── 处理旧的 init-config / check-config 参数 ────────────────
-
-    if args.init_config:
-        _init_model_config(workspace)
-        return 0
-
-    if args.check_config:
-        _check_model_config(workspace)
-        return 0
-
     # ── 解析运行模式和模型 ──────────────────────────────────────
 
     run_mode = _resolve_run_mode(args)
@@ -588,75 +422,29 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         workspace_dir=workspace,
         provider=provider,
         model_id=model_id,
-        system_prompt=args.system_prompt,
         session_id=args.session_id,
-        thinking_level=args.thinking_level,
-        tool_execution=args.tool_execution,
-        max_context_messages=args.max_context_messages,
-        max_context_tokens=args.max_context_tokens,
-        retain_recent_messages=args.retain_recent_messages,
-        retry_enabled=None if args.no_retry is None else False,
-        max_retries=args.max_retries,
-        retry_base_delay_ms=args.retry_base_delay_ms,
         read_only_mode=(permission_mode == "read-only"),
-        block_dangerous_bash=None if args.allow_dangerous_bash is None else False,
-        bash_allow_patterns=args.bash_allow_pattern,
-        bash_block_patterns=args.bash_block_pattern,
-        edit_require_unique_match=None if args.relaxed_edit is None else False,
-        load_workspace_resources=not args.disable_workspace_resources,
     )
 
     # ── 创建会话并运行 ──────────────────────────────────────────
 
     runtime = RuntimeService()
-    session = runtime.create_session(options).session
+    handle = runtime.create_session(options)
 
     try:
-        # 会话管理操作（兼容旧接口）
-        if args.switch_entry:
-            session.switch_to_entry(str(args.switch_entry))
-            print(json.dumps({"type": "switch_entry", "session_id": session.session_id, "entry_id": args.switch_entry}))
-            return 0
-
-        if args.fork_entry:
-            forked = session.fork_from_entry(str(args.fork_entry))
-            try:
-                print(json.dumps({
-                    "type": "forked",
-                    "from_session_id": session.session_id,
-                    "from_entry_id": args.fork_entry,
-                    "new_session_id": forked.session_id,
-                }, ensure_ascii=False))
-            finally:
-                forked.close()
-            return 0
-
-        if args.list_entries:
-            print(json.dumps({
-                "session_id": session.session_id,
-                "entry_ids": session.list_entry_ids(),
-            }, ensure_ascii=False))
-            return 0
-
-        if args.show_tree:
-            print(json.dumps({
-                "session_id": session.session_id,
-                "tree": session.get_session_tree(),
-            }, ensure_ascii=False))
-            return 0
-
-        # 正常运行
         await run(
             RunOptions(
                 mode=run_mode,
-                session=session,
+                session_id=handle.session_id,
+                runtime=runtime,
                 prompt=args.prompt,
                 verbose=args.verbose,
                 no_color=args.no_color,
             )
         )
     finally:
-        runtime.close_session(session.session_id)
+        # 关闭所有会话（包括 fork 出来的新会话）
+        runtime.close_all()
 
     return 0
 
@@ -667,6 +455,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     解析命令行参数，启动异步事件循环执行 Agent 会话。
     捕获 ValueError 并通过 parser.error() 输出友好的错误信息。
     """
+    from codepilot.runtime.service import SessionBusyError, SessionNotFoundError, EmptyInputError
+
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -675,6 +465,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nBye.")
         return 130
+    except SessionNotFoundError as exc:
+        parser.error(str(exc))
+        return 2
+    except SessionBusyError as exc:
+        print(f"Error: {exc}")
+        return 1
+    except EmptyInputError as exc:
+        print(f"Error: {exc}")
+        return 1
     except ValueError as exc:
         parser.error(str(exc))
         return 2

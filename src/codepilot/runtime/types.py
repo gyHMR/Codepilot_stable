@@ -6,18 +6,17 @@ Runtime 对外类型定义模块。
 定义了创建 Agent 会话所需的配置选项 CreateAgentSessionOptions，
 以及运行模式、输出/输入函数等辅助类型。
 
-配置分组（阶段二引入）：
-- ModelSelection: 模型选择（provider/model_id）
-- AgentPolicy: Agent 策略（thinking_level、retry 等）
-- ContextPolicy: 上下文管理策略（消息数、token 数等）
-- ToolPolicy: 工具策略（执行模式、权限等）
-
-CreateAgentSessionOptions 保持向后兼容，内部可从分组构建。
+装配产物（Runtime 装配优化引入）：
+- RuntimeDiagnostic: 装配诊断信息
+- ResolvedRuntimeProfile: 统一运行时配置
+- CapabilityCatalog: 能力目录
+- RuntimeAssembly: 完整装配产物
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Optional
 
 from codepilot.protocols import Message, Model
 from codepilot.core import (
@@ -30,7 +29,11 @@ from codepilot.core import (
 )
 from codepilot.extensions.types import LifecycleHook, RegisteredCommand
 from codepilot.sessions.types import AgentSessionOptions, ConvertToLlmFn
-from codepilot.tools import AgentTool
+from codepilot.tools import AgentTool, ToolMetadata
+
+if TYPE_CHECKING:
+    from .context import RepositoryBootstrap
+    from codepilot.sessions.session import AgentSession
 
 
 # ── 配置分组（阶段二引入） ────────────────────────────────────────
@@ -54,56 +57,6 @@ class ModelSelection:
         if self.provider and self.model_id:
             return f"{self.provider}/{self.model_id}"
         return self.model_id or "(not configured)"
-
-
-@dataclass(frozen=True)
-class AgentPolicy:
-    """Agent 策略配置。
-
-    控制 Agent 的推理、重试等行为。
-
-    Attributes:
-        thinking_level: 推理级别（off/minimal/low/medium/high/xhigh）。
-        retry_enabled: 是否启用重试。
-        max_retries: 最大重试次数。
-        retry_base_delay_ms: 重试基础延迟（毫秒）。
-    """
-    thinking_level: str = "off"
-    retry_enabled: bool = True
-    max_retries: int = 2
-    retry_base_delay_ms: int = 1200
-
-
-@dataclass(frozen=True)
-class ContextPolicy:
-    """上下文管理策略。
-
-    控制上下文窗口的溢出检测和压缩行为。
-
-    Attributes:
-        max_messages: 消息数量上限（None 表示不限制）。
-        max_tokens: token 数量上限（None 表示不限制）。
-        retain_recent_messages: 压缩时保留的最近消息数。
-    """
-    max_messages: int | None = None
-    max_tokens: int | None = None
-    retain_recent_messages: int = 24
-
-
-@dataclass(frozen=True)
-class ToolPolicy:
-    """工具策略配置。
-
-    控制工具的执行模式和权限。
-
-    Attributes:
-        execution: 工具执行模式（parallel/sequential）。
-        permission_mode: 权限模式（read-only/workspace-write）。
-        block_dangerous_bash: 是否阻止危险 bash 命令。
-    """
-    execution: ToolExecutionMode = "parallel"
-    permission_mode: str = "workspace-write"
-    block_dangerous_bash: bool = True
 
 
 @dataclass
@@ -206,3 +159,150 @@ RunMode = Literal["print", "interactive", "rpc"]
 OutputFn = Callable[[str], None]
 # 输入函数类型：接收提示文本并返回用户输入
 InputFn = Callable[[str], str]
+
+
+# ── 装配产物类型（Runtime 装配优化引入） ──────────────────────────
+
+@dataclass(frozen=True)
+class RuntimeDiagnostic:
+    """装配诊断信息。
+
+    记录装配过程中的警告、错误和信息，用于 CLI 启动展示和调试。
+
+    Attributes:
+        severity: 严重级别（info/warning/error）。
+        code: 诊断代码（如 tool.name_conflict）。
+        message: 诊断消息。
+        source: 来源（可选）。
+    """
+    severity: Literal["info", "warning", "error"]
+    code: str
+    message: str
+    source: str | None = None
+
+
+@dataclass(frozen=True)
+class ConfigValueSource:
+    """配置值来源。
+
+    Attributes:
+        kind: 来源类型（cli/session/project/user/default）。
+        location: 具体位置（可选，如文件路径）。
+    """
+    kind: str
+    location: str | None = None
+
+
+@dataclass(frozen=True)
+class ResolvedRuntimeProfile:
+    """统一运行时配置。
+
+    汇总所有配置的最终值和来源，供 CLI status/config explain 查询。
+
+    Attributes:
+        model: 解析后的模型对象。
+        credential_source: 凭证来源（env/local-file/missing）。
+        credential_location: 凭证位置（可选，如环境变量名）。
+        permission_mode: 工具权限模式。
+        sources: 每个配置项的来源。
+    """
+    model: Model
+    credential_source: str
+    credential_location: str | None = None
+    permission_mode: Literal["read-only", "workspace-write"] = "workspace-write"
+    sources: dict[str, ConfigValueSource] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RegisteredTool:
+    """已注册的工具信息。
+
+    Attributes:
+        name: 工具名称。
+        tool: 工具对象。
+        metadata: 工具执行元数据。
+        source: 来源（builtin/caller/extension/mcp）。
+        origin: 具体来源（如扩展路径）。
+    """
+    name: str
+    tool: AgentTool
+    metadata: ToolMetadata | None
+    source: str
+    origin: str | None = None
+
+
+@dataclass
+class CapabilityCatalog:
+    """能力目录。
+
+    统一表示工具和命令。
+
+    Attributes:
+        tools: 已注册的工具列表。
+        commands: 已注册的命令字典。
+    """
+    tools: list[RegisteredTool] = field(default_factory=list)
+    commands: dict[str, RegisteredCommand] = field(default_factory=dict)
+
+
+@dataclass
+class RuntimeAssembly:
+    """完整装配产物。
+
+    保存装配过程的所有结果，供 RuntimeService 和 CLI 查询。
+
+    Attributes:
+        session_options: 最终的会话选项。
+        profile: 统一运行时配置。
+        repository: 仓库引导信息。
+        capabilities: 能力目录。
+        diagnostics: 装配诊断列表。
+    """
+    session_options: AgentSessionOptions
+    profile: ResolvedRuntimeProfile
+    repository: RepositoryBootstrap
+    capabilities: CapabilityCatalog
+    diagnostics: list[RuntimeDiagnostic] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SessionHandle:
+    """RuntimeService 创建并注册的会话句柄。"""
+
+    session_id: str
+    session: AgentSession
+    assembly: RuntimeAssembly
+
+
+@dataclass(frozen=True)
+class UserInput:
+    """发送给会话的用户输入。"""
+
+    text: str
+    images: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class SessionStatus:
+    """供接口层展示的会话状态快照。"""
+
+    session_id: str
+    model_id: str
+    workspace: str
+    permission_mode: str
+    message_count: int
+    leaf_id: str
+    is_running: bool = False
+    credential_source: str = "unknown"
+    warnings: list[str] | None = None
+
+
+@dataclass
+class ActiveRun:
+    """RuntimeService 内部的活动运行记录。"""
+
+    run_id: str
+    session_id: str
+    task: asyncio.Task[Any] | None = None
+    started_at: float = 0
+    status: Literal["running", "completed", "failed", "aborted"] = "running"

@@ -38,16 +38,19 @@ def test_im_interface_source_package_is_removed() -> None:
     remaining_sources = sorted(path.name for path in im_dir.glob("*.py")) if im_dir.exists() else []
 
     assert remaining_sources == []
-    assert find_spec("codepilot.interfaces.im.cli") is None
+    try:
+        spec = find_spec("codepilot.interfaces.im.cli")
+    except ModuleNotFoundError:
+        spec = None
+    assert spec is None
 
 
 def test_cli_parser_builds() -> None:
     from codepilot.interfaces.cli.main import build_parser
 
     parser = build_parser()
-    args = parser.parse_args(["--mode", "print", "--prompt", "hello"])
+    args = parser.parse_args(["--prompt", "hello"])
 
-    assert args.mode == "print"
     assert args.prompt == "hello"
 
 

@@ -6,7 +6,7 @@ Agent 会话工厂模块。
 提供 create_agent_session 工厂函数，将上层友好的 CreateAgentSessionOptions
 解析为底层的 AgentSessionOptions，并创建 AgentSession 实例。
 
-解析流程：
+装配流程：
 1) 加载运行时输入（工作区资源、会话恢复元数据）
 2) 解析模型配置（从 options / 会话元数据 / 工作区配置中确定模型）
 3) 解析运行时配置（多源合并）
@@ -15,45 +15,42 @@ Agent 会话工厂模块。
 6) 构建系统提示词
 7) 组装钩子（before/after tool call、生命周期钩子）
 8) 构造最终的 AgentSessionOptions 并创建 AgentSession
+9) 保存装配产物（RuntimeAssembly）
 """
+
+from dataclasses import replace
 
 from codepilot.sessions.session import AgentSession
 from codepilot.core.message_conversion import convert_to_llm
 
 from .config import load_runtime_inputs, resolve_runtime_config
-from .context import build_runtime_context
+from .context import build_runtime_context, build_repository_bootstrap
 from .hook_pipeline import compose_after_tool_call, compose_before_tool_call, compose_lifecycle_hooks
 from .model_resolver import resolve_model
 from .prompt import build_runtime_system_prompt
 from .tool_assembler import assemble_tools
-from .types import AgentSessionOptions, CreateAgentSessionOptions
+from .types import (
+    AgentSessionOptions,
+    CapabilityCatalog,
+    ConfigValueSource,
+    CreateAgentSessionOptions,
+    ResolvedRuntimeProfile,
+    RuntimeAssembly,
+    RuntimeDiagnostic,
+)
 
 
-def create_agent_session(options: AgentSessionOptions | CreateAgentSessionOptions) -> AgentSession:
-    """创建 AgentSession 实例（工厂入口）。
+def create_agent_session(options: CreateAgentSessionOptions) -> AgentSession:
+    """创建一个完整装配的 AgentSession。"""
 
-    支持两种输入形式：
-    - AgentSessionOptions: 底层参数，model 必填，直接创建。
-    - CreateAgentSessionOptions: 友好参数，支持 provider/model_id 或会话恢复，
-      自动解析为 AgentSessionOptions 后创建。
-
-    Args:
-        options: 会话配置选项。
-
-    Returns:
-        创建好的 AgentSession 实例。
-    """
-    if isinstance(options, AgentSessionOptions):
-        return AgentSession(options)
-
-    concrete = build_agent_session_options(options)
-    return AgentSession(concrete)
+    session, _ = assemble_runtime(options)
+    return session
 
 
-def build_agent_session_options(options: CreateAgentSessionOptions) -> AgentSessionOptions:
-    """将友好的 CreateAgentSessionOptions 解析为底层的 AgentSessionOptions。
+def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, RuntimeAssembly]:
+    """完整装配流程，返回 AgentSession 和 RuntimeAssembly。
 
-    完整解析流程：
+    装配流程：
     1. load_runtime_inputs: 加载工作区资源和会话恢复元数据。
     2. resolve_model: 解析模型配置。
     3. resolve_runtime_config: 多源合并运行时配置。
@@ -61,21 +58,47 @@ def build_agent_session_options(options: CreateAgentSessionOptions) -> AgentSess
     5. build_runtime_context: 构建运行时上下文。
     6. build_runtime_system_prompt: 构建系统提示词。
     7. compose_*: 组装钩子函数。
+    8. 构建 RuntimeAssembly。
 
     Args:
         options: 友好的创建会话选项。
 
     Returns:
-        解析完成的底层 AgentSessionOptions。
+        (AgentSession, RuntimeAssembly) 元组。
     """
+    diagnostics: list[RuntimeDiagnostic] = []
+
     # 步骤 1：加载运行时输入数据
     inputs = load_runtime_inputs(options)
+
     # 步骤 2：解析模型
     resolved_model = resolve_model(options, inputs)
+
+    # 确定凭证来源
+    credential_source, credential_location = _resolve_credential_source(options, inputs)
+
     # 步骤 3：解析运行时配置
     config = resolve_runtime_config(options, inputs)
+
+    # 构建配置来源
+    sources = _build_config_sources(config.sources)
+
+    # 构建 ResolvedRuntimeProfile
+    profile = ResolvedRuntimeProfile(
+        model=resolved_model.model,
+        credential_source=credential_source,
+        credential_location=credential_location,
+        permission_mode="read-only" if config.read_only_mode else "workspace-write",
+        sources=sources,
+    )
+
     # 步骤 4：组装工具
     assembled_tools = assemble_tools(inputs.workspace, options, config)
+
+    # 收集工具装配诊断
+    for diag in assembled_tools.diagnostics:
+        diagnostics.append(diag)
+
     # 步骤 5：构建运行时上下文
     runtime_context = build_runtime_context(
         inputs.workspace,
@@ -83,6 +106,7 @@ def build_agent_session_options(options: CreateAgentSessionOptions) -> AgentSess
         assembled_tools.loaded_extensions,
         assembled_tools.loaded_skills,
     )
+
     # 步骤 6：构建系统提示词
     system_prompt = build_runtime_system_prompt(
         base_system_prompt=config.system_prompt,
@@ -110,7 +134,7 @@ def build_agent_session_options(options: CreateAgentSessionOptions) -> AgentSess
     )
 
     # 步骤 8：构造最终的 AgentSessionOptions
-    return AgentSessionOptions(
+    session_options = AgentSessionOptions(
         model=resolved_model.model,
         workspace_dir=inputs.workspace,
         system_prompt=system_prompt,
@@ -138,3 +162,63 @@ def build_agent_session_options(options: CreateAgentSessionOptions) -> AgentSess
         before_tool_call=before_tool_call,
         after_tool_call=after_tool_call,
     )
+
+    # 步骤 9：构建能力目录和装配产物
+    capability_catalog = CapabilityCatalog(
+        tools=assembled_tools.registered_tools,
+        commands={
+            **assembled_tools.loaded_skills.commands,
+            **assembled_tools.loaded_extensions.commands,
+        },
+    )
+    session = AgentSession(session_options)
+    effective_session_options = replace(
+        session_options,
+        session_id=session.session_id,
+    )
+    assembly = RuntimeAssembly(
+        session_options=effective_session_options,
+        profile=profile,
+        repository=build_repository_bootstrap(inputs.workspace),
+        capabilities=capability_catalog,
+        diagnostics=diagnostics,
+    )
+
+    return session, assembly
+
+
+def _resolve_credential_source(
+    options: CreateAgentSessionOptions,
+    inputs: Any,
+) -> tuple[str, str | None]:
+    """解析凭证来源。
+
+    Returns:
+        (凭证来源, 凭证位置) 元组。
+    """
+    resources = inputs.resources
+
+    # 检查环境变量
+    if options.get_api_key:
+        return "caller", "get_api_key function"
+
+    if resources and resources.model:
+        if resources.model.api_key_env:
+            import os
+            if os.getenv(resources.model.api_key_env):
+                return "env", resources.model.api_key_env
+        if resources.model.api_key:
+            return "local-file", ".codepilot/model.local.json"
+
+    return "missing", None
+
+
+def _build_config_sources(raw_sources: dict[str, str]) -> dict[str, ConfigValueSource]:
+    """构建配置来源映射。"""
+    source_map = {
+        "options": ConfigValueSource(kind="cli"),
+        "restored_session": ConfigValueSource(kind="session"),
+        "workspace": ConfigValueSource(kind="project", location=".codepilot/settings.json"),
+        "default": ConfigValueSource(kind="default"),
+    }
+    return {key: source_map.get(value, ConfigValueSource(kind=value)) for key, value in raw_sources.items()}

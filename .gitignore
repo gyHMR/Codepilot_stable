@@ -50,6 +50,7 @@ TODOLIST/
 .codex/
 .codegraph/
 .codepilot/
+.claude.md
 Planing/
 Agents.md
 docs/

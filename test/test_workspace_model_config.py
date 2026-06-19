@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from codepilot.interfaces.cli.cli import _init_model_config, build_parser
 from codepilot.runtime.factory import create_agent_session
 from codepilot.runtime.model_resolver import resolve_model
@@ -85,22 +87,23 @@ def test_init_config_creates_editable_template(tmp_path) -> None:
 
 
 def test_cli_exposes_local_config_commands() -> None:
-    args = build_parser().parse_args(["--init-config"])
+    args = build_parser().parse_args(["config", "init"])
 
-    assert args.init_config is True
+    assert args.command == "config"
+    assert args.config_action == "init"
 
 
 def test_cli_defaults_leave_runtime_config_unspecified() -> None:
-    args = build_parser().parse_args(["--mode", "print", "--prompt", "hello"])
+    args = build_parser().parse_args(["--prompt", "hello"])
 
-    assert args.system_prompt is None
-    assert args.thinking_level is None
-    assert args.tool_execution is None
-    assert args.retain_recent_messages is None
-    assert args.no_retry is None
-    assert args.read_only is None
-    assert args.allow_dangerous_bash is None
-    assert args.relaxed_edit is None
+    assert args.prompt == "hello"
+    assert args.model is None
+    assert args.permission_mode is None
+
+
+def test_cli_rejects_removed_legacy_options() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--mode", "print", "--prompt", "hello"])
 
 
 def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> None:

@@ -50,12 +50,14 @@ class RuntimeCommandResult:
     Attributes:
         handled: 是否已处理（True 表示匹配到命令，False 表示未匹配）。
         output_lines: 命令输出的文本行列表。
-        switched_session: 如果命令导致会话切换，此字段包含新的 AgentSession。
+        switched_session: 命令处理器内部创建的新 AgentSession。
+        switched_session_id: RuntimeService 注册后的新会话 ID。
     """
 
     handled: bool
     output_lines: list[str] = field(default_factory=list)
     switched_session: AgentSession | None = None
+    switched_session_id: str | None = None
 
 
 def builtin_commands() -> list[RuntimeCommand]:
@@ -159,7 +161,6 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
             f"  Session    : {session_id}",
             f"  Leaf       : {leaf_id}",
             f"  Messages   : {message_count}",
-            f"  Permission : workspace-write",  # TODO: 从配置读取
         ]
         return RuntimeCommandResult(handled=True, output_lines=lines)
 
@@ -216,25 +217,30 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
 
     # /compact: 手动触发上下文压缩
     if cmd == "/compact":
-        try:
-            # 尝试执行压缩
-            from codepilot.sessions.compaction import build_compacted_context, fallback_summary
-            messages = session.messages
-            if len(messages) < 10:
-                return RuntimeCommandResult(
-                    handled=True,
-                    output_lines=["Context is too short to compact."],
-                )
-            # 执行压缩
-            summary = fallback_summary(messages)
+        messages = session.messages
+        if len(messages) < 10:
             return RuntimeCommandResult(
                 handled=True,
-                output_lines=[
-                    "Context compacted.",
-                    f"Messages: {len(messages)} -> ~10",
-                    f"Summary: {summary[:100]}...",
-                ],
+                output_lines=["Context is too short to compact (need at least 10 messages)."],
             )
+        # 尝试调用 Session 的压缩方法
+        try:
+            # 检查 Session 是否有压缩方法
+            if hasattr(session, '_compact_context_if_needed'):
+                # 注意：这是内部方法，正式版本应该暴露公开 API
+                return RuntimeCommandResult(
+                    handled=True,
+                    output_lines=[
+                        "[yellow]Warning: Manual compaction not yet fully implemented.[/yellow]",
+                        f"Current messages: {len(messages)}",
+                        "Compaction will happen automatically when context window is full.",
+                    ],
+                )
+            else:
+                return RuntimeCommandResult(
+                    handled=True,
+                    output_lines=["Compaction not available for this session."],
+                )
         except Exception as exc:
             return RuntimeCommandResult(
                 handled=True,

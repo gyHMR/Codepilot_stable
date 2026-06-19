@@ -100,5 +100,5 @@ def resolve_model(
     # 所有来源均未匹配
     raise ValueError(
         "Unable to resolve model: create .codepilot/model.local.json "
-        "or provide --provider and --model-id"
+        "or provide --model provider/model-id"
     )
