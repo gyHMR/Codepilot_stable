@@ -69,6 +69,10 @@ def builtin_commands() -> list[RuntimeCommand]:
         RuntimeCommand(name="new", description="等价于从当前叶子分叉新会话", source="builtin"),
         RuntimeCommand(name="switch", description="切换到指定叶子节点", source="builtin"),
         RuntimeCommand(name="clear", description="清空上下文，创建新会话", source="builtin"),
+        RuntimeCommand(name="compact", description="手动触发上下文压缩", source="builtin"),
+        RuntimeCommand(name="tools", description="查看当前可用工具", source="builtin"),
+        RuntimeCommand(name="model", description="查看当前模型信息", source="builtin"),
+        RuntimeCommand(name="usage", description="查看 token 用量和费用", source="builtin"),
         RuntimeCommand(name="exit", description="退出 Codepilot", source="builtin"),
     ]
 
@@ -209,6 +213,72 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
             handled=True,
             output_lines=[f"switched leaf -> {session.get_leaf_id()}"],
         )
+
+    # /compact: 手动触发上下文压缩
+    if cmd == "/compact":
+        try:
+            # 尝试执行压缩
+            from codepilot.sessions.compaction import build_compacted_context, fallback_summary
+            messages = session.messages
+            if len(messages) < 10:
+                return RuntimeCommandResult(
+                    handled=True,
+                    output_lines=["Context is too short to compact."],
+                )
+            # 执行压缩
+            summary = fallback_summary(messages)
+            return RuntimeCommandResult(
+                handled=True,
+                output_lines=[
+                    "Context compacted.",
+                    f"Messages: {len(messages)} -> ~10",
+                    f"Summary: {summary[:100]}...",
+                ],
+            )
+        except Exception as exc:
+            return RuntimeCommandResult(
+                handled=True,
+                output_lines=[f"Compact error: {exc}"],
+            )
+
+    # /tools: 查看当前可用工具
+    if cmd == "/tools":
+        tools = session.agent.state.tools
+        if not tools:
+            return RuntimeCommandResult(handled=True, output_lines=["(no tools available)"])
+        lines: list[str] = ["Available tools:"]
+        for tool in tools:
+            name = tool.name if hasattr(tool, "name") else str(tool)
+            desc = tool.description if hasattr(tool, "description") else ""
+            lines.append(f"  - {name}: {desc[:50]}...")
+        return RuntimeCommandResult(handled=True, output_lines=lines)
+
+    # /model: 查看当前模型信息
+    if cmd == "/model":
+        model = session.agent.state.model
+        model_id = f"{model.provider}/{model.id}" if model.provider else model.id
+        lines = [
+            "=== Model ===",
+            f"  ID         : {model_id}",
+            f"  Provider   : {model.provider}",
+            f"  API        : {model.api}",
+            f"  Base URL   : {model.base_url}",
+            f"  Reasoning  : {model.reasoning}",
+            f"  Vision     : {model.capabilities.vision if model.capabilities else False}",
+        ]
+        return RuntimeCommandResult(handled=True, output_lines=lines)
+
+    # /usage: 查看 token 用量和费用
+    if cmd == "/usage":
+        usage = session.cumulative_usage
+        lines = [
+            "=== Usage ===",
+            f"  Input tokens  : {usage['input_tokens']:,}",
+            f"  Output tokens : {usage['output_tokens']:,}",
+            f"  Total tokens  : {usage['total_tokens']:,}",
+            f"  Total cost    : ${usage['total_cost']:.4f}",
+        ]
+        return RuntimeCommandResult(handled=True, output_lines=lines)
 
     # /exit: 退出 CLI（由上层处理实际退出逻辑）
     if cmd == "/exit":

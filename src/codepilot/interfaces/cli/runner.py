@@ -215,6 +215,11 @@ class TerminalRenderer:
             self._handle_tool_end(event)
             return
 
+        # 工具审批请求
+        if event_type == "tool_approval_required":
+            self._handle_approval_required(event)
+            return
+
         # 错误事件
         if event_type == "error":
             self._handle_error(event)
@@ -309,6 +314,50 @@ class TerminalRenderer:
 
         self._current_tool = None
         self._tool_start_time = 0
+
+    def _handle_approval_required(self, event: AgentEvent) -> None:
+        """处理工具审批请求事件。
+
+        显示工具调用信息，等待用户确认。
+        """
+        tool_name = event.get("toolName", "unknown")
+        args = event.get("args", {})
+        approval_id = event.get("approvalId", "")
+        risk_level = event.get("riskLevel", "medium")
+
+        # 结束之前的流式文本
+        if self._stream_started:
+            self._print()
+            self._stream_started = False
+
+        # 提取目标信息
+        target = self._extract_tool_target(tool_name, args)
+
+        if self._console:
+            from rich.panel import Panel
+            from rich.text import Text
+
+            content = Text()
+            content.append("Tool requests permission:\n", style="bold yellow")
+            content.append(f"  {tool_name}", style="bold")
+            if target:
+                content.append(f" {target}", style="dim")
+            content.append(f"\n  Risk level: {risk_level}", style="dim")
+
+            panel = Panel(
+                content,
+                title="[bold yellow]Approval Required[/bold yellow]",
+                border_style="yellow",
+                padding=(1, 2),
+            )
+            self._console.print(panel)
+        else:
+            self._print()
+            self._print(f"⚠️  Tool requests permission: {tool_name} {target}")
+            self._print(f"   Risk level: {risk_level}")
+
+        # 注意：实际的审批流程需要通过 Runtime 的 ApprovalProvider 处理
+        # 这里只是显示信息，审批决定通过 Runtime API 返回
 
     def _handle_error(self, event: AgentEvent) -> None:
         """处理错误事件。"""
@@ -504,21 +553,38 @@ async def run_interactive(
 
     流程：
     1. 渲染启动摘要
-    2. 循环读取用户输入
-    3. "/" 开头 → 交给命令处理器
-    4. 普通文本 → 调用 Agent 处理
-    5. 捕获 KeyboardInterrupt，安全回到输入循环
+    2. 创建 InteractiveShell（支持历史、补全、快捷键）
+    3. 循环读取用户输入
+    4. "/" 开头 → 交给命令处理器
+    5. 普通文本 → 调用 Agent 处理
+    6. 捕获 KeyboardInterrupt，安全回到输入循环
     """
+    from .shell import create_shell
+
     # 交互模式使用 rich 渲染器
     renderer = TerminalRenderer(verbose=verbose, use_rich=not no_color)
     startup_state = _build_startup_state(session)
     renderer.render_startup(state=startup_state)
 
+    # 创建 InteractiveShell（支持历史、补全）
+    workspace = session.workspace_dir
+    shell = create_shell(
+        history_dir=workspace / ".codepilot",
+        no_color=no_color,
+    )
+
     current_session = session
 
     while True:
+        # 获取用户输入
         try:
-            if renderer._console:
+            if shell:
+                # 使用 prompt_toolkit（异步版本）
+                text = await shell.prompt(
+                    prompt_text="> ",
+                    bottom_toolbar="<b>Ctrl+C</b> cancel | <b>/help</b> commands",
+                )
+            elif renderer._console:
                 # 使用 rich 的 prompt
                 text = renderer._console.input("[bold green]>[/bold green] ")
             else:
@@ -526,6 +592,10 @@ async def run_interactive(
             text = text.strip()
         except EOFError:
             # Ctrl+D 退出
+            renderer._print("\nBye.")
+            return
+        except KeyboardInterrupt:
+            # Ctrl+C 在输入阶段：清空输入或退出
             renderer._print("\nBye.")
             return
 
@@ -560,8 +630,6 @@ async def run_interactive(
         try:
             renderer.reset()
             # 交互模式下，流式文本由 renderer 的 handle_event 处理
-            # run_print 内部的 SimpleRenderer 只用于 print 模式
-            # 这里直接订阅 renderer 的事件并调用 session.run
             unsubscribe = current_session.subscribe(renderer.handle_event)
             try:
                 await current_session.run(text)
