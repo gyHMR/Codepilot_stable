@@ -1,9 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-"""Workspace resource loading:
-1) settings.json: model and runtime parameters
-2) prompt.md: system prompt
-3) tools.json: enabled built-in tools
+"""
+工作区资源加载模块。
+
+负责从工作区的 `.codepilot/` 目录加载配置文件：
+1) settings.json: 模型和运行时参数配置
+2) model.local.json: 自定义模型配置（本地模型或非内置 provider）
+3) prompt.md: 自定义系统提示词
+4) tools.json: 启用的内置工具列表
 """
 
 import json
@@ -16,11 +20,29 @@ from codepilot.core import ToolExecutionMode
 from codepilot.protocols import Model, ModelCapabilities
 
 
+# 支持的模型 API 协议集合
 SUPPORTED_MODEL_APIS = {"openai-compatible", "anthropic-messages"}
 
 
 @dataclass(frozen=True)
 class WorkspaceModelConfig:
+    """工作区自定义模型配置。
+
+    从 `.codepilot/model.local.json` 加载，用于配置非内置的自定义模型。
+
+    Attributes:
+        api: API 协议标识（"openai-compatible" 或 "anthropic-messages"）。
+        provider: provider 名称。
+        model_id: 模型 ID。
+        base_url: API 端点基础 URL。
+        api_key: 明文 API Key（可选，优先使用环境变量）。
+        api_key_env: API Key 对应的环境变量名（可选）。
+        context_window: 上下文窗口大小（默认 128K）。
+        max_tokens: 最大输出 token 数（默认 8192）。
+        reasoning: 是否支持推理模式。
+        vision: 是否支持图片输入。
+    """
+
     api: str
     provider: str
     model_id: str
@@ -33,6 +55,7 @@ class WorkspaceModelConfig:
     vision: bool = False
 
     def __post_init__(self) -> None:
+        """初始化后校验：确保 API 协议、必填字段和数值范围有效。"""
         if self.api not in SUPPORTED_MODEL_APIS:
             raise ValueError(f"Unsupported API protocol: {self.api}")
         if not self.provider or not self.model_id or not self.base_url:
@@ -41,6 +64,7 @@ class WorkspaceModelConfig:
             raise ValueError("context_window and max_tokens must be positive")
 
     def to_model(self) -> Model:
+        """将工作区模型配置转换为通用的 Model 对象。"""
         return Model(
             id=self.model_id,
             name=self.model_id,
@@ -63,6 +87,7 @@ class WorkspaceModelConfig:
         )
 
     def resolve_api_key(self) -> str | None:
+        """解析 API Key：优先从环境变量读取，其次使用明文配置。"""
         if self.api_key_env:
             value = os.getenv(self.api_key_env)
             if value:
@@ -70,11 +95,43 @@ class WorkspaceModelConfig:
         return self.api_key
 
     def build_api_key_resolver(self) -> Callable[[str], str | None]:
+        """构建 API Key 解析器函数（忽略 provider 参数，始终返回本配置的 Key）。"""
         return lambda _provider: self.resolve_api_key()
 
 
 @dataclass
 class WorkspaceSettings:
+    """工作区 settings.json 配置。
+
+    所有字段都是可选的，未设置时使用 RuntimeDefaults 中的默认值。
+    通过 WorkspaceResourceLoader._load_settings() 从 JSON 文件加载。
+
+    Attributes:
+        provider: provider 名称。
+        model_id: 模型 ID。
+        system_prompt: 自定义系统提示词。
+        thinking_level: 推理级别。
+        tool_execution: 工具执行模式。
+        max_context_messages: 消息数量上限。
+        retain_recent_messages: 压缩时保留的最近消息数。
+        max_context_tokens: token 数量上限。
+        retry_enabled: 是否启用重试。
+        max_retries: 最大重试次数。
+        retry_base_delay_ms: 重试基础延迟（毫秒）。
+        read_only_mode: 是否为只读模式。
+        block_dangerous_bash: 是否阻止危险 bash 命令。
+        bash_allow_patterns: bash 命令白名单。
+        bash_block_patterns: bash 命令黑名单。
+        edit_require_unique_match: edit 是否要求唯一匹配。
+        prompt_guidelines: 额外的提示词准则。
+        append_system_prompt: 追加到系统提示词末尾的文本。
+        tool_snippets: 工具说明片段。
+        extension_paths: 扩展加载路径。
+        skill_paths: 技能加载路径。
+        prompt_debug_sources: 是否包含调试来源信息。
+        mcp_servers: MCP 服务器配置。
+    """
+
     provider: Optional[str] = None
     model_id: Optional[str] = None
     system_prompt: Optional[str] = None
@@ -102,6 +159,15 @@ class WorkspaceSettings:
 
 @dataclass
 class WorkspaceResources:
+    """工作区资源汇总。
+
+    Attributes:
+        settings: settings.json 中的配置。
+        model: model.local.json 中的自定义模型配置（不存在时为 None）。
+        prompt: prompt.md 中的自定义系统提示词（不存在时为 None）。
+        enabled_tools: tools.json 中启用的工具列表（不存在时为 None）。
+    """
+
     settings: WorkspaceSettings
     model: WorkspaceModelConfig | None
     prompt: Optional[str]
@@ -109,6 +175,19 @@ class WorkspaceResources:
 
 
 class WorkspaceResourceLoader:
+    """工作区资源加载器。
+
+    从工作区的 `.codepilot/` 目录加载所有配置文件，
+    并进行类型安全的解析和校验。
+
+    使用示例::
+
+        loader = WorkspaceResourceLoader("/path/to/workspace")
+        resources = loader.load()
+        if resources.model:
+            model = resources.model.to_model()
+    """
+
     def __init__(self, workspace_dir: str | Path) -> None:
         self.workspace_dir = Path(workspace_dir)
         self.resource_root = self.workspace_dir / ".codepilot"
@@ -118,6 +197,7 @@ class WorkspaceResourceLoader:
         self.tools_file = self.resource_root / "tools.json"
 
     def load(self) -> WorkspaceResources:
+        """加载所有工作区资源文件。"""
         return WorkspaceResources(
             settings=self._load_settings(),
             model=self._load_model(),
@@ -126,12 +206,14 @@ class WorkspaceResourceLoader:
         )
 
     def _load_settings(self) -> WorkspaceSettings:
+        """加载并解析 settings.json。"""
         if not self.settings_file.exists():
             return WorkspaceSettings()
         raw = self._safe_load_json(self.settings_file)
         if not isinstance(raw, dict):
             return WorkspaceSettings()
 
+        # 校验 tool_execution 枚举值
         tool_execution = raw.get("tool_execution")
         if tool_execution not in {"parallel", "sequential"}:
             tool_execution = None
@@ -171,6 +253,7 @@ class WorkspaceResourceLoader:
         )
 
     def _load_model(self) -> WorkspaceModelConfig | None:
+        """加载并解析 model.local.json。"""
         if not self.model_file.exists():
             return None
         raw = self._safe_load_json(self.model_file)
@@ -193,12 +276,14 @@ class WorkspaceResourceLoader:
             raise ValueError(f"Invalid model config {self.model_file}: {exc}") from exc
 
     def _load_prompt(self) -> Optional[str]:
+        """加载 prompt.md 文件内容。"""
         if not self.prompt_file.exists():
             return None
         text = self.prompt_file.read_text(encoding="utf-8").strip()
         return text or None
 
     def _load_tools(self) -> Optional[list[str]]:
+        """加载并解析 tools.json 中的 enabled 列表。"""
         if not self.tools_file.exists():
             return None
         raw = self._safe_load_json(self.tools_file)
@@ -211,6 +296,7 @@ class WorkspaceResourceLoader:
 
     @staticmethod
     def _safe_load_json(path: Path) -> Any:
+        """安全加载 JSON 文件，解析失败时返回 None。"""
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -218,6 +304,7 @@ class WorkspaceResourceLoader:
 
     @staticmethod
     def _to_positive_int(value: Any) -> Optional[int]:
+        """将值转换为正整数（排除 bool 类型），无效时返回 None。"""
         if isinstance(value, bool):
             return None
         if isinstance(value, int) and value > 0:
@@ -226,12 +313,14 @@ class WorkspaceResourceLoader:
 
     @staticmethod
     def _to_string_list(value: Any) -> Optional[list[str]]:
+        """将值转换为字符串列表，过滤非字符串元素。"""
         if not isinstance(value, list):
             return None
         return [item for item in value if isinstance(item, str)]
 
     @staticmethod
     def _to_string_map(value: Any) -> Optional[dict[str, str]]:
+        """将值转换为字符串字典，过滤非字符串的键值。"""
         if not isinstance(value, dict):
             return None
         result: dict[str, str] = {}
@@ -242,6 +331,7 @@ class WorkspaceResourceLoader:
 
     @staticmethod
     def _to_object_list(value: Any) -> Optional[list[dict[str, Any]]]:
+        """将值转换为字典列表，过滤非字典元素。"""
         if not isinstance(value, list):
             return None
         result: list[dict[str, Any]] = []
@@ -249,4 +339,3 @@ class WorkspaceResourceLoader:
             if isinstance(item, dict):
                 result.append(dict(item))
         return result
-

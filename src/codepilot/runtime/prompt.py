@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-"""Pure runtime system-prompt rendering."""
+"""
+系统提示词渲染模块。
+
+负责构建最终发送给 LLM 的系统提示词，包括：
+- 基础提示词（自定义或默认的编程助手人设）
+- 仓库上下文（项目类型、目录结构、Git 状态）
+- 长期记忆（全局 MEMORY 文件内容）
+- 追加段落（扩展和技能注入的内容）
+- 当前日期和工作目录
+"""
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +23,19 @@ from .context import RuntimeContext
 
 @dataclass
 class SystemPromptBuildOptions:
+    """系统提示词构建选项。
+
+    Attributes:
+        custom_prompt: 自定义系统提示词（覆盖默认人设）。
+        selected_tools: 当前会话可用的工具名称列表。
+        tool_snippets: 工具说明片段字典（工具名 -> 说明文本）。
+        prompt_guidelines: 额外的提示词准则列表。
+        append_sections: 追加到提示词末尾的段落列表。
+        repository_context: 渲染后的仓库上下文文本。
+        memory_text: 长期记忆文本。
+        cwd: 当前工作目录路径。
+    """
+
     custom_prompt: Optional[str] = None
     selected_tools: Optional[list[str]] = None
     tool_snippets: Optional[dict[str, str]] = None
@@ -31,6 +53,20 @@ def build_runtime_system_prompt(
     runtime_context: RuntimeContext,
     workspace: Path,
 ) -> str:
+    """构建运行时系统提示词（工厂调用入口）。
+
+    将底层运行时参数转换为 SystemPromptBuildOptions，
+    然后委托给 build_system_prompt 完成渲染。
+
+    Args:
+        base_system_prompt: 基础系统提示词（来自配置或会话恢复）。
+        tools: 当前会话可用的工具列表。
+        runtime_context: 运行时上下文（仓库信息、准则、记忆等）。
+        workspace: 工作区目录路径。
+
+    Returns:
+        完整的系统提示词字符串。
+    """
     return build_system_prompt(
         SystemPromptBuildOptions(
             custom_prompt=base_system_prompt or None,
@@ -46,15 +82,32 @@ def build_runtime_system_prompt(
 
 
 def build_system_prompt(options: SystemPromptBuildOptions) -> str:
+    """根据选项构建完整的系统提示词。
+
+    拼接顺序：
+    1) 基础提示词（自定义或默认人设）
+    2) 仓库上下文（项目类型、目录结构等）
+    3) 长期记忆（MEMORY 文件内容）
+    4) 追加段落（扩展/技能注入的内容）
+    5) 当前日期和工作目录
+
+    Args:
+        options: 系统提示词构建选项。
+
+    Returns:
+        完整的系统提示词字符串。
+    """
     date = datetime.now().strftime("%Y-%m-%d")
     cwd_text = str((Path(options.cwd) if options.cwd is not None else Path.cwd()).resolve()).replace("\\", "/")
     append_sections = [section.strip() for section in options.append_sections or [] if section.strip()]
 
+    # 确定基础提示词：自定义或默认
     if options.custom_prompt:
         prompt = options.custom_prompt.strip()
     else:
         prompt = _default_prompt_body(options)
 
+    # 逐段追加
     if options.repository_context:
         prompt += f"\n\n{options.repository_context.strip()}"
     if options.memory_text:
@@ -66,20 +119,34 @@ def build_system_prompt(options: SystemPromptBuildOptions) -> str:
 
 
 def build_default_system_prompt(tool_names: list[str] | None = None) -> str:
+    """构建默认系统提示词（便捷入口）。
+
+    Args:
+        tool_names: 可选的工具名称列表。
+
+    Returns:
+        默认系统提示词字符串。
+    """
     return build_system_prompt(SystemPromptBuildOptions(selected_tools=tool_names))
 
 
 def _default_prompt_body(options: SystemPromptBuildOptions) -> str:
+    """生成默认的系统提示词主体。
+
+    包含：人设定义、工作原则、可用工具说明、工具使用规范、
+    短任务探索规则、代码质量要求和安全边界。
+    """
     tool_names = options.selected_tools or []
     snippets = {**_default_tool_snippets(), **(options.tool_snippets or {})}
     visible_tools = [name for name in tool_names if name in snippets]
     tools_list = "\n".join([f"- {name}: {snippets[name]}" for name in visible_tools]) if visible_tools else "- （由运行时提供）"
     tools_text = "、".join(tool_names) if tool_names else "（由运行时提供）"
 
+    # 合并准则：默认准则 + 用户/扩展/技能追加的准则
     guidelines = [
         "先理解目标与约束，再开始操作；需求不清时只提最小必要问题。",
         "对代码与文件系统的判断，优先基于工具结果，不凭空猜测。",
-        "变更应“小步、可验证、可回滚”，优先修复根因而不是症状。",
+        "变更应"小步、可验证、可回滚"，优先修复根因而不是症状。",
         "涉及风险操作时先提示影响范围，再执行更安全替代方案。",
         "输出要简洁直接：先结论，再关键证据，再下一步。",
     ]
@@ -106,9 +173,9 @@ def _default_prompt_body(options: SystemPromptBuildOptions) -> str:
 
 短任务探索规则：
 1. 任务缺少具体文件、符号或错误信息时，先获取最小事实，不立即修改。
-2. “修一下测试”：先识别测试入口并运行相关测试，取得真实失败。
-3. “加个接口”：先搜索现有路由或相邻接口，读取项目已有写法。
-4. “为什么挂了”：优先使用用户提供的错误、最近失败结果和会话历史；若“这里”没有明确指代，再询问最小必要信息。
+2. "修一下测试"：先识别测试入口并运行相关测试，取得真实失败。
+3. "加个接口"：先搜索现有路由或相邻接口，读取项目已有写法。
+4. "为什么挂了"：优先使用用户提供的错误、最近失败结果和会话历史；若"这里"没有明确指代，再询问最小必要信息。
 5. 已有明确文件、符号或堆栈时，直接进行针对性搜索和读取。
 6. 每次探索应逐步收窄范围，避免一次读取大量无关文件。
 
@@ -117,7 +184,7 @@ def _default_prompt_body(options: SystemPromptBuildOptions) -> str:
 2. 优先修复根因，不只绕过症状；
 3. 对关键行为变更，补充最小测试或验证步骤；
 4. 若执行失败，明确错误原因、影响范围与修复建议；
-5. 变更完成后给出“做了什么 / 为什么这样做 / 如何验证”。
+5. 变更完成后给出"做了什么 / 为什么这样做 / 如何验证"。
 
 安全边界：
 1. 不输出或泄露敏感密钥；
@@ -126,6 +193,7 @@ def _default_prompt_body(options: SystemPromptBuildOptions) -> str:
 
 
 def _default_tool_snippets() -> dict[str, str]:
+    """默认的工具说明片段（用于系统提示词中的工具说明部分）。"""
     return {
         "ls": "列出目录内容（文件名、目录、大小）。",
         "find": "按 glob 查找文件路径。",
@@ -138,6 +206,7 @@ def _default_tool_snippets() -> dict[str, str]:
 
 
 def _canonical_tool_names(tools: list[AgentTool]) -> list[str]:
+    """提取工具名称列表（去重并保持顺序）。"""
     names: list[str] = []
     seen: set[str] = set()
     for tool in tools:

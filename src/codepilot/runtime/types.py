@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 """
-coding_agent 对外类型定义。
+Runtime 对外类型定义模块。
+
+定义了创建 Agent 会话所需的配置选项 CreateAgentSessionOptions，
+以及运行模式、输出/输入函数等辅助类型。
+
+CreateAgentSessionOptions 是面向上层接口的"友好"配置类，
+支持多种模型指定方式（直接传 Model、传 provider+model_id、从会话恢复）。
 """
 
 from dataclasses import dataclass, field
@@ -24,15 +30,52 @@ from codepilot.tools import AgentTool
 
 @dataclass
 class CreateAgentSessionOptions:
-    """
-    更友好的会话创建参数：
+    """创建 Agent 会话的友好配置选项。
 
-    你可以二选一提供模型信息：
-    1) 直接传 model；
-    2) 传 provider + model_id（由工厂自动解析）。
+    支持三种模型指定方式（按优先级）：
+    1) 直接传 model 对象（最高优先级）。
+    2) 传 provider + model_id（由工厂自动从内置目录解析）。
+    3) 传入已有 session_id（工厂从会话元数据恢复 provider/model_id/system_prompt）。
 
-    若传入已有 session_id，工厂会优先尝试从会话元数据恢复
-    provider/model_id/system_prompt。
+    Attributes:
+        workspace_dir: 工作区目录路径。
+        model: 直接指定的模型对象（可选）。
+        provider: provider 名称（可选，与 model_id 配合使用）。
+        model_id: 模型 ID（可选，与 provider 配合使用）。
+        get_api_key: API Key 获取函数（可选）。
+        system_prompt: 系统提示词（可选，覆盖默认值）。
+        tools: 额外的工具列表。
+        session_id: 已有会话 ID（用于恢复会话）。
+        messages: 初始消息列表。
+        thinking_level: 推理思考级别。
+        tool_execution: 工具执行模式（parallel/sequential）。
+        load_workspace_resources: 是否加载工作区资源文件。
+        enabled_builtin_tools: 启用的内置工具名称列表。
+        max_context_messages: 上下文消息数量上限。
+        max_context_tokens: 上下文 token 数量上限。
+        retain_recent_messages: 压缩时保留的最近消息数。
+        summary_builder: 自定义摘要构建器。
+        retry_enabled: 是否启用重试。
+        max_retries: 最大重试次数。
+        retry_base_delay_ms: 重试基础延迟（毫秒）。
+        read_only_mode: 是否为只读模式（禁止文件修改）。
+        block_dangerous_bash: 是否阻止危险的 bash 命令。
+        bash_allow_patterns: bash 命令白名单模式。
+        bash_block_patterns: bash 命令黑名单模式。
+        edit_require_unique_match: edit 工具是否要求唯一匹配。
+        prompt_guidelines: 额外的提示词准则。
+        append_system_prompt: 追加到系统提示词末尾的文本。
+        tool_snippets: 工具说明片段（用于系统提示词）。
+        extension_paths: 扩展加载路径列表。
+        skill_paths: 技能加载路径列表。
+        prompt_debug_sources: 是否在提示词中包含调试来源信息。
+        mcp_servers: MCP 服务器配置列表。
+        mcp_client: MCP 客户端实例。
+        extension_commands: 已注册的扩展命令。
+        before_prompt_hooks: 提示词执行前的生命周期钩子。
+        after_prompt_hooks: 提示词执行后的生命周期钩子。
+        before_tool_call: 工具调用前的拦截钩子。
+        after_tool_call: 工具调用后的拦截钩子。
     """
 
     workspace_dir: str | Path
@@ -78,6 +121,10 @@ class CreateAgentSessionOptions:
         Callable[[AfterToolCallContext, Any | None], AfterToolCallResult | None | Awaitable[AfterToolCallResult | None]]
     ] = None
 
+
+# 运行模式：print（单次输出）、interactive（交互式）、rpc（远程调用）
 RunMode = Literal["print", "interactive", "rpc"]
+# 输出函数类型：接收文本并输出（如打印到终端）
 OutputFn = Callable[[str], None]
+# 输入函数类型：接收提示文本并返回用户输入
 InputFn = Callable[[str], str]

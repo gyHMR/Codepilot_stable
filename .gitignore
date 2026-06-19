@@ -36,9 +36,6 @@ htmlcov/
 Thumbs.db
 
 # Runtime state
-.codepilot/sessions/
-.codepilot/im/
-.codepilot/model.local.json
 test/.tmp_runs/
 test_tmp_runs/
 
@@ -52,5 +49,5 @@ TODOLIST/
 docs/
 .codex/
 .codegraph/
-Planing/
 .codepilot/
+Planing/

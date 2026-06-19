@@ -1,6 +1,17 @@
 from __future__ import annotations
 
-"""Runtime inputs and effective configuration resolution."""
+"""
+运行时配置解析模块。
+
+负责将上层传入的 CreateAgentSessionOptions 与工作区资源、
+会话恢复元数据、默认值进行多源合并，生成最终的 ResolvedRuntimeConfig。
+
+配置优先级（从高到低）：
+1) 调用方显式传入的 options
+2) 恢复的会话元数据（restored_meta）
+3) 工作区配置文件（.codepilot/settings.json）
+4) 硬编码默认值（RuntimeDefaults）
+"""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,12 +23,42 @@ from codepilot.sessions.store import SessionStore
 from .resources import WorkspaceResourceLoader, WorkspaceResources
 from .types import CreateAgentSessionOptions
 
+# 配置来源标识
 ConfigSource = str
 T = TypeVar("T")
 
 
 @dataclass(frozen=True)
 class RuntimeDefaults:
+    """运行时硬编码默认值。
+
+    当 options、会话元数据、工作区配置均未指定时使用这些默认值。
+
+    Attributes:
+        system_prompt: 默认系统提示词（空字符串，由 prompt 模块填充）。
+        thinking_level: 默认推理级别（"off" 关闭推理）。
+        tool_execution: 默认工具执行模式（"parallel" 并行）。
+        max_context_messages: 消息数量上限（None 表示不限制）。
+        retain_recent_messages: 压缩时保留的最近消息数（24 条）。
+        max_context_tokens: token 数量上限（None 表示不限制）。
+        retry_enabled: 是否启用重试（默认 True）。
+        max_retries: 最大重试次数（默认 2 次）。
+        retry_base_delay_ms: 重试基础延迟（默认 1200ms，即指数退避起始值）。
+        read_only_mode: 是否为只读模式（默认 False）。
+        block_dangerous_bash: 是否阻止危险 bash 命令（默认 True）。
+        bash_allow_patterns: bash 命令白名单。
+        bash_block_patterns: bash 命令黑名单。
+        edit_require_unique_match: edit 是否要求唯一匹配（默认 True）。
+        extension_paths: 扩展加载路径。
+        skill_paths: 技能加载路径。
+        mcp_servers: MCP 服务器配置。
+        prompt_guidelines: 额外的提示词准则。
+        append_system_prompt: 追加到系统提示词末尾的文本。
+        prompt_debug_sources: 是否包含调试来源信息。
+        tool_snippets: 工具说明片段。
+        enabled_builtin_tools: 启用的内置工具列表。
+    """
+
     system_prompt: str = ""
     thinking_level: str = "off"
     tool_execution: ToolExecutionMode = "parallel"
@@ -44,6 +85,14 @@ class RuntimeDefaults:
 
 @dataclass(frozen=True)
 class RuntimeInputs:
+    """运行时输入数据（从 options 和工作区加载的原始数据）。
+
+    Attributes:
+        workspace: 工作区目录路径。
+        resources: 工作区资源（settings.json、prompt.md 等），未加载时为 None。
+        restored_meta: 恢复的会话元数据（provider/model_id/system_prompt 等）。
+    """
+
     workspace: Path
     resources: WorkspaceResources | None
     restored_meta: dict[str, Any] | None
@@ -51,6 +100,16 @@ class RuntimeInputs:
 
 @dataclass(frozen=True)
 class ResolvedRuntimeConfig:
+    """最终解析完成的运行时配置。
+
+    所有字段都经过多源合并（options -> 会话元数据 -> 工作区 -> 默认值），
+    每个字段都确定了最终值和来源。
+
+    Attributes:
+        sources: 每个配置项的来源标识（如 "options"、"workspace"、"default"）。
+        其余字段含义见 RuntimeDefaults 和 CreateAgentSessionOptions。
+    """
+
     system_prompt: str
     thinking_level: str
     tool_execution: ToolExecutionMode
@@ -76,10 +135,21 @@ class ResolvedRuntimeConfig:
     sources: dict[str, ConfigSource] = field(default_factory=dict)
 
 
+# RuntimeConfig 是 ResolvedRuntimeConfig 的别名
 RuntimeConfig = ResolvedRuntimeConfig
 
 
 def load_runtime_inputs(options: CreateAgentSessionOptions) -> RuntimeInputs:
+    """从 options 加载运行时输入数据。
+
+    包括工作区路径、工作区资源文件、恢复的会话元数据。
+
+    Args:
+        options: 创建会话的配置选项。
+
+    Returns:
+        RuntimeInputs 对象，包含 workspace、resources 和 restored_meta。
+    """
     workspace, resources = load_workspace_resources(options)
     return RuntimeInputs(
         workspace=workspace,
@@ -89,12 +159,29 @@ def load_runtime_inputs(options: CreateAgentSessionOptions) -> RuntimeInputs:
 
 
 def load_workspace_resources(options: CreateAgentSessionOptions) -> tuple[Path, WorkspaceResources | None]:
+    """加载工作区资源（settings.json、prompt.md 等）。
+
+    Args:
+        options: 创建会话的配置选项。
+
+    Returns:
+        (工作区路径, 工作区资源) 元组；load_workspace_resources=False 时资源为 None。
+    """
     workspace = Path(options.workspace_dir)
     resources = WorkspaceResourceLoader(workspace).load() if options.load_workspace_resources else None
     return workspace, resources
 
 
 def read_restored_session_meta(workspace: Path, session_id: str | None) -> dict[str, Any] | None:
+    """读取已恢复会话的元数据（provider、model_id、system_prompt 等）。
+
+    Args:
+        workspace: 工作区路径。
+        session_id: 会话 ID（None 时直接返回 None）。
+
+    Returns:
+        会话元数据字典；session_id 为 None 或元数据不存在时返回 None。
+    """
     if not session_id:
         return None
     return SessionStore(workspace_dir=workspace, session_id=session_id).read_meta()
@@ -105,12 +192,29 @@ def resolve_runtime_config(
     inputs: RuntimeInputs,
     defaults: RuntimeDefaults = RuntimeDefaults(),
 ) -> ResolvedRuntimeConfig:
+    """将多源配置合并为最终的 ResolvedRuntimeConfig。
+
+    对每个配置项，按优先级依次检查：
+    1) options 中的显式值
+    2) 恢复的会话元数据
+    3) 工作区 settings.json
+    4) 硬编码默认值
+
+    Args:
+        options: 创建会话的配置选项。
+        inputs: 运行时输入数据（含工作区资源和会话元数据）。
+        defaults: 硬编码默认值。
+
+    Returns:
+        解析完成的 ResolvedRuntimeConfig，每个字段都确定了最终值。
+    """
     resources = inputs.resources
     settings = resources.settings if resources is not None else None
     restored = inputs.restored_meta or {}
     sources: dict[str, ConfigSource] = {}
 
     def choose(name: str, *candidates: tuple[ConfigSource, T | None], default: T) -> T:
+        """按优先级选择第一个非 None 的候选值，并记录来源。"""
         for source, value in candidates:
             if value is not None:
                 sources[name] = source
@@ -118,6 +222,7 @@ def resolve_runtime_config(
         sources[name] = "default"
         return default
 
+    # 逐项解析配置，每个 choose 调用对应一个配置项的多源合并
     system_prompt = choose(
         "system_prompt",
         ("options", options.system_prompt),
