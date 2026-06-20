@@ -1,27 +1,31 @@
 from __future__ import annotations
 
-"""JSONL event recorder for sessions, Web Console, and future eval runners."""
+"""JSONL 事件记录器：用于会话、Web Console 和未来的 eval 运行器。"""
 
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from .audit import redact_artifact
 from .events import event_to_record, summarize_events
 
 
 @dataclass(frozen=True)
 class EventRecorder:
+    """JSONL 事件记录器：追加写入事件到文件，支持加载和统计。"""
     path: Path
 
     def ensure_parent(self) -> None:
+        """确保父目录和文件存在。"""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self.path.write_text("", encoding="utf-8")
 
     def append(self, event: dict[str, Any]) -> dict[str, Any]:
+        """追加一条事件到 JSONL 文件，返回规范化后的记录。"""
         self.ensure_parent()
-        record = event_to_record(event)
+        record = redact_artifact(event_to_record(event))
         with self.path.open("a", encoding="utf-8") as fp:
             fp.write(json.dumps(record, ensure_ascii=False) + "\n")
         return record
@@ -30,6 +34,7 @@ class EventRecorder:
         return [self.append(event) for event in events]
 
     def load(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        """加载事件列表（可选限制返回最近 N 条）。"""
         if not self.path.exists():
             return []
         lines = [line.strip() for line in self.path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -43,4 +48,5 @@ class EventRecorder:
         return events
 
     def summarize(self) -> dict[str, Any]:
+        """加载全部事件并返回统计摘要。"""
         return summarize_events(self.load())

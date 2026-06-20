@@ -1,0 +1,31 @@
+{
+  "id": "memory-retrieval",
+  "domain": "memory",
+  "fixture": "audit_sandbox",
+  "steps": [
+    {
+      "type": "prompt",
+      "text": "请记住：这个项目的演示代号是 cobalt-17。只确认你已记住，不要修改文件。"
+    },
+    {
+      "type": "prompt",
+      "text": "刚才约定的项目演示代号是什么？不要修改文件。"
+    }
+  ],
+  "budgets": {
+    "timeout_seconds": 120,
+    "max_tool_calls": 6
+  },
+  "assertions": [
+    {
+      "type": "memory",
+      "max_repeated_reads": 2,
+      "expect_retrieval_reason": "query"
+    },
+    {
+      "type": "run",
+      "expect_status": "completed",
+      "expect_workspace_changed": false
+    }
+  ]
+}

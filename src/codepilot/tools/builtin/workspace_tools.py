@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""内置工作区工具：workspace_status（Git 分支、HEAD、变更路径和 diff 统计）。"""
+
 import json
 import subprocess
 from typing import Any, Callable

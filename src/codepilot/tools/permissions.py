@@ -7,15 +7,20 @@ from typing import Any, Literal
 from .shell_policy import classify_shell_command
 from .types import ToolMetadata
 
+# 只读工具名称集合
 READ_ONLY_TOOL_NAMES = {"read", "grep", "find", "ls", "workspace_status"}
+# 修改型工具名称集合
 MUTATING_TOOL_NAMES = {"write", "edit", "bash"}
 
+# 工具决策类型：允许/拒绝/需要审批
 ToolDecisionKind = Literal["allow", "deny", "approval_required"]
+# 工具权限模式：只读/工作区写入/询问
 ToolPermissionMode = Literal["read-only", "workspace-write", "ask"]
 
 
 @dataclass(frozen=True)
 class ToolRequest:
+    """工具权限检查请求。"""
     name: str
     params: dict[str, Any] = field(default_factory=dict)
     source: str = "agent"
@@ -24,6 +29,7 @@ class ToolRequest:
 
 @dataclass(frozen=True)
 class ToolDecision:
+    """工具权限决策结果。"""
     kind: ToolDecisionKind
     reason: str = ""
     details: dict[str, Any] = field(default_factory=dict)
@@ -57,6 +63,7 @@ def validate_patterns(patterns: list[str] | None) -> None:
 
 @dataclass(frozen=True)
 class PermissionPolicy:
+    """工具权限策略：根据模式和规则决定工具调用的允许/拒绝/审批。"""
     mode: ToolPermissionMode = "workspace-write"
     read_only: bool = False
     block_dangerous_bash: bool = True
@@ -72,6 +79,7 @@ class PermissionPolicy:
             object.__setattr__(self, "mode", "read-only")
 
     def decide(self, request: ToolRequest) -> ToolDecision:
+        """根据权限策略对工具请求做出决策。"""
         name = request.name
         metadata = request.metadata
         read_only = metadata.read_only if metadata is not None else name in READ_ONLY_TOOL_NAMES

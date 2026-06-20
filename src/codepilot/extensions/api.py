@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+"""扩展 API：供扩展的 register(api) 函数调用，注册工具、钩子、命令和提示词。"""
+
 from codepilot.tools import AgentTool
 
 from .types import AfterHook, BeforeHook, CommandHandler, LifecycleHook, LoadedExtensions, RegisteredCommand
 
 
 class ExtensionAPI:
+    """扩展 API：扩展通过 register(api) 函数获取此对象来注册能力。"""
+
     def __init__(self) -> None:
         self._tools: list[AgentTool] = []
         self._before_hooks: list[BeforeHook] = []
@@ -53,6 +57,7 @@ class ExtensionAPI:
         self._after_prompt_hooks.append(hook)
 
     def snapshot(self) -> LoadedExtensions:
+        """将当前注册的所有能力快照为 LoadedExtensions。"""
         return LoadedExtensions(
             tools=list(self._tools),
             before_tool_hooks=list(self._before_hooks),

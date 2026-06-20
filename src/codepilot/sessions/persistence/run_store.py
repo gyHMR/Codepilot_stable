@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-"""Run-level persistence and freshness checks.
+"""Run 级别的持久化和新鲜度检查。
 
-SessionStore keeps the long-lived conversation tree. RunStore keeps one task's
-events/result/state under .codepilot/runs/<run_id>/ so runs can be inspected
-without rewriting session history.
+SessionStore 维护长期对话树；RunStore 将每次任务的事件/结果/状态
+保存在 .codepilot/runs/<run_id>/ 下，便于独立检查而无需重写会话历史。
 """
 
 import json
@@ -13,7 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from codepilot.observability import EventRecorder
+from codepilot.observability import (
+    EventRecorder,
+    build_audit_report,
+    redact_artifact,
+)
 from codepilot.observability.events import normalize_event_value
 from codepilot.protocols import AgentRunResult, ToolResultMessage
 from codepilot.tools.sandbox import file_state_for_path
@@ -28,13 +31,15 @@ def _utc_now_iso() -> str:
 
 @dataclass(frozen=True)
 class FreshnessResult:
-    status: str
-    checked_paths: list[str] = field(default_factory=list)
-    changed_paths: list[str] = field(default_factory=list)
-    missing_paths: list[str] = field(default_factory=list)
-    workspace_path: str = ""
+    """文件新鲜度检查结果。"""
+    status: str                              # 状态：valid/stale/mismatch
+    checked_paths: list[str] = field(default_factory=list)   # 已检查的文件路径
+    changed_paths: list[str] = field(default_factory=list)   # 内容已变更的文件
+    missing_paths: list[str] = field(default_factory=list)   # 已删除的文件
+    workspace_path: str = ""                 # 工作区路径
 
     def to_event_payload(self) -> dict[str, Any]:
+        """转换为事件载荷字典。"""
         return {
             "status": self.status,
             "checked_paths": list(self.checked_paths),
@@ -45,6 +50,8 @@ class FreshnessResult:
 
 
 class RunStore:
+    """Run 持久化存储：管理每次任务的事件、结果和文件状态。"""
+
     def __init__(self, workspace_dir: str | Path, session_id: str) -> None:
         self.workspace_dir = Path(workspace_dir)
         self.session_id = session_id
@@ -57,6 +64,7 @@ class RunStore:
         run_dir = self._run_dir(run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         EventRecorder(run_dir / "events.jsonl").append(event)
+        self._update_state_from_event(run_id, event)
 
     def load_events(self, run_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
         return EventRecorder(self._run_dir(run_id) / "events.jsonl").load(limit=limit)
@@ -64,21 +72,30 @@ class RunStore:
     def append_run_result(self, result: AgentRunResult) -> None:
         run_dir = self._run_dir(result.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
-        record = normalize_event_value(result)
+        record = redact_artifact(normalize_event_value(result))
         record["schema_version"] = RUN_ARTIFACT_SCHEMA_VERSION
         self._write_json(run_dir / "result.json", record)
+        state = {
+            **(self._read_json(run_dir / "state.json") or {}),
+            "schema_version": RUN_ARTIFACT_SCHEMA_VERSION,
+            "run_id": result.run_id,
+            "session_id": result.session_id or self.session_id,
+            "status": result.status,
+            "stop_reason": result.stop_reason,
+            "model_attempts": result.counters.model_attempts,
+            "tool_calls": result.counters.tool_calls,
+            "workspace_path": str(self.workspace_dir.resolve()),
+            "affected_paths": list(result.affected_paths),
+            "workspace_changed": result.workspace_changed,
+            "task": redact_artifact(normalize_event_value(result.task)),
+            "tracked_files": self._extract_tracked_files(result),
+            "updated_at": _utc_now_iso(),
+        }
+        self._write_json(run_dir / "state.json", state)
+        events = self.load_events(result.run_id)
         self._write_json(
-            run_dir / "state.json",
-            {
-                "schema_version": RUN_ARTIFACT_SCHEMA_VERSION,
-                "run_id": result.run_id,
-                "session_id": result.session_id or self.session_id,
-                "status": result.status,
-                "stop_reason": result.stop_reason,
-                "workspace_path": str(self.workspace_dir.resolve()),
-                "tracked_files": self._extract_tracked_files(result),
-                "updated_at": _utc_now_iso(),
-            },
+            run_dir / "report.json",
+            build_audit_report(record, events=events, state=state),
         )
 
     def load_run_result(self, run_id: str) -> dict[str, Any]:
@@ -108,6 +125,7 @@ class RunStore:
         return out[-limit:] if limit is not None else out
 
     def evaluate_freshness(self) -> FreshnessResult:
+        """评估最近 Run 跟踪的文件相对于当前工作区的新鲜度。"""
         workspace_path = str(self.workspace_dir.resolve())
         tracked = self._latest_tracked_files()
         if not tracked:
@@ -181,6 +199,68 @@ class RunStore:
 
     def _run_dir(self, run_id: str) -> Path:
         return self.root / run_id
+
+    def _update_state_from_event(
+        self,
+        run_id: str,
+        event: dict[str, Any],
+    ) -> None:
+        run_dir = self._run_dir(run_id)
+        path = run_dir / "state.json"
+        state = self._read_json(path) or {
+            "schema_version": RUN_ARTIFACT_SCHEMA_VERSION,
+            "run_id": run_id,
+            "session_id": event.get("sessionId") or self.session_id,
+            "status": "running",
+            "stop_reason": None,
+            "model_attempts": 0,
+            "tool_calls": 0,
+            "workspace_path": str(self.workspace_dir.resolve()),
+            "affected_paths": [],
+            "workspace_changed": False,
+        }
+        event_type = event.get("type")
+        if event_type == "message_end":
+            message = event.get("message")
+            role = getattr(message, "role", None)
+            if role is None and isinstance(message, dict):
+                role = message.get("role")
+            if role == "assistant":
+                state["model_attempts"] = int(state.get("model_attempts", 0)) + 1
+        elif event_type == "tool_execution_end":
+            state["tool_calls"] = int(state.get("tool_calls", 0)) + 1
+            result = event.get("result")
+            if isinstance(result, dict):
+                affected = result.get("affected_paths", [])
+                changed = result.get("workspace_changed")
+            else:
+                affected = getattr(result, "affected_paths", [])
+                changed = getattr(result, "workspace_changed", None)
+            state["affected_paths"] = sorted(
+                {
+                    *[
+                        str(item)
+                        for item in state.get("affected_paths", [])
+                    ],
+                    *[str(item) for item in affected or []],
+                }
+            )
+            if changed is True:
+                state["workspace_changed"] = True
+        elif event_type in {
+            "task_plan_created",
+            "task_step_updated",
+            "task_decision",
+            "completion_checked",
+        }:
+            state["task"] = redact_artifact(normalize_event_value(event))
+        elif event_type == "agent_end":
+            state["status"] = event.get("status", "completed")
+            state["stop_reason"] = event.get("stopReason")
+        elif event_type == "error":
+            state["last_error"] = redact_artifact(normalize_event_value(event))
+        state["updated_at"] = _utc_now_iso()
+        self._write_json(path, redact_artifact(state))
 
     @staticmethod
     def _write_json(path: Path, data: dict[str, Any]) -> None:

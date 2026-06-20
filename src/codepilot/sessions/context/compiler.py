@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-"""Compile a fresh, budgeted model context before every LLM call.
+"""每次 LLM 调用前编译新鲜的、带预算的模型上下文。
 
-This module belongs to sessions because it uses long-lived session state,
-memory, evidence, repository freshness, and the current Agent run's messages
-to prepare the next model input.
+本模块属于 sessions 层，因为它使用长期会话状态、记忆、证据、
+仓库新鲜度和当前 Agent Run 的消息来准备下一次模型输入。
 """
 
 import re
@@ -49,16 +48,18 @@ _STATIC_MEMORY_SECTION = re.compile(
 
 @dataclass(frozen=True)
 class ContextPolicy:
-    safety_margin_tokens: int = 1024
-    repository_ratio: float = 0.10
-    active_files_ratio: float = 0.15
-    recent_evidence_ratio: float = 0.17
-    memory_ratio: float = 0.15
-    history_ratio: float = 0.28
-    task_ratio: float = 0.15
-    minimum_input_budget: int = 1024
+    """上下文预算策略：控制各段落的 token 分配比例。"""
+    safety_margin_tokens: int = 1024      # 安全余量 token 数
+    repository_ratio: float = 0.10        # 仓库上下文占比
+    active_files_ratio: float = 0.15      # 活跃文件占比
+    recent_evidence_ratio: float = 0.17   # 近期证据占比
+    memory_ratio: float = 0.15            # 记忆占比
+    history_ratio: float = 0.28           # 历史消息占比
+    task_ratio: float = 0.15              # 当前任务占比
+    minimum_input_budget: int = 1024      # 最小输入预算
 
     def input_budget(self, request: ContextPreparationRequest) -> int:
+        """计算可用的输入 token 预算。"""
         available = (
             request.model_context_window
             - request.model_max_output_tokens
@@ -72,6 +73,8 @@ class ContextPolicy:
 
 
 class ContextCompiler:
+    """上下文编译器：在每次 LLM 调用前将仓库、文件、证据、记忆编译为带预算的上下文。"""
+
     def __init__(
         self,
         *,
@@ -86,9 +89,11 @@ class ContextCompiler:
         self.memory_retriever = memory_retriever
 
     def bind_memory_retriever(self, retriever: MemoryRetriever) -> None:
+        """绑定记忆检索器（Session 初始化后调用）。"""
         self.memory_retriever = retriever
 
     def clone(self) -> "ContextCompiler":
+        """克隆编译器（用于 Session 分支时创建独立副本）。"""
         return ContextCompiler(
             workspace=str(self.repository.workspace),
             state=SessionContextState(workspace_dir=self.state.workspace_dir),
@@ -100,6 +105,7 @@ class ContextCompiler:
         context: AgentContext,
         request: ContextPreparationRequest,
     ) -> PreparedAgentContext:
+        """编译上下文：刷新仓库快照，按预算选择各段落，返回准备好的上下文。"""
         snapshot, delta = self.repository.refresh(self.state.last_repository_snapshot)
         self._apply_repository_delta(delta)
         self.state.last_repository_snapshot = snapshot

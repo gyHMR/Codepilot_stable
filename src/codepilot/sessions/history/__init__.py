@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Session branching, switching, and checkpoints."""
+"""会话分支、切换和检查点。"""
 
 from .branching import (
     build_session_options_from_existing,

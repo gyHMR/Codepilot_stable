@@ -103,8 +103,25 @@ class TestTerminalRenderer:
         })
 
         rendered = [call.args[0] for call in output.call_args_list]
-        assert "● read src/codepilot/core/agent_loop.py:10-29" in rendered
-        assert "● ls src/codepilot" in rendered
+        assert "◆ read  src/codepilot/core/agent_loop.py:10-29" in rendered
+        assert "◆ ls  src/codepilot" in rendered
+
+    def test_tool_target_is_shortened_for_narrow_terminal_readability(self):
+        output = MagicMock()
+        renderer = TerminalRenderer(use_rich=False, output=output)
+        long_path = "src/" + "/".join(["very_long_directory"] * 8) + "/module.py"
+
+        renderer.handle_event({
+            "type": "tool_execution_start",
+            "toolCallId": "read-long",
+            "toolName": "read",
+            "args": {"path": long_path},
+        })
+
+        rendered = output.call_args.args[0]
+        assert rendered.startswith("◆ read  …")
+        assert rendered.endswith("/module.py")
+        assert len(rendered) <= 78
 
     def test_parallel_tool_timings_are_tracked_by_call_id(self, monkeypatch):
         output = MagicMock()
@@ -141,7 +158,64 @@ class TestTerminalRenderer:
         })
 
         rendered = [call.args[0] for call in output.call_args_list]
-        assert rendered[-2:] == ["  Completed in 2.0s", "  Completed in 2.0s"]
+        assert rendered[-2:] == ["  └ done  2.0s", "  └ done  2.0s"]
+
+    def test_plain_startup_is_compact_and_has_no_box_table(self):
+        output = MagicMock()
+        renderer = TerminalRenderer(use_rich=False, output=output)
+        state = CliStartupState(
+            version="0.3",
+            model_id="deepseek/deepseek-chat",
+            workspace="E:/Project_python/agent/Codepilot",
+            session_id="session-123456789",
+            permission_mode="workspace-write",
+        )
+
+        renderer.render_startup(state)
+
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        assert "Codepilot 0.3" in rendered
+        assert "Local coding agent" in rendered
+        assert "deepseek/deepseek-chat" in rendered
+        assert "workspace-write" in rendered
+        assert "session-1.." in rendered
+        assert "╭─" not in rendered
+        assert "│ Model" not in rendered
+
+    def test_toolbar_contains_current_model_permission_and_shortcuts(self):
+        renderer = TerminalRenderer(use_rich=False, output=MagicMock())
+        state = CliStartupState(
+            version="0.3",
+            model_id="deepseek/deepseek-chat",
+            workspace="E:/Project_python/agent/Codepilot",
+            session_id="session-123456789",
+            permission_mode="workspace-write",
+        )
+
+        toolbar = renderer.build_toolbar(state)
+
+        assert "<b>deepseek/deepseek-chat</b>" in toolbar
+        assert "workspace-write" in toolbar
+        assert "/help" in toolbar
+        assert "Ctrl+C" in toolbar
+
+    @pytest.mark.parametrize(
+        ("kind", "expected"),
+        [
+            ("info", "• Working"),
+            ("success", "✓ Working"),
+            ("warning", "! Working"),
+            ("error", "× Working"),
+            ("cancelled", "■ Working"),
+        ],
+    )
+    def test_plain_status_messages_use_consistent_symbols(self, kind, expected):
+        output = MagicMock()
+        renderer = TerminalRenderer(use_rich=False, output=output)
+
+        renderer.render_status("Working", kind=kind)
+
+        output.assert_called_once_with(expected)
 
     def test_handle_error(self):
         """测试处理错误事件。"""

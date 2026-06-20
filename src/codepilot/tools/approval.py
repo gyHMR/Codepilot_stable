@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-"""Tool approval abstractions.
+"""工具审批抽象层。
 
-The current runtime has no interactive approval resume loop yet, but this
-module defines the boundary used by ToolRuntime and future CLI/Web approval UI.
+当前运行时尚未实现交互式审批恢复循环，但本模块定义了
+ToolRuntime 和未来 CLI/Web 审批 UI 使用的边界接口。
 """
 
 from dataclasses import dataclass
@@ -16,6 +16,7 @@ from .types import ToolMetadata, ToolRuntimeRequest
 
 @dataclass(frozen=True)
 class ApprovalDecision:
+    """审批决策结果。"""
     approved: bool
     reason: str = ""
     approval_id: str | None = None
@@ -23,6 +24,7 @@ class ApprovalDecision:
 
 @dataclass(frozen=True)
 class ApprovalRequest:
+    """审批请求：包含工具信息、参数预览和风险等级。"""
     approval_id: str
     tool_call_id: str
     tool_name: str
@@ -57,6 +59,7 @@ def build_approval_request(
 
 
 class ApprovalProvider(Protocol):
+    """审批提供者协议：由 CLI/Web 等接口层实现。"""
     async def request_approval(
         self,
         request: ToolRuntimeRequest,
@@ -66,7 +69,7 @@ class ApprovalProvider(Protocol):
 
 
 class DenyApprovalProvider:
-    """Default provider used until a CLI/Web approval flow is connected."""
+    """默认审批提供者：在 CLI/Web 审批流程接入前，所有审批请求都被拒绝。"""
 
     async def request_approval(
         self,

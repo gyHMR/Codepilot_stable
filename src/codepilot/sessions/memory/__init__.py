@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Structured session and project memory."""
+"""结构化会话记忆和项目记忆。"""
 
 from .files import load_global_memory, sanitize_memory_text, save_global_memory
 from .records import (

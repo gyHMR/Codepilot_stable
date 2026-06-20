@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-"""Lightweight observability projections for one Agent Run.
+"""单次 Agent Run 的轻量级可观测性投影。
 
-This module only reads run results and emitted events. It never calls models,
-executes tools, writes state, or influences normal run decisions.
+本模块只读取 Run 结果和已发射的事件，不调用模型、不执行工具、
+不写入状态，也不影响正常的运行决策。
 """
 
 from dataclasses import dataclass, field
@@ -16,16 +16,17 @@ from .events import normalize_event_value
 
 @dataclass(frozen=True)
 class ModelCallRecord:
-    index: int
-    provider: str
-    model: str
-    api: str
-    stop_reason: str
-    token_usage: dict[str, int] = field(default_factory=dict)
-    cost: dict[str, float] = field(default_factory=dict)
-    timestamp: int | None = None
-    latency_ms: int | None = None
-    error: dict[str, Any] | None = None
+    """单次模型调用记录。"""
+    index: int                            # 调用序号
+    provider: str                         # Provider 名称
+    model: str                            # 模型 ID
+    api: str                              # API 协议
+    stop_reason: str                      # 停止原因
+    token_usage: dict[str, int] = field(default_factory=dict)  # token 用量
+    cost: dict[str, float] = field(default_factory=dict)       # 费用
+    timestamp: int | None = None          # 时间戳
+    latency_ms: int | None = None         # 延迟（毫秒）
+    error: dict[str, Any] | None = None   # 错误信息
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -44,18 +45,19 @@ class ModelCallRecord:
 
 @dataclass(frozen=True)
 class ToolCallRecord:
-    tool_call_id: str
-    tool_name: str
-    status: str
-    is_error: bool = False
-    approved: bool = True
-    approval_id: str | None = None
-    error_reason: str | None = None
-    duration_ms: int | None = None
-    affected_paths: list[str] = field(default_factory=list)
-    workspace_changed: bool | None = None
-    verification_status: str | None = None
-    output_truncated: bool = False
+    """单次工具调用记录。"""
+    tool_call_id: str                     # 调用 ID
+    tool_name: str                        # 工具名称
+    status: str                           # 执行状态
+    is_error: bool = False                # 是否出错
+    approved: bool = True                 # 是否已审批
+    approval_id: str | None = None        # 审批 ID
+    error_reason: str | None = None       # 错误原因
+    duration_ms: int | None = None        # 耗时（毫秒）
+    affected_paths: list[str] = field(default_factory=list)  # 受影响文件
+    workspace_changed: bool | None = None # 是否修改了工作区
+    verification_status: str | None = None  # 验证状态
+    output_truncated: bool = False        # 输出是否被截断
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,21 +78,22 @@ class ToolCallRecord:
 
 @dataclass(frozen=True)
 class RunMetrics:
-    duration_ms: int | None = None
-    model_attempts: int = 0
-    model_calls: int = 0
-    model_errors: int = 0
-    tool_iterations: int = 0
-    tool_calls: int = 0
-    tool_errors: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_tokens: int = 0
-    total_cost: float = 0.0
-    verification_count: int = 0
-    verification_passed: int = 0
-    approval_count: int = 0
-    denied_count: int = 0
+    """Run 聚合指标。"""
+    duration_ms: int | None = None        # 总耗时（毫秒）
+    model_attempts: int = 0               # 模型调用尝试次数
+    model_calls: int = 0                  # 实际模型调用次数
+    model_errors: int = 0                 # 模型错误次数
+    tool_iterations: int = 0              # 工具迭代次数
+    tool_calls: int = 0                   # 工具调用次数
+    tool_errors: int = 0                  # 工具错误次数
+    input_tokens: int = 0                 # 输入 token 总数
+    output_tokens: int = 0                # 输出 token 总数
+    total_tokens: int = 0                 # token 总数
+    total_cost: float = 0.0               # 总费用
+    verification_count: int = 0           # 验证次数
+    verification_passed: int = 0          # 验证通过次数
+    approval_count: int = 0               # 审批请求次数
+    denied_count: int = 0                 # 拒绝次数
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -117,6 +120,7 @@ def build_model_call_records(
     *,
     events: list[dict[str, Any]] | None = None,
 ) -> list[ModelCallRecord]:
+    """从 Run 结果和事件提取模型调用记录列表。"""
     record = _run_record(result)
     messages = [
         message
@@ -167,6 +171,7 @@ def build_tool_call_records(
     *,
     events: list[dict[str, Any]] | None = None,
 ) -> list[ToolCallRecord]:
+    """从 Run 结果和事件提取工具调用记录列表。"""
     normalized_events = _normalize_events(events or [])
     records = [_tool_record_from_event(event) for event in normalized_events if event.get("type") == "tool_execution_end"]
     if records:
@@ -186,6 +191,7 @@ def build_run_metrics(
     *,
     events: list[dict[str, Any]] | None = None,
 ) -> RunMetrics:
+    """从 Run 结果和事件构建聚合指标。"""
     record = _run_record(result)
     counters = _dict(record.get("counters"))
     model_calls = build_model_call_records(record, events=events)

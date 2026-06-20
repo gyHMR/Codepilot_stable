@@ -1,10 +1,13 @@
 {
   "id": "fix-divide-zero",
-  "category": "coding",
+  "domain": "coding",
   "fixture": "calculator",
   "prompt": "修复 calculator.py 中 divide() 的除零行为：除数为 0 时抛出 ValueError，并运行测试。",
-  "timeout_seconds": 120,
-  "verifiers": [
+  "budgets": {
+    "timeout_seconds": 120,
+    "max_tool_calls": 12
+  },
+  "assertions": [
     {
       "type": "command",
       "command": "python -m pytest -q",
@@ -17,4 +20,3 @@
     }
   ]
 }
-

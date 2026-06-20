@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""内置工具包：提供文件操作、搜索、shell 和工作区状态等基础工具。"""
+
 from pathlib import Path
 
 from codepilot.tools.permissions import (

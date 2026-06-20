@@ -1,13 +1,15 @@
 ﻿from __future__ import annotations
 
-"""Session persistence store.
+"""会话持久化存储。
 
-Default directory layout:
+默认目录布局：
 .codepilot/sessions/<session_id>/
-  - meta.json
-  - session.jsonl
-  - context.jsonl
-  - events.jsonl
+  - meta.json        会话元数据
+  - session.jsonl    会话消息树（支持分支）
+  - context.jsonl    上下文消息（用于恢复）
+  - events.jsonl     事件日志
+  - runs.jsonl       Run 结果记录
+  - memory.json      结构化记忆
 """
 
 import json
@@ -25,14 +27,18 @@ from .serde import message_from_dict, message_to_dict
 
 
 def _utc_now_iso() -> str:
+    """返回当前 UTC 时间的 ISO 格式字符串。"""
     return datetime.now(timezone.utc).isoformat()
 
 
 def new_session_id() -> str:
+    """生成新的会话 ID（格式：session_ + 12位UUID hex）。"""
     return f"session_{uuid.uuid4().hex[:12]}"
 
 
 class SessionStore:
+    """会话持久化存储：管理会话的消息树、上下文、事件和 Run 产物。"""
+
     def __init__(self, workspace_dir: str | Path, session_id: str) -> None:
         self.workspace_dir = Path(workspace_dir)
         self.session_id = session_id
@@ -53,6 +59,7 @@ class SessionStore:
         provider: str,
         system_prompt: str,
     ) -> None:
+        """确保存储目录和文件已创建；已存在时跳过。"""
         self.root.mkdir(parents=True, exist_ok=True)
         if self.meta_file.exists():
             return
@@ -85,6 +92,7 @@ class SessionStore:
             self.runs_file.write_text("", encoding="utf-8")
 
     def touch_updated_at(self) -> None:
+        """更新 meta.json 中的 updated_at 时间戳。"""
         if not self.meta_file.exists():
             return
         meta = json.loads(self.meta_file.read_text(encoding="utf-8"))
@@ -92,11 +100,13 @@ class SessionStore:
         self.meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def read_meta(self) -> dict[str, Any] | None:
+        """读取会话元数据；文件不存在时返回 None。"""
         if not self.meta_file.exists():
             return None
         return json.loads(self.meta_file.read_text(encoding="utf-8"))
 
     def append_context_message(self, message: Message) -> None:
+        """追加一条消息到上下文文件和会话消息树。"""
         entry = {
             "ts": _utc_now_iso(),
             "message": message_to_dict(message),
@@ -107,17 +117,20 @@ class SessionStore:
         self.append_session_message(message)
 
     def append_event(self, event: dict[str, Any]) -> None:
+        """追加事件到事件日志和 Run Store。"""
         self.event_recorder.append(event)
         self.run_store.append_event(event)
         self.touch_updated_at()
 
     def load_events(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        """加载事件列表（可选限制数量）。"""
         return self.event_recorder.load(limit=limit)
 
     def summarize_events(self) -> dict[str, Any]:
         return self.event_recorder.summarize()
 
     def append_run_result(self, result: AgentRunResult) -> None:
+        """追加 Run 结果到 Run Store 和 runs.jsonl。"""
         self.run_store.append_run_result(result)
         record = normalize_event_value(result)
         with self.runs_file.open("a", encoding="utf-8") as fp:
@@ -138,6 +151,7 @@ class SessionStore:
         return records[-limit:] if limit is not None else records
 
     def rewrite_context_messages(self, messages: list[Message]) -> None:
+        """重写上下文文件（用于压缩后替换全部消息）。"""
         lines = []
         for msg in messages:
             lines.append(json.dumps({"ts": _utc_now_iso(), "message": message_to_dict(msg)}, ensure_ascii=False))
@@ -145,6 +159,7 @@ class SessionStore:
         self.touch_updated_at()
 
     def load_context_messages(self) -> list[Message]:
+        """从上下文文件加载消息列表。"""
         if not self.context_file.exists():
             return []
 
@@ -181,7 +196,7 @@ class SessionStore:
         self.touch_updated_at()
 
     def append_session_message(self, message: Message) -> str:
-        """Append a message to the session tree for fork/switch support."""
+        """追加消息到会话消息树（支持分支/切换），返回 entry_id。"""
 
         lines = self._read_session_lines()
         header = lines[0] if lines and lines[0].get("type") == "session" else None
@@ -237,7 +252,7 @@ class SessionStore:
         self.meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def load_session_messages(self, *, leaf_id: str | None = None) -> list[Message]:
-        """Restore messages from the selected session-tree branch."""
+        """从会话消息树恢复指定分支的消息列表（沿 parent_id 链回溯）。"""
 
         lines = self._read_session_lines()
         if not lines:
@@ -279,7 +294,7 @@ class SessionStore:
         return leaf if isinstance(leaf, str) else None
 
     def list_entries(self) -> list[dict[str, Any]]:
-        """Return flat entries with depth, leaf marker, and text preview."""
+        """返回扁平化的条目列表（含深度、叶子标记和文本预览）。"""
 
         lines = self._read_session_lines()
         entries = [line for line in lines if line.get("type") == "message"]
@@ -310,7 +325,7 @@ class SessionStore:
         return result
 
     def get_entry_path(self, entry_id: str) -> list[str]:
-        """Return the root-to-entry path for a session tree entry."""
+        """返回从根条目到指定条目的路径（ID 列表）。"""
 
         lines = self._read_session_lines()
         by_id = {
@@ -342,7 +357,7 @@ class SessionStore:
         self.meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def get_session_tree(self) -> list[dict[str, Any]]:
-        """Return the session tree grouped by parent_id."""
+        """返回按 parent_id 分组的会话树结构。"""
 
         lines = self._read_session_lines()
         entries = [line for line in lines if line.get("type") == "message"]
@@ -406,7 +421,7 @@ class SessionStore:
         *,
         from_entry_id: str | None = None,
     ) -> "SessionStore":
-        """Create a new session from the current session branch."""
+        """从当前会话分支创建新会话（复制消息和记忆）。"""
 
         target = SessionStore(self.workspace_dir, new_session_id)
         meta = self.read_meta() or {}

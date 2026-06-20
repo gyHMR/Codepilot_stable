@@ -16,7 +16,11 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, cast
 
 from codepilot.core import AgentEvent
-from codepilot.observability import build_run_report
+from codepilot.observability import (
+    AuditBundle,
+    build_run_report,
+    load_audit_bundle,
+)
 from codepilot.protocols import AgentRunResult, AssistantMessage
 from codepilot.sessions.session import AgentSession
 
@@ -516,6 +520,19 @@ class RuntimeService:
         result = self.get_run_result(session_id, run_id)
         events = self.get_run_events(session_id, run_id)
         return build_run_report(result, events=events)
+
+    def get_run_audit_bundle(
+        self,
+        session_id: str,
+        run_id: str,
+    ) -> AuditBundle:
+        """读取指定 Run 的统一审计证据。"""
+
+        session = self.get_session(session_id)
+        return load_audit_bundle(
+            session.store.run_store.root / run_id,
+            workspace=session.workspace_dir,
+        )
 
     def _validate_request(self, session_id: str, message: UserInput) -> None:
         """校验请求。

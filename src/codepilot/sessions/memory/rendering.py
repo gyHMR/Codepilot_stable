@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-"""Human-readable rendering for retrieved memory records."""
+"""将记忆记录渲染为人类可读的文本格式。"""
 
 from .records import MemoryRecord
 
 
 def render_memory(record: MemoryRecord) -> str:
+    """将记忆记录渲染为单行人类可读文本。"""
     content = record.content
     if record.kind == "task":
         parts = [f"Task goal: {content.get('goal', '')}"]

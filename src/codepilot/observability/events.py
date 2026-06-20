@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""事件规范化、验证和统计工具。"""
+
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
@@ -11,6 +13,7 @@ from codepilot.protocols import (
     UserMessage,
 )
 
+# Agent 事件类型集合（由 core 层发射）
 AGENT_EVENT_TYPES = {
     "agent_start",
     "turn_start",
@@ -30,6 +33,7 @@ AGENT_EVENT_TYPES = {
     "error",
 }
 
+# Session 事件类型集合（由 sessions 层发射）
 SESSION_EVENT_TYPES = {
     "auto_retry_start",
     "context_compacted",
@@ -38,10 +42,12 @@ SESSION_EVENT_TYPES = {
     "session_switch_entry",
 }
 
+# Agent 事件的公共必填字段
 _COMMON_AGENT_EVENT_FIELDS = {"type", "runId", "turnId", "eventId", "timestamp", "sessionId"}
 
 
 def normalize_event_value(value: Any) -> Any:
+    """递归将事件值规范化为 JSON 可序列化格式（处理 dataclass、Message 等）。"""
     if isinstance(value, (AssistantMessage, ToolResultMessage, UserMessage)):
         return normalize_event_value(asdict(value))
     if isinstance(value, ToolResult):
@@ -73,6 +79,7 @@ def normalize_event_value(value: Any) -> Any:
 
 
 def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
+    """将事件规范化为可持久化的记录字典（附加 schema_version）。"""
     record = normalize_event_value(event)
     if not isinstance(record, dict):
         raise TypeError("event must normalize to a dictionary")
@@ -81,6 +88,7 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_agent_event(event: dict[str, Any]) -> list[str]:
+    """校验 Agent 事件的类型和公共字段，返回错误列表（空表示通过）。"""
     errors: list[str] = []
     event_type = event.get("type")
     if event_type not in AGENT_EVENT_TYPES:
@@ -93,6 +101,7 @@ def validate_agent_event(event: dict[str, Any]) -> list[str]:
 
 
 def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """统计事件列表的聚合信息：事件计数、工具调用数、错误数和 token 用量。"""
     counts: dict[str, int] = {}
     run_ids: set[str] = set()
     session_ids: set[str] = set()

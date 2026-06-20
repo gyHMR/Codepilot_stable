@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""内置文件工具：ls（列目录）、read（读文件）、write（写文件）、edit（精确替换）。"""
+
 from typing import Any, Callable
 
 from codepilot.protocols import TextContent

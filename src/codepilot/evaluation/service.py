@@ -8,12 +8,13 @@ from typing import Callable
 
 from codepilot.runtime import RuntimeService
 
-from .artifacts import EvalArtifactStore
+from .artifacts import EvalArtifactStore, hash_tree, stable_hash
 from .executor import EvaluationExecutor
 from .loader import EvalCaseValidationError, load_eval_suite
-from .report import build_suite_summary
+from .report import build_suite_summary, render_suite_markdown
 from .types import (
     EvalCase,
+    EvalDefinition,
     EvalResult,
     EvalRunOptions,
     EvalScenario,
@@ -35,10 +36,10 @@ class EvaluationService:
         options: EvalRunOptions,
     ) -> EvalResult:
         artifacts = self._artifact_store(options)
-        self._initialize_manifest(artifacts, options)
+        self._initialize_manifest(artifacts, options, [case])
         artifacts.write_case_definition(case.id, case)
         result = await self._run_definition(case, options, artifacts)
-        artifacts.write_summary(build_suite_summary([result]))
+        self._write_report(artifacts, [result])
         return result
 
     async def run_scenario(
@@ -47,10 +48,14 @@ class EvaluationService:
         options: EvalRunOptions,
     ) -> EvalResult:
         artifacts = self._artifact_store(options)
-        self._initialize_manifest(artifacts, options)
+        self._initialize_manifest(artifacts, options, [scenario])
         artifacts.write_case_definition(scenario.id, scenario)
-        result = await self._run_definition(scenario, options, artifacts)
-        artifacts.write_summary(build_suite_summary([result]))
+        result = await self._run_definition(
+            scenario,
+            options,
+            artifacts,
+        )
+        self._write_report(artifacts, [result])
         return result
 
     async def run_suite(
@@ -59,49 +64,35 @@ class EvaluationService:
         options: EvalRunOptions,
     ) -> EvalSuiteResult:
         artifacts = self._artifact_store(options)
-        self._initialize_manifest(artifacts, options)
         try:
             definitions = load_eval_suite(suite_path)
         except EvalCaseValidationError as exc:
-            result = EvalResult(
-                case_id=Path(suite_path).stem or "suite",
-                verdict="invalid_case",
-                session_id=None,
-                run_ids=[],
-                verifier_results=[],
-                artifact_dir=str(artifacts.root),
-                error=str(exc),
+            self._initialize_manifest(artifacts, options, [])
+            result = self._invalid_result(
+                Path(suite_path).stem or "suite",
+                artifacts,
+                str(exc),
             )
-            summary = build_suite_summary([result])
-            artifacts.write_summary(summary)
-            return EvalSuiteResult(
-                eval_id=artifacts.root.name,
-                results=[result],
-                artifact_dir=str(artifacts.root),
-                summary=summary,
-            )
+            self._write_report(artifacts, [result])
+            return self._suite_result(artifacts, [result])
 
-        results: list[EvalResult] = []
+        self._initialize_manifest(artifacts, options, definitions)
+        results = []
         for definition in definitions:
             artifacts.write_case_definition(definition.id, definition)
-            result = await self._run_definition(
-                definition,
-                options,
-                artifacts,
+            results.append(
+                await self._run_definition(
+                    definition,
+                    options,
+                    artifacts,
+                )
             )
-            results.append(result)
-        summary = build_suite_summary(results)
-        artifacts.write_summary(summary)
-        return EvalSuiteResult(
-            eval_id=artifacts.root.name,
-            results=results,
-            artifact_dir=str(artifacts.root),
-            summary=summary,
-        )
+        self._write_report(artifacts, results)
+        return self._suite_result(artifacts, results)
 
     async def _run_definition(
         self,
-        definition: EvalCase | EvalScenario,
+        definition: EvalDefinition,
         options: EvalRunOptions,
         artifacts: EvalArtifactStore,
     ) -> EvalResult:
@@ -118,17 +109,45 @@ class EvaluationService:
                 artifacts,
             )
         except (FileNotFoundError, ValueError) as exc:
+            result = self._invalid_result(
+                definition.id,
+                artifacts,
+                f"{type(exc).__name__}: {exc}",
+            )
+            artifacts.write_result(result)
+            return result
+        except Exception as exc:
             result = EvalResult(
                 case_id=definition.id,
-                verdict="invalid_case",
+                overall="execution_error",
                 session_id=None,
                 run_ids=[],
-                verifier_results=[],
+                dimensions=[],
+                failure_categories=["evaluation.execution_error"],
+                metrics={},
                 artifact_dir=str(artifacts.case_dir(definition.id)),
                 error=f"{type(exc).__name__}: {exc}",
             )
             artifacts.write_result(result)
             return result
+
+    @staticmethod
+    def _invalid_result(
+        case_id: str,
+        artifacts: EvalArtifactStore,
+        error: str,
+    ) -> EvalResult:
+        return EvalResult(
+            case_id=case_id,
+            overall="invalid_case",
+            session_id=None,
+            run_ids=[],
+            dimensions=[],
+            failure_categories=["evaluation.invalid_case"],
+            metrics={},
+            artifact_dir=str(artifacts.case_dir(case_id)),
+            error=error,
+        )
 
     @staticmethod
     def _artifact_store(options: EvalRunOptions) -> EvalArtifactStore:
@@ -139,16 +158,44 @@ class EvaluationService:
     def _initialize_manifest(
         artifacts: EvalArtifactStore,
         options: EvalRunOptions,
+        definitions: list[EvalDefinition],
     ) -> None:
         model = options.session_options.model
         artifacts.initialize_manifest(
             benchmark_name=options.benchmark_name,
             model_id=(
-                model.id if model is not None
+                model.id
+                if model is not None
                 else options.session_options.model_id
             ),
             provider=(
-                model.provider if model is not None
+                model.provider
+                if model is not None
                 else options.session_options.provider
             ),
+            benchmark_snapshot=stable_hash(definitions),
+            fixture_snapshot=hash_tree(options.fixtures_root),
+        )
+
+    @staticmethod
+    def _write_report(
+        artifacts: EvalArtifactStore,
+        results: list[EvalResult],
+    ) -> None:
+        summary = build_suite_summary(results)
+        artifacts.write_summary(
+            summary,
+            markdown=render_suite_markdown(results, summary),
+        )
+
+    @staticmethod
+    def _suite_result(
+        artifacts: EvalArtifactStore,
+        results: list[EvalResult],
+    ) -> EvalSuiteResult:
+        return EvalSuiteResult(
+            eval_id=artifacts.root.name,
+            results=results,
+            artifact_dir=str(artifacts.root),
+            summary=build_suite_summary(results),
         )

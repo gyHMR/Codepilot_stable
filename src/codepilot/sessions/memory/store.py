@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Persistence adapter for structured session/project memory records."""
+"""结构化记忆的持久化适配器（会话级和项目级记忆）。"""
 
 import json
 import logging
@@ -24,7 +24,7 @@ logger = logging.getLogger("codepilot.sessions.memory")
 
 
 class MemoryStore:
-    """Persist structured memory without deciding what should be remembered."""
+    """记忆持久化存储：负责读写结构化记忆，不决定应记住什么。"""
 
     def __init__(self, session_store: "SessionStore") -> None:
         self.session_store = session_store

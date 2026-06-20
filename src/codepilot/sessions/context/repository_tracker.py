@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-"""Low-cost dynamic repository snapshots used before every model call.
+"""每次模型调用前的低成本动态仓库快照。
 
-Repository snapshots are dynamic session context, not one-time runtime
-assembly state. They intentionally include top-level entries in the
-fingerprint and delta so directory creation/deletion is reflected before the
-next model call.
+仓库快照是动态会话上下文，而非一次性运行时装配状态。
+它们刻意将顶层目录条目纳入指纹和差异计算，
+以便在下一次模型调用前反映目录的创建/删除。
 """
 
 import hashlib
@@ -18,6 +17,8 @@ from .repository_context import build_repository_bootstrap
 
 
 class RepositoryTracker:
+    """仓库追踪器：生成低成本的仓库快照并计算前后差异。"""
+
     def __init__(self, workspace: str | Path) -> None:
         self.workspace = Path(workspace).resolve()
 

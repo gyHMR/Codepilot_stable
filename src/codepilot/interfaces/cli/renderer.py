@@ -14,6 +14,7 @@ CLI 终端渲染。
 """
 
 from dataclasses import dataclass, field
+from html import escape
 import sys
 import time
 from typing import Any
@@ -96,12 +97,15 @@ class TerminalRenderer:
             from rich.theme import Theme
 
             theme = Theme({
+                "brand": "bold bright_cyan",
                 "info": "cyan",
+                "muted": "grey62",
                 "warning": "yellow",
                 "error": "bold red",
                 "success": "green",
-                "tool": "blue",
-                "model": "magenta",
+                "cancelled": "yellow",
+                "tool": "bright_cyan",
+                "model": "bright_magenta",
                 "path": "cyan",
             })
             self._console = Console(theme=theme)
@@ -145,76 +149,86 @@ class TerminalRenderer:
             self._render_plain_startup(state)
 
     def _render_rich_startup(self, state: CliStartupState) -> None:
-        """使用 rich 渲染启动面板。"""
+        """使用 Rich 渲染紧凑启动摘要。"""
 
-        from rich.panel import Panel
-        from rich.table import Table
         from rich.text import Text
 
-        table = Table(show_header=False, box=None, padding=(0, 2))
-        table.add_column(style="bold cyan", width=12)
-        table.add_column()
+        workspace = self._shorten_tail(state.workspace, 54)
+        session_display = self._short_session(state.session_id)
 
-        workspace = state.workspace
-        if len(workspace) > 45:
-            workspace = "..." + workspace[-42:]
+        title = Text("  Codepilot", style="brand")
+        title.append(f" {state.version}", style="muted")
+        title.append("  Local coding agent", style="muted")
+        self._console.print()
+        self._console.print(title)
 
-        session_display = state.session_id
-        if len(session_display) > 12:
-            session_display = session_display[:10] + ".."
+        primary = Text("  ")
+        primary.append(self._shorten_tail(state.model_id, 40), style="model")
+        primary.append("  ·  ", style="muted")
+        primary.append(workspace, style="path")
+        self._console.print(primary)
 
-        table.add_row("Model", Text(state.model_id, style="magenta"))
-        table.add_row("Workspace", Text(workspace, style="path"))
-        table.add_row("Session", Text(session_display, style="green"))
-        table.add_row("Permission", Text(state.permission_mode, style="yellow"))
-
-        panel = Panel(
-            table,
-            title=f"[bold]Codepilot {state.version}[/bold]",
-            border_style="blue",
-            padding=(1, 2),
-        )
-        self._console.print(panel)
+        secondary = Text("  ")
+        secondary.append(state.permission_mode, style=self._permission_style(state.permission_mode))
+        secondary.append("  ·  ", style="muted")
+        secondary.append(session_display, style="muted")
+        self._console.print(secondary)
 
         for warning in state.warnings:
-            self._console.print(f"⚠️  [warning]{warning}[/warning]")
+            self.render_status(warning, kind="warning")
 
-        if state.warnings:
-            self._console.print()
-
-        self._console.print("💡 输入 [bold]/help[/bold] 查看命令，[bold]Ctrl+C[/bold] 取消当前任务")
+        hint = Text("  /help", style="muted")
+        hint.append(" commands  ·  Ctrl+C exit / cancel run  ·  Alt+Enter newline", style="muted")
+        self._console.print(hint)
         self._console.print()
 
     def _render_plain_startup(self, state: CliStartupState) -> None:
-        """使用纯文本渲染启动面板。"""
+        """使用纯文本渲染紧凑启动摘要。"""
 
-        workspace = state.workspace
-        if len(workspace) > 40:
-            workspace = "..." + workspace[-37:]
-
-        model_display = state.model_id
-        if len(model_display) > 35:
-            model_display = model_display[:32] + "..."
-
-        session_display = state.session_id
-        if len(session_display) > 10:
-            session_display = session_display[:8] + ".."
+        workspace = self._shorten_tail(state.workspace, 54)
+        model_display = self._shorten_tail(state.model_id, 40)
+        session_display = self._short_session(state.session_id)
 
         self._print()
-        self._print(f"╭─ Codepilot {state.version} ─────────────────────────────╮")
-        self._print(f"│ Model       {model_display:<35} │")
-        self._print(f"│ Workspace   {workspace:<35} │")
-        self._print(f"│ Session     {session_display:<35} │")
-        self._print(f"│ Permission  {state.permission_mode:<35} │")
-        self._print("╰─────────────────────────────────────────────╯")
-        self._print()
+        self._print(f"  Codepilot {state.version}  Local coding agent")
+        self._print(f"  {model_display}  ·  {workspace}")
+        self._print(f"  {state.permission_mode}  ·  {session_display}")
 
         for warning in state.warnings:
-            self._print(f"Warning: {warning}")
-        if state.warnings:
-            self._print()
+            self.render_status(warning, kind="warning")
 
-        self._print("Tip: 输入 /help 查看命令，Ctrl+C 取消当前任务")
+        self._print("  /help commands  ·  Ctrl+C exit / cancel run  ·  Alt+Enter newline")
+        self._print()
+
+    def build_toolbar(self, state: CliStartupState) -> str:
+        """构建 prompt_toolkit 底栏，保持内容短且可扫读。"""
+
+        model = escape(self._shorten_tail(state.model_id, 34))
+        permission = escape(state.permission_mode)
+        return (
+            f"<b>{model}</b>  ·  {permission}"
+            "  ·  <b>/help</b> commands  ·  <b>Ctrl+C</b> exit / cancel run"
+        )
+
+    def render_status(self, message: str, *, kind: str = "info") -> None:
+        """渲染统一的单行状态反馈。"""
+
+        symbols = {
+            "info": "•",
+            "success": "✓",
+            "warning": "!",
+            "error": "×",
+            "cancelled": "■",
+        }
+        symbol = symbols.get(kind, symbols["info"])
+        if self._console:
+            from rich.text import Text
+
+            text = Text(f"{symbol} ", style=kind if kind in symbols else "info")
+            text.append(message)
+            self._console.print(text)
+            return
+        self._print(f"{symbol} {message}")
 
     def handle_event(self, event: AgentEvent) -> None:
         """处理 Agent 事件，转换为终端输出。"""
@@ -278,7 +292,7 @@ class TerminalRenderer:
 
         tool_name = event.get("toolName", "unknown")
         args = event.get("args", {})
-        target = self._extract_tool_target(tool_name, args)
+        target = self._shorten_tail(self._extract_tool_target(tool_name, args), 68)
 
         if self._stream_started:
             self._print()
@@ -288,13 +302,13 @@ class TerminalRenderer:
             from rich.text import Text
 
             text = Text()
-            text.append("● ", style="bold blue")
+            text.append("◆ ", style="tool")
             text.append(tool_name, style="bold")
             if target:
-                text.append(f" {target}", style="dim")
+                text.append(f"  {target}", style="muted")
             self._console.print(text)
         else:
-            self._print(f"● {tool_name}" + (f" {target}" if target else ""))
+            self._print(f"◆ {tool_name}" + (f"  {target}" if target else ""))
 
         self._current_tool = tool_name
         self._tool_start_time = time.time()
@@ -307,6 +321,7 @@ class TerminalRenderer:
 
         is_error = event.get("isError", False)
         error_reason = event.get("errorReason")
+        status = event.get("status", "error" if is_error else "success")
 
         tool_call_id = str(event.get("toolCallId", ""))
         started_at = self._tool_start_times.pop(tool_call_id, 0) if tool_call_id else self._tool_start_time
@@ -317,19 +332,25 @@ class TerminalRenderer:
             from rich.text import Text
 
             text = Text()
-            text.append("  ")
-            if is_error:
-                text.append("✗ ", style="bold red")
-                text.append(error_reason or "failed", style="red")
+            text.append("  └ ", style="muted")
+            if status == "cancelled":
+                text.append("cancelled", style="warning")
+            elif is_error:
+                text.append("failed", style="error")
+                if error_reason:
+                    text.append(f"  {error_reason}", style="muted")
             else:
-                text.append("✓ ", style="bold green")
-                text.append(f"Completed in {elapsed_str}", style="dim")
+                text.append("done", style="success")
+                text.append(f"  {elapsed_str}", style="muted")
             self._console.print(text)
         else:
-            if is_error:
-                self._print(f"  × {error_reason or 'failed'}")
+            if status == "cancelled":
+                self._print(f"  └ cancelled  {elapsed_str}")
+            elif is_error:
+                suffix = f"  {error_reason}" if error_reason else ""
+                self._print(f"  └ failed{suffix}")
             else:
-                self._print(f"  Completed in {elapsed_str}")
+                self._print(f"  └ done  {elapsed_str}")
 
         self._current_tool = None
         self._tool_start_time = 0
@@ -345,7 +366,7 @@ class TerminalRenderer:
             self._print()
             self._stream_started = False
 
-        target = self._extract_tool_target(tool_name, args)
+        target = self._shorten_tail(self._extract_tool_target(tool_name, args), 64)
 
         if self._console:
             from rich.panel import Panel
@@ -360,9 +381,9 @@ class TerminalRenderer:
 
             panel = Panel(
                 content,
-                title="[bold yellow]Approval Required[/bold yellow]",
+                title="[bold yellow]Permission required[/bold yellow]",
                 border_style="yellow",
-                padding=(1, 2),
+                padding=(0, 1),
             )
             self._console.print(panel)
         else:
@@ -392,9 +413,10 @@ class TerminalRenderer:
             from rich.text import Text
 
             content = Text()
-            content.append(error, style="bold red")
             if message:
-                content.append(f"\n{message}")
+                content.append(message)
+            else:
+                content.append(error, style="error")
             if provider_response:
                 content.append(f"\nProvider response: {provider_response}", style="dim")
             if provider:
@@ -402,11 +424,13 @@ class TerminalRenderer:
             if model:
                 content.append(f"\nModel: {model}", style="dim")
 
+            title = Text("Error · ", style="error")
+            title.append(str(error), style="error")
             panel = Panel(
                 content,
-                title="[bold red]Error[/bold red]",
+                title=title,
                 border_style="red",
-                padding=(1, 2),
+                padding=(0, 1),
             )
             self._console.print(panel)
         else:
@@ -450,6 +474,22 @@ class TerminalRenderer:
                 cmd = cmd[:47] + "..."
             return cmd
         return ""
+
+    @staticmethod
+    def _shorten_tail(value: str, max_length: int) -> str:
+        if len(value) <= max_length:
+            return value
+        return "…" + value[-(max_length - 1):]
+
+    @staticmethod
+    def _short_session(session_id: str) -> str:
+        return session_id if len(session_id) <= 11 else session_id[:9] + ".."
+
+    @staticmethod
+    def _permission_style(permission_mode: str) -> str:
+        if permission_mode == "read-only":
+            return "warning"
+        return "success"
 
     def render_final(self, final_assistant: AssistantMessage | None) -> None:
         """渲染最终结果。"""

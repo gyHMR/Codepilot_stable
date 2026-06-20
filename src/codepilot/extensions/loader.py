@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+"""Python 扩展加载器：发现并加载工作区中的 .py 扩展文件。"""
+
 import importlib.util
 from pathlib import Path
 
@@ -8,6 +10,7 @@ from .types import LoadedExtensions
 
 
 def discover_extension_paths(workspace_dir: str | Path, configured_paths: list[str] | None = None) -> list[Path]:
+    """发现扩展文件路径：扫描默认目录和配置路径中的 .py 文件。"""
     workspace = Path(workspace_dir)
     paths: list[Path] = []
     seen: set[str] = set()
@@ -43,6 +46,7 @@ def discover_extension_paths(workspace_dir: str | Path, configured_paths: list[s
 
 
 def load_extensions(workspace_dir: str | Path, configured_paths: list[str] | None = None) -> LoadedExtensions:
+    """加载所有扩展：执行每个 .py 文件的 register(api) 函数，收集注册的能力。"""
     result = LoadedExtensions()
     for path in discover_extension_paths(workspace_dir, configured_paths=configured_paths):
         api = ExtensionAPI()

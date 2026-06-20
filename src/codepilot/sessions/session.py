@@ -361,6 +361,7 @@ class AgentSession:
                         {
                             "type": "memory_retrieved",
                             "sessionId": self.session_id,
+                            "runId": event.get("runId"),
                             "memoryIds": memory_ids,
                             "reasons": report.get("memory_retrieval_reasons", {}),
                         }

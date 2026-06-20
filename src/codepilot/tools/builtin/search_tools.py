@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""内置搜索工具：grep（正则内容搜索）、find（glob 文件查找）。"""
+
 import re
 from typing import Any, Callable
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Session branching and switching helpers."""
+"""会话分支与切换辅助函数。"""
 
 from typing import TYPE_CHECKING
 
@@ -17,7 +17,7 @@ def build_session_options_from_existing(
     session_id: str,
     system_prompt: str | None = None,
 ) -> AgentSessionOptions:
-    """Create low-level options that preserve an existing session runtime shape."""
+    """从已有会话构建底层选项，保留运行时配置（模型、工具、钩子等）。"""
 
     return AgentSessionOptions(
         model=session.agent.state.model,
@@ -48,7 +48,7 @@ def build_session_options_from_existing(
 
 
 def create_fresh_session(old: "AgentSession") -> "AgentSession":
-    """Create an empty sibling session while preserving runtime settings."""
+    """创建一个空的兄弟会话（保留运行时设置，清空消息历史）。"""
 
     from ..session import AgentSession
 
@@ -61,7 +61,7 @@ def create_fresh_session(old: "AgentSession") -> "AgentSession":
 
 
 def fork_session(session: "AgentSession", from_entry_id: str | None = None) -> "AgentSession":
-    """Fork a session from a specific entry or the current leaf."""
+    """从指定条目或当前叶子分叉一个新会话。"""
 
     from ..session import AgentSession
 
@@ -79,7 +79,7 @@ def fork_session(session: "AgentSession", from_entry_id: str | None = None) -> "
 
 
 def switch_to_entry(session: "AgentSession", entry_id: str) -> None:
-    """Switch the current session leaf and restore messages from that entry."""
+    """切换当前会话叶子到指定条目，并恢复该分支的消息。"""
 
     session.store.set_leaf(entry_id)
     restored = session.store.load_session_messages(leaf_id=entry_id)
@@ -94,7 +94,7 @@ def switch_to_entry(session: "AgentSession", entry_id: str) -> None:
 
 
 def switch_session(session: "AgentSession", session_id: str) -> None:
-    """Switch this facade to another persisted session id in the same workspace."""
+    """切换到同一工作区中的另一个已持久化的会话。"""
 
     new_store = SessionStore(session.workspace_dir, session_id)
     meta = new_store.read_meta()

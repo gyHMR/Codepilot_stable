@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""内置 shell 工具：bash（受限命令执行，含超时、环境过滤和工作区变更检测）。"""
+
 import asyncio
 import hashlib
 import os

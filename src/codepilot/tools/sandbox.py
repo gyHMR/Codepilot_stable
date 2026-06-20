@@ -8,8 +8,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class WorkspaceSandbox:
-    """Resolve paths while enforcing the workspace boundary."""
-
+    """工作区沙箱：在解析路径的同时强制执行工作区边界检查。"""
     workspace_dir: str | Path
 
     @property
@@ -32,6 +31,7 @@ class WorkspaceSandbox:
 
 
 def file_state_for_path(workspace_dir: str | Path, path: str | Path) -> dict[str, Any]:
+    """获取文件状态快照（路径、存在性、大小、修改时间、SHA256）。"""
     sandbox = WorkspaceSandbox(workspace_dir)
     target = sandbox.resolve_path(path)
     relative = target.relative_to(sandbox.root).as_posix()

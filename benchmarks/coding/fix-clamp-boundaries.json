@@ -1,10 +1,13 @@
 {
   "id": "fix-clamp-boundaries",
-  "category": "coding",
+  "domain": "coding",
   "fixture": "clamp",
   "prompt": "修复 clamp.py 的边界处理，使小于下界返回下界、大于上界返回上界，并运行测试。不要修改测试。",
-  "timeout_seconds": 120,
-  "verifiers": [
+  "budgets": {
+    "timeout_seconds": 120,
+    "max_tool_calls": 12
+  },
+  "assertions": [
     {
       "type": "command",
       "command": "python -m pytest -q",
@@ -17,4 +20,3 @@
     }
   ]
 }
-

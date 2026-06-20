@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Pinned MEMORY.md helpers and memory text sanitization."""
+"""固定 MEMORY.md 辅助工具和记忆文本脱敏。"""
 
 import logging
 import re
@@ -17,6 +17,7 @@ _SECRET_PATTERNS = [
 
 
 def sanitize_memory_text(text: str, *, limit: int) -> str:
+    """脱敏记忆文本：移除密钥、token 等敏感信息后截断。"""
     safe = text
     for pattern in _SECRET_PATTERNS:
         safe = pattern.sub("[REDACTED]", safe)
@@ -25,14 +26,14 @@ def sanitize_memory_text(text: str, *, limit: int) -> str:
 
 
 def load_global_memory(workspace_dir: str | Path) -> str:
-    """Load user-maintained pinned `.codepilot/MEMORY.md`."""
+    """加载用户维护的固定记忆文件 `.codepilot/MEMORY.md`。"""
 
     path = Path(workspace_dir) / ".codepilot" / "MEMORY.md"
     return _read_memory_file(path)
 
 
 def save_global_memory(workspace_dir: str | Path, content: str) -> None:
-    """Save pinned MEMORY.md. Automatic memory never calls this function."""
+    """保存固定 MEMORY.md（自动记忆机制不会调用此函数，仅用户手动操作）。"""
 
     path = Path(workspace_dir) / ".codepilot" / "MEMORY.md"
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -7,10 +7,9 @@ from .types import AgentTool, ToolMetadata
 
 @dataclass
 class ToolRegistry:
-    """Small registry used by runtime assembly and future plugin loading."""
-
-    _tools: dict[str, AgentTool] = field(default_factory=dict)
-    _metadata: dict[str, ToolMetadata] = field(default_factory=dict)
+    """工具注册表：由 runtime 装配和未来插件加载使用。"""
+    _tools: dict[str, AgentTool] = field(default_factory=dict)       # 名称 -> 工具
+    _metadata: dict[str, ToolMetadata] = field(default_factory=dict) # 名称 -> 元数据
 
     def register(self, tool: AgentTool, *, metadata: ToolMetadata | None = None, replace: bool = True) -> None:
         if not replace and tool.name in self._tools:
@@ -36,6 +35,7 @@ class ToolRegistry:
 
 
 def infer_tool_metadata(tool: AgentTool) -> ToolMetadata:
+    """从工具定义推断元数据（用于非内置工具）。"""
     name = tool.name
     read_only = name in {"read", "grep", "find", "ls", "workspace_status"}
     mutating = name in {"write", "edit", "bash"}

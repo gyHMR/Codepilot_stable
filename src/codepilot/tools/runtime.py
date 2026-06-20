@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Unified tool execution runtime."""
+"""统一工具执行运行时：集成权限检查、审批流程和工具执行。"""
 
 import asyncio
 import time
@@ -70,11 +70,13 @@ async def _maybe_await(value: Any) -> Any:
 
 @dataclass
 class ToolRuntime:
-    registry: ToolRegistry
-    permission_policy: PermissionPolicy = field(default_factory=PermissionPolicy)
-    approval_provider: ApprovalProvider = field(default_factory=DenyApprovalProvider)
+    """工具运行时：将注册表、权限策略和审批提供者组合为统一的执行引擎。"""
+    registry: ToolRegistry                                      # 工具注册表
+    permission_policy: PermissionPolicy = field(default_factory=PermissionPolicy)  # 权限策略
+    approval_provider: ApprovalProvider = field(default_factory=DenyApprovalProvider)  # 审批提供者
 
     def as_agent_tools(self) -> list[AgentTool]:
+        """将注册表中的工具转换为 Agent 可用的工具列表（包装权限检查逻辑）。"""
         adapters: list[AgentTool] = []
         for tool in self.registry.list():
             adapter = AgentTool(
@@ -123,6 +125,7 @@ class ToolRuntime:
         signal: Any | None = None,
         on_update: AgentToolUpdateCallback | None = None,
     ) -> ToolRuntimeResult:
+        """执行工具调用：权限检查 → 审批 → 执行 → 返回结果。"""
         tool = self.registry.get(request.name)
         if tool is None:
             result = _tool_result(

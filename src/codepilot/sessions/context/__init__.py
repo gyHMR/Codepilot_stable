@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Dynamic session context governance."""
+"""动态会话上下文治理：编译、压缩、仓库追踪和状态管理。"""
 
 from .compaction import (
     COMPACTION_SYSTEM_PROMPT,

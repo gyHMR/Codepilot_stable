@@ -114,7 +114,11 @@ async def run_interactive(
     from .shell import create_shell
 
     # 交互模式使用 rich 渲染器
-    renderer = TerminalRenderer(verbose=verbose, use_rich=not no_color)
+    renderer = TerminalRenderer(
+        output=output,
+        verbose=verbose,
+        use_rich=not no_color,
+    )
 
     # 从 RuntimeService 获取会话状态
     status = runtime.get_session_status(session_id)
@@ -135,30 +139,32 @@ async def run_interactive(
         try:
             if shell:
                 # 使用 prompt_toolkit（异步版本）
+                status = runtime.get_session_status(current_session_id)
+                toolbar = renderer.build_toolbar(build_startup_state(status))
                 text = await shell.prompt(
-                    prompt_text="> ",
-                    bottom_toolbar="<b>Ctrl+C</b> cancel | <b>/help</b> commands",
+                    prompt_text="› ",
+                    bottom_toolbar=toolbar,
                 )
             elif renderer.has_rich_console:
                 # 使用 rich 的 prompt
-                text = renderer.input("[bold green]>[/bold green] ")
+                text = renderer.input("[bold bright_cyan]›[/bold bright_cyan] ")
             else:
-                text = input_fn("> ")
+                text = input_fn("› ")
             text = text.strip()
         except EOFError:
             # Ctrl+D 退出
-            renderer.print("\nBye.")
+            renderer.render_status("Bye.", kind="info")
             return
         except KeyboardInterrupt:
-            # Ctrl+C 在输入阶段：清空输入或退出
-            renderer.print("\nBye.")
+            # Ctrl+C 在输入阶段：退出 CLI。
+            renderer.render_status("Bye.", kind="info")
             return
 
         bare = text.lstrip("/")
 
         # 检查退出命令
         if bare in exit_commands or text == "/exit":
-            renderer.print("Bye.")
+            renderer.render_status("Bye.", kind="info")
             return
 
         # 空输入跳过
@@ -179,11 +185,14 @@ async def run_interactive(
                     current_session_id = command_result.switched_session_id
                     # 更新状态显示
                     status = runtime.get_session_status(current_session_id)
-                    renderer.print(f"[info]Switched to session: {current_session_id[:8]}..[/info]")
+                    renderer.render_status(
+                        f"Switched to session {current_session_id[:8]}..",
+                        kind="success",
+                    )
                 if command_result.handled:
                     continue
             except Exception as exc:
-                renderer.print(f"[error]Command error: {exc}[/error]")
+                renderer.render_status(f"Command error: {exc}", kind="error")
                 continue
 
         # 普通文本 → 通过 RuntimeService 发送消息
@@ -202,12 +211,12 @@ async def run_interactive(
             )
         except KeyboardInterrupt:
             # Ctrl+C 取消当前运行，不退出 CLI
-            renderer.print("\n[yellow][cancelled][/yellow]")
+            renderer.render_status("Cancelled", kind="cancelled")
             # 通过 RuntimeService 取消任务
             await runtime.cancel_run(current_session_id)
             continue
         except Exception as exc:
-            renderer.print(f"\n[error]Error: {exc}[/error]")
+            renderer.render_status(f"Error: {exc}", kind="error")
             if verbose:
                 import traceback
                 traceback.print_exc()

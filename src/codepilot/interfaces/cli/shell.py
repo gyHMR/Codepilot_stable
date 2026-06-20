@@ -29,8 +29,13 @@ from prompt_toolkit.formatted_text import HTML
 
 # 自定义样式
 CODEPILOT_STYLE = Style.from_dict({
-    "prompt": "bold green",
-    "continuation": "bold blue",
+    "prompt": "bold #67e8f9",
+    "continuation": "#64748b",
+    "bottom-toolbar": "bg:#172033 #94a3b8",
+    "completion-menu.completion": "bg:#111827 #cbd5e1",
+    "completion-menu.completion.current": "bg:#164e63 #ecfeff bold",
+    "completion-menu.meta.completion": "bg:#111827 #64748b",
+    "completion-menu.meta.completion.current": "bg:#164e63 #a5f3fc",
 })
 
 # 命令列表（用于补全）
@@ -145,8 +150,8 @@ class InteractiveShell:
 
         @bindings.add("c-c")
         def _(event: "KeyPressEvent") -> None:
-            """Ctrl+C 清空当前输入。"""
-            event.current_buffer.reset()
+            """Ctrl+C 结束当前输入，让上层决定退出或取消任务。"""
+            event.app.exit(exception=KeyboardInterrupt)
 
         # 创建 PromptSession
         self.session: PromptSession[str] = PromptSession(
@@ -160,7 +165,7 @@ class InteractiveShell:
     async def prompt(
         self,
         *,
-        prompt_text: str = "> ",
+        prompt_text: str = "› ",
         bottom_toolbar: str | None = None,
     ) -> str:
         """显示提示符并获取用户输入（异步版本）。
@@ -186,10 +191,8 @@ class InteractiveShell:
                 bottom_toolbar=HTML(bottom_toolbar) if bottom_toolbar else None,
             )
             return text.strip()
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):
             raise
-        except KeyboardInterrupt:
-            return ""
 
     async def prompt_yes_no(
         self,

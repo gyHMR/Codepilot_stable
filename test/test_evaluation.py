@@ -9,22 +9,30 @@ from types import SimpleNamespace
 import pytest
 
 from codepilot.evaluation import (
+    AssertionSpec,
+    EvalBudgets,
     EvalCase,
     EvalCaseValidationError,
     EvalRunOptions,
+    EvalRuntimeProfile,
     EvalScenario,
     EvaluationService,
     ScenarioStep,
-    VerifierSpec,
     load_eval_definition,
     load_eval_suite,
+    run_assertions,
 )
-from codepilot.evaluation.types import EvaluationEvidence
-from codepilot.evaluation.verifier import (
+from codepilot.evaluation.executor import EvaluationExecutor
+from codepilot.evaluation.outcome_assertions import (
     capture_workspace_baseline,
-    run_verifiers,
 )
+from codepilot.evaluation.types import EvalEvidence
 from codepilot.llm import AssistantMessageEventStream
+from codepilot.observability import (
+    AuditBundle,
+    build_audit_report,
+    redact_artifact,
+)
 from codepilot.protocols import AssistantMessage, Model, TextContent
 from codepilot.runtime import CreateAgentSessionOptions
 
@@ -43,16 +51,29 @@ def _model() -> Model:
     )
 
 
+def _spec(
+    assertion_type,
+    dimension,
+    **options,
+) -> AssertionSpec:
+    return AssertionSpec(
+        type=assertion_type,
+        dimension=dimension,
+        options=options,
+    )
+
+
 def test_loader_parses_case_and_scenario(tmp_path: Path) -> None:
     case_file = tmp_path / "case.json"
     case_file.write_text(
         json.dumps(
             {
                 "id": "case-1",
-                "category": "coding",
+                "domain": "coding",
                 "fixture": "fixture",
                 "prompt": "fix it",
-                "verifiers": [
+                "budgets": {"max_tool_calls": 5},
+                "assertions": [
                     {
                         "type": "command",
                         "command": "python -m pytest -q",
@@ -67,6 +88,7 @@ def test_loader_parses_case_and_scenario(tmp_path: Path) -> None:
         json.dumps(
             {
                 "id": "scenario-1",
+                "domain": "recovery",
                 "fixture": "fixture",
                 "steps": [
                     {"type": "prompt", "text": "inspect"},
@@ -76,7 +98,13 @@ def test_loader_parses_case_and_scenario(tmp_path: Path) -> None:
                         "content": "changed",
                     },
                 ],
-                "verifiers": [{"type": "run", "expect_freshness": "stale"}],
+                "assertions": [
+                    {
+                        "type": "run",
+                        "dimension": "recovery",
+                        "expect_freshness": "stale",
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -86,12 +114,13 @@ def test_loader_parses_case_and_scenario(tmp_path: Path) -> None:
     scenario = load_eval_definition(scenario_file)
 
     assert isinstance(case, EvalCase)
-    assert case.verifiers[0].type == "command"
+    assert case.assertions[0].dimension == "coding_outcome"
+    assert case.budgets.max_tool_calls == 5
     assert isinstance(scenario, EvalScenario)
-    assert scenario.steps[1].type == "modify_file"
+    assert scenario.assertions[0].dimension == "recovery"
 
 
-def test_loader_rejects_invalid_verifier(tmp_path: Path) -> None:
+def test_loader_rejects_old_or_invalid_schema(tmp_path: Path) -> None:
     path = tmp_path / "invalid.json"
     path.write_text(
         json.dumps(
@@ -118,32 +147,70 @@ def test_example_coding_benchmarks_are_valid() -> None:
     assert all(isinstance(item, EvalCase) for item in definitions)
 
 
-def test_outcome_verifiers_include_evidence(tmp_path: Path) -> None:
+def test_minimal_module_benchmarks_are_valid() -> None:
+    root = Path(__file__).resolve().parents[1]
+    definitions = load_eval_suite(root / "benchmarks")
+
+    assert len(definitions) == 9
+    assert {
+        item.domain for item in definitions
+    } == {
+        "runtime",
+        "coding",
+        "context",
+        "memory",
+        "security",
+        "planning",
+        "recovery",
+    }
+
+
+def test_runtime_profile_applies_permission_mode() -> None:
+    options = CreateAgentSessionOptions(
+        workspace_dir=".",
+        model=_model(),
+    )
+
+    applied = EvaluationExecutor._apply_runtime_profile(
+        options,
+        EvalRuntimeProfile(permission_mode="read-only"),
+    )
+
+    assert applied.tool_permission_mode == "read-only"
+    assert applied.read_only_mode is True
+    assert options.tool_permission_mode is None
+
+
+def test_outcome_assertions_include_evidence_refs(
+    tmp_path: Path,
+) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "app.py").write_text("before\n", encoding="utf-8")
     baseline = capture_workspace_baseline(workspace)
     (workspace / "app.py").write_text("after\n", encoding="utf-8")
-    evidence = EvaluationEvidence(workspace=workspace, baseline=baseline)
+    evidence = EvalEvidence(workspace=workspace, baseline=baseline)
 
-    results = run_verifiers(
+    results = run_assertions(
         [
-            VerifierSpec(
-                type="command",
-                options={
-                    "command": (
-                        f'"{sys.executable}" -c "import pathlib; '
-                        "assert pathlib.Path('app.py').exists()\""
-                    )
-                },
+            _spec(
+                "command",
+                "coding_outcome",
+                command=(
+                    f'"{sys.executable}" -c "import pathlib; '
+                    "assert pathlib.Path('app.py').exists()\""
+                ),
             ),
-            VerifierSpec(
-                type="file",
-                options={"path": "app.py", "contains": "after"},
+            _spec(
+                "file",
+                "coding_outcome",
+                path="app.py",
+                contains="after",
             ),
-            VerifierSpec(
-                type="diff",
-                options={"allowed_paths": ["app.py"]},
+            _spec(
+                "diff",
+                "coding_outcome",
+                allowed_paths=["app.py"],
             ),
         ],
         evidence,
@@ -154,111 +221,249 @@ def test_outcome_verifiers_include_evidence(tmp_path: Path) -> None:
         "passed",
         "passed",
     ]
-    assert results[0].evidence["command"]
+    assert results[0].evidence_refs[0].startswith("command:")
     assert results[2].actual == {"changed_paths": ["app.py"]}
 
 
-def test_run_and_trace_verifiers_detect_contract_mismatch(
+def test_runtime_and_module_assertions_use_audit_bundle(
     tmp_path: Path,
 ) -> None:
-    evidence = EvaluationEvidence(
+    events = [
+        {
+            "type": "agent_start",
+            "runId": "r1",
+            "eventId": "r1:1",
+            "timestamp": 1,
+        },
+        {
+            "type": "context_prepared",
+            "runId": "r1",
+            "eventId": "r1:2",
+            "timestamp": 2,
+            "report": {
+                "context_id": "ctx-1",
+                "estimated_tokens_before": 100,
+                "estimated_tokens_after": 60,
+                "stale_items": ["file:old.py"],
+                "dropped_items": [
+                    {
+                        "item_id": "old",
+                        "section": "active_files",
+                        "reason": "stale",
+                        "source": "old.py",
+                    }
+                ],
+                "retrieved_memory_ids": ["mem-1"],
+                "memory_retrieval_reasons": {
+                    "mem-1": ["related_path:app.py"]
+                },
+                "sections": [
+                    {
+                        "name": "current_request",
+                        "budget_tokens": 20,
+                        "candidate_items": 1,
+                        "selected_items": 1,
+                    }
+                ],
+            },
+        },
+        {
+            "type": "memory_retrieved",
+            "runId": "r1",
+            "eventId": "r1:3",
+            "timestamp": 3,
+            "memoryIds": ["mem-1"],
+            "reasons": {"mem-1": ["related_path:app.py"]},
+        },
+        {
+            "type": "task_decision",
+            "runId": "r1",
+            "eventId": "r1:4",
+            "timestamp": 4,
+            "action": "repair",
+        },
+        {
+            "type": "agent_end",
+            "runId": "r1",
+            "eventId": "r1:5",
+            "timestamp": 5,
+        },
+    ]
+    result = {
+        "run_id": "r1",
+        "session_id": "s1",
+        "status": "completed",
+        "stop_reason": "final_answer",
+        "counters": {
+            "model_attempts": 1,
+            "tool_iterations": 0,
+            "tool_calls": 0,
+        },
+        "messages": [],
+        "verification": [],
+        "workspace_changed": False,
+        "task": {
+            "completion_satisfied": True,
+            "completion_reason": "all_steps_completed",
+            "completed_steps": ["done"],
+            "pending_steps": [],
+            "blocked_steps": [],
+        },
+    }
+    report = build_audit_report(result, events=events)
+    bundle = AuditBundle(
+        run_id="r1",
+        session_id="s1",
+        events=events,
+        state={},
+        result=result,
+        report=report,
+        workspace=tmp_path,
+    )
+    evidence = EvalEvidence(
         workspace=tmp_path,
         baseline={},
-        session_id="s1",
-        run_ids=["r1"],
-        run_results={
-            "r1": {
-                "run_id": "r1",
-                "session_id": "s1",
-                "status": "completed",
-                "stop_reason": "final_answer",
-                "counters": {
-                    "model_attempts": 1,
-                    "tool_iterations": 1,
-                    "tool_calls": 2,
-                },
-                "messages": [],
-                "affected_paths": [],
-                "workspace_changed": False,
-                "verification": [],
-            }
-        },
-        run_events={
-            "r1": [
-                {"type": "agent_start", "runId": "r1", "timestamp": 1},
-                {
-                    "type": "tool_execution_start",
-                    "runId": "r1",
-                    "toolCallId": "call-1",
-                    "timestamp": 2,
-                },
-                {
-                    "type": "tool_execution_end",
-                    "runId": "r1",
-                    "toolCallId": "call-1",
-                    "timestamp": 3,
-                },
-                {"type": "agent_end", "runId": "r1", "timestamp": 4},
-            ]
-        },
+        audit_bundles=[bundle],
     )
 
-    results = run_verifiers(
+    results = run_assertions(
         [
-            VerifierSpec(
-                type="run",
-                options={
-                    "expect_status": "completed",
-                    "expect_stop_reason": "final_answer",
-                },
+            _spec(
+                "run",
+                "runtime_contract",
+                expect_status="completed",
             ),
-            VerifierSpec(type="trace"),
+            _spec("trace", "runtime_contract"),
+            _spec(
+                "context",
+                "context_governance",
+                expect_current_request_preserved=True,
+                min_compression_ratio=0.3,
+                expect_dropped_reason="stale",
+                expect_memory_id="mem-1",
+            ),
+            _spec(
+                "memory",
+                "memory",
+                expect_retrieved=["mem-1"],
+                expect_retrieval_reason="related_path",
+            ),
+            _spec(
+                "task",
+                "task_planning",
+                expect_completion_satisfied=True,
+                expect_decision="repair",
+            ),
         ],
         evidence,
     )
 
-    assert results[0].status == "passed"
-    assert results[1].status == "failed"
-    assert "tool_calls counter=2" in results[1].summary
+    assert all(item.status == "passed" for item in results)
+    assert "context:ctx-1" in results[2].evidence_refs
+    assert "memory:mem-1" in results[3].evidence_refs
 
 
-def test_evaluation_service_runs_case_and_writes_artifacts(
+def test_security_assertion_checks_denial_and_side_effects(
+    tmp_path: Path,
+) -> None:
+    events = [
+        {
+            "type": "tool_execution_end",
+            "runId": "r1",
+            "eventId": "r1:1",
+            "toolCallId": "call-1",
+            "toolName": "write",
+            "status": "denied",
+            "errorReason": "read_only_mode",
+            "approved": False,
+            "result": {
+                "status": "denied",
+                "error_code": "read_only_mode",
+                "workspace_changed": False,
+            },
+        }
+    ]
+    result = {
+        "run_id": "r1",
+        "session_id": "s1",
+        "status": "completed",
+        "stop_reason": "final_answer",
+        "counters": {"tool_calls": 1},
+        "messages": [],
+    }
+    bundle = AuditBundle(
+        run_id="r1",
+        session_id="s1",
+        events=events,
+        state={},
+        result=result,
+        report=build_audit_report(result, events=events),
+        workspace=tmp_path,
+    )
+    evidence = EvalEvidence(
+        workspace=tmp_path,
+        baseline={},
+        audit_bundles=[bundle],
+    )
+
+    assertion = _spec(
+        "security",
+        "tool_security",
+        tool_name="write",
+        expect_tool_status="denied",
+        expect_error_code="read_only_mode",
+        expect_workspace_unchanged=True,
+        forbid_success=True,
+    )
+
+    assert run_assertions([assertion], evidence)[0].status == "passed"
+
+
+def test_redaction_removes_nested_credentials() -> None:
+    value = {
+        "api_key": "secret-value",
+        "nested": {"password": "password-value"},
+    }
+
+    assert redact_artifact(value) == {
+        "api_key": "<redacted>",
+        "nested": {"password": "<redacted>"},
+    }
+
+
+def test_evaluation_service_writes_multidimensional_artifacts(
     tmp_path: Path,
 ) -> None:
     fixtures = tmp_path / "fixtures"
     fixture = fixtures / "tiny"
     fixture.mkdir(parents=True)
     (fixture / "app.py").write_text("BUG\n", encoding="utf-8")
-    artifacts = tmp_path / "artifacts"
-
     service = EvaluationService(runtime_factory=_FakeRuntime)
     case = EvalCase(
         id="fix-bug",
-        category="coding",
+        domain="coding",
         fixture="tiny",
         prompt="fix",
-        verifiers=[
-            VerifierSpec(
-                type="file",
-                options={"path": "app.py", "contains": "fixed"},
+        budgets=EvalBudgets(max_tool_calls=2),
+        assertions=[
+            _spec(
+                "file",
+                "coding_outcome",
+                path="app.py",
+                contains="fixed",
             ),
-            VerifierSpec(
-                type="diff",
-                options={"allowed_paths": ["app.py"]},
+            _spec(
+                "run",
+                "runtime_contract",
+                expect_status="completed",
+                expect_stop_reason="final_answer",
             ),
-            VerifierSpec(
-                type="run",
-                options={
-                    "expect_status": "completed",
-                    "expect_stop_reason": "final_answer",
-                },
-            ),
-            VerifierSpec(type="trace"),
+            _spec("trace", "runtime_contract"),
         ],
     )
     options = EvalRunOptions(
         fixtures_root=fixtures,
-        artifact_root=artifacts,
+        artifact_root=tmp_path / "artifacts",
         eval_id="eval-test",
         session_options=CreateAgentSessionOptions(
             workspace_dir=".",
@@ -269,25 +474,36 @@ def test_evaluation_service_runs_case_and_writes_artifacts(
 
     result = asyncio.run(service.run_case(case, options))
 
-    assert result.verdict == "passed"
-    assert result.run_ids == ["run-1"]
-    case_dir = artifacts / "eval-test" / "cases" / "fix-bug"
-    assert (case_dir / "result.json").is_file()
-    assert (case_dir / "verifier-results.json").is_file()
-    assert (case_dir / "workspace.diff").read_text(
-        encoding="utf-8"
-    ) == "M app.py"
+    assert result.overall == "passed"
+    assert {item.dimension for item in result.dimensions} == {
+        "coding_outcome",
+        "runtime_contract",
+        "efficiency",
+    }
+    case_dir = (
+        tmp_path / "artifacts" / "eval-test" / "cases" / "fix-bug"
+    )
+    assert (case_dir / "definition.json").is_file()
+    assert (case_dir / "assertion-results.json").is_file()
+    assert (case_dir / "metrics.json").is_file()
+    assert (
+        tmp_path / "artifacts" / "eval-test" / "report.md"
+    ).is_file()
 
 
-def test_evaluation_service_runs_restart_scenario(tmp_path: Path) -> None:
+def test_evaluation_service_runs_restart_scenario(
+    tmp_path: Path,
+) -> None:
     fixtures = tmp_path / "fixtures"
     fixture = fixtures / "tiny"
     fixture.mkdir(parents=True)
     (fixture / "app.py").write_text("one\n", encoding="utf-8")
-    factory = _SharedFakeRuntimeFactory()
-    service = EvaluationService(runtime_factory=factory)
+    service = EvaluationService(
+        runtime_factory=_SharedFakeRuntimeFactory()
+    )
     scenario = EvalScenario(
         id="restart",
+        domain="recovery",
         fixture="tiny",
         steps=[
             ScenarioStep(type="prompt", options={"text": "inspect"}),
@@ -298,10 +514,12 @@ def test_evaluation_service_runs_restart_scenario(tmp_path: Path) -> None:
             ),
             ScenarioStep(type="prompt", options={"text": "finish"}),
         ],
-        verifiers=[
-            VerifierSpec(
-                type="file",
-                options={"path": "external.txt", "contains": "changed"},
+        assertions=[
+            _spec(
+                "file",
+                "coding_outcome",
+                path="external.txt",
+                contains="changed",
             )
         ],
     )
@@ -318,14 +536,12 @@ def test_evaluation_service_runs_restart_scenario(tmp_path: Path) -> None:
 
     result = asyncio.run(service.run_scenario(scenario, options))
 
-    assert result.verdict == "passed"
+    assert result.overall == "passed"
     assert result.session_id == "session-1"
     assert result.run_ids == ["run-1", "run-2"]
 
 
-def test_evaluation_service_runs_with_session_scripted_stream(
-    tmp_path: Path,
-) -> None:
+def test_real_runtime_writes_run_audit_report(tmp_path: Path) -> None:
     fixtures = tmp_path / "fixtures"
     fixture = fixtures / "tiny"
     fixture.mkdir(parents=True)
@@ -344,19 +560,18 @@ def test_evaluation_service_runs_with_session_scripted_stream(
     service = EvaluationService()
     case = EvalCase(
         id="scripted-runtime",
-        category="harness",
+        domain="runtime",
         fixture="tiny",
         prompt="respond deterministically",
-        verifiers=[
-            VerifierSpec(
-                type="run",
-                options={
-                    "expect_status": "completed",
-                    "expect_stop_reason": "final_answer",
-                    "expect_tool_calls": 0,
-                },
+        assertions=[
+            _spec(
+                "run",
+                "runtime_contract",
+                expect_status="completed",
+                expect_stop_reason="final_answer",
+                expect_tool_calls=0,
             ),
-            VerifierSpec(type="trace"),
+            _spec("trace", "runtime_contract"),
         ],
     )
     options = EvalRunOptions(
@@ -373,29 +588,32 @@ def test_evaluation_service_runs_with_session_scripted_stream(
 
     result = asyncio.run(service.run_case(case, options))
 
-    assert result.verdict == "passed"
+    assert result.overall == "passed"
     assert len(result.run_ids) == 1
-    run_refs = json.loads(
-        (
-            tmp_path
-            / "artifacts"
-            / "eval-scripted"
-            / "cases"
-            / "scripted-runtime"
-            / "run-refs.json"
-        ).read_text(encoding="utf-8")
+    run_report = (
+        tmp_path
+        / "artifacts"
+        / "eval-scripted"
+        / "workspaces"
+        / "scripted-runtime"
+        / ".codepilot"
+        / "runs"
+        / result.run_ids[0]
+        / "report.json"
     )
-    assert run_refs["runs"][0]["run_id"] == result.run_ids[0]
+    assert run_report.is_file()
+    payload = json.loads(run_report.read_text(encoding="utf-8"))
+    assert payload["context"]["preparation_count"] >= 1
 
 
-def test_missing_fixture_is_reported_as_invalid_case(tmp_path: Path) -> None:
+def test_missing_fixture_is_invalid_case(tmp_path: Path) -> None:
     service = EvaluationService()
     case = EvalCase(
         id="missing-fixture",
-        category="coding",
+        domain="coding",
         fixture="missing",
         prompt="fix",
-        verifiers=[VerifierSpec(type="trace")],
+        assertions=[_spec("trace", "runtime_contract")],
     )
     options = EvalRunOptions(
         fixtures_root=tmp_path / "fixtures",
@@ -410,16 +628,8 @@ def test_missing_fixture_is_reported_as_invalid_case(tmp_path: Path) -> None:
 
     result = asyncio.run(service.run_case(case, options))
 
-    assert result.verdict == "invalid_case"
+    assert result.overall == "invalid_case"
     assert "Fixture directory not found" in (result.error or "")
-    assert (
-        tmp_path
-        / "artifacts"
-        / "eval-invalid"
-        / "cases"
-        / "missing-fixture"
-        / "result.json"
-    ).is_file()
 
 
 class _FakeRuntime:
@@ -446,8 +656,18 @@ class _FakeRuntime:
                 encoding="utf-8",
             )
         events = [
-            {"type": "agent_start", "runId": run_id, "timestamp": 1},
-            {"type": "agent_end", "runId": run_id, "timestamp": 2},
+            {
+                "type": "agent_start",
+                "runId": run_id,
+                "eventId": f"{run_id}:1",
+                "timestamp": 1,
+            },
+            {
+                "type": "agent_end",
+                "runId": run_id,
+                "eventId": f"{run_id}:2",
+                "timestamp": 2,
+            },
         ]
         result = {
             "run_id": run_id,

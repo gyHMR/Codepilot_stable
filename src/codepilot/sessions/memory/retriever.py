@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Retrieve relevant structured memory for dynamic context compilation."""
+"""检索相关结构化记忆，用于动态上下文编译。"""
 
 import re
 from pathlib import Path
@@ -13,6 +13,8 @@ from .writer import MemoryWriter
 
 
 class MemoryRetriever:
+    """记忆检索器：根据查询文本和活跃文件路径检索相关记忆并评分排序。"""
+
     def __init__(self, *, store: MemoryStore, workspace_dir: str | Path) -> None:
         self.store = store
         self.workspace_dir = Path(workspace_dir)

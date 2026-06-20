@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-"""Session-scoped working context state.
+"""会话级别的工作上下文状态。
 
-This is intentionally not a second chat history. It only stores compact,
-source-bound facts that help the runtime compile the next model context.
+本模块刻意不作为第二份聊天历史——它只存储紧凑的、与来源绑定的事实，
+帮助运行时在每次模型调用前编译上下文。
 """
 
 import time
@@ -17,39 +17,43 @@ from codepilot.tools.sandbox import file_state_for_path
 
 @dataclass
 class ActiveFile:
-    path: str
-    role: str
-    reason: str
-    source_hash: str | None = None
-    access_count: int = 1
+    """活跃文件记录：跟踪会话中被读写过的文件。"""
+    path: str                        # 文件路径
+    role: str                        # 角色：target/test/dependency/config/reference
+    reason: str                      # 记录原因
+    source_hash: str | None = None   # 文件内容哈希
+    access_count: int = 1            # 访问次数
     last_accessed_at: float = field(default_factory=time.time)
 
 
 @dataclass
 class FileSummary:
+    """文件摘要：由 LLM 生成的文件内容摘要。"""
     path: str
     summary: str
     source_hash: str
     relevant_symbols: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
-    freshness: str = "fresh"
+    freshness: str = "fresh"         # 新鲜度：fresh/stale/missing
 
 
 @dataclass
 class ContextEvidence:
-    kind: str
-    content: str
-    trust: str
-    source: str
+    """上下文证据：从工具结果、验证等来源收集的结构化事实。"""
+    kind: str                        # 证据类型：tool_result/verification 等
+    content: str                     # 证据内容
+    trust: str                       # 信任级别：observed/derived/user_given/model_claim
+    source: str                      # 来源（工具名等）
     source_hash: str | None = None
     workspace_fingerprint: str | None = None
-    freshness: str = "unknown"
+    freshness: str = "unknown"       # 新鲜度
     path: str | None = None
     created_at: float = field(default_factory=time.time)
 
 
 @dataclass
 class SessionContextState:
+    """会话上下文状态：维护活跃文件、摘要、证据等运行时事实。"""
     workspace_dir: Path
     active_files: dict[str, ActiveFile] = field(default_factory=dict)
     file_summaries: dict[str, FileSummary] = field(default_factory=dict)

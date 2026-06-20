@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-"""Session-owned type definitions.
+"""Session 层的类型定义。
 
-This module keeps long-lived AgentSession construction types in the
-sessions layer so session orchestration does not depend on runtime assembly.
+本模块将 AgentSession 的构造类型保留在 sessions 层，
+使会话编排不依赖 runtime 装配层。
 """
 
 from dataclasses import dataclass, field
@@ -24,12 +24,13 @@ from codepilot.extensions.types import LifecycleHook, RegisteredCommand
 from codepilot.protocols import Message, Model
 from codepilot.tools import AgentTool
 
+# 消息转换函数类型：将内部 AgentMessage 列表转换为 LLM Message 列表
 ConvertToLlmFn = Callable[[list[AgentMessage]], list[Message] | Awaitable[list[Message]]]
 
 
 @dataclass
 class AgentSessionOptions:
-    """Low-level AgentSession initialization parameters."""
+    """AgentSession 的底层初始化参数（由 runtime 装配层构造）。"""
 
     model: Model
     workspace_dir: str | Path

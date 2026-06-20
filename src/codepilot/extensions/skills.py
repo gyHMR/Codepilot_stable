@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+"""技能加载器：发现并加载工作区中的 .md 技能文件，将其内容注入系统提示词。"""
+
 import re
 from pathlib import Path
 
@@ -7,6 +9,7 @@ from .types import LoadedExtensions, RegisteredCommand, SkillSpec
 
 
 def discover_skill_paths(workspace_dir: str | Path, configured_paths: list[str] | None = None) -> list[Path]:
+    """发现技能文件路径：扫描默认目录和配置路径中的 .md 文件。"""
     workspace = Path(workspace_dir)
     paths: list[Path] = []
     seen: set[str] = set()
@@ -38,6 +41,7 @@ def discover_skill_paths(workspace_dir: str | Path, configured_paths: list[str] 
 
 
 def load_skills(workspace_dir: str | Path, configured_paths: list[str] | None = None) -> LoadedExtensions:
+    """加载所有技能：解析 .md 文件的 frontmatter 和正文，注册为命令和提示词段落。"""
     result = LoadedExtensions()
     seen_cmds: dict[str, str] = {}
     for path in discover_skill_paths(workspace_dir, configured_paths=configured_paths):

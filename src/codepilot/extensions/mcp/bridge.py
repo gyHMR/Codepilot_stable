@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""MCP 桥接：解析 MCP 服务器配置并创建代理工具。"""
+
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -8,22 +10,23 @@ from codepilot.tools import AgentTool, AgentToolResult
 
 
 class MCPClient(Protocol):
+    """MCP 客户端协议：由外部 MCP 适配器实现。"""
     async def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> Any:
-        """
-        调用 MCP 服务器工具并返回结果对象。
-        """
+        """调用 MCP 服务器工具并返回结果对象。"""
 
 
 @dataclass
 class MCPToolConfig:
-    name: str
-    description: str
-    parameters: dict[str, Any]
-    server: str
-    tool: str
+    """MCP 工具配置：描述一个 MCP 服务器工具的映射关系。"""
+    name: str                   # 代理工具名称
+    description: str            # 工具描述
+    parameters: dict[str, Any]  # JSON Schema 参数定义
+    server: str                 # MCP 服务器名称
+    tool: str                   # MCP 服务器上的工具名
 
 
 def parse_mcp_tool_configs(raw_servers: list[dict[str, Any]] | None) -> list[MCPToolConfig]:
+    """解析 MCP 服务器配置列表为 MCPToolConfig 列表。"""
     if not raw_servers:
         return []
     result: list[MCPToolConfig] = []
@@ -60,6 +63,7 @@ def parse_mcp_tool_configs(raw_servers: list[dict[str, Any]] | None) -> list[MCP
 
 
 def create_mcp_proxy_tools(configs: list[MCPToolConfig], client: MCPClient | None) -> list[AgentTool]:
+    """从 MCP 工具配置创建代理 AgentTool 列表（通过 MCPClient 转发调用）。"""
     tools: list[AgentTool] = []
     for cfg in configs:
         async def _execute(tool_call_id, params, signal=None, on_update=None, *, _cfg=cfg):  # type: ignore[no-untyped-def]

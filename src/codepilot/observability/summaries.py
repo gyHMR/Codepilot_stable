@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Eval-ready summaries derived from events and AgentRunResult."""
+"""从事件和 AgentRunResult 构建 Eval 就绪的运行摘要。"""
 
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,14 +17,15 @@ from .metrics import (
 
 @dataclass(frozen=True)
 class EvalRunSummary:
-    total_events: int
-    run_count: int
-    session_count: int
-    tool_calls: int
-    tool_errors: int
-    errors: int
-    usage: dict[str, Any] = field(default_factory=dict)
-    event_counts: dict[str, int] = field(default_factory=dict)
+    """Eval 运行摘要：从事件流中提取的聚合指标。"""
+    total_events: int           # 总事件数
+    run_count: int              # Run 数量
+    session_count: int          # Session 数量
+    tool_calls: int             # 工具调用次数
+    tool_errors: int            # 工具错误次数
+    errors: int                 # 错误事件数
+    usage: dict[str, Any] = field(default_factory=dict)        # token 用量
+    event_counts: dict[str, int] = field(default_factory=dict)  # 各类型事件计数
 
     @property
     def tool_error_rate(self) -> float:
@@ -52,6 +53,7 @@ class EvalRunSummary:
 
 
 def build_eval_summary(events: list[dict[str, Any]]) -> EvalRunSummary:
+    """从事件列表构建 Eval 运行摘要。"""
     raw = summarize_events(events)
     return EvalRunSummary(
         total_events=int(raw.get("total_events", 0)),
@@ -67,23 +69,24 @@ def build_eval_summary(events: list[dict[str, Any]]) -> EvalRunSummary:
 
 @dataclass(frozen=True)
 class RunSummary:
+    """单次 Run 的结构化摘要。"""
     run_id: str
     session_id: str | None
-    status: str
-    stop_reason: str
-    model_attempts: int
-    tool_iterations: int
-    tool_calls: int
-    affected_paths: list[str] = field(default_factory=list)
-    workspace_changed: bool = False
-    verification_count: int = 0
-    verification_passed: int = 0
-    approval_count: int = 0
-    denied_count: int = 0
-    token_usage: dict[str, int] = field(default_factory=dict)
-    cost: dict[str, float] = field(default_factory=dict)
-    duration_ms: int | None = None
-    error: dict[str, Any] | None = None
+    status: str                           # 运行状态
+    stop_reason: str                      # 停止原因
+    model_attempts: int                   # 模型调用尝试次数
+    tool_iterations: int                  # 工具迭代次数
+    tool_calls: int                       # 工具调用次数
+    affected_paths: list[str] = field(default_factory=list)  # 受影响文件
+    workspace_changed: bool = False       # 工作区是否被修改
+    verification_count: int = 0           # 验证次数
+    verification_passed: int = 0          # 验证通过次数
+    approval_count: int = 0               # 审批请求次数
+    denied_count: int = 0                 # 拒绝次数
+    token_usage: dict[str, int] = field(default_factory=dict)  # token 用量
+    cost: dict[str, float] = field(default_factory=dict)       # 费用
+    duration_ms: int | None = None        # 总耗时（毫秒）
+    error: dict[str, Any] | None = None   # 错误信息
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -112,6 +115,7 @@ def build_run_summary(
     *,
     events: list[dict[str, Any]] | None = None,
 ) -> RunSummary:
+    """从 Run 结果和事件构建 RunSummary。"""
     record = _run_record(result)
     metrics = build_run_metrics(record, events=events)
     model_calls = build_model_call_records(record, events=events)
@@ -153,6 +157,7 @@ def build_run_report(
     events: list[dict[str, Any]] | None = None,
     task: str | None = None,
 ) -> dict[str, Any]:
+    """构建完整的 Run 报告（摘要 + 指标 + 模型调用 + 工具调用 + 最终文本）。"""
     record = _run_record(result)
     summary = build_run_summary(record, events=events)
     metrics = build_run_metrics(record, events=events)

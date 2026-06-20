@@ -1,37 +1,52 @@
-"""Codepilot evaluation framework."""
+"""Codepilot evaluation and lightweight experiment framework."""
 
+from .assertions import (
+    build_dimension_results,
+    failure_categories,
+    run_assertions,
+)
 from .loader import (
     EvalCaseValidationError,
     load_eval_definition,
     load_eval_suite,
     parse_eval_definition,
 )
-from .report import build_suite_summary
+from .report import build_suite_summary, render_suite_markdown
 from .service import EvaluationService
 from .types import (
+    AssertionResult,
+    AssertionSpec,
+    DimensionResult,
+    EvalBudgets,
     EvalCase,
     EvalResult,
     EvalRunOptions,
+    EvalRuntimeProfile,
     EvalScenario,
     EvalSuiteResult,
     ScenarioStep,
-    VerifierResult,
-    VerifierSpec,
 )
 
 __all__ = [
+    "AssertionResult",
+    "AssertionSpec",
+    "DimensionResult",
+    "EvalBudgets",
     "EvalCase",
     "EvalCaseValidationError",
     "EvalResult",
     "EvalRunOptions",
+    "EvalRuntimeProfile",
     "EvalScenario",
     "EvalSuiteResult",
     "EvaluationService",
     "ScenarioStep",
-    "VerifierResult",
-    "VerifierSpec",
+    "build_dimension_results",
     "build_suite_summary",
+    "failure_categories",
     "load_eval_definition",
     "load_eval_suite",
     "parse_eval_definition",
+    "render_suite_markdown",
+    "run_assertions",
 ]

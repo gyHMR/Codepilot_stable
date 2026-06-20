@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Conservative shell classification, environment, and output controls."""
+"""保守的 shell 命令分类、环境变量过滤和输出截断控制。"""
 
 import os
 import re
@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 
+# Shell 命令分类：验证型/修改型/高风险/未知
 ShellCommandClass = Literal["verification", "mutation", "high_risk", "unknown"]
 
 _HIGH_RISK_PATTERNS = (
@@ -72,11 +73,12 @@ _SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "CREDENTIAL", "
 
 @dataclass(frozen=True)
 class ShellExecutionPolicy:
-    timeout_seconds: int = 30
-    max_timeout_seconds: int = 120
-    stdout_limit: int = 20_000
-    stderr_limit: int = 10_000
-    allowed_env: tuple[str, ...] = ()
+    """Shell 执行策略：控制超时、输出限制和环境变量白名单。"""
+    timeout_seconds: int = 30           # 默认超时（秒）
+    max_timeout_seconds: int = 120      # 最大允许超时（秒）
+    stdout_limit: int = 20_000          # stdout 最大字符数
+    stderr_limit: int = 10_000          # stderr 最大字符数
+    allowed_env: tuple[str, ...] = ()   # 额外允许的环境变量名
 
     def validate_timeout(self, requested: object) -> tuple[int | None, str | None]:
         if requested is None:
@@ -94,13 +96,15 @@ class ShellExecutionPolicy:
 
 @dataclass(frozen=True)
 class TruncatedOutput:
-    text: str
-    truncated: bool
-    original_chars: int
-    returned_chars: int
+    """截断后的输出结果。"""
+    text: str              # 截断后的文本
+    truncated: bool        # 是否发生了截断
+    original_chars: int    # 原始字符数
+    returned_chars: int    # 返回的字符数
 
 
 def classify_shell_command(command: str) -> ShellCommandClass:
+    """分类 shell 命令：验证型（测试/lint）、修改型（格式化/git add）、高风险（rm -rf）或未知。"""
     normalized = " ".join(command.strip().lower().split())
     if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _HIGH_RISK_PATTERNS):
         return "high_risk"
@@ -113,6 +117,7 @@ def classify_shell_command(command: str) -> ShellCommandClass:
 
 
 def build_shell_environment(extra_allowed: tuple[str, ...] = ()) -> dict[str, str]:
+    """构建安全的 shell 环境变量（过滤密钥，只保留白名单变量）。"""
     names = _SAFE_ENV_NAMES | {name.upper() for name in extra_allowed}
     result: dict[str, str] = {}
     for name, value in os.environ.items():
@@ -126,6 +131,7 @@ def build_shell_environment(extra_allowed: tuple[str, ...] = ()) -> dict[str, st
 
 
 def truncate_output(text: str, limit: int) -> TruncatedOutput:
+    """截断输出文本：保留头部和尾部，中间用省略标记替代。"""
     original = len(text)
     if original <= limit:
         return TruncatedOutput(text, False, original, original)

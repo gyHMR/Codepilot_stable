@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Write structured memories from user prompts, tool results, and run results."""
+"""从用户提示、工具结果和 Run 结果中写入结构化记忆。"""
 
 import uuid
 from pathlib import Path
@@ -27,7 +27,7 @@ _FAILURE_CODES = {
 
 
 class MemoryWriter:
-    """Conservatively turn user/tool/run facts into structured memory."""
+    """记忆写入器：保守地将用户/工具/Run 事实转化为结构化记忆。"""
 
     def __init__(self, *, store: MemoryStore, workspace_dir: str | Path) -> None:
         self.store = store

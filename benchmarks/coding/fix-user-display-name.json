@@ -1,10 +1,13 @@
 {
   "id": "fix-user-display-name",
-  "category": "coding",
+  "domain": "coding",
   "fixture": "user_display",
   "prompt": "修复 user.py 的 display_name()：去除名字首尾空白；名字为空时使用邮箱 @ 前的部分。运行测试且不要修改测试目录。",
-  "timeout_seconds": 120,
-  "verifiers": [
+  "budgets": {
+    "timeout_seconds": 120,
+    "max_tool_calls": 12
+  },
+  "assertions": [
     {
       "type": "command",
       "command": "python -m pytest -q",
@@ -17,4 +20,3 @@
     }
   ]
 }
-

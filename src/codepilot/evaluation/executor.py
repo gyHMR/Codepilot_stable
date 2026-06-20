@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Execution engine for Eval cases and recovery scenarios."""
+"""Execution engine for Eval cases and stateful scenarios."""
 
 import asyncio
 import shutil
@@ -10,20 +10,33 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from codepilot.runtime import RuntimeService, UserInput
+from codepilot.observability import AuditBundle, build_audit_report
+from codepilot.runtime import (
+    CreateAgentSessionOptions,
+    RuntimeService,
+    UserInput,
+)
 
 from .artifacts import EvalArtifactStore
+from .assertions import (
+    build_dimension_results,
+    failure_categories,
+    required_assertions_passed,
+    run_assertions,
+)
+from .outcome_assertions import capture_workspace_baseline
 from .types import (
+    AssertionResult,
+    AssertionSpec,
     EvalCase,
+    EvalBudgets,
+    EvalEvidence,
     EvalResult,
     EvalRunOptions,
+    EvalRuntimeProfile,
     EvalScenario,
-    EvaluationEvidence,
     ScenarioStep,
-    VerifierResult,
-    VerifierSpec,
 )
-from .verifier import capture_workspace_baseline, run_verifiers
 
 
 class EvaluationExecutor:
@@ -41,21 +54,29 @@ class EvaluationExecutor:
         artifacts: EvalArtifactStore,
     ) -> EvalResult:
         started = time.perf_counter()
-        workspace = self._prepare_workspace(case.id, case.fixture, options, artifacts)
-        evidence = EvaluationEvidence(
+        workspace = self._prepare_workspace(
+            case.id,
+            case.fixture,
+            options,
+            artifacts,
+        )
+        evidence = EvalEvidence(
             workspace=workspace,
             baseline=capture_workspace_baseline(workspace),
         )
         runtime = self.runtime_factory()
-        session_options = replace(
-            options.session_options,
-            workspace_dir=workspace,
-            session_id=None,
+        handle = runtime.create_session(
+            replace(
+                self._apply_runtime_profile(
+                    options.session_options,
+                    case.runtime,
+                ),
+                workspace_dir=workspace,
+                session_id=None,
+            )
         )
-        handle = runtime.create_session(session_options)
         evidence.session_id = handle.session_id
         error: str | None = None
-
         try:
             await self._execute_prompt(
                 runtime,
@@ -64,26 +85,27 @@ class EvaluationExecutor:
                 case.timeout_seconds,
                 evidence,
             )
-            evidence.freshness = runtime.get_session_freshness(
-                handle.session_id
+            evidence.freshness_history.append(
+                runtime.get_session_freshness(handle.session_id)
             )
-            evidence.freshness_history.append(dict(evidence.freshness))
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+            self._refresh_audit_evidence(
+                runtime,
+                handle.session_id,
+                evidence,
+            )
         finally:
             await runtime.aclose_all()
 
-        verifier_results = run_verifiers(case.verifiers, evidence)
-        verdict = _case_verdict(case, verifier_results, error)
-        result = EvalResult(
-            case_id=case.id,
-            verdict=verdict,
-            session_id=evidence.session_id,
-            run_ids=evidence.run_ids,
-            verifier_results=verifier_results,
-            artifact_dir=str(artifacts.case_dir(case.id)),
+        result = self._evaluate(
+            case.id,
+            case.assertions,
+            case.budgets,
+            evidence,
+            artifacts,
             error=error,
-            duration_ms=int((time.perf_counter() - started) * 1000),
+            started=started,
         )
         artifacts.write_case_result(result, evidence)
         if not options.keep_workspace:
@@ -103,20 +125,23 @@ class EvaluationExecutor:
             options,
             artifacts,
         )
-        evidence = EvaluationEvidence(
+        evidence = EvalEvidence(
             workspace=workspace,
             baseline=capture_workspace_baseline(workspace),
         )
         runtime = self.runtime_factory()
         session_options = replace(
-            options.session_options,
+            self._apply_runtime_profile(
+                options.session_options,
+                scenario.runtime,
+            ),
             workspace_dir=workspace,
             session_id=None,
         )
         handle = runtime.create_session(session_options)
         session_id = handle.session_id
         evidence.session_id = session_id
-        step_verifiers: list[VerifierResult] = []
+        step_assertions: list[AssertionResult] = []
         pending_task: asyncio.Task[None] | None = None
         pending_events: list[dict] = []
         error: str | None = None
@@ -125,10 +150,11 @@ class EvaluationExecutor:
             for index, step in enumerate(scenario.steps):
                 if step.type == "prompt":
                     text = str(step.options["text"])
-                    background = bool(step.options.get("background", False))
-                    if background:
+                    if bool(step.options.get("background", False)):
                         if pending_task is not None and not pending_task.done():
-                            raise RuntimeError("A background prompt is already running")
+                            raise RuntimeError(
+                                "A background prompt is already running"
+                            )
                         pending_events = []
                         pending_task = asyncio.create_task(
                             self._consume_prompt_stream(
@@ -140,7 +166,11 @@ class EvaluationExecutor:
                         )
                         await self._wait_until_running(runtime, session_id)
                         evidence.step_results.append(
-                            {"step": index, "type": "prompt", "background": True}
+                            {
+                                "step": index,
+                                "type": "prompt",
+                                "background": True,
+                            }
                         )
                     else:
                         await self._execute_prompt(
@@ -151,22 +181,30 @@ class EvaluationExecutor:
                             evidence,
                         )
                         evidence.step_results.append(
-                            {"step": index, "type": "prompt", "completed": True}
+                            {
+                                "step": index,
+                                "type": "prompt",
+                                "completed": True,
+                            }
                         )
                 elif step.type == "cancel":
                     cancelled = await runtime.cancel_run(session_id)
                     if pending_task is not None:
                         with suppress(asyncio.CancelledError):
                             await pending_task
-                        self._record_captured_events(
-                            pending_events,
-                            evidence,
-                        )
                         pending_task = None
                         pending_events = []
-                    self._refresh_run_evidence(runtime, session_id, evidence)
+                    self._refresh_audit_evidence(
+                        runtime,
+                        session_id,
+                        evidence,
+                    )
                     evidence.step_results.append(
-                        {"step": index, "type": "cancel", "cancelled": cancelled}
+                        {
+                            "step": index,
+                            "type": "cancel",
+                            "cancelled": cancelled,
+                        }
                     )
                 elif step.type == "modify_file":
                     self._modify_file(
@@ -175,86 +213,145 @@ class EvaluationExecutor:
                         step,
                         options,
                     )
-                    evidence.freshness = runtime.get_session_freshness(session_id)
-                    evidence.freshness_history.append(
-                        dict(evidence.freshness)
-                    )
+                    freshness = runtime.get_session_freshness(session_id)
+                    evidence.freshness_history.append(freshness)
                     evidence.step_results.append(
                         {
                             "step": index,
                             "type": "modify_file",
                             "path": step.options["path"],
-                            "freshness": evidence.freshness,
+                            "freshness": freshness,
                         }
                     )
                 elif step.type == "restart":
                     if pending_task is not None and not pending_task.done():
-                        raise RuntimeError("Cannot restart with a background prompt")
+                        raise RuntimeError(
+                            "Cannot restart with a background prompt"
+                        )
                     await runtime.aclose_all()
                     runtime = self.runtime_factory()
-                    restored_options = replace(
-                        session_options,
-                        session_id=session_id,
+                    runtime.create_session(
+                        replace(session_options, session_id=session_id)
                     )
-                    runtime.create_session(restored_options)
                     evidence.step_results.append(
-                        {"step": index, "type": "restart", "session_id": session_id}
+                        {
+                            "step": index,
+                            "type": "restart",
+                            "session_id": session_id,
+                        }
                     )
                 elif step.type == "continue":
-                    events = await asyncio.wait_for(
+                    await asyncio.wait_for(
                         self._consume_continue(runtime, session_id),
                         timeout=scenario.timeout_seconds,
                     )
-                    self._record_captured_events(events, evidence)
-                    self._refresh_run_evidence(runtime, session_id, evidence)
+                    self._refresh_audit_evidence(
+                        runtime,
+                        session_id,
+                        evidence,
+                    )
                     evidence.step_results.append(
-                        {"step": index, "type": "continue", "completed": True}
+                        {
+                            "step": index,
+                            "type": "continue",
+                            "completed": True,
+                        }
                     )
                 elif step.type == "verify":
-                    raw = step.options["verifier"]
-                    verifier_spec = VerifierSpec(
-                        type=raw["type"],
-                        options={
-                            key: value for key, value in raw.items()
-                            if key != "type"
-                        },
+                    assertion = step.options["assertion"]
+                    if not isinstance(assertion, AssertionSpec):
+                        raise TypeError(
+                            "verify step assertion was not normalized"
+                        )
+                    step_assertions.extend(
+                        run_assertions([assertion], evidence)
                     )
-                    step_verifiers.extend(run_verifiers([verifier_spec], evidence))
                     evidence.step_results.append(
                         {"step": index, "type": "verify"}
                     )
-            evidence.freshness = runtime.get_session_freshness(session_id)
-            evidence.freshness_history.append(dict(evidence.freshness))
+                elif step.type == "inspect":
+                    state = self._inspect_runtime(runtime, session_id)
+                    evidence.step_results.append(
+                        {
+                            "step": index,
+                            "type": "inspect",
+                            "state": state,
+                        }
+                    )
+            evidence.freshness_history.append(
+                runtime.get_session_freshness(session_id)
+            )
+            self._refresh_audit_evidence(runtime, session_id, evidence)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+            self._refresh_audit_evidence(runtime, session_id, evidence)
         finally:
             if pending_task is not None and not pending_task.done():
                 await runtime.cancel_run(session_id)
                 pending_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await pending_task
-                self._record_captured_events(pending_events, evidence)
+                self._refresh_audit_evidence(
+                    runtime,
+                    session_id,
+                    evidence,
+                )
             await runtime.aclose_all()
 
-        verifier_results = [
-            *step_verifiers,
-            *run_verifiers(scenario.verifiers, evidence),
-        ]
-        verdict = _scenario_verdict(verifier_results, error)
-        result = EvalResult(
-            case_id=scenario.id,
-            verdict=verdict,
-            session_id=session_id,
-            run_ids=evidence.run_ids,
-            verifier_results=verifier_results,
-            artifact_dir=str(artifacts.case_dir(scenario.id)),
+        result = self._evaluate(
+            scenario.id,
+            scenario.assertions,
+            scenario.budgets,
+            evidence,
+            artifacts,
             error=error,
-            duration_ms=int((time.perf_counter() - started) * 1000),
+            started=started,
+            precomputed=step_assertions,
         )
         artifacts.write_case_result(result, evidence)
         if not options.keep_workspace:
             shutil.rmtree(workspace, ignore_errors=True)
         return result
+
+    def _evaluate(
+        self,
+        case_id: str,
+        assertions: list[AssertionSpec],
+        budgets: EvalBudgets,
+        evidence: EvalEvidence,
+        artifacts: EvalArtifactStore,
+        *,
+        error: str | None,
+        started: float,
+        precomputed: list[AssertionResult] | None = None,
+    ) -> EvalResult:
+        assertion_results = [
+            *(precomputed or []),
+            *run_assertions(assertions, evidence),
+            *self._budget_assertions(budgets, evidence),
+        ]
+        dimensions = build_dimension_results(assertion_results)
+        if error:
+            overall = "execution_error"
+        elif not assertion_results:
+            overall = "invalid_case"
+        elif required_assertions_passed(assertion_results):
+            overall = "passed"
+        else:
+            overall = "failed"
+        metrics = self._metrics(evidence, assertion_results)
+        return EvalResult(
+            case_id=case_id,
+            overall=overall,
+            session_id=evidence.session_id,
+            run_ids=evidence.run_ids,
+            dimensions=dimensions,
+            failure_categories=failure_categories(assertion_results),
+            metrics=metrics,
+            artifact_dir=str(artifacts.case_dir(case_id)),
+            error=error,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
 
     async def _execute_prompt(
         self,
@@ -262,26 +359,9 @@ class EvaluationExecutor:
         session_id: str,
         text: str,
         timeout_seconds: int,
-        evidence: EvaluationEvidence,
+        evidence: EvalEvidence,
     ) -> None:
-        events = await self._consume_prompt(
-            runtime,
-            session_id,
-            text,
-            timeout_seconds,
-        )
-        self._record_captured_events(events, evidence)
-        self._refresh_run_evidence(runtime, session_id, evidence)
-
-    async def _consume_prompt(
-        self,
-        runtime: RuntimeService,
-        session_id: str,
-        text: str,
-        timeout_seconds: int,
-    ) -> list[dict]:
         events: list[dict] = []
-
         try:
             await asyncio.wait_for(
                 self._consume_prompt_stream(
@@ -297,7 +377,7 @@ class EvaluationExecutor:
             raise TimeoutError(
                 f"Prompt timed out after {timeout_seconds}s"
             ) from None
-        return events
+        self._refresh_audit_evidence(runtime, session_id, evidence)
 
     @staticmethod
     async def _consume_prompt_stream(
@@ -312,15 +392,13 @@ class EvaluationExecutor:
         ):
             events.append(dict(event))
 
+    @staticmethod
     async def _consume_continue(
-        self,
         runtime: RuntimeService,
         session_id: str,
-    ) -> list[dict]:
-        events: list[dict] = []
-        async for event in runtime.continue_session(session_id):
-            events.append(dict(event))
-        return events
+    ) -> None:
+        async for _ in runtime.continue_session(session_id):
+            pass
 
     @staticmethod
     async def _wait_until_running(
@@ -334,37 +412,143 @@ class EvaluationExecutor:
         raise TimeoutError("Background prompt did not start")
 
     @staticmethod
-    def _record_captured_events(
-        events: list[dict],
-        evidence: EvaluationEvidence,
-    ) -> None:
-        by_run: dict[str, list[dict]] = {}
-        for event in events:
-            run_id = event.get("runId") or event.get("run_id")
-            if isinstance(run_id, str) and run_id:
-                by_run.setdefault(run_id, []).append(event)
-        for run_id, run_events in by_run.items():
-            if run_id not in evidence.run_ids:
-                evidence.run_ids.append(run_id)
-            evidence.run_events.setdefault(run_id, []).extend(run_events)
-
-    @staticmethod
-    def _refresh_run_evidence(
+    def _refresh_audit_evidence(
         runtime: RuntimeService,
         session_id: str,
-        evidence: EvaluationEvidence,
+        evidence: EvalEvidence,
     ) -> None:
+        by_id = {bundle.run_id: bundle for bundle in evidence.audit_bundles}
         for result in runtime.list_runs(session_id):
             run_id = result.get("run_id")
             if not isinstance(run_id, str) or not run_id:
                 continue
-            if run_id not in evidence.run_ids:
-                evidence.run_ids.append(run_id)
-            evidence.run_results[run_id] = result
-            evidence.run_events[run_id] = runtime.get_run_events(
-                session_id,
-                run_id,
+            events = runtime.get_run_events(session_id, run_id)
+            if hasattr(runtime, "get_run_audit_bundle"):
+                bundle = runtime.get_run_audit_bundle(session_id, run_id)
+            else:
+                state = {
+                    "run_id": run_id,
+                    "session_id": session_id,
+                    "status": result.get("status"),
+                    "stop_reason": result.get("stop_reason"),
+                    "workspace_path": str(evidence.workspace),
+                }
+                bundle = AuditBundle(
+                    run_id=run_id,
+                    session_id=session_id,
+                    events=events,
+                    state=state,
+                    result=result,
+                    report=build_audit_report(
+                        result,
+                        events=events,
+                        state=state,
+                    ),
+                    workspace=evidence.workspace,
+                )
+            by_id[run_id] = bundle
+        evidence.audit_bundles = list(by_id.values())
+
+    @staticmethod
+    def _inspect_runtime(
+        runtime: RuntimeService,
+        session_id: str,
+    ) -> dict:
+        if hasattr(runtime, "get_session_recovery_state"):
+            return runtime.get_session_recovery_state(session_id)
+        return {
+            "session_id": session_id,
+            "freshness": runtime.get_session_freshness(session_id),
+            "run_ids": [
+                result.get("run_id")
+                for result in runtime.list_runs(session_id)
+            ],
+        }
+
+    @staticmethod
+    def _metrics(
+        evidence: EvalEvidence,
+        assertion_results: list[AssertionResult],
+    ) -> dict:
+        run_summaries = [
+            bundle.report.get("run", {}).get("summary", {})
+            for bundle in evidence.audit_bundles
+        ]
+        return {
+            "run_count": len(evidence.audit_bundles),
+            "assertion_count": len(assertion_results),
+            "assertions_passed": sum(
+                result.status == "passed" for result in assertion_results
+            ),
+            "model_attempts": sum(
+                int(summary.get("model_attempts", 0) or 0)
+                for summary in run_summaries
+            ),
+            "tool_calls": sum(
+                int(summary.get("tool_calls", 0) or 0)
+                for summary in run_summaries
+            ),
+            "changed_path_count": len(evidence.changes),
+        }
+
+    @staticmethod
+    def _budget_assertions(
+        budgets: EvalBudgets,
+        evidence: EvalEvidence,
+    ) -> list[AssertionResult]:
+        summaries = [
+            bundle.report.get("run", {}).get("summary", {})
+            for bundle in evidence.audit_bundles
+        ]
+        actual = {
+            "model_attempts": sum(
+                int(item.get("model_attempts", 0) or 0)
+                for item in summaries
+            ),
+            "tool_calls": sum(
+                int(item.get("tool_calls", 0) or 0)
+                for item in summaries
+            ),
+            "replans": sum(
+                int(
+                    bundle.report.get("task", {})
+                    .get("decision_counts", {})
+                    .get("replan", 0)
+                    or 0
+                )
+                for bundle in evidence.audit_bundles
+            ),
+        }
+        configured = {
+            "model_attempts": budgets.max_model_attempts,
+            "tool_calls": budgets.max_tool_calls,
+            "replans": budgets.max_replans,
+        }
+        results = []
+        for metric, limit in configured.items():
+            if limit is None:
+                continue
+            passed = actual[metric] <= limit
+            results.append(
+                AssertionResult(
+                    name=f"budget_{metric}",
+                    dimension="efficiency",
+                    status="passed" if passed else "failed",
+                    summary=(
+                        f"{metric} within budget: {actual[metric]} <= {limit}"
+                        if passed
+                        else f"{metric} exceeded budget: {actual[metric]} > {limit}"
+                    ),
+                    expected={"maximum": limit},
+                    actual={"value": actual[metric]},
+                    evidence_refs=[
+                        f"run:{bundle.run_id}"
+                        for bundle in evidence.audit_bundles
+                    ],
+                    required=True,
+                )
             )
+        return results
 
     def _prepare_workspace(
         self,
@@ -378,16 +562,36 @@ class EvaluationExecutor:
         if source != fixtures_root and fixtures_root not in source.parents:
             raise ValueError(f"Fixture escapes fixtures root: {fixture}")
         if not source.is_dir():
-            raise FileNotFoundError(f"Fixture directory not found: {source}")
+            raise FileNotFoundError(
+                f"Fixture directory not found: {source}"
+            )
         workspace = artifacts.workspace_dir(case_id)
         if workspace.exists():
             shutil.rmtree(workspace)
         shutil.copytree(
             source,
             workspace,
-            ignore=shutil.ignore_patterns(".git", ".codepilot", "__pycache__"),
+            ignore=shutil.ignore_patterns(
+                ".git",
+                ".codepilot",
+                "__pycache__",
+                ".pytest_cache",
+            ),
         )
         return workspace
+
+    @staticmethod
+    def _apply_runtime_profile(
+        session_options: CreateAgentSessionOptions,
+        profile: EvalRuntimeProfile,
+    ) -> CreateAgentSessionOptions:
+        """Apply Eval-owned runtime controls without mutating caller options."""
+
+        return replace(
+            session_options,
+            tool_permission_mode=profile.permission_mode,
+            read_only_mode=profile.permission_mode == "read-only",
+        )
 
     @staticmethod
     def _modify_file(
@@ -399,14 +603,22 @@ class EvaluationExecutor:
         target = _safe_child(workspace, str(step.options["path"]))
         target.parent.mkdir(parents=True, exist_ok=True)
         if "content" in step.options:
-            target.write_text(str(step.options["content"]), encoding="utf-8")
+            target.write_text(
+                str(step.options["content"]),
+                encoding="utf-8",
+            )
             return
         fixture_root = (
             Path(options.fixtures_root).resolve() / fixture
         ).resolve()
-        source = _safe_child(fixture_root, str(step.options["source"]))
+        source = _safe_child(
+            fixture_root,
+            str(step.options["source"]),
+        )
         if not source.is_file():
-            raise FileNotFoundError(f"Mutation source not found: {source}")
+            raise FileNotFoundError(
+                f"Mutation source not found: {source}"
+            )
         shutil.copyfile(source, target)
 
 
@@ -416,35 +628,3 @@ def _safe_child(root: Path, relative: str) -> Path:
     if target != resolved_root and resolved_root not in target.parents:
         raise ValueError(f"Path escapes root: {relative}")
     return target
-
-
-def _case_verdict(
-    case: EvalCase,
-    results: list[VerifierResult],
-    error: str | None,
-):
-    if error:
-        return "harness_failed"
-    if not results or all(item.status == "skipped" for item in results):
-        return "invalid_case"
-    failed = [item for item in results if item.status in {"failed", "error"}]
-    if not failed:
-        return "passed"
-    if case.category == "harness" or any(
-        item.name in {"run", "trace"} for item in failed
-    ):
-        return "harness_failed"
-    return "task_failed"
-
-
-def _scenario_verdict(
-    results: list[VerifierResult],
-    error: str | None,
-):
-    if not results or all(item.status == "skipped" for item in results):
-        return "invalid_case"
-    if error or any(
-        item.status in {"failed", "error"} for item in results
-    ):
-        return "recovery_failed"
-    return "passed"
