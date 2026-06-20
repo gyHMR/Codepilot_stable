@@ -8,10 +8,10 @@ Runtime 只负责在装配时把 ContextCompiler 接入 AgentSessionOptions.prep
 属于 Session/Run 期间的动态上下文治理。
 
 TODO(runtime-cleanup): 后续清理旧导入时，可以删除本模块，并将调用方统一改为
-codepilot.sessions.context_compiler。
+codepilot.sessions.context.compiler。
 """
 
-from codepilot.sessions.context_compiler import ContextCompiler, ContextPolicy
+from codepilot.sessions.context.compiler import ContextCompiler, ContextPolicy
 
 
 __all__ = ["ContextCompiler", "ContextPolicy"]

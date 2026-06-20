@@ -13,7 +13,7 @@ if str(SRC) not in sys.path:
 def test_session_store_persists_messages_forks_and_summarizes_events(tmp_path: Path) -> None:
     from codepilot.core import AgentToolResult
     from codepilot.protocols import AssistantMessage, Cost, TextContent, Usage, UserMessage
-    from codepilot.sessions.store import SessionStore
+    from codepilot.sessions.persistence.store import SessionStore
 
     store = SessionStore(tmp_path, "session_test")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
@@ -117,8 +117,8 @@ def test_session_store_persists_run_results(tmp_path: Path) -> None:
         TextContent,
         ToolResultMessage,
     )
-    from codepilot.sessions.run_store import RunStore
-    from codepilot.sessions.store import SessionStore
+    from codepilot.sessions.persistence.run_store import RunStore
+    from codepilot.sessions.persistence.store import SessionStore
 
     store = SessionStore(tmp_path, "session_run")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="")

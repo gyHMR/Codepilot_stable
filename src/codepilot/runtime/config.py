@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from codepilot.core import ToolExecutionMode
-from codepilot.sessions.store import SessionStore
+from codepilot.sessions.persistence.store import SessionStore
 
 from .resources import WorkspaceResourceLoader, WorkspaceResources
 from .types import CreateAgentSessionOptions

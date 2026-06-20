@@ -36,7 +36,7 @@ def test_compaction_preserves_full_session_history(tmp_path: Path) -> None:
 
 
 def test_compaction_prompt_preserves_working_context_facts() -> None:
-    from codepilot.sessions.compaction import COMPACTION_SYSTEM_PROMPT
+    from codepilot.sessions.context.compaction import COMPACTION_SYSTEM_PROMPT
 
     assert "当前任务目标" in COMPACTION_SYSTEM_PROMPT
     assert "关键文件" in COMPACTION_SYSTEM_PROMPT
@@ -88,7 +88,7 @@ async def _run_history_preservation_case(tmp_path: Path) -> None:
     from codepilot.protocols import AssistantMessage, TextContent, UserMessage
     from codepilot.runtime.types import AgentSessionOptions
     from codepilot.sessions.session import AgentSession
-    from codepilot.sessions.store import SessionStore
+    from codepilot.sessions.persistence.store import SessionStore
 
     store = SessionStore(tmp_path, "session_history")
     store.ensure_initialized(model_id="test-model", provider="unit-test", system_prompt="sys")

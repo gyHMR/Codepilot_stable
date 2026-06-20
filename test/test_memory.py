@@ -22,7 +22,7 @@ def _model():
 
 def test_memory_store_persists_session_and_project_records(tmp_path: Path) -> None:
     from codepilot.sessions.memory import MemoryRecord, MemoryStore
-    from codepilot.sessions.store import SessionStore
+    from codepilot.sessions.persistence.store import SessionStore
 
     session_store = SessionStore(tmp_path, "session_memory")
     session_store.ensure_initialized(
@@ -62,7 +62,7 @@ def test_memory_store_persists_session_and_project_records(tmp_path: Path) -> No
 def test_memory_writer_tracks_task_file_versions_and_failures(tmp_path: Path) -> None:
     from codepilot.protocols import TextContent, ToolResultMessage
     from codepilot.sessions.memory import MemoryStore, MemoryWriter
-    from codepilot.sessions.store import SessionStore
+    from codepilot.sessions.persistence.store import SessionStore
     from codepilot.tools.sandbox import file_state_for_path
 
     target = tmp_path / "service.py"
@@ -130,7 +130,7 @@ def test_memory_writer_tracks_task_file_versions_and_failures(tmp_path: Path) ->
 def test_memory_writer_projects_unfinished_task_summary(tmp_path: Path) -> None:
     from codepilot.protocols import AgentRunResult, TaskSummary
     from codepilot.sessions.memory import MemoryStore, MemoryWriter, render_memory
-    from codepilot.sessions.store import SessionStore
+    from codepilot.sessions.persistence.store import SessionStore
 
     session_store = SessionStore(tmp_path, "session_task_projection")
     session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
@@ -177,7 +177,7 @@ def test_memory_writer_clears_next_action_only_when_completion_is_satisfied(
 ) -> None:
     from codepilot.protocols import AgentRunResult, TaskSummary
     from codepilot.sessions.memory import MemoryStore, MemoryWriter
-    from codepilot.sessions.store import SessionStore
+    from codepilot.sessions.persistence.store import SessionStore
 
     session_store = SessionStore(tmp_path, "session_task_done")
     session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
@@ -213,7 +213,7 @@ def test_memory_retriever_excludes_stale_and_explains_selection(tmp_path: Path) 
         MemoryRetriever,
         MemoryStore,
     )
-    from codepilot.sessions.store import SessionStore
+    from codepilot.sessions.persistence.store import SessionStore
 
     session_store = SessionStore(tmp_path, "session_retriever")
     session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
@@ -260,10 +260,10 @@ def test_context_compiler_reads_pinned_memory_dynamically(tmp_path: Path) -> Non
 async def _dynamic_pinned_memory_case(tmp_path: Path) -> None:
     from codepilot.core import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
-    from codepilot.sessions.context_compiler import ContextCompiler
-    from codepilot.sessions.context_state import SessionContextState
+    from codepilot.sessions.context.compiler import ContextCompiler
+    from codepilot.sessions.context.state import SessionContextState
     from codepilot.sessions.memory import MemoryRetriever, MemoryStore
-    from codepilot.sessions.store import SessionStore
+    from codepilot.sessions.persistence.store import SessionStore
 
     session_store = SessionStore(tmp_path, "session_context_memory")
     session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")

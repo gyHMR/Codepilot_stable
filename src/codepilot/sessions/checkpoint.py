@@ -1,42 +1,12 @@
 from __future__ import annotations
 
-"""Session checkpoint helpers.
+"""
+兼容导出：检查点逻辑已迁移到 sessions.history.checkpoint。
 
-Checkpoints are intentionally event-based for now. Later phases can attach
-file snapshots and diff records without changing the AgentSession facade.
+TODO(sessions-cleanup): 后续清理旧导入时，可以删除本模块。
 """
 
-from dataclasses import dataclass, field
-from typing import Any
-
-from .store import SessionStore
+from .history.checkpoint import SessionCheckpoint, record_checkpoint
 
 
-@dataclass(frozen=True)
-class SessionCheckpoint:
-    session_id: str
-    label: str
-    details: dict[str, Any] = field(default_factory=dict)
-
-
-def record_checkpoint(
-    store: SessionStore,
-    *,
-    session_id: str,
-    label: str,
-    details: dict[str, Any] | None = None,
-) -> SessionCheckpoint:
-    checkpoint = SessionCheckpoint(
-        session_id=session_id,
-        label=label,
-        details=dict(details or {}),
-    )
-    store.append_event(
-        {
-            "type": "session_checkpoint",
-            "session_id": checkpoint.session_id,
-            "label": checkpoint.label,
-            "details": checkpoint.details,
-        }
-    )
-    return checkpoint
+__all__ = ["SessionCheckpoint", "record_checkpoint"]

@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def test_repository_tracker_detects_external_dirty_file_changes(tmp_path: Path) -> None:
-    from codepilot.sessions.repository_tracker import RepositoryTracker
+    from codepilot.sessions.context.repository_tracker import RepositoryTracker
 
     tracked = tmp_path / "app.py"
     tracked.write_text("value = 1\n", encoding="utf-8", newline="\n")
@@ -35,8 +35,8 @@ def test_context_compiler_preserves_current_request_and_reports_budget(tmp_path:
 async def _compile_context_case(tmp_path: Path) -> None:
     from codepilot.core import AgentContext, ContextPreparationRequest
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
-    from codepilot.sessions.context_compiler import ContextCompiler, ContextPolicy
-    from codepilot.sessions.context_state import SessionContextState
+    from codepilot.sessions.context.compiler import ContextCompiler, ContextPolicy
+    from codepilot.sessions.context.state import SessionContextState
 
     target = tmp_path / "service.py"
     target.write_text("def run():\n    return 1\n", encoding="utf-8", newline="\n")
@@ -101,8 +101,8 @@ def test_context_compiler_refreshes_deleted_top_level_directory(tmp_path: Path) 
 async def _deleted_top_level_directory_case(tmp_path: Path) -> None:
     from codepilot.core import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
-    from codepilot.sessions.context_compiler import ContextCompiler
-    from codepilot.sessions.context_state import SessionContextState
+    from codepilot.sessions.context.compiler import ContextCompiler
+    from codepilot.sessions.context.state import SessionContextState
 
     removed_dir = tmp_path / "old_feature"
     removed_dir.mkdir()
@@ -139,8 +139,8 @@ async def _deleted_top_level_directory_case(tmp_path: Path) -> None:
 async def _stale_summary_case(tmp_path: Path) -> None:
     from codepilot.core import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
-    from codepilot.sessions.context_compiler import ContextCompiler
-    from codepilot.sessions.context_state import FileSummary, SessionContextState
+    from codepilot.sessions.context.compiler import ContextCompiler
+    from codepilot.sessions.context.state import FileSummary, SessionContextState
     from codepilot.tools.sandbox import file_state_for_path
 
     target = tmp_path / "service.py"
@@ -209,8 +209,8 @@ async def _per_model_call_compile_case(tmp_path: Path) -> None:
     from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
     from codepilot.llm.event_stream import AssistantMessageEventStream
     from codepilot.protocols import AssistantMessage, Model, TextContent, ToolCall, ToolResultMessage, UserMessage
-    from codepilot.sessions.context_compiler import ContextCompiler
-    from codepilot.sessions.context_state import SessionContextState
+    from codepilot.sessions.context.compiler import ContextCompiler
+    from codepilot.sessions.context.state import SessionContextState
     from codepilot.tools import AgentTool, AgentToolResult
 
     target = tmp_path / "generated.py"

@@ -29,18 +29,18 @@ from codepilot.protocols import (
 from codepilot.core import Agent, AgentEvent, AgentMessage, AgentOptions
 
 from codepilot.extensions.types import ExtensionLifecycleContext
-from .branching import fork_session as branch_fork_session
-from .branching import switch_session as branch_switch_session
-from .branching import switch_to_entry as branch_switch_to_entry
-from .checkpoint import SessionCheckpoint, record_checkpoint
-from .compaction import (
+from .context.compaction import (
     COMPACTION_SYSTEM_PROMPT,
     build_compacted_context,
     fallback_summary,
     format_messages_for_summary,
 )
-from .store import SessionStore, new_session_id
+from .history.branching import fork_session as branch_fork_session
+from .history.branching import switch_session as branch_switch_session
+from .history.branching import switch_to_entry as branch_switch_to_entry
+from .history.checkpoint import SessionCheckpoint, record_checkpoint
 from .memory import MemoryRetriever, MemoryStore, MemoryWriter
+from .persistence.store import SessionStore, new_session_id
 from .types import AgentSessionOptions
 
 logger = logging.getLogger("codepilot.sessions.session")

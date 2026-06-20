@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from codepilot.extensions.types import LoadedExtensions
-from codepilot.sessions.repository_context import (
+from codepilot.sessions.context.repository_context import (
     GitInfo,
     RepositoryBootstrap,
     build_repository_bootstrap,

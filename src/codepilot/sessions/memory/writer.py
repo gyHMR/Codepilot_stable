@@ -1,41 +1,19 @@
 from __future__ import annotations
 
-"""Evidence-driven session and project memory.
+"""Write structured memories from user prompts, tool results, and run results."""
 
-MEMORY.md remains user-maintained pinned project memory. Automatic memories are
-stored as structured records and are retrieved by ContextCompiler.
-"""
-
-import json
-import logging
-import os
-import re
-import tempfile
 import uuid
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any
 
 from codepilot.protocols import AgentRunResult, ToolResultMessage
 from codepilot.tools.sandbox import file_state_for_path
 
-if TYPE_CHECKING:
-    from .store import SessionStore
+from .files import sanitize_memory_text
+from .records import MemoryRecord, MemoryStatus, utc_now_iso
+from .store import MemoryStore
 
-logger = logging.getLogger("codepilot.sessions.memory")
 
-MemoryKind = Literal["task", "file", "failure", "decision", "project"]
-MemoryScope = Literal["session", "project"]
-MemoryTrust = Literal["observed", "verified", "user_given", "model_claim"]
-MemoryStatus = Literal["active", "stale", "superseded", "deleted"]
-
-MEMORY_SCHEMA_VERSION = 1
-_SECRET_PATTERNS = [
-    re.compile(r"(?i)(api[_-]?key|token|password|secret|cookie)\s*[:=]\s*\S+"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
-    re.compile(r"\b(?:sk|pk)-[A-Za-z0-9_-]{12,}\b"),
-]
 _FAILURE_CODES = {
     "unexpected_match_count",
     "multiple_matches",
@@ -46,156 +24,6 @@ _FAILURE_CODES = {
     "stale_file",
     "no_match",
 }
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-@dataclass
-class MemoryRecord:
-    id: str
-    kind: MemoryKind
-    scope: MemoryScope
-    content: dict[str, Any]
-    source: str
-    source_run_id: str | None = None
-    related_paths: list[str] = field(default_factory=list)
-    source_hashes: dict[str, str] = field(default_factory=dict)
-    trust: MemoryTrust = "observed"
-    status: MemoryStatus = "active"
-    created_at: str = field(default_factory=_utc_now_iso)
-    updated_at: str = field(default_factory=_utc_now_iso)
-
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "MemoryRecord":
-        return cls(
-            id=str(value.get("id", "")),
-            kind=_memory_kind(value.get("kind")),
-            scope=_memory_scope(value.get("scope")),
-            content=dict(value.get("content", {})) if isinstance(value.get("content"), dict) else {},
-            source=str(value.get("source", "unknown")),
-            source_run_id=value.get("source_run_id") if isinstance(value.get("source_run_id"), str) else None,
-            related_paths=[str(item) for item in value.get("related_paths", []) if isinstance(item, str)],
-            source_hashes={
-                str(key): str(item)
-                for key, item in value.get("source_hashes", {}).items()
-            } if isinstance(value.get("source_hashes"), dict) else {},
-            trust=_memory_trust(value.get("trust")),
-            status=_memory_status(value.get("status")),
-            created_at=str(value.get("created_at", _utc_now_iso())),
-            updated_at=str(value.get("updated_at", _utc_now_iso())),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class MemoryQuery:
-    text: str
-    active_paths: list[str]
-    limit: int = 8
-
-
-@dataclass(frozen=True)
-class RetrievedMemory:
-    record: MemoryRecord
-    score: int
-    reasons: list[str]
-
-
-class MemoryStore:
-    """Persist structured memory without deciding what should be remembered."""
-
-    def __init__(self, session_store: "SessionStore") -> None:
-        self.session_store = session_store
-        self.workspace_dir = session_store.workspace_dir
-        self.session_id = session_store.session_id
-        self.session_file = session_store.memory_file
-        self.project_file = self.workspace_dir / ".codepilot" / "memory" / "project.jsonl"
-
-    def load_session(self) -> list[MemoryRecord]:
-        if not self.session_file.exists():
-            return []
-        try:
-            payload = json.loads(self.session_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            logger.warning("failed to load session memory file=%s", self.session_file)
-            return []
-        records = payload.get("records", []) if isinstance(payload, dict) else []
-        return [
-            MemoryRecord.from_dict(item)
-            for item in records
-            if isinstance(item, dict)
-        ]
-
-    def save_session(self, records: list[MemoryRecord]) -> None:
-        self.session_file.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "schema_version": MEMORY_SCHEMA_VERSION,
-            "session_id": self.session_id,
-            "records": [record.to_dict() for record in records],
-        }
-        _atomic_write_json(self.session_file, payload)
-
-    def load_project(self) -> list[MemoryRecord]:
-        if not self.project_file.exists():
-            return []
-        latest: dict[str, MemoryRecord] = {}
-        for line in self.project_file.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                logger.warning("skipping invalid project memory line")
-                continue
-            if isinstance(raw, dict):
-                record = MemoryRecord.from_dict(raw)
-                latest[record.id] = record
-        return list(latest.values())
-
-    def append_project(self, record: MemoryRecord) -> None:
-        self.project_file.parent.mkdir(parents=True, exist_ok=True)
-        with self.project_file.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
-
-    def upsert_session(self, record: MemoryRecord) -> MemoryRecord:
-        records = self.load_session()
-        for index, existing in enumerate(records):
-            if existing.id == record.id:
-                records[index] = record
-                break
-        else:
-            records.append(record)
-        self.save_session(records)
-        return record
-
-    def update(self, record: MemoryRecord) -> MemoryRecord:
-        record.updated_at = _utc_now_iso()
-        if record.scope == "project":
-            self.append_project(record)
-        else:
-            self.upsert_session(record)
-        return record
-
-    def mark_status(self, memory_id: str, status: MemoryStatus) -> MemoryRecord:
-        for record in self.load_session():
-            if record.id == memory_id:
-                record.status = status
-                return self.update(record)
-        for record in self.load_project():
-            if record.id == memory_id:
-                record.status = status
-                return self.update(record)
-        raise ValueError(f"Memory not found: {memory_id}")
-
-    def get(self, memory_id: str) -> MemoryRecord | None:
-        for record in [*self.load_session(), *self.load_project()]:
-            if record.id == memory_id:
-                return record
-        return None
 
 
 class MemoryWriter:
@@ -488,7 +316,7 @@ class MemoryWriter:
                 existing.content["occurrence_count"] = int(
                     existing.content.get("occurrence_count", 1)
                 ) + 1
-                existing.content["last_seen_at"] = _utc_now_iso()
+                existing.content["last_seen_at"] = utc_now_iso()
                 existing.source_run_id = run_id
                 return self.store.update(existing)
         return self.store.update(
@@ -502,7 +330,7 @@ class MemoryWriter:
                     "cause": sanitize_memory_text(_tool_result_text(message), limit=400),
                     "resolution": None,
                     "occurrence_count": 1,
-                    "last_seen_at": _utc_now_iso(),
+                    "last_seen_at": utc_now_iso(),
                 },
                 source=f"tool:{message.tool_name}",
                 source_run_id=run_id,
@@ -550,155 +378,6 @@ class MemoryWriter:
         )
 
 
-class MemoryRetriever:
-    def __init__(self, *, store: MemoryStore, workspace_dir: str | Path) -> None:
-        self.store = store
-        self.workspace_dir = Path(workspace_dir)
-
-    def retrieve(self, query: MemoryQuery) -> list[RetrievedMemory]:
-        records = [*self.store.load_session(), *self.store.load_project()]
-        query_terms = _terms(query.text)
-        active_paths = {Path(path).as_posix() for path in query.active_paths}
-        ranked: list[RetrievedMemory] = []
-        for record in records:
-            if record.status != "active":
-                continue
-            if (
-                record.kind == "failure"
-                and int(record.content.get("occurrence_count", 1)) < 2
-                and not record.content.get("resolution")
-            ):
-                continue
-            score = 0
-            reasons: list[str] = []
-            if record.kind == "task":
-                score += 100
-                reasons.append("task_memory")
-            related = active_paths.intersection(record.related_paths)
-            if related:
-                score += 40
-                reasons.append(f"related_path:{sorted(related)[0]}")
-            record_terms = _terms(render_memory(record))
-            keyword_matches = sorted(query_terms.intersection(record_terms))
-            if keyword_matches:
-                score += min(30, len(keyword_matches) * 10)
-                reasons.append(f"keyword:{keyword_matches[0]}")
-            if record.trust in {"verified", "observed"}:
-                score += 20
-                reasons.append(f"trust:{record.trust}")
-            if record.scope == "project":
-                score += 10
-                reasons.append("project_memory")
-            if record.trust == "model_claim":
-                score -= 20
-                reasons.append("model_claim_penalty")
-            if score > 0:
-                ranked.append(RetrievedMemory(record=record, score=score, reasons=reasons))
-
-        ranked.sort(
-            key=lambda item: (item.score, item.record.updated_at),
-            reverse=True,
-        )
-        return _apply_kind_limits(ranked, query.limit)
-
-    def validate_freshness(self) -> list[MemoryRecord]:
-        return MemoryWriter(
-            store=self.store,
-            workspace_dir=self.workspace_dir,
-        ).validate_freshness()
-
-    def pinned_memory(self) -> str:
-        return load_global_memory(self.workspace_dir)
-
-
-def render_memory(record: MemoryRecord) -> str:
-    content = record.content
-    if record.kind == "task":
-        parts = [f"Task goal: {content.get('goal', '')}"]
-        for key, label in [
-            ("constraints", "Constraints"),
-            ("confirmed_findings", "Confirmed"),
-            ("blocked_on", "Blocked"),
-        ]:
-            values = content.get(key)
-            if isinstance(values, list) and values:
-                parts.append(f"{label}: {'; '.join(str(item) for item in values[:5])}")
-        if content.get("next_action"):
-            parts.append(f"Next: {content['next_action']}")
-        progress = content.get("task_progress")
-        if isinstance(progress, dict):
-            pending = progress.get("pending_steps")
-            if isinstance(pending, list) and pending:
-                parts.append(f"Pending: {'; '.join(str(item) for item in pending[:5])}")
-        return " | ".join(parts)
-    if record.kind == "file":
-        return (
-            f"File {content.get('path', '')}: {content.get('summary', '')} "
-            f"(hash={next(iter(record.source_hashes.values()), '')[:12]})"
-        ).strip()
-    if record.kind == "failure":
-        return (
-            f"Failure lesson: {content.get('action', '')} -> "
-            f"{content.get('failure_signature', '')}; "
-            f"cause={content.get('cause') or 'unknown'}; "
-            f"resolution={content.get('resolution') or 'not confirmed'}"
-        )
-    if record.kind == "decision":
-        return f"Decision: {content.get('decision', '')}; rationale={content.get('rationale', '')}"
-    return f"Project knowledge: {content.get('knowledge', '')}"
-
-
-def sanitize_memory_text(text: str, *, limit: int) -> str:
-    safe = text
-    for pattern in _SECRET_PATTERNS:
-        safe = pattern.sub("[REDACTED]", safe)
-    safe = safe.replace("\x00", "").strip()
-    return safe[:limit]
-
-
-def load_global_memory(workspace_dir: str | Path) -> str:
-    """Load user-maintained pinned `.codepilot/MEMORY.md`."""
-    path = Path(workspace_dir) / ".codepilot" / "MEMORY.md"
-    return _read_memory_file(path)
-
-
-def save_global_memory(workspace_dir: str | Path, content: str) -> None:
-    """Save pinned MEMORY.md. Automatic memory never calls this function."""
-    path = Path(workspace_dir) / ".codepilot" / "MEMORY.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8", newline="\n")
-    logger.info("global memory saved chars=%d", len(content))
-
-
-def _read_memory_file(path: Path) -> str:
-    if not path.exists():
-        return ""
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-        if text:
-            logger.debug("loaded memory file=%s chars=%d", path, len(text))
-        return text
-    except Exception as exc:
-        logger.warning("failed to read memory file=%s: %s", path, exc)
-        return ""
-
-
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    fd, temp_name = tempfile.mkstemp(
-        prefix=f"{path.name}.",
-        suffix=".tmp",
-        dir=path.parent,
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-        os.replace(temp_name, path)
-    finally:
-        if os.path.exists(temp_name):
-            os.unlink(temp_name)
-
-
 def _new_memory_id() -> str:
     return f"mem_{uuid.uuid4().hex[:12]}"
 
@@ -711,61 +390,4 @@ def _tool_result_text(message: ToolResultMessage) -> str:
     ).strip()
 
 
-def _terms(text: str) -> set[str]:
-    return {
-        token.lower()
-        for token in re.findall(r"[\w./-]{2,}", text, flags=re.UNICODE)
-    }
-
-
-def _apply_kind_limits(
-    ranked: list[RetrievedMemory],
-    total_limit: int,
-) -> list[RetrievedMemory]:
-    limits = {"task": 1, "file": 3, "failure": 2, "decision": 2, "project": 3}
-    counts: dict[str, int] = {}
-    selected: list[RetrievedMemory] = []
-    for item in ranked:
-        kind = item.record.kind
-        if counts.get(kind, 0) >= limits.get(kind, total_limit):
-            continue
-        selected.append(item)
-        counts[kind] = counts.get(kind, 0) + 1
-        if len(selected) >= total_limit:
-            break
-    return selected
-
-
-def _memory_kind(value: object) -> MemoryKind:
-    return value if value in {"task", "file", "failure", "decision", "project"} else "project"  # type: ignore[return-value]
-
-
-def _memory_scope(value: object) -> MemoryScope:
-    return value if value in {"session", "project"} else "session"  # type: ignore[return-value]
-
-
-def _memory_trust(value: object) -> MemoryTrust:
-    return value if value in {"observed", "verified", "user_given", "model_claim"} else "observed"  # type: ignore[return-value]
-
-
-def _memory_status(value: object) -> MemoryStatus:
-    return value if value in {"active", "stale", "superseded", "deleted"} else "active"  # type: ignore[return-value]
-
-
-__all__ = [
-    "MEMORY_SCHEMA_VERSION",
-    "MemoryKind",
-    "MemoryQuery",
-    "MemoryRecord",
-    "MemoryRetriever",
-    "MemoryScope",
-    "MemoryStatus",
-    "MemoryStore",
-    "MemoryTrust",
-    "MemoryWriter",
-    "RetrievedMemory",
-    "load_global_memory",
-    "render_memory",
-    "sanitize_memory_text",
-    "save_global_memory",
-]
+__all__ = ["MemoryWriter"]

@@ -108,7 +108,7 @@ def test_cli_rejects_removed_legacy_options() -> None:
 
 def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> None:
     from codepilot.runtime.config import read_restored_session_meta, resolve_runtime_config
-    from codepilot.sessions.store import SessionStore
+    from codepilot.sessions.persistence.store import SessionStore
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -209,7 +209,7 @@ def _runtime_inputs(tmp_path, *, session_id: str | None = None):
         workspace=tmp_path,
         resources=WorkspaceResourceLoader(tmp_path).load(),
         restored_meta=(
-            __import__("codepilot.sessions.store", fromlist=["SessionStore"])
+            __import__("codepilot.sessions.persistence.store", fromlist=["SessionStore"])
             .SessionStore(tmp_path, session_id)
             .read_meta()
             if session_id

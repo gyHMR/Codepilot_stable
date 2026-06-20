@@ -21,7 +21,7 @@ import inspect
 from typing import Literal
 
 from codepilot.extensions.types import ExtensionCommandContext, RegisteredCommand
-from codepilot.sessions.branching import create_fresh_session
+from codepilot.sessions.history.branching import create_fresh_session
 from codepilot.sessions.session import AgentSession
 from codepilot.sessions.memory import render_memory
 

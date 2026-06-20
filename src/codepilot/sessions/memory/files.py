@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+"""Pinned MEMORY.md helpers and memory text sanitization."""
+
+import logging
+import re
+from pathlib import Path
+
+
+logger = logging.getLogger("codepilot.sessions.memory")
+
+_SECRET_PATTERNS = [
+    re.compile(r"(?i)(api[_-]?key|token|password|secret|cookie)\s*[:=]\s*\S+"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
+    re.compile(r"\b(?:sk|pk)-[A-Za-z0-9_-]{12,}\b"),
+]
+
+
+def sanitize_memory_text(text: str, *, limit: int) -> str:
+    safe = text
+    for pattern in _SECRET_PATTERNS:
+        safe = pattern.sub("[REDACTED]", safe)
+    safe = safe.replace("\x00", "").strip()
+    return safe[:limit]
+
+
+def load_global_memory(workspace_dir: str | Path) -> str:
+    """Load user-maintained pinned `.codepilot/MEMORY.md`."""
+
+    path = Path(workspace_dir) / ".codepilot" / "MEMORY.md"
+    return _read_memory_file(path)
+
+
+def save_global_memory(workspace_dir: str | Path, content: str) -> None:
+    """Save pinned MEMORY.md. Automatic memory never calls this function."""
+
+    path = Path(workspace_dir) / ".codepilot" / "MEMORY.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8", newline="\n")
+    logger.info("global memory saved chars=%d", len(content))
+
+
+def _read_memory_file(path: Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+        if text:
+            logger.debug("loaded memory file=%s chars=%d", path, len(text))
+        return text
+    except Exception as exc:
+        logger.warning("failed to read memory file=%s: %s", path, exc)
+        return ""
+
+
+__all__ = [
+    "load_global_memory",
+    "sanitize_memory_text",
+    "save_global_memory",
+]

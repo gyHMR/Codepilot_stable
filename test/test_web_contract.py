@@ -68,7 +68,7 @@ def test_runtime_service_exposes_run_result_events_and_report(tmp_path: Path) ->
         TextContent,
     )
     from codepilot.runtime.service import RuntimeService
-    from codepilot.sessions.store import SessionStore
+    from codepilot.sessions.persistence.store import SessionStore
 
     store = SessionStore(tmp_path, "session_runtime")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="")

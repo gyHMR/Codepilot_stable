@@ -23,8 +23,8 @@ import os
 
 from codepilot.core.message_conversion import convert_to_llm
 from codepilot.llm.env_api_keys import get_env_api_key_name
-from codepilot.sessions.context_compiler import ContextCompiler
-from codepilot.sessions.context_state import SessionContextState
+from codepilot.sessions.context.compiler import ContextCompiler
+from codepilot.sessions.context.state import SessionContextState
 from codepilot.sessions.session import AgentSession
 
 from .config import RuntimeInputs, load_runtime_inputs, resolve_runtime_config

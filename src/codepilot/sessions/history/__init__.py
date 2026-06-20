@@ -1,24 +1,23 @@
 from __future__ import annotations
 
-"""
-兼容导出：会话分支逻辑已迁移到 sessions.history.branching。
+"""Session branching, switching, and checkpoints."""
 
-TODO(sessions-cleanup): 后续清理旧导入时，可以删除本模块。
-"""
-
-from .history.branching import (
+from .branching import (
     build_session_options_from_existing,
     create_fresh_session,
     fork_session,
     switch_session,
     switch_to_entry,
 )
+from .checkpoint import SessionCheckpoint, record_checkpoint
 
 
 __all__ = [
+    "SessionCheckpoint",
     "build_session_options_from_existing",
     "create_fresh_session",
     "fork_session",
+    "record_checkpoint",
     "switch_session",
     "switch_to_entry",
 ]

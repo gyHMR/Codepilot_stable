@@ -468,7 +468,7 @@ async def _cli_approval_case() -> None:
 
 def test_tool_result_message_preserves_approval_evidence() -> None:
     from codepilot.protocols import TextContent, ToolResultMessage
-    from codepilot.sessions.serde import message_from_dict, message_to_dict
+    from codepilot.sessions.persistence.serde import message_from_dict, message_to_dict
 
     message = ToolResultMessage(
         tool_call_id="call_1",
