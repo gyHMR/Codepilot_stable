@@ -57,6 +57,14 @@ class SkillSpec:
 
 @dataclass
 class LoadedExtensions:
+    """Normalized capabilities loaded from extensions, skills, and MCP config.
+
+    Extension sources are intentionally normalized into four simple capabilities:
+    tools enter the tools security layer, commands enter the runtime slash-command
+    registry, prompt text enters the system prompt, and hooks enter lifecycle or
+    tool-call pipelines.
+    """
+
     tools: list[AgentTool] = field(default_factory=list)
     before_tool_hooks: list[BeforeHook] = field(default_factory=list)
     after_tool_hooks: list[AfterHook] = field(default_factory=list)

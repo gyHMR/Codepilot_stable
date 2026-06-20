@@ -58,9 +58,6 @@ class ApiProvider:
     metadata: dict[str, object] = field(default_factory=dict)
 
 
-LLMProviderDescriptor = ApiProvider
-
-
 _REGISTRY: dict[str, ApiProvider] = {}
 
 
@@ -106,12 +103,8 @@ def stream_simple(
     model: Model,
     context: Context,
     options: SimpleStreamOptions | None = None,
-    *,
-    reasoning: str | None = None,
 ) -> AssistantMessageEventStream:
     effective_options = options or SimpleStreamOptions()
-    if reasoning is not None:
-        effective_options.reasoning = reasoning  # type: ignore[assignment]
     return _resolve_provider(model.api).stream_simple(
         model,
         context,
@@ -123,12 +116,5 @@ async def complete_simple(
     model: Model,
     context: Context,
     options: SimpleStreamOptions | None = None,
-    *,
-    reasoning: str | None = None,
 ) -> AssistantMessage:
-    return await stream_simple(
-        model,
-        context,
-        options,
-        reasoning=reasoning,
-    ).result()
+    return await stream_simple(model, context, options).result()

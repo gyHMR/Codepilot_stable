@@ -16,7 +16,7 @@ from codepilot.protocols import (
 
 from .events import AgentEventEmitter, maybe_await
 from .llm_runner import LLMStreamRunner, StreamFn
-from .run import RunState, new_run_id
+from .run_state import RunState, new_run_id
 from .task_controller import TaskController
 from .tool_coordinator import ToolCallCoordinator
 from .types import AgentContext, AgentLoopConfig, AgentMessage

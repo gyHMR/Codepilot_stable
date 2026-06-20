@@ -507,7 +507,7 @@ class AgentSession:
     ) -> None:
         """执行生命周期钩子列表。
 
-        钩子可以是同步或异步函数，统一通过 inspect.isawaitable 兼容处理。
+        钩子可以是同步或异步函数，统一通过 inspect.isawaitable 处理。
 
         Args:
             text: 当前用户输入文本。

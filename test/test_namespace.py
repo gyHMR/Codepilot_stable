@@ -125,6 +125,9 @@ def test_removed_runtime_compat_modules_are_gone() -> None:
         "agent_session",
         "builtin_tools",
         "cli",
+        "context_compiler",
+        "factory",
+        "repository_tracker",
         "runner",
         "session_store",
         "serde",
@@ -132,6 +135,26 @@ def test_removed_runtime_compat_modules_are_gone() -> None:
         "__main__",
     )
     removed_modules = tuple(f"codepilot.runtime.{name}" for name in removed_names)
+
+    existing = [module for module in removed_modules if find_spec(module) is not None]
+
+    assert existing == []
+
+
+def test_removed_sessions_compat_modules_are_gone() -> None:
+    removed_names = (
+        "branching",
+        "checkpoint",
+        "compaction",
+        "context_compiler",
+        "context_state",
+        "repository_context",
+        "repository_tracker",
+        "run_store",
+        "serde",
+        "store",
+    )
+    removed_modules = tuple(f"codepilot.sessions.{name}" for name in removed_names)
 
     existing = [module for module in removed_modules if find_spec(module) is not None]
 
@@ -147,6 +170,16 @@ def test_removed_llm_forwarding_modules_are_gone() -> None:
     existing = [module for module in removed_modules if find_spec(module) is not None]
 
     assert existing == []
+
+
+def test_removed_protocol_and_llm_aliases_are_gone() -> None:
+    import codepilot.llm as llm
+    import codepilot.protocols as protocols
+    import codepilot.protocols.tools as protocol_tools
+
+    assert not hasattr(llm, "LLMProviderDescriptor")
+    assert not hasattr(protocols, "ToolSpec")
+    assert not hasattr(protocol_tools, "ToolSpec")
 
 
 def test_removed_builtin_file_tool_aliases_are_gone(tmp_path: Path) -> None:

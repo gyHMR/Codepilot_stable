@@ -4,7 +4,7 @@ from __future__ import annotations
 工具相关类型定义。
 
 定义了工具调用全生命周期涉及的类型：
-- Tool / ToolSpec: 工具定义（模型可见的工具规范）
+- Tool: 工具定义（模型可见的工具规范）
 - ToolCall: 模型发出的工具调用请求
 - ToolResult: 工具执行结果
 - ToolMetadata: 工具元数据（风险级别、权限要求等）
@@ -38,10 +38,6 @@ class Tool:
     name: str
     description: str
     parameters: dict[str, Any]
-
-
-# ToolSpec 是 Tool 的别名，保持向后兼容
-ToolSpec = Tool
 
 
 @dataclass
@@ -164,5 +160,4 @@ __all__ = [
     "ToolResultBlock",
     "ToolResultStatus",
     "ToolRiskLevel",
-    "ToolSpec",
 ]

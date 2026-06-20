@@ -8,6 +8,11 @@ from typing import Any
 from codepilot.protocols import AgentRunResult
 
 from .events import normalize_event_value, summarize_events
+from .metrics import (
+    build_model_call_records,
+    build_run_metrics,
+    build_tool_call_records,
+)
 
 
 @dataclass(frozen=True)
@@ -108,38 +113,36 @@ def build_run_summary(
     events: list[dict[str, Any]] | None = None,
 ) -> RunSummary:
     record = _run_record(result)
-    counters = _dict(record.get("counters"))
-    final_message = _dict(record.get("final_message"))
-    usage = _dict(final_message.get("usage"))
-    cost = _dict(usage.get("cost"))
-    verification = _list_of_dicts(record.get("verification"))
-    messages = _list_of_dicts(record.get("messages"))
+    metrics = build_run_metrics(record, events=events)
+    model_calls = build_model_call_records(record, events=events)
+    cost_input = sum(item.cost.get("input", 0.0) for item in model_calls)
+    cost_output = sum(item.cost.get("output", 0.0) for item in model_calls)
 
     return RunSummary(
         run_id=str(record.get("run_id", "")),
         session_id=_optional_str(record.get("session_id")),
         status=str(record.get("status", "")),
         stop_reason=str(record.get("stop_reason", "")),
-        model_attempts=int(counters.get("model_attempts", 0) or 0),
-        tool_iterations=int(counters.get("tool_iterations", 0) or 0),
-        tool_calls=int(counters.get("tool_calls", 0) or 0),
+        model_attempts=metrics.model_attempts,
+        tool_iterations=metrics.tool_iterations,
+        tool_calls=metrics.tool_calls,
         affected_paths=[str(path) for path in record.get("affected_paths", []) if isinstance(path, str)],
         workspace_changed=bool(record.get("workspace_changed", False)),
-        verification_count=len(verification),
-        verification_passed=sum(1 for item in verification if item.get("status") == "passed"),
-        approval_count=sum(1 for item in messages if item.get("status") == "approval_required"),
-        denied_count=sum(1 for item in messages if item.get("status") == "denied"),
+        verification_count=metrics.verification_count,
+        verification_passed=metrics.verification_passed,
+        approval_count=metrics.approval_count,
+        denied_count=metrics.denied_count,
         token_usage={
-            "input_tokens": int(usage.get("input", 0) or 0),
-            "output_tokens": int(usage.get("output", 0) or 0),
-            "total_tokens": int(usage.get("total_tokens", 0) or 0),
+            "input_tokens": metrics.input_tokens,
+            "output_tokens": metrics.output_tokens,
+            "total_tokens": metrics.total_tokens,
         },
         cost={
-            "input": float(cost.get("input", 0.0) or 0.0),
-            "output": float(cost.get("output", 0.0) or 0.0),
-            "total": float(cost.get("total", 0.0) or 0.0),
+            "input": cost_input,
+            "output": cost_output,
+            "total": metrics.total_cost,
         },
-        duration_ms=_duration_ms(events or []),
+        duration_ms=metrics.duration_ms,
         error=_dict_or_none(record.get("error")),
     )
 
@@ -152,17 +155,25 @@ def build_run_report(
 ) -> dict[str, Any]:
     record = _run_record(result)
     summary = build_run_summary(record, events=events)
+    metrics = build_run_metrics(record, events=events)
+    model_calls = build_model_call_records(record, events=events)
+    tool_calls = build_tool_call_records(record, events=events)
+    event_counts = summarize_events(events or []).get("event_counts", {})
     verification = _list_of_dicts(record.get("verification"))
     return {
         "run_id": summary.run_id,
         "session_id": summary.session_id,
         "task": task or "",
         "summary": summary.to_dict(),
+        "metrics": metrics.to_dict(),
+        "model_calls": [item.to_dict() for item in model_calls],
+        "tool_calls": [item.to_dict() for item in tool_calls],
         "final_text": _final_text(record),
         "affected_paths": list(summary.affected_paths),
         "verification": verification,
         "error": summary.error,
         "event_count": len(events or []),
+        "event_counts": dict(event_counts) if isinstance(event_counts, dict) else {},
     }
 
 
@@ -189,14 +200,6 @@ def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
 
 def _optional_str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
-
-
-def _duration_ms(events: list[dict[str, Any]]) -> int | None:
-    timestamps = [event.get("timestamp") for event in events]
-    numeric = [int(item) for item in timestamps if isinstance(item, int) and not isinstance(item, bool)]
-    if len(numeric) < 2:
-        return None
-    return max(numeric) - min(numeric)
 
 
 def _final_text(record: dict[str, Any]) -> str:

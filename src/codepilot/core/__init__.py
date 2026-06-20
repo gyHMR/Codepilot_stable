@@ -1,12 +1,12 @@
 """
-Codepilot agent_core
-===================
+Codepilot Agent Run core
+========================
 
-Minimal Agent orchestration core:
-- Agent object
-- Agent loop
-- Tool execution protocol
-- Event callback protocol
+This package owns one Agent Run's execution loop:
+- Agent and AgentLoop coordinate the run lifecycle.
+- RunState records mechanical execution facts.
+- TaskState and TaskController track task progress from tool feedback.
+- LLMStreamRunner and ToolCallCoordinator adapt model and tool steps.
 """
 
 from .agent import Agent, AgentOptions
@@ -17,6 +17,7 @@ from .agent_loop import (
 from .events import AgentEventEmitter
 from .llm_runner import LLMStreamRunner, StreamFn
 from .message_conversion import convert_to_llm
+from .run_state import RunState, new_run_id
 from .task_controller import TaskController
 from .task_state import CompletionCheck, ExecutionDecision, TaskState, TaskStep
 from .tool_coordinator import ToolCallCoordinator
@@ -64,6 +65,8 @@ __all__ = [
     "LLMStreamRunner",
     "StreamFn",
     "convert_to_llm",
+    "RunState",
+    "new_run_id",
     "ToolCallCoordinator",
     "TaskController",
     "CompletionCheck",

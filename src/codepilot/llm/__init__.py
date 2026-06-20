@@ -12,7 +12,6 @@ Codepilot LLM 公共导出模块。
 from .api_registry import (
     ApiProvider,
     LLMProvider,
-    LLMProviderDescriptor,
     clear_api_providers,
     complete,
     complete_simple,
@@ -81,7 +80,6 @@ __all__ = [
     "LLMErrorInfo",
     "LLMErrorKind",
     "LLMProvider",
-    "LLMProviderDescriptor",
     "LLMStreamEvent",
     "LLMStreamEventType",
     "Message",

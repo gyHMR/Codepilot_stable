@@ -13,7 +13,7 @@ from typing import Iterable, Mapping
 
 from codepilot.protocols import TaskSummary, TextContent, ToolResultMessage, UserMessage
 
-from .run import RunState
+from .run_state import RunState
 from .task_state import CompletionCheck, ExecutionDecision, TaskState, TaskStep
 from .types import AgentMessage
 

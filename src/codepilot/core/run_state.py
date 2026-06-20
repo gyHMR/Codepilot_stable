@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-"""Mutable state collected while one Agent Run is executing."""
+"""Execution facts collected while one Agent Run is executing.
+
+RunState deliberately stays mechanical: it records what happened during this
+run, but does not decide whether the user's task is semantically complete.
+TaskController consumes these facts together with TaskState to make that call.
+"""
 
 import json
 import uuid
@@ -124,3 +129,6 @@ def _optional_str(value: object) -> str | None:
 
 def _optional_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+__all__ = ["RunState", "new_run_id"]

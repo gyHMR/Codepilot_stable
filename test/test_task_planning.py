@@ -6,7 +6,7 @@ from typing import Any
 
 
 def test_task_controller_normalizes_steps_and_updates_from_tool_results() -> None:
-    from codepilot.core.run import RunState
+    from codepilot.core.run_state import RunState
     from codepilot.core.task_controller import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
@@ -70,7 +70,7 @@ def test_task_controller_normalizes_steps_and_updates_from_tool_results() -> Non
 
 
 def test_completion_gate_requires_fresh_verification_after_workspace_change() -> None:
-    from codepilot.core.run import RunState
+    from codepilot.core.run_state import RunState
     from codepilot.core.task_controller import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
@@ -118,7 +118,7 @@ def test_completion_gate_requires_fresh_verification_after_workspace_change() ->
 
 
 def test_replan_preserves_completed_steps_and_stops_after_limit() -> None:
-    from codepilot.core.run import RunState
+    from codepilot.core.run_state import RunState
     from codepilot.core.task_controller import TaskController
     from codepilot.protocols import ToolResultMessage, UserMessage
 

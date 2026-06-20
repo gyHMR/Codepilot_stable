@@ -126,7 +126,7 @@ def stream_openai_compatible(
                                 )
                             )
 
-                        # reasoning 兼容字段（不同网关命名可能不同）
+                        # 不同网关的 reasoning 字段名可能不同。
                         reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning")
                         if reasoning_delta:
                             if current_thinking is None:

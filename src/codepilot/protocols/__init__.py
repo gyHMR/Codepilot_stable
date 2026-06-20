@@ -15,9 +15,7 @@ Protocols 子包公共索引。
 
 使用建议：
 - 常用稳定协议可以从 codepilot.protocols 直接导入；
-- 细分事件、上下文治理等较专门的类型，优先从对应子模块导入；
-- 为了兼容已有调用，本模块仍保留若干细分类型的直接导入属性，
-  但 __all__ 只列出公共索引中最常用、最稳定的协议类型。
+- 细分事件、上下文治理等较专门的类型，优先从对应子模块导入。
 """
 
 from .content import ContentBlock, ImageContent, TextContent, ThinkingContent
@@ -94,7 +92,6 @@ from .tools import (
     ToolResult,
     ToolResultStatus,
     ToolRiskLevel,
-    ToolSpec,
 )
 
 
@@ -119,7 +116,6 @@ __all__ = [
     "ToolResult",
     "ToolResultStatus",
     "ToolRiskLevel",
-    "ToolSpec",
     # ── LLM ──
     "Api",
     "Cost",

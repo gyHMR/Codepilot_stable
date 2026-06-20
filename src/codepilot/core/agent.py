@@ -46,7 +46,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
 
 
 async def _maybe_await(value: Any) -> Any:
-    """兼容处理同步/异步回调：如果是可等待对象则 await，否则直接返回。"""
+    """统一处理同步/异步回调：如果是可等待对象则 await，否则直接返回。"""
     if asyncio.isfuture(value) or asyncio.iscoroutine(value):
         return await value
     return value
@@ -435,7 +435,7 @@ class Agent:
             if result is not None and result.status == "completed":
                 self._state.error = None
 
-        # 将事件广播给所有已注册的监听器（兼容同步/异步回调）
+        # 将事件广播给所有已注册的监听器（支持同步/异步回调）
         for listener in list(self._listeners):
             await _maybe_await(listener(event))
 
