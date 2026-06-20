@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def test_repository_tracker_detects_external_dirty_file_changes(tmp_path: Path) -> None:
-    from codepilot.runtime.repository_tracker import RepositoryTracker
+    from codepilot.sessions.repository_tracker import RepositoryTracker
 
     tracked = tmp_path / "app.py"
     tracked.write_text("value = 1\n", encoding="utf-8", newline="\n")
@@ -35,7 +35,7 @@ def test_context_compiler_preserves_current_request_and_reports_budget(tmp_path:
 async def _compile_context_case(tmp_path: Path) -> None:
     from codepilot.core import AgentContext, ContextPreparationRequest
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
-    from codepilot.runtime.context_compiler import ContextCompiler, ContextPolicy
+    from codepilot.sessions.context_compiler import ContextCompiler, ContextPolicy
     from codepilot.sessions.context_state import SessionContextState
 
     target = tmp_path / "service.py"
@@ -94,10 +94,52 @@ def test_context_compiler_marks_hash_bound_summary_stale(tmp_path: Path) -> None
     asyncio.run(_stale_summary_case(tmp_path))
 
 
+def test_context_compiler_refreshes_deleted_top_level_directory(tmp_path: Path) -> None:
+    asyncio.run(_deleted_top_level_directory_case(tmp_path))
+
+
+async def _deleted_top_level_directory_case(tmp_path: Path) -> None:
+    from codepilot.core import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import UserMessage
+    from codepilot.sessions.context_compiler import ContextCompiler
+    from codepilot.sessions.context_state import SessionContextState
+
+    removed_dir = tmp_path / "old_feature"
+    removed_dir.mkdir()
+    (removed_dir / "module.py").write_text("value = 1\n", encoding="utf-8", newline="\n")
+
+    compiler = ContextCompiler(
+        workspace=str(tmp_path),
+        state=SessionContextState(workspace_dir=tmp_path),
+    )
+    request = ContextPreparationRequest(
+        session_id="session_1",
+        model_context_window=4000,
+        model_max_output_tokens=500,
+    )
+
+    first = await compiler.compile(
+        AgentContext(system_prompt="rules", messages=[UserMessage(content="inspect")]),
+        request,
+    )
+    assert "old_feature/" in first.system_prompt
+
+    (removed_dir / "module.py").unlink()
+    removed_dir.rmdir()
+
+    second = await compiler.compile(
+        AgentContext(system_prompt=first.system_prompt, messages=[UserMessage(content="inspect again")]),
+        request,
+    )
+
+    assert "- Top-level: old_feature/" not in second.system_prompt
+    assert "old_feature/" in second.report.repository_delta.deleted_paths
+
+
 async def _stale_summary_case(tmp_path: Path) -> None:
     from codepilot.core import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
-    from codepilot.runtime.context_compiler import ContextCompiler
+    from codepilot.sessions.context_compiler import ContextCompiler
     from codepilot.sessions.context_state import FileSummary, SessionContextState
     from codepilot.tools.sandbox import file_state_for_path
 
@@ -167,7 +209,7 @@ async def _per_model_call_compile_case(tmp_path: Path) -> None:
     from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
     from codepilot.llm.event_stream import AssistantMessageEventStream
     from codepilot.protocols import AssistantMessage, Model, TextContent, ToolCall, ToolResultMessage, UserMessage
-    from codepilot.runtime.context_compiler import ContextCompiler
+    from codepilot.sessions.context_compiler import ContextCompiler
     from codepilot.sessions.context_state import SessionContextState
     from codepilot.tools import AgentTool, AgentToolResult
 

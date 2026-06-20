@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Sequence
 
 from codepilot.runtime.resources import WorkspaceResourceLoader
-from codepilot.runtime.factory import (
+from codepilot.runtime.assembly import (
     UnknownRuntimeConfigKeyError,
     explain_runtime_config,
 )

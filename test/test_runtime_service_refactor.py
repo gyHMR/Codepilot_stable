@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from codepilot.protocols import Model
-from codepilot.runtime.factory import explain_runtime_config
+from codepilot.runtime.assembly import explain_runtime_config
 from codepilot.runtime.service import (
     RuntimeService,
     SessionBusyError,

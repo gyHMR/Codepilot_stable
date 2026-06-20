@@ -34,7 +34,7 @@ from codepilot.tools import AgentTool, ToolMetadata
 from codepilot.tools.approval import ApprovalProvider
 
 if TYPE_CHECKING:
-    from .context import RepositoryBootstrap
+    from codepilot.sessions.repository_context import RepositoryBootstrap
     from codepilot.sessions.session import AgentSession
 
 

@@ -260,7 +260,7 @@ def test_context_compiler_reads_pinned_memory_dynamically(tmp_path: Path) -> Non
 async def _dynamic_pinned_memory_case(tmp_path: Path) -> None:
     from codepilot.core import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
-    from codepilot.runtime.context_compiler import ContextCompiler
+    from codepilot.sessions.context_compiler import ContextCompiler
     from codepilot.sessions.context_state import SessionContextState
     from codepilot.sessions.memory import MemoryRetriever, MemoryStore
     from codepilot.sessions.store import SessionStore

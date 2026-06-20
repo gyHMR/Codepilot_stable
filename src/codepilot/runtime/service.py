@@ -25,7 +25,7 @@ from .command_registry import (
     handle_runtime_command,
     list_runtime_commands,
 )
-from .factory import assemble_runtime
+from .assembly import assemble_runtime
 from .types import (
     ActiveRun,
     CreateAgentSessionOptions,
