@@ -242,7 +242,7 @@ Examples:
     parser.add_argument(
         "--permission-mode",
         default=None,
-        choices=["read-only", "workspace-write"],
+        choices=["read-only", "workspace-write", "ask"],
         help="Permission mode (default: workspace-write)",
     )
     parser.add_argument(
@@ -315,9 +315,9 @@ def _resolve_model_id(args: argparse.Namespace) -> tuple[str | None, str | None]
     return None, None
 
 
-def _resolve_permission_mode(args: argparse.Namespace) -> str:
+def _resolve_permission_mode(args: argparse.Namespace) -> str | None:
     """解析权限模式。"""
-    return args.permission_mode or "workspace-write"
+    return args.permission_mode
 
 
 async def _run_from_args(args: argparse.Namespace) -> int:
@@ -357,6 +357,7 @@ async def _run_from_args(args: argparse.Namespace) -> int:
                         if args.permission_mode is not None
                         else None
                     ),
+                    tool_permission_mode=args.permission_mode,
                 ),
                 args.config_key,
             )
@@ -375,8 +376,17 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         provider=provider,
         model_id=model_id,
         session_id=args.session_id,
-        read_only_mode=(permission_mode == "read-only"),
+        read_only_mode=(
+            permission_mode == "read-only"
+            if permission_mode is not None
+            else None
+        ),
+        tool_permission_mode=permission_mode,
     )
+    if run_mode == "interactive":
+        from .approval import CliApprovalProvider
+
+        options.approval_provider = CliApprovalProvider()
 
     # ── 创建会话并运行 ──────────────────────────────────────────
 

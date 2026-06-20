@@ -16,6 +16,7 @@ from codepilot.protocols import (
     ErrorInfo,
     RunVerification,
     RunVerificationStatus,
+    TaskSummary,
     ToolCall,
     ToolResultMessage,
 )
@@ -35,6 +36,7 @@ class RunState:
     affected_paths: set[str] = field(default_factory=set)
     workspace_changed: bool = False
     verification: list[RunVerification] = field(default_factory=list)
+    fresh_verification_passed: bool = False
     last_tool_fingerprint: str | None = None
     repeated_tool_calls: int = 0
 
@@ -68,18 +70,21 @@ class RunState:
             self.affected_paths.update(result.affected_paths)
             if result.workspace_changed:
                 self.workspace_changed = True
+                self.fresh_verification_passed = False
             if result.verification:
                 verification = result.verification
+                status = _verification_status(verification.get("status"))
                 self.verification.append(
                     RunVerification(
                         tool_call_id=result.tool_call_id,
                         tool_name=result.tool_name,
-                        status=_verification_status(verification.get("status")),
+                        status=status,
                         command=_optional_str(verification.get("command")),
                         exit_code=_optional_int(verification.get("exit_code")),
                         summary=str(verification.get("summary", "")),
                     )
                 )
+                self.fresh_verification_passed = status == "passed"
 
     def result(
         self,
@@ -89,6 +94,7 @@ class RunState:
         messages: list[AgentMessage],
         final_message: AssistantMessage | None,
         error: ErrorInfo | None = None,
+        task: TaskSummary | None = None,
     ) -> AgentRunResult:
         return AgentRunResult(
             run_id=self.run_id,
@@ -102,6 +108,7 @@ class RunState:
             affected_paths=sorted(self.affected_paths),
             workspace_changed=self.workspace_changed,
             verification=list(self.verification),
+            task=task,
         )
 
 

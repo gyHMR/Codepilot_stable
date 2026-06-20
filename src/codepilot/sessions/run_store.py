@@ -19,6 +19,9 @@ from codepilot.protocols import AgentRunResult, ToolResultMessage
 from codepilot.tools.sandbox import file_state_for_path
 
 
+RUN_ARTIFACT_SCHEMA_VERSION = "1"
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -62,10 +65,12 @@ class RunStore:
         run_dir = self._run_dir(result.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         record = normalize_event_value(result)
+        record["schema_version"] = RUN_ARTIFACT_SCHEMA_VERSION
         self._write_json(run_dir / "result.json", record)
         self._write_json(
             run_dir / "state.json",
             {
+                "schema_version": RUN_ARTIFACT_SCHEMA_VERSION,
                 "run_id": result.run_id,
                 "session_id": result.session_id or self.session_id,
                 "status": result.status,

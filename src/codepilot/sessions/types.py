@@ -16,6 +16,8 @@ from codepilot.core import (
     AgentMessage,
     BeforeToolCallContext,
     BeforeToolCallResult,
+    PrepareContextFn,
+    StreamFn,
     ToolExecutionMode,
 )
 from codepilot.extensions.types import LifecycleHook, RegisteredCommand
@@ -37,6 +39,7 @@ class AgentSessionOptions:
     messages: list[AgentMessage] = field(default_factory=list)
     thinking_level: str = "off"
     tool_execution: ToolExecutionMode = "parallel"
+    max_tool_calls_per_turn: int = 8
     convert_to_llm: Optional[ConvertToLlmFn] = None
     get_api_key: Optional[Callable[[str], str | None | Awaitable[str | None]]] = None
     max_context_messages: Optional[int] = None
@@ -61,3 +64,5 @@ class AgentSessionOptions:
             AfterToolCallResult | None | Awaitable[AfterToolCallResult | None],
         ]
     ] = None
+    stream_fn: StreamFn | None = None
+    prepare_context: PrepareContextFn | None = None

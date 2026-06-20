@@ -141,6 +141,8 @@ def _process_tool_result(msg: ToolResultMessage, *, max_chars: int) -> ToolResul
         content=new_content,
         status=msg.status,
         is_error=msg.is_error,
+        approved=msg.approved,
+        approval_id=msg.approval_id,
         error_code=msg.error_code,
         exit_code=msg.exit_code,
         affected_paths=list(msg.affected_paths),

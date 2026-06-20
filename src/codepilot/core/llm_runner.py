@@ -19,7 +19,7 @@ from codepilot.protocols import (
 from codepilot.protocols import LLMErrorInfo
 
 from .events import AgentEventEmitter, maybe_await
-from .types import AgentContext, AgentLoopConfig
+from .types import AgentContext, AgentLoopConfig, ContextPreparationRequest
 
 
 StreamFn = Callable[
@@ -54,7 +54,34 @@ class LLMStreamRunner:
         *,
         signal: Any | None = None,
     ) -> AssistantMessage:
-        messages = context.messages
+        prepared_context = _with_current_task_context(context)
+        if self._config.prepare_context:
+            prepared = await maybe_await(
+                self._config.prepare_context(
+                    context,
+                    ContextPreparationRequest(
+                        session_id=self._config.session_id,
+                        model_context_window=self._config.model.context_window,
+                        model_max_output_tokens=self._config.model.max_tokens,
+                        signal=signal,
+                    ),
+                )
+            )
+            prepared_context = AgentContext(
+                system_prompt=prepared.system_prompt,
+                messages=list(prepared.messages),
+                tools=list(prepared.tools),
+                current_task=context.current_task,
+                recovered_task=context.recovered_task,
+            )
+            await self._emitter.emit(
+                {
+                    "type": "context_prepared",
+                    "report": prepared.report.to_dict(),
+                }
+            )
+
+        messages = prepared_context.messages
         if self._config.transform_context:
             messages = await maybe_await(self._config.transform_context(messages, signal))
 
@@ -65,9 +92,9 @@ class LLMStreamRunner:
             return await self._finalize_direct_response(context, capability_error)
 
         llm_context = Context(
-            system_prompt=context.system_prompt if capabilities.system_prompt else None,
+            system_prompt=prepared_context.system_prompt if capabilities.system_prompt else None,
             messages=llm_messages,
-            tools=[tool.to_spec() for tool in context.tools] if capabilities.tools else [],
+            tools=[tool.to_spec() for tool in prepared_context.tools] if capabilities.tools else [],
         )
 
         resolved_api_key = None
@@ -223,3 +250,19 @@ class LLMStreamRunner:
                 "errorInfo": info,
             }
         )
+
+
+def _with_current_task_context(context: AgentContext) -> AgentContext:
+    if not context.current_task:
+        return context
+    marker = "## Current Task"
+    system_prompt = context.system_prompt.rstrip()
+    if marker not in system_prompt:
+        system_prompt = f"{system_prompt}\n\n{context.current_task}".strip()
+    return AgentContext(
+        system_prompt=system_prompt,
+        messages=context.messages,
+        tools=context.tools,
+        current_task=context.current_task,
+        recovered_task=context.recovered_task,
+    )

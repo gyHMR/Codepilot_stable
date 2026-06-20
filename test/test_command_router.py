@@ -56,6 +56,74 @@ def test_runtime_command_router_clear_switches_session(tmp_path: Path) -> None:
     asyncio.run(_run_clear_command_case(tmp_path))
 
 
+def test_runtime_command_router_shows_context_report(tmp_path: Path) -> None:
+    asyncio.run(_run_context_command_case(tmp_path))
+
+
+def test_runtime_command_router_manages_project_memory(tmp_path: Path) -> None:
+    asyncio.run(_run_memory_command_case(tmp_path))
+
+
+async def _run_memory_command_case(tmp_path: Path) -> None:
+    from codepilot.runtime.command_registry import handle_runtime_command
+    from codepilot.sessions.session import AgentSession
+    from codepilot.sessions.types import AgentSessionOptions
+
+    session = AgentSession(
+        AgentSessionOptions(
+            model=_test_model(),
+            workspace_dir=tmp_path,
+            system_prompt="sys",
+        )
+    )
+    try:
+        added = await handle_runtime_command(
+            session,
+            "/memory add tests use python -m pytest test -q",
+        )
+        memory_id = added.output_lines[0].split(": ", 1)[1]
+        listed = await handle_runtime_command(session, "/memory list project")
+        forgotten = await handle_runtime_command(session, f"/memory forget {memory_id}")
+
+        assert added.handled
+        assert any(memory_id in line for line in listed.output_lines)
+        assert forgotten.output_lines == [f"memory forgotten: {memory_id}"]
+        assert session.memory_store.get(memory_id).status == "deleted"
+    finally:
+        session.close()
+
+
+async def _run_context_command_case(tmp_path: Path) -> None:
+    from codepilot.runtime.command_registry import handle_runtime_command
+    from codepilot.sessions.session import AgentSession
+    from codepilot.sessions.types import AgentSessionOptions
+
+    session = AgentSession(
+        AgentSessionOptions(
+            model=_test_model(),
+            workspace_dir=tmp_path,
+            system_prompt="sys",
+        )
+    )
+    session.latest_context_report = {
+        "context_id": "ctx_1",
+        "repository_fingerprint": "abcdef1234567890",
+        "total_budget_tokens": 1000,
+        "estimated_tokens_before": 800,
+        "estimated_tokens_after": 500,
+        "stale_items": [],
+        "dropped_items": [{"item_id": "old"}],
+        "sections": [],
+    }
+    try:
+        result = await handle_runtime_command(session, "/context")
+        assert result.handled
+        assert any("ctx_1" in line for line in result.output_lines)
+        assert any("Dropped items" in line for line in result.output_lines)
+    finally:
+        session.close()
+
+
 async def _run_clear_command_case(tmp_path: Path) -> None:
     from codepilot.runtime.command_registry import handle_runtime_command
     from codepilot.sessions.session import AgentSession

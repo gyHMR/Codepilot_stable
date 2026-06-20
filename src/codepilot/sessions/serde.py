@@ -98,6 +98,8 @@ def message_to_dict(message: Message) -> dict[str, Any]:
             "content": [_tool_result_block_to_dict(b) for b in message.content],
             "status": message.status,
             "is_error": message.is_error,
+            "approved": message.approved,
+            "approval_id": message.approval_id,
             "error_code": message.error_code,
             "exit_code": message.exit_code,
             "affected_paths": message.affected_paths,
@@ -206,6 +208,12 @@ def message_from_dict(data: dict[str, Any]) -> Message:
             content=[_tool_result_block_from_dict(i) for i in data.get("content", []) if isinstance(i, dict)],
             status=data.get("status", "error" if data.get("is_error") else "success"),
             is_error=bool(data.get("is_error", False)),
+            approved=bool(data.get("approved", True)),
+            approval_id=(
+                data.get("approval_id")
+                if isinstance(data.get("approval_id"), str)
+                else None
+            ),
             error_code=data.get("error_code"),
             exit_code=data.get("exit_code"),
             affected_paths=[

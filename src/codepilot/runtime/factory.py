@@ -22,11 +22,13 @@ from dataclasses import replace
 import os
 
 from codepilot.sessions.session import AgentSession
+from codepilot.sessions.context_state import SessionContextState
 from codepilot.core.message_conversion import convert_to_llm
 from codepilot.llm.env_api_keys import get_env_api_key_name
 
 from .config import RuntimeInputs, load_runtime_inputs, resolve_runtime_config
 from .context import build_runtime_context, build_repository_bootstrap
+from .context_compiler import ContextCompiler
 from .hook_pipeline import compose_after_tool_call, compose_before_tool_call, compose_lifecycle_hooks
 from .model_resolver import ResolvedModel, resolve_model
 from .prompt import build_runtime_system_prompt
@@ -104,7 +106,7 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
         model=resolved_model.model,
         credential_source=credential_source,
         credential_location=credential_location,
-        permission_mode="read-only" if config.read_only_mode else "workspace-write",
+        permission_mode=config.tool_permission_mode,  # type: ignore[arg-type]
         sources=sources,
     )
 
@@ -150,6 +152,11 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
     )
 
     # 步骤 8：构造最终的 AgentSessionOptions
+    context_state = SessionContextState(workspace_dir=inputs.workspace)
+    context_compiler = ContextCompiler(
+        workspace=str(inputs.workspace),
+        state=context_state,
+    )
     session_options = AgentSessionOptions(
         model=resolved_model.model,
         workspace_dir=inputs.workspace,
@@ -159,6 +166,7 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
         messages=options.messages,
         thinking_level=config.thinking_level,
         tool_execution=config.tool_execution,
+        max_tool_calls_per_turn=config.max_tool_calls_per_turn,
         convert_to_llm=convert_to_llm,
         get_api_key=resolved_model.get_api_key,
         max_context_messages=config.max_context_messages,
@@ -177,6 +185,8 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
         after_prompt_hooks=after_prompt_hooks,
         before_tool_call=before_tool_call,
         after_tool_call=after_tool_call,
+        stream_fn=options.stream_fn,
+        prepare_context=context_compiler.compile,
     )
 
     # 步骤 9：构建能力目录和装配产物

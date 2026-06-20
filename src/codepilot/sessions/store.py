@@ -42,6 +42,7 @@ class SessionStore:
         self.context_file = self.root / "context.jsonl"
         self.events_file = self.root / "events.jsonl"
         self.runs_file = self.root / "runs.jsonl"
+        self.memory_file = self.root / "memory.json"
         self.event_recorder = EventRecorder(self.events_file)
         self.run_store = RunStore(self.workspace_dir, self.session_id)
 
@@ -418,6 +419,23 @@ class SessionStore:
         messages = self.load_session_messages(leaf_id=from_entry_id)
         target.rewrite_session_messages(messages)
         target.rewrite_context_messages(messages)
+        if self.memory_file.exists():
+            target.memory_file.write_text(
+                self.memory_file.read_text(encoding="utf-8"),
+                encoding="utf-8",
+                newline="\n",
+            )
+            try:
+                memory_payload = json.loads(target.memory_file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                memory_payload = None
+            if isinstance(memory_payload, dict):
+                memory_payload["session_id"] = new_session_id
+                target.memory_file.write_text(
+                    json.dumps(memory_payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
 
         tmeta = target.read_meta() or {}
         tmeta["parent_session_id"] = self.session_id

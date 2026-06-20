@@ -28,6 +28,7 @@ def build_session_options_from_existing(
         messages=[],
         thinking_level=session.agent.state.thinking_level,
         tool_execution=session.tool_execution,
+        max_tool_calls_per_turn=session.max_tool_calls_per_turn,
         get_api_key=session.get_api_key,
         max_context_messages=session.max_context_messages,
         max_context_tokens=session.max_context_tokens,
@@ -41,6 +42,8 @@ def build_session_options_from_existing(
         after_prompt_hooks=session.after_prompt_hooks,
         before_tool_call=session.before_tool_call,
         after_tool_call=session.after_tool_call,
+        stream_fn=session.stream_fn,
+        prepare_context=session.prepare_context,
     )
 
 
@@ -99,7 +102,7 @@ def switch_session(session: "AgentSession", session_id: str) -> None:
         raise ValueError(f"Session not found: {session_id}")
 
     session.session_id = session_id
-    session.store = new_store
+    session.rebind_store(new_store)
     restored = new_store.load_session_messages()
     if not restored:
         restored = new_store.load_context_messages()

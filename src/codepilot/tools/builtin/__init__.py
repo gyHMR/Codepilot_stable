@@ -12,6 +12,8 @@ from codepilot.tools.types import AgentTool, ToolMetadata, ToolRiskLevel
 from .file_tools import create_file_tools
 from .search_tools import create_search_tools
 from .shell_tools import create_shell_tools
+from .workspace_tools import create_workspace_tools
+from codepilot.tools.shell_policy import ShellExecutionPolicy
 
 
 def create_builtin_tools(
@@ -19,6 +21,7 @@ def create_builtin_tools(
     enabled_names: list[str] | None = None,
     *,
     edit_require_unique_match: bool = True,
+    shell_policy: ShellExecutionPolicy | None = None,
 ) -> list[AgentTool]:
     workspace = Path(workspace_dir)
     sandbox = WorkspaceSandbox(workspace)
@@ -36,7 +39,8 @@ def create_builtin_tools(
         )
     )
     tools.extend(create_search_tools(sandbox, allow=allow))
-    tools.extend(create_shell_tools(sandbox, allow=allow))
+    tools.extend(create_workspace_tools(sandbox, allow=allow))
+    tools.extend(create_shell_tools(sandbox, allow=allow, policy=shell_policy))
     return tools
 
 
@@ -59,6 +63,19 @@ def _builtin_metadata(
         resource_scope=resource_scope,
         network_access=False,
         credential_required=False,
+        extra={
+            "capabilities": [
+                (
+                    "filesystem.read"
+                    if read_only and category in {"filesystem", "search"}
+                    else "filesystem.write"
+                    if category == "filesystem"
+                    else "process.execute"
+                    if category == "shell"
+                    else "workspace.read"
+                )
+            ]
+        },
     )
 
 
@@ -111,6 +128,13 @@ _BUILTIN_TOOL_METADATA: dict[str, ToolMetadata] = {
         read_only=False,
         risk_level="medium",
         resource_scope=("workspace", "process"),
+    ),
+    "workspace_status": _builtin_metadata(
+        "workspace_status",
+        category="workspace",
+        read_only=True,
+        risk_level="low",
+        resource_scope=("workspace", "git"),
     ),
 }
 

@@ -37,6 +37,7 @@ class AgentTool:
     parameters: dict[str, Any]
     execute: ToolExecuteFn
     runtime_managed: bool = False
+    metadata: ToolMetadata | None = None
 
     def to_spec(self) -> Tool:
         """Return the provider-facing tool description without the executor."""

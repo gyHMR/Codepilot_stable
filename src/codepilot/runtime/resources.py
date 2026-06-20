@@ -137,6 +137,7 @@ class WorkspaceSettings:
     system_prompt: Optional[str] = None
     thinking_level: Optional[str] = None
     tool_execution: Optional[ToolExecutionMode] = None
+    max_tool_calls_per_turn: Optional[int] = None
     max_context_messages: Optional[int] = None
     retain_recent_messages: Optional[int] = None
     max_context_tokens: Optional[int] = None
@@ -144,6 +145,7 @@ class WorkspaceSettings:
     max_retries: Optional[int] = None
     retry_base_delay_ms: Optional[int] = None
     read_only_mode: Optional[bool] = None
+    tool_permission_mode: Optional[str] = None
     block_dangerous_bash: Optional[bool] = None
     bash_allow_patterns: Optional[list[str]] = None
     bash_block_patterns: Optional[list[str]] = None
@@ -155,6 +157,11 @@ class WorkspaceSettings:
     skill_paths: Optional[list[str]] = None
     prompt_debug_sources: Optional[bool] = None
     mcp_servers: Optional[list[dict[str, Any]]] = None
+    shell_timeout_seconds: Optional[int] = None
+    shell_max_timeout_seconds: Optional[int] = None
+    shell_stdout_limit: Optional[int] = None
+    shell_stderr_limit: Optional[int] = None
+    shell_allowed_env: Optional[list[str]] = None
 
 
 @dataclass
@@ -217,6 +224,9 @@ class WorkspaceResourceLoader:
         tool_execution = raw.get("tool_execution")
         if tool_execution not in {"parallel", "sequential"}:
             tool_execution = None
+        permission_mode = raw.get("tool_permission_mode")
+        if permission_mode not in {"read-only", "workspace-write", "ask"}:
+            permission_mode = None
 
         return WorkspaceSettings(
             provider=raw.get("provider") if isinstance(raw.get("provider"), str) else None,
@@ -224,6 +234,7 @@ class WorkspaceResourceLoader:
             system_prompt=raw.get("system_prompt") if isinstance(raw.get("system_prompt"), str) else None,
             thinking_level=raw.get("thinking_level") if isinstance(raw.get("thinking_level"), str) else None,
             tool_execution=tool_execution,
+            max_tool_calls_per_turn=self._to_positive_int(raw.get("max_tool_calls_per_turn")),
             max_context_messages=self._to_positive_int(raw.get("max_context_messages")),
             retain_recent_messages=self._to_positive_int(raw.get("retain_recent_messages")),
             max_context_tokens=self._to_positive_int(raw.get("max_context_tokens")),
@@ -231,6 +242,7 @@ class WorkspaceResourceLoader:
             max_retries=self._to_positive_int(raw.get("max_retries")),
             retry_base_delay_ms=self._to_positive_int(raw.get("retry_base_delay_ms")),
             read_only_mode=raw.get("read_only_mode") if isinstance(raw.get("read_only_mode"), bool) else None,
+            tool_permission_mode=permission_mode,
             block_dangerous_bash=raw.get("block_dangerous_bash")
             if isinstance(raw.get("block_dangerous_bash"), bool)
             else None,
@@ -250,6 +262,11 @@ class WorkspaceResourceLoader:
             if isinstance(raw.get("prompt_debug_sources"), bool)
             else None,
             mcp_servers=self._to_object_list(raw.get("mcp_servers")),
+            shell_timeout_seconds=self._to_positive_int(raw.get("shell_timeout_seconds")),
+            shell_max_timeout_seconds=self._to_positive_int(raw.get("shell_max_timeout_seconds")),
+            shell_stdout_limit=self._to_positive_int(raw.get("shell_stdout_limit")),
+            shell_stderr_limit=self._to_positive_int(raw.get("shell_stderr_limit")),
+            shell_allowed_env=self._to_string_list(raw.get("shell_allowed_env")),
         )
 
     def _load_model(self) -> WorkspaceModelConfig | None:

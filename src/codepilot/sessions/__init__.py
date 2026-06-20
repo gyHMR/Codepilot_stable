@@ -5,7 +5,16 @@ This package owns long-lived AgentSession orchestration, persistence,
 serialization, memory files, and context compaction helpers.
 """
 
-from .memory import load_global_memory, save_global_memory
+from .memory import (
+    MemoryQuery,
+    MemoryRecord,
+    MemoryRetriever,
+    MemoryStore,
+    MemoryWriter,
+    RetrievedMemory,
+    load_global_memory,
+    save_global_memory,
+)
 from .session import AgentSession
 from .store import SessionStore, new_session_id
 from .run_store import FreshnessResult, RunStore
@@ -23,4 +32,10 @@ __all__ = [
     "new_session_id",
     "load_global_memory",
     "save_global_memory",
+    "MemoryQuery",
+    "MemoryRecord",
+    "MemoryRetriever",
+    "MemoryStore",
+    "MemoryWriter",
+    "RetrievedMemory",
 ]

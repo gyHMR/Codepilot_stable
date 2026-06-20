@@ -36,6 +36,7 @@ AgentRunStopReason = Literal[
     "aborted",               # 被用户中止
     "approval_required",     # 需要用户审批
     "repeated_tool_call",    # 检测到重复的工具调用（可能陷入循环）
+    "replan_limit",          # 连续失败后达到重新规划上限
     "internal_error",        # 内部错误
 ]
 
@@ -82,6 +83,20 @@ class RunVerification:
 
 
 @dataclass
+class TaskSummary:
+    """Lightweight summary of the active task plan for one run."""
+
+    task_id: str
+    goal: str
+    completed_steps: list[str] = field(default_factory=list)
+    pending_steps: list[str] = field(default_factory=list)
+    blocked_steps: list[str] = field(default_factory=list)
+    next_action: str | None = None
+    completion_satisfied: bool = False
+    completion_reason: str = ""
+
+
+@dataclass
 class AgentRunResult:
     """Agent 运行的完整结果。
 
@@ -112,6 +127,7 @@ class AgentRunResult:
     affected_paths: list[str] = field(default_factory=list)
     workspace_changed: bool = False
     verification: list[RunVerification] = field(default_factory=list)
+    task: TaskSummary | None = None
 
 
 __all__ = [
@@ -121,4 +137,5 @@ __all__ = [
     "AgentRunStopReason",
     "RunVerification",
     "RunVerificationStatus",
+    "TaskSummary",
 ]

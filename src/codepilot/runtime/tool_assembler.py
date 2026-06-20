@@ -27,8 +27,10 @@ from codepilot.tools.builtin import (
     get_builtin_tool_metadata,
 )
 from codepilot.tools.permissions import PermissionPolicy
+from codepilot.tools.approval import DenyApprovalProvider
 from codepilot.tools.registry import ToolRegistry, infer_tool_metadata
 from codepilot.tools.runtime import ToolRuntime
+from codepilot.tools.shell_policy import ShellExecutionPolicy
 from codepilot.tools.types import AgentTool
 
 from .config import RuntimeConfig
@@ -172,6 +174,13 @@ def assemble_tools(
         workspace,
         enabled_names=config.enabled_builtin_tools,
         edit_require_unique_match=config.edit_require_unique_match,
+        shell_policy=ShellExecutionPolicy(
+            timeout_seconds=config.shell_timeout_seconds,
+            max_timeout_seconds=config.shell_max_timeout_seconds,
+            stdout_limit=config.shell_stdout_limit,
+            stderr_limit=config.shell_stderr_limit,
+            allowed_env=tuple(config.shell_allowed_env or ()),
+        ),
     )
 
     # 按名称去重合并：内置 -> 自定义 -> 扩展 -> MCP（后者覆盖前者）
@@ -279,11 +288,12 @@ def assemble_tools(
     runtime = ToolRuntime(
         registry=registry,
         permission_policy=PermissionPolicy(
-            read_only=config.read_only_mode,
+            mode=config.tool_permission_mode,  # type: ignore[arg-type]
             block_dangerous_bash=config.block_dangerous_bash,
             bash_allow_patterns=config.bash_allow_patterns,
             bash_block_patterns=config.bash_block_patterns,
         ),
+        approval_provider=options.approval_provider or DenyApprovalProvider(),
     )
 
     return AssembledTools(

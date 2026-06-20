@@ -23,6 +23,7 @@ from typing import Literal
 from codepilot.extensions.types import ExtensionCommandContext, RegisteredCommand
 from codepilot.sessions.branching import create_fresh_session
 from codepilot.sessions.session import AgentSession
+from codepilot.sessions.memory import render_memory
 
 # 命令来源类型
 CommandSource = Literal["builtin", "extension", "skill", "prompt"]
@@ -72,6 +73,8 @@ def builtin_commands() -> list[RuntimeCommand]:
         RuntimeCommand(name="switch", description="切换到指定叶子节点", source="builtin"),
         RuntimeCommand(name="clear", description="清空上下文，创建新会话", source="builtin"),
         RuntimeCommand(name="compact", description="手动触发上下文压缩", source="builtin"),
+        RuntimeCommand(name="context", description="查看最近一次上下文编译报告", source="builtin"),
+        RuntimeCommand(name="memory", description="查看、添加、提升或删除结构化记忆", source="builtin"),
         RuntimeCommand(name="tools", description="查看当前可用工具", source="builtin"),
         RuntimeCommand(name="model", description="查看当前模型信息", source="builtin"),
         RuntimeCommand(name="usage", description="查看 token 用量和费用", source="builtin"),
@@ -212,7 +215,10 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
         session.switch_to_entry(arg)
         return RuntimeCommandResult(
             handled=True,
-            output_lines=[f"switched leaf -> {session.get_leaf_id()}"],
+            output_lines=[
+                f"switched leaf -> {session.get_leaf_id()}",
+                "Note: message history was restored; Session Memory is not rolled back in V1.",
+            ],
         )
 
     # /compact: 手动触发上下文压缩
@@ -246,6 +252,159 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
                 handled=True,
                 output_lines=[f"Compact error: {exc}"],
             )
+
+    # /context [items|stale]: 查看最近一次模型调用的上下文治理报告
+    if cmd == "/context":
+        report = session.latest_context_report
+        if report is None:
+            return RuntimeCommandResult(
+                handled=True,
+                output_lines=["No context report yet. Send a prompt first."],
+            )
+        if arg == "items":
+            lines = ["=== Context Sections ==="]
+            for section in report.get("sections", []):
+                lines.append(
+                    f"  {section.get('name')}: "
+                    f"{section.get('selected_items', 0)}/{section.get('candidate_items', 0)} items, "
+                    f"{section.get('estimated_tokens_after', 0)}/"
+                    f"{section.get('budget_tokens', 0)} tokens"
+                )
+            dropped = report.get("dropped_items", [])
+            lines.append(f"  Dropped items: {len(dropped)}")
+            return RuntimeCommandResult(handled=True, output_lines=lines)
+        if arg == "stale":
+            stale = report.get("stale_items", [])
+            return RuntimeCommandResult(
+                handled=True,
+                output_lines=["=== Stale Context ===", *([f"  - {item}" for item in stale] or ["  (none)"])],
+            )
+        lines = [
+            "=== Context ===",
+            f"  Context ID       : {report.get('context_id', '')}",
+            f"  Repository       : {str(report.get('repository_fingerprint', ''))[:12]}",
+            f"  Token budget     : {report.get('total_budget_tokens', 0):,}",
+            f"  Estimated before : {report.get('estimated_tokens_before', 0):,}",
+            f"  Estimated after  : {report.get('estimated_tokens_after', 0):,}",
+            f"  Stale items      : {len(report.get('stale_items', []))}",
+            f"  Dropped items    : {len(report.get('dropped_items', []))}",
+            "Use /context items or /context stale for details.",
+        ]
+        return RuntimeCommandResult(handled=True, output_lines=lines)
+
+    # /memory [list|add|promote|forget]
+    if cmd == "/memory":
+        action, _, value = arg.partition(" ")
+        action = action.strip()
+        value = value.strip()
+        if not action:
+            session_records = session.memory_store.load_session()
+            project_records = session.memory_store.load_project()
+            task = next(
+                (
+                    record
+                    for record in session_records
+                    if record.kind == "task" and record.status == "active"
+                ),
+                None,
+            )
+            return RuntimeCommandResult(
+                handled=True,
+                output_lines=[
+                    "=== Memory ===",
+                    f"  Task             : {task.content.get('goal', '') if task else '(none)'}",
+                    f"  Session active   : {sum(record.status == 'active' for record in session_records)}",
+                    f"  Session stale    : {sum(record.status == 'stale' for record in session_records)}",
+                    f"  Project active   : {sum(record.status == 'active' for record in project_records)}",
+                    "Use /memory list [session|project|stale], /memory add <text>,",
+                    "    /memory promote <id>, or /memory forget <id>.",
+                ],
+            )
+        if action == "list":
+            scope = value or "all"
+            records = [
+                *session.memory_store.load_session(),
+                *session.memory_store.load_project(),
+            ]
+            if scope == "session":
+                records = [record for record in records if record.scope == "session"]
+            elif scope == "project":
+                records = [record for record in records if record.scope == "project"]
+            elif scope == "stale":
+                records = [record for record in records if record.status == "stale"]
+            else:
+                records = [record for record in records if record.status != "deleted"]
+            lines = ["=== Memory Records ==="]
+            lines.extend(
+                f"  {record.id} [{record.scope}/{record.kind}/{record.status}] "
+                f"{render_memory(record)[:160]}"
+                for record in records
+            )
+            if len(lines) == 1:
+                lines.append("  (none)")
+            return RuntimeCommandResult(handled=True, output_lines=lines)
+        if action == "add":
+            if not value:
+                return RuntimeCommandResult(
+                    handled=True,
+                    output_lines=["usage: /memory add <project knowledge>"],
+                )
+            record = session.memory_writer.add_project(value)
+            session.store.append_event(
+                {
+                    "type": "memory_created",
+                    "sessionId": session.session_id,
+                    "memoryId": record.id,
+                    "kind": record.kind,
+                    "scope": record.scope,
+                }
+            )
+            return RuntimeCommandResult(
+                handled=True,
+                output_lines=[f"project memory added: {record.id}"],
+            )
+        if action == "promote":
+            if not value:
+                return RuntimeCommandResult(
+                    handled=True,
+                    output_lines=["usage: /memory promote <memory_id>"],
+                )
+            record = session.memory_writer.promote(value)
+            session.store.append_event(
+                {
+                    "type": "memory_promoted",
+                    "sessionId": session.session_id,
+                    "memoryId": record.id,
+                    "sourceMemoryId": value,
+                }
+            )
+            return RuntimeCommandResult(
+                handled=True,
+                output_lines=[f"memory promoted: {value} -> {record.id}"],
+            )
+        if action == "forget":
+            if not value:
+                return RuntimeCommandResult(
+                    handled=True,
+                    output_lines=["usage: /memory forget <memory_id>"],
+                )
+            record = session.memory_store.mark_status(value, "deleted")
+            session.store.append_event(
+                {
+                    "type": "memory_invalidated",
+                    "sessionId": session.session_id,
+                    "memoryId": record.id,
+                    "status": "deleted",
+                }
+            )
+            return RuntimeCommandResult(
+                handled=True,
+                output_lines=[f"memory forgotten: {record.id}"],
+            )
+        return RuntimeCommandResult(
+            handled=True,
+            output_lines=["unknown memory action; use /memory for help"],
+        )
 
     # /tools: 查看当前可用工具
     if cmd == "/tools":

@@ -15,8 +15,10 @@ from .agent_loop import (
     run_agent_loop_continue,
 )
 from .events import AgentEventEmitter
-from .llm_runner import LLMStreamRunner
+from .llm_runner import LLMStreamRunner, StreamFn
 from .message_conversion import convert_to_llm
+from .task_controller import TaskController
+from .task_state import CompletionCheck, ExecutionDecision, TaskState, TaskStep
 from .tool_coordinator import ToolCallCoordinator
 from codepilot.protocols import (
     AgentEndEvent,
@@ -47,6 +49,9 @@ from .types import (
     AgentState,
     BeforeToolCallContext,
     BeforeToolCallResult,
+    ContextPreparationRequest,
+    PreparedAgentContext,
+    PrepareContextFn,
     ToolExecutionMode,
 )
 
@@ -57,8 +62,14 @@ __all__ = [
     "run_agent_loop_continue",
     "AgentEventEmitter",
     "LLMStreamRunner",
+    "StreamFn",
     "convert_to_llm",
     "ToolCallCoordinator",
+    "TaskController",
+    "CompletionCheck",
+    "ExecutionDecision",
+    "TaskState",
+    "TaskStep",
     "AfterToolCallContext",
     "AfterToolCallResult",
     "AgentContext",
@@ -86,5 +97,8 @@ __all__ = [
     "AgentToolResult",
     "BeforeToolCallContext",
     "BeforeToolCallResult",
+    "ContextPreparationRequest",
+    "PreparedAgentContext",
+    "PrepareContextFn",
     "ToolExecutionMode",
 ]

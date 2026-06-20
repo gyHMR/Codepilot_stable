@@ -149,12 +149,14 @@ def test_session_store_persists_run_results(tmp_path: Path) -> None:
     loaded = store.load_run_results()
 
     assert loaded[0]["run_id"] == "run_1"
+    assert loaded[0]["schema_version"] == "1"
     assert loaded[0]["counters"]["model_attempts"] == 2
     assert loaded[0]["affected_paths"] == ["a.py"]
     assert (tmp_path / ".codepilot" / "runs" / "run_1" / "result.json").exists()
 
     run_store = RunStore(tmp_path, "session_run")
     assert run_store.load_run_result("run_1")["run_id"] == "run_1"
+    assert run_store.load_run_result("run_1")["schema_version"] == "1"
     assert run_store.evaluate_freshness().status == "valid"
 
     tracked.write_text("print('new')\n", encoding="utf-8")

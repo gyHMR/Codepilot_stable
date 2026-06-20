@@ -25,11 +25,13 @@ from codepilot.core import (
     AgentMessage,
     BeforeToolCallContext,
     BeforeToolCallResult,
+    StreamFn,
     ToolExecutionMode,
 )
 from codepilot.extensions.types import LifecycleHook, RegisteredCommand
 from codepilot.sessions.types import AgentSessionOptions, ConvertToLlmFn
 from codepilot.tools import AgentTool, ToolMetadata
+from codepilot.tools.approval import ApprovalProvider
 
 if TYPE_CHECKING:
     from .context import RepositoryBootstrap
@@ -107,6 +109,7 @@ class CreateAgentSessionOptions:
         after_prompt_hooks: 提示词执行后的生命周期钩子。
         before_tool_call: 工具调用前的拦截钩子。
         after_tool_call: 工具调用后的拦截钩子。
+        stream_fn: Session 级 LLM 流函数，主要用于确定性 Harness Eval。
     """
 
     workspace_dir: str | Path
@@ -120,6 +123,7 @@ class CreateAgentSessionOptions:
     messages: list[AgentMessage] = field(default_factory=list)
     thinking_level: Optional[str] = None
     tool_execution: Optional[ToolExecutionMode] = None
+    max_tool_calls_per_turn: Optional[int] = None
     load_workspace_resources: bool = True
     enabled_builtin_tools: Optional[list[str]] = None
     max_context_messages: Optional[int] = None
@@ -130,6 +134,7 @@ class CreateAgentSessionOptions:
     max_retries: Optional[int] = None
     retry_base_delay_ms: Optional[int] = None
     read_only_mode: Optional[bool] = None
+    tool_permission_mode: Optional[Literal["read-only", "workspace-write", "ask"]] = None
     block_dangerous_bash: Optional[bool] = None
     bash_allow_patterns: Optional[list[str]] = None
     bash_block_patterns: Optional[list[str]] = None
@@ -142,6 +147,12 @@ class CreateAgentSessionOptions:
     prompt_debug_sources: Optional[bool] = None
     mcp_servers: Optional[list[dict[str, Any]]] = None
     mcp_client: Any | None = None
+    approval_provider: ApprovalProvider | None = None
+    shell_timeout_seconds: Optional[int] = None
+    shell_max_timeout_seconds: Optional[int] = None
+    shell_stdout_limit: Optional[int] = None
+    shell_stderr_limit: Optional[int] = None
+    shell_allowed_env: Optional[list[str]] = None
     extension_commands: dict[str, RegisteredCommand] = field(default_factory=dict)
     before_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
     after_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
@@ -151,6 +162,7 @@ class CreateAgentSessionOptions:
     after_tool_call: Optional[
         Callable[[AfterToolCallContext, Any | None], AfterToolCallResult | None | Awaitable[AfterToolCallResult | None]]
     ] = None
+    stream_fn: StreamFn | None = None
 
 
 # 运行模式：print（单次输出）、interactive（交互式）、rpc（远程调用）
@@ -209,7 +221,7 @@ class ResolvedRuntimeProfile:
     model: Model
     credential_source: str
     credential_location: str | None = None
-    permission_mode: Literal["read-only", "workspace-write"] = "workspace-write"
+    permission_mode: Literal["read-only", "workspace-write", "ask"] = "workspace-write"
     sources: dict[str, ConfigValueSource] = field(default_factory=dict)
 
 

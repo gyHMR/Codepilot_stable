@@ -12,7 +12,7 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock
 from pathlib import Path
 
-from codepilot.interfaces.cli.runner import (
+from codepilot.interfaces.cli.renderer import (
     TerminalRenderer,
     CliStartupState,
     build_startup_state,

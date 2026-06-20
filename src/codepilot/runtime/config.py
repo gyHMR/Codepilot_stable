@@ -62,6 +62,7 @@ class RuntimeDefaults:
     system_prompt: str = ""
     thinking_level: str = "off"
     tool_execution: ToolExecutionMode = "parallel"
+    max_tool_calls_per_turn: int = 8
     max_context_messages: int | None = None
     retain_recent_messages: int = 24
     max_context_tokens: int | None = None
@@ -69,6 +70,7 @@ class RuntimeDefaults:
     max_retries: int = 2
     retry_base_delay_ms: int = 1200
     read_only_mode: bool = False
+    tool_permission_mode: str = "workspace-write"
     block_dangerous_bash: bool = True
     bash_allow_patterns: list[str] | None = None
     bash_block_patterns: list[str] | None = None
@@ -81,6 +83,11 @@ class RuntimeDefaults:
     prompt_debug_sources: bool = False
     tool_snippets: dict[str, str] | None = None
     enabled_builtin_tools: list[str] | None = None
+    shell_timeout_seconds: int = 30
+    shell_max_timeout_seconds: int = 120
+    shell_stdout_limit: int = 20_000
+    shell_stderr_limit: int = 10_000
+    shell_allowed_env: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +139,13 @@ class ResolvedRuntimeConfig:
     prompt_debug_sources: bool
     tool_snippets: dict[str, str] | None
     enabled_builtin_tools: list[str] | None
+    max_tool_calls_per_turn: int = 8
+    tool_permission_mode: str = "workspace-write"
+    shell_timeout_seconds: int = 30
+    shell_max_timeout_seconds: int = 120
+    shell_stdout_limit: int = 20_000
+    shell_stderr_limit: int = 10_000
+    shell_allowed_env: list[str] | None = None
     sources: dict[str, ConfigSource] = field(default_factory=dict)
 
 
@@ -243,6 +257,12 @@ def resolve_runtime_config(
         ("workspace", settings.tool_execution if settings is not None else None),
         default=defaults.tool_execution,
     )
+    max_tool_calls_per_turn = choose(
+        "max_tool_calls_per_turn",
+        ("options", options.max_tool_calls_per_turn),
+        ("workspace", settings.max_tool_calls_per_turn if settings is not None else None),
+        default=defaults.max_tool_calls_per_turn,
+    )
     max_context_messages = choose(
         "max_context_messages",
         ("options", options.max_context_messages),
@@ -285,6 +305,14 @@ def resolve_runtime_config(
         ("workspace", settings.read_only_mode if settings is not None else None),
         default=defaults.read_only_mode,
     )
+    tool_permission_mode = choose(
+        "tool_permission_mode",
+        ("options", options.tool_permission_mode),
+        ("workspace", settings.tool_permission_mode if settings is not None else None),
+        default=("read-only" if read_only_mode else defaults.tool_permission_mode),
+    )
+    if read_only_mode:
+        tool_permission_mode = "read-only"
     block_dangerous_bash = choose(
         "block_dangerous_bash",
         ("options", options.block_dangerous_bash),
@@ -357,11 +385,42 @@ def resolve_runtime_config(
         ("workspace", resources.enabled_tools if resources is not None else None),
         default=defaults.enabled_builtin_tools,
     )
+    shell_timeout_seconds = choose(
+        "shell_timeout_seconds",
+        ("options", options.shell_timeout_seconds),
+        ("workspace", settings.shell_timeout_seconds if settings is not None else None),
+        default=defaults.shell_timeout_seconds,
+    )
+    shell_max_timeout_seconds = choose(
+        "shell_max_timeout_seconds",
+        ("options", options.shell_max_timeout_seconds),
+        ("workspace", settings.shell_max_timeout_seconds if settings is not None else None),
+        default=defaults.shell_max_timeout_seconds,
+    )
+    shell_stdout_limit = choose(
+        "shell_stdout_limit",
+        ("options", options.shell_stdout_limit),
+        ("workspace", settings.shell_stdout_limit if settings is not None else None),
+        default=defaults.shell_stdout_limit,
+    )
+    shell_stderr_limit = choose(
+        "shell_stderr_limit",
+        ("options", options.shell_stderr_limit),
+        ("workspace", settings.shell_stderr_limit if settings is not None else None),
+        default=defaults.shell_stderr_limit,
+    )
+    shell_allowed_env = choose(
+        "shell_allowed_env",
+        ("options", options.shell_allowed_env),
+        ("workspace", settings.shell_allowed_env if settings is not None else None),
+        default=defaults.shell_allowed_env,
+    )
 
     return ResolvedRuntimeConfig(
         system_prompt=system_prompt,
         thinking_level=thinking_level,
         tool_execution=tool_execution,
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
         max_context_messages=max_context_messages,
         retain_recent_messages=retain_recent_messages,
         max_context_tokens=max_context_tokens,
@@ -369,6 +428,7 @@ def resolve_runtime_config(
         max_retries=max_retries,
         retry_base_delay_ms=retry_base_delay_ms,
         read_only_mode=read_only_mode,
+        tool_permission_mode=tool_permission_mode,
         block_dangerous_bash=block_dangerous_bash,
         bash_allow_patterns=bash_allow_patterns,
         bash_block_patterns=bash_block_patterns,
@@ -381,5 +441,13 @@ def resolve_runtime_config(
         prompt_debug_sources=prompt_debug_sources,
         tool_snippets=tool_snippets,
         enabled_builtin_tools=enabled_builtin_tools,
+        shell_timeout_seconds=min(
+            max(1, shell_timeout_seconds),
+            min(120, max(1, shell_max_timeout_seconds)),
+        ),
+        shell_max_timeout_seconds=min(120, max(1, shell_max_timeout_seconds)),
+        shell_stdout_limit=shell_stdout_limit,
+        shell_stderr_limit=shell_stderr_limit,
+        shell_allowed_env=shell_allowed_env,
         sources=sources,
     )

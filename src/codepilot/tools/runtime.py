@@ -3,6 +3,7 @@ from __future__ import annotations
 """Unified tool execution runtime."""
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -83,6 +84,7 @@ class ToolRuntime:
                 parameters=tool.parameters,
                 execute=self._make_execute_adapter(tool.name),
                 runtime_managed=True,
+                metadata=self.registry.metadata_for(tool.name),
             )
             adapters.append(adapter)
         return adapters
@@ -151,12 +153,14 @@ class ToolRuntime:
         if decision.denied:
             return self._blocked_result(request, decision)
 
+        approval_id: str | None = None
         if decision.requires_approval:
             approval = await self.approval_provider.request_approval(
                 request,
                 metadata,
                 decision,
             )
+            approval_id = approval.approval_id
             if not approval.approved:
                 result = _tool_result(
                     approval.reason or "Tool execution requires approval",
@@ -167,12 +171,19 @@ class ToolRuntime:
                         "reason": decision.reason,
                         "approval_id": approval.approval_id,
                         "policy_reason": decision.reason,
+                        "decision": decision.kind,
+                        **decision.details,
                     },
                 )
                 result.tool_call_id = request.tool_call_id
                 result.tool_name = request.name
                 result.approved = False
                 result.approval_id = approval.approval_id
+                result.metadata["permission_decision"] = {
+                    "decision": decision.kind,
+                    "reason": decision.reason,
+                    **decision.details,
+                }
                 return ToolRuntimeResult(
                     result=result,
                     status="approval_required",
@@ -182,8 +193,34 @@ class ToolRuntime:
                 )
 
         try:
+            started_at = time.monotonic()
             value = tool.execute(request.tool_call_id, request.params, signal, on_update)
             result = await _maybe_await(value)
+            if approval_id is not None:
+                result.approved = True
+                result.approval_id = approval_id
+            if not isinstance(result.details, dict):
+                result.details = {"tool_details": result.details}
+            result.details.setdefault(
+                "permission",
+                {
+                    "decision": decision.kind,
+                    "reason": decision.reason,
+                    **decision.details,
+                },
+            )
+            result.metadata.setdefault(
+                "permission_decision",
+                {
+                    "decision": decision.kind,
+                    "reason": decision.reason,
+                    **decision.details,
+                },
+            )
+            result.metadata.setdefault(
+                "duration_ms",
+                int((time.monotonic() - started_at) * 1000),
+            )
             status: ToolResultStatus = result.status
             if status == "success" and result.is_error:
                 status = "error"
@@ -192,14 +229,14 @@ class ToolRuntime:
                 result,
                 status,
                 approved=result.approved,
-                approval_id=result.approval_id,
+                approval_id=approval_id,
             )
             return ToolRuntimeResult(
                 result=result,
                 status=status,
                 is_error=bool(result.is_error),
                 approved=result.approved,
-                approval_id=result.approval_id,
+                approval_id=approval_id,
             )
         except Exception as exc:
             result = _tool_result(
@@ -232,6 +269,11 @@ class ToolRuntime:
         result.tool_call_id = request.tool_call_id
         result.tool_name = request.name
         result.approved = False
+        result.metadata["permission_decision"] = {
+            "decision": decision.kind,
+            "reason": decision.reason,
+            **decision.details,
+        }
         return ToolRuntimeResult(
             result=result,
             status="denied",

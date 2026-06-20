@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from codepilot.extensions.types import LoadedExtensions
-from codepilot.sessions.memory import load_global_memory
 
 from .config import ResolvedRuntimeConfig
 
@@ -295,7 +294,8 @@ def build_runtime_context(
         prompt_guidelines=prompt_guidelines,
         append_sections=append_sections,
         tool_snippets=config.tool_snippets or {},
-        memory_text=load_global_memory(workspace),
+        # Memory is dynamically recalled by ContextCompiler on every model call.
+        memory_text="",
     )
 
 

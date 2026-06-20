@@ -38,6 +38,10 @@ RuntimeEventType = Literal[
     "tool_approval_required",    # 工具调用需要审批
     "tool_approval_resolved",    # 工具调用审批已解决
     "tool_execution_end",        # 工具执行结束
+    "task_plan_created",         # 任务计划已创建
+    "task_step_updated",         # 任务步骤状态已更新
+    "task_decision",             # 任务控制器做出执行决策
+    "completion_checked",        # 完成门槛检查结果
     "file_diff",                 # 文件变更差异
     "error",                     # 错误事件
 ]

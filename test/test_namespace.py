@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 def test_codepilot_namespace_imports() -> None:
     import codepilot.core
     import codepilot.extensions
+    import codepilot.evaluation
     import codepilot.llm
     import codepilot.runtime
     import codepilot.sessions
@@ -25,6 +26,7 @@ def test_codepilot_namespace_imports() -> None:
 
     assert codepilot.core is not None
     assert codepilot.extensions is not None
+    assert codepilot.evaluation is not None
     assert codepilot.llm is not None
     assert codepilot.runtime is not None
     assert codepilot.sessions is not None

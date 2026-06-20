@@ -65,8 +65,31 @@ def test_runtime_assembly_is_registered_with_session(tmp_path: Path) -> None:
         status = runtime.get_session_status(handle.session_id)
         assert status.permission_mode == "read-only"
         assert status.workspace == str(tmp_path.resolve())
+        assert runtime.get_session_freshness(handle.session_id)["status"] == "valid"
     finally:
         runtime.close_all()
+
+
+def test_runtime_exposes_read_only_recovery_state(tmp_path: Path) -> None:
+    first = RuntimeService()
+    handle = first.create_session(_options(tmp_path))
+    session_id = handle.session_id
+    try:
+        state = first.get_session_recovery_state(session_id)
+        assert state["restored"] is False
+        assert state["run_ids"] == []
+        assert state["freshness"]["status"] == "valid"
+    finally:
+        first.close_all()
+
+    restored = RuntimeService()
+    restored.create_session(_options(tmp_path, session_id=session_id))
+    try:
+        state = restored.get_session_recovery_state(session_id)
+        assert state["restored"] is True
+        assert state["run_ids"] == []
+    finally:
+        restored.close_all()
 
 
 def test_runtime_command_registers_replacement_session(
@@ -170,8 +193,8 @@ def test_aclose_all_waits_for_running_tasks_before_closing() -> None:
 
                 return unsubscribe
 
-            async def run(self, text, *, images=None):
-                _ = text, images
+            async def run(self, text, *, images=None, run_id=None):
+                _ = text, images, run_id
                 self.started.set()
                 try:
                     await asyncio.Event().wait()
@@ -256,8 +279,8 @@ def test_runtime_rejects_second_run_for_same_session() -> None:
 
                 return unsubscribe
 
-            async def run(self, text, *, images=None):
-                _ = text, images
+            async def run(self, text, *, images=None, run_id=None):
+                _ = text, images, run_id
                 for listener in list(self.listeners):
                     listener({"type": "turn_start"})
                 await self.release.wait()
@@ -297,8 +320,8 @@ def test_cancel_run_cancels_stream_task() -> None:
 
                 return unsubscribe
 
-            async def run(self, text, *, images=None):
-                _ = text, images
+            async def run(self, text, *, images=None, run_id=None):
+                _ = text, images, run_id
                 self.started.set()
                 await asyncio.Event().wait()
 
@@ -319,5 +342,51 @@ def test_cancel_run_cancels_stream_task() -> None:
         with pytest.raises(asyncio.CancelledError):
             await consumer
         assert "s1" not in runtime._active_runs
+
+    asyncio.run(run_case())
+
+
+def test_runtime_injects_active_run_id_into_session() -> None:
+    async def run_case() -> None:
+        class FakeSession:
+            session_id = "s1"
+
+            def __init__(self) -> None:
+                self.listeners = []
+                self.received_run_id = None
+
+            def subscribe(self, listener):
+                self.listeners.append(listener)
+
+                def unsubscribe():
+                    self.listeners.remove(listener)
+
+                return unsubscribe
+
+            async def run(self, text, *, images=None, run_id=None):
+                _ = text, images
+                self.received_run_id = run_id
+                for listener in list(self.listeners):
+                    listener(
+                        {
+                            "type": "agent_start",
+                            "runId": run_id,
+                        }
+                    )
+
+        runtime = RuntimeService()
+        fake = FakeSession()
+        runtime._sessions[fake.session_id] = fake  # type: ignore[assignment]
+
+        events = [
+            event
+            async for event in runtime.send_message(
+                "s1",
+                UserInput(text="hello"),
+            )
+        ]
+
+        assert fake.received_run_id is not None
+        assert events[0]["runId"] == fake.received_run_id
 
     asyncio.run(run_case())

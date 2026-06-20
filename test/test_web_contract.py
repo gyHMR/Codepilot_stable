@@ -133,14 +133,15 @@ async def _run_runtime_service_send_message_streaming_case() -> None:
 
             return unsubscribe
 
-        async def run(self, text, *, images=None):
-            _ = text, images
+        async def run(self, text, *, images=None, run_id=None):
+            _ = text, images, run_id
             for listener in list(self.listeners):
                 listener({"type": "message_update", "delta": "hello"})
             await self.run_can_finish.wait()
             self.run_finished = True
 
-        async def continue_run(self):
+        async def continue_run(self, *, run_id=None):
+            _ = run_id
             for listener in list(self.listeners):
                 listener({"type": "turn_start"})
             await self.run_can_finish.wait()
@@ -180,7 +181,8 @@ async def _run_runtime_service_continue_session_streaming_case() -> None:
 
             return unsubscribe
 
-        async def continue_run(self):
+        async def continue_run(self, *, run_id=None):
+            _ = run_id
             for listener in list(self.listeners):
                 listener({"type": "turn_start"})
             await self.continue_can_finish.wait()

@@ -7,6 +7,20 @@ from codepilot.protocols import TextContent
 from codepilot.tools.sandbox import WorkspaceSandbox
 from codepilot.tools.types import AgentTool, AgentToolResult
 
+_IGNORED_DIRS = {
+    ".git",
+    ".codepilot",
+    ".pytest_cache",
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+}
+_MAX_SCAN_FILES = 5000
+_MAX_FILE_BYTES = 2 * 1024 * 1024
+
 
 def _error_result(message: str, error_code: str) -> AgentToolResult:
     return AgentToolResult(
@@ -42,10 +56,24 @@ def create_search_tools(sandbox: WorkspaceSandbox, *, allow: Callable[[str], boo
             return _error_result(f"Invalid regex: {exc}", "invalid_regex")
 
         matches: list[str] = []
-        files = [p for p in root.glob(glob_pattern) if p.is_file()]
-        for file_path in files:
+        files = sorted(
+            (
+                p
+                for p in root.glob(glob_pattern)
+                if p.is_file() and not _is_ignored(p, root)
+            ),
+            key=lambda path: path.as_posix(),
+        )
+        scanned = 0
+        skipped_binary = 0
+        scan_truncated = len(files) > _MAX_SCAN_FILES
+        for file_path in files[:_MAX_SCAN_FILES]:
+            scanned += 1
             try:
-                text = file_path.read_text(encoding="utf-8", errors="replace")
+                if file_path.stat().st_size > _MAX_FILE_BYTES or _is_binary(file_path):
+                    skipped_binary += 1
+                    continue
+                text = file_path.read_text(encoding="utf-8")
             except Exception:
                 continue
             for idx, line in enumerate(text.splitlines(), start=1):
@@ -59,7 +87,16 @@ def create_search_tools(sandbox: WorkspaceSandbox, *, allow: Callable[[str], boo
 
         return AgentToolResult(
             content=[TextContent(text="\n".join(matches) if matches else "(no matches)")],
-            details={"matches": len(matches)},
+            details={
+                "matches": len(matches),
+                "scanned_files": scanned,
+                "skipped_binary_files": skipped_binary,
+            },
+            metadata={
+                "truncated": len(matches) >= max_matches or scan_truncated,
+                "match_limit": max_matches,
+                "scan_file_limit": _MAX_SCAN_FILES,
+            },
         )
 
     async def find_tool(tool_call_id: str, params: dict[str, Any], signal=None, on_update=None) -> AgentToolResult:
@@ -71,8 +108,16 @@ def create_search_tools(sandbox: WorkspaceSandbox, *, allow: Callable[[str], boo
         if not root.exists():
             return _error_result(f"Path not found: {start_path}", "path_not_found")
 
+        candidates = sorted(
+            (
+                path
+                for path in root.glob(pattern)
+                if not _is_ignored(path, root)
+            ),
+            key=lambda path: path.as_posix(),
+        )
         results = []
-        for path in root.glob(pattern):
+        for path in candidates[:_MAX_SCAN_FILES]:
             rel = path.relative_to(workspace).as_posix()
             results.append(rel + ("/" if path.is_dir() else ""))
             if len(results) >= max_results:
@@ -80,6 +125,14 @@ def create_search_tools(sandbox: WorkspaceSandbox, *, allow: Callable[[str], boo
         return AgentToolResult(
             content=[TextContent(text="\n".join(results) if results else "(no files)")],
             details={"count": len(results)},
+            metadata={
+                "truncated": (
+                    len(results) >= max_results
+                    or len(candidates) > _MAX_SCAN_FILES
+                ),
+                "result_limit": max_results,
+                "scan_file_limit": _MAX_SCAN_FILES,
+            },
         )
 
     if allow("grep"):
@@ -125,3 +178,20 @@ def create_search_tools(sandbox: WorkspaceSandbox, *, allow: Callable[[str], boo
         )
 
     return tools
+
+
+def _is_ignored(path, root) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return True
+    return any(part in _IGNORED_DIRS for part in relative.parts)
+
+
+def _is_binary(path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            chunk = handle.read(4096)
+    except OSError:
+        return True
+    return b"\x00" in chunk

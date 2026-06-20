@@ -1,8 +1,8 @@
 """
-Protocols 子包统一导出模块。
+Protocols 子包公共索引。
 
-本包定义了 Codepilot 系统中所有核心数据结构的协议/类型，
-是整个项目的"类型契约层"，各模块依赖此包进行类型交互。
+本包是 Codepilot 的类型契约层，只放跨层共享的稳定数据结构。
+这里不放业务逻辑、文件读写、模型调用、工具执行或持久化实现。
 
 子模块分工：
 - content.py: 内容块类型（文本、图片、思考）
@@ -12,9 +12,27 @@ Protocols 子包统一导出模块。
 - events.py: 运行时事件类型定义
 - runs.py: 运行结果和状态
 - errors.py: 错误信息结构
+
+使用建议：
+- 常用稳定协议可以从 codepilot.protocols 直接导入；
+- 细分事件、上下文治理等较专门的类型，优先从对应子模块导入；
+- 为了兼容已有调用，本模块仍保留若干细分类型的直接导入属性，
+  但 __all__ 只列出公共索引中最常用、最稳定的协议类型。
 """
 
 from .content import ContentBlock, ImageContent, TextContent, ThinkingContent
+from .context import (
+    ContextFreshness,
+    ContextItem,
+    ContextReport,
+    ContextSection,
+    ContextSectionReport,
+    ContextTrust,
+    DroppedContextItem,
+    DroppedContextReason,
+    RepositoryDelta,
+    RepositorySnapshot,
+)
 from .errors import ErrorInfo, ErrorSource, LLMErrorInfo, LLMErrorKind
 from .events import (
     AgentEndEvent,
@@ -67,6 +85,7 @@ from .runs import (
     AgentRunStopReason,
     RunVerification,
     RunVerificationStatus,
+    TaskSummary,
 )
 from .tools import (
     Tool,
@@ -80,37 +99,30 @@ from .tools import (
 
 
 __all__ = [
-    # ── 事件相关 ──
-    "AgentEvent",
-    "AgentEventBase",
-    "AgentEventSink",
-    "AgentStartEvent",
-    "AgentEndEvent",
-    "ErrorEvent",
-    "EventEnvelope",
-    "MessageEndEvent",
-    "MessageStartEvent",
-    "MessageUpdateEvent",
-    "ModelRetryStartEvent",
-    "RuntimeEvent",
-    "RuntimeEventType",
-    "ToolExecutionEndEvent",
-    "ToolExecutionStartEvent",
-    "ToolExecutionUpdateEvent",
-    "TurnEndEvent",
-    "TurnStartEvent",
-    # ── 运行结果相关 ──
-    "AgentRunCounters",
-    "AgentRunResult",
-    "AgentRunStatus",
-    "AgentRunStopReason",
-    "RunVerification",
-    "RunVerificationStatus",
-    # ── LLM 相关 ──
+    # ── 消息与内容 ──
+    "AssistantBlock",
+    "AssistantMessage",
+    "ContentBlock",
+    "Context",
+    "ImageContent",
+    "Message",
+    "TextContent",
+    "ThinkingContent",
+    "ToolResultBlock",
+    "ToolResultMessage",
+    "UserBlock",
+    "UserMessage",
+    # ── 工具 ──
+    "Tool",
+    "ToolCall",
+    "ToolMetadata",
+    "ToolResult",
+    "ToolResultStatus",
+    "ToolRiskLevel",
+    "ToolSpec",
+    # ── LLM ──
     "Api",
     "Cost",
-    "LLMStreamEvent",
-    "LLMStreamEventType",
     "Model",
     "ModelCapabilities",
     "Provider",
@@ -119,31 +131,25 @@ __all__ = [
     "StreamOptions",
     "ThinkingLevel",
     "Usage",
-    # ── 消息相关 ──
-    "AssistantBlock",
-    "AssistantMessage",
-    "Context",
-    "Message",
-    "ToolResultBlock",
-    "ToolResultMessage",
-    "UserBlock",
-    "UserMessage",
-    # ── 内容块相关 ──
-    "ContentBlock",
-    "ImageContent",
-    "TextContent",
-    "ThinkingContent",
-    # ── 工具相关 ──
-    "Tool",
-    "ToolCall",
-    "ToolMetadata",
-    "ToolResult",
-    "ToolResultStatus",
-    "ToolRiskLevel",
-    "ToolSpec",
-    # ── 错误相关 ──
+    # ── Run 结果 ──
+    "AgentRunCounters",
+    "AgentRunResult",
+    "AgentRunStatus",
+    "AgentRunStopReason",
+    "RunVerification",
+    "RunVerificationStatus",
+    "TaskSummary",
+    # ── 通用事件入口 ──
+    "AgentEvent",
+    "AgentEventSink",
+    "EventEnvelope",
+    "RuntimeEvent",
+    "RuntimeEventType",
+    # ── LLM 流式事件 ──
+    "LLMStreamEvent",
+    "LLMStreamEventType",
+    # ── 错误 ──
     "ErrorInfo",
-    "ErrorSource",
     "LLMErrorInfo",
     "LLMErrorKind",
 ]

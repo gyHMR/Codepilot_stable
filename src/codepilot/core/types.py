@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Literal, Optional
 
 from codepilot.protocols import (
     AssistantMessage,
+    ContextReport,
     ImageContent,
     Message,
     Model,
@@ -39,6 +40,30 @@ class AgentContext:
     system_prompt: str
     messages: list[AgentMessage]
     tools: list[AgentTool] = field(default_factory=list)
+    current_task: str | None = None
+    recovered_task: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class ContextPreparationRequest:
+    session_id: str | None
+    model_context_window: int
+    model_max_output_tokens: int
+    signal: Any | None = None
+
+
+@dataclass
+class PreparedAgentContext:
+    system_prompt: str
+    messages: list[AgentMessage]
+    tools: list[AgentTool]
+    report: ContextReport
+
+
+PrepareContextFn = Callable[
+    [AgentContext, ContextPreparationRequest],
+    PreparedAgentContext | Awaitable[PreparedAgentContext],
+]
 
 
 @dataclass
@@ -79,6 +104,7 @@ class AgentLoopConfig:
     transform_context: Optional[
         Callable[[list[AgentMessage], Any | None], list[AgentMessage] | Awaitable[list[AgentMessage]]]
     ] = None
+    prepare_context: PrepareContextFn | None = None
     get_api_key: Optional[Callable[[str], str | None | Awaitable[str | None]]] = None
     get_steering_messages: Optional[Callable[[], list[AgentMessage] | Awaitable[list[AgentMessage]]]] = None
     get_follow_up_messages: Optional[Callable[[], list[AgentMessage] | Awaitable[list[AgentMessage]]]] = None
@@ -92,7 +118,7 @@ class AgentLoopConfig:
     reasoning: Optional[ThinkingLevel] = None
     session_id: Optional[str] = None
     max_tool_iterations: int = 12
-    max_tool_calls_per_turn: Optional[int] = None
+    max_tool_calls_per_turn: Optional[int] = 8
     allow_unmanaged_tools: bool = False
     repeated_tool_call_limit: int = 3
     retry_enabled: bool = True

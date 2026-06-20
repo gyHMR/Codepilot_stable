@@ -269,6 +269,7 @@ async def _run_builtin_result_case(tmp_path: Path, monkeypatch) -> None:
     from codepilot.tools.builtin import create_builtin_tools, get_builtin_tool_metadata
     from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.runtime import ToolRuntime
+    from codepilot.tools.permissions import PermissionPolicy
 
     return_codes = iter([3, 0])
 
@@ -290,7 +291,15 @@ async def _run_builtin_result_case(tmp_path: Path, monkeypatch) -> None:
     registry = ToolRegistry()
     for tool in create_builtin_tools(tmp_path):
         registry.register(tool, metadata=get_builtin_tool_metadata(tool.name))
-    tools = {tool.name: tool for tool in ToolRuntime(registry).as_agent_tools()}
+    tools = {
+        tool.name: tool
+        for tool in ToolRuntime(
+            registry,
+            permission_policy=PermissionPolicy(
+                bash_allow_patterns=[r"^python -c"],
+            ),
+        ).as_agent_tools()
+    }
 
     write = await tools["write"].execute(
         "write_1",
@@ -325,7 +334,7 @@ async def _run_builtin_result_case(tmp_path: Path, monkeypatch) -> None:
 
     verification = await tools["bash"].execute(
         "bash_2",
-        {"command": 'python -c "print(1)" pytest'},
+        {"command": "python -m pytest -q"},
     )
     assert verification.status == "success"
     assert verification.verification is not None

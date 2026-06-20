@@ -77,6 +77,8 @@ class RuntimeService:
         self._assemblies: dict[str, RuntimeAssembly] = {}
         # 活跃运行：session_id -> ActiveRun（单 Session 单 Run）
         self._active_runs: dict[str, ActiveRun] = {}
+        # 本 Runtime 实例中由持久化数据恢复的 Session。
+        self._restored_sessions: set[str] = set()
 
     def create_session(self, options: CreateAgentSessionOptions) -> SessionHandle:
         """创建一个新的 Agent 会话。
@@ -87,9 +89,21 @@ class RuntimeService:
         Returns:
             SessionHandle，包含 session_id、session 实例和装配产物。
         """
+        persisted_meta = (
+            Path(options.workspace_dir)
+            / ".codepilot"
+            / "sessions"
+            / str(options.session_id)
+            / "meta.json"
+        )
+        is_restored = options.session_id is not None and persisted_meta.is_file()
         session, assembly = assemble_runtime(options)
         self._sessions[session.session_id] = session
         self._assemblies[session.session_id] = assembly
+        if is_restored:
+            self._restored_sessions.add(session.session_id)
+        else:
+            self._restored_sessions.discard(session.session_id)
 
         return SessionHandle(
             session_id=session.session_id,
@@ -114,6 +128,7 @@ class RuntimeService:
         assembly = replace(source, session_options=session_options)
         self._sessions[session.session_id] = session
         self._assemblies[session.session_id] = assembly
+        self._restored_sessions.discard(session.session_id)
         return SessionHandle(
             session_id=session.session_id,
             session=session,
@@ -223,6 +238,45 @@ class RuntimeService:
             "leaf_id": session.get_leaf_id(),
         }
 
+    def get_session_freshness(self, session_id: str) -> dict[str, Any]:
+        """返回最近 Run Artifact 相对当前工作区的新鲜度。"""
+
+        session = self.get_session(session_id)
+        return session.store.run_store.evaluate_freshness().to_event_payload()
+
+    def get_context_report(self, session_id: str) -> dict[str, Any] | None:
+        """返回 Session 最近一次模型调用的上下文编译报告。"""
+
+        report = self.get_session(session_id).latest_context_report
+        return dict(report) if report is not None else None
+
+    def get_memory_state(self, session_id: str) -> dict[str, Any]:
+        """Return a read-only summary of structured session/project memory."""
+
+        session = self.get_session(session_id)
+        session_records = session.memory_store.load_session()
+        project_records = session.memory_store.load_project()
+        return {
+            "session_id": session_id,
+            "session": [record.to_dict() for record in session_records],
+            "project": [record.to_dict() for record in project_records],
+        }
+
+    def get_session_recovery_state(self, session_id: str) -> dict[str, Any]:
+        """返回 Eval/接口层需要的只读恢复状态。"""
+
+        runs = self.list_runs(session_id)
+        return {
+            "session_id": session_id,
+            "restored": session_id in self._restored_sessions,
+            "run_ids": [
+                run_id
+                for result in runs
+                if isinstance((run_id := result.get("run_id")), str)
+            ],
+            "freshness": self.get_session_freshness(session_id),
+        }
+
     def list_session_entries(self, session_id: str) -> list[dict[str, Any]]:
         return self.get_session(session_id).list_entries()
 
@@ -276,7 +330,11 @@ class RuntimeService:
         active_run.task = asyncio.current_task()
 
         try:
-            result = await session.run(message.text, images=message.images)
+            result = await session.run(
+                message.text,
+                images=message.images,
+                run_id=active_run.run_id,
+            )
             active_run.status = "completed"
             return result
         except asyncio.CancelledError:
@@ -312,7 +370,11 @@ class RuntimeService:
         try:
             async for event in self._stream_session_events(
                 session,
-                lambda: session.run(message.text, images=message.images),
+                lambda: session.run(
+                    message.text,
+                    images=message.images,
+                    run_id=active_run.run_id,
+                ),
                 active_run=active_run,
             ):
                 yield event
@@ -350,7 +412,7 @@ class RuntimeService:
         try:
             async for event in self._stream_session_events(
                 session,
-                session.continue_run,
+                lambda: session.continue_run(run_id=active_run.run_id),
                 active_run=active_run,
             ):
                 yield event
@@ -567,6 +629,7 @@ class RuntimeService:
                 f"Cannot close running session: {session_id}"
             )
         self._active_runs.pop(session_id, None)
+        self._restored_sessions.discard(session_id)
 
         # 移除装配产物
         self._assemblies.pop(session_id, None)

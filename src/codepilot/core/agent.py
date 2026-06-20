@@ -22,6 +22,7 @@ from codepilot.protocols import (
 )
 
 from .agent_loop import run_agent_loop, run_agent_loop_continue
+from .llm_runner import StreamFn
 from .types import (
     AfterToolCallContext,
     AfterToolCallResult,
@@ -32,6 +33,7 @@ from .types import (
     AgentTool,
     BeforeToolCallContext,
     BeforeToolCallResult,
+    PrepareContextFn,
     ToolExecutionMode,
 )
 
@@ -104,6 +106,7 @@ class AgentOptions:
     transform_context: Optional[
         Callable[[list[AgentMessage], Any | None], list[AgentMessage] | Awaitable[list[AgentMessage]]]
     ] = None
+    prepare_context: PrepareContextFn | None = None
     get_api_key: Optional[Callable[[str], str | None | Awaitable[str | None]]] = None
     before_tool_call: Optional[
         Callable[[BeforeToolCallContext, Any | None], BeforeToolCallResult | None | Awaitable[BeforeToolCallResult | None]]
@@ -112,13 +115,15 @@ class AgentOptions:
         Callable[[AfterToolCallContext, Any | None], AfterToolCallResult | None | Awaitable[AfterToolCallResult | None]]
     ] = None
     max_tool_iterations: int = 12
-    max_tool_calls_per_turn: Optional[int] = None
+    max_tool_calls_per_turn: Optional[int] = 8
     allow_unmanaged_tools: bool = False
     repeated_tool_call_limit: int = 3
     retry_enabled: bool = True
     max_model_retries: int = 2
     retry_base_delay_ms: int = 1200
     session_id: Optional[str] = None
+    stream_fn: StreamFn | None = None
+    recovered_task: dict[str, object] | None = None
 
 
 # ── Agent 核心类 ────────────────────────────────────────────────
@@ -183,6 +188,18 @@ class Agent:
         """替换全部消息列表（通常用于上下文压缩后重置）。"""
         self._state.messages = list(messages)
 
+    def set_prepare_context(self, prepare_context: PrepareContextFn | None) -> None:
+        """Replace the per-model-call context preparation callback."""
+        self._options.prepare_context = prepare_context
+
+    def set_session_id(self, session_id: str) -> None:
+        """Update the session identity used by events and model requests."""
+        self._options.session_id = session_id
+
+    def set_recovered_task(self, recovered_task: dict[str, object] | None) -> None:
+        """Set the task-memory projection used to initialize the next run."""
+        self._options.recovered_task = recovered_task
+
     def add_steering_message(self, message: AgentMessage) -> None:
         """向引导消息队列中添加一条消息。
 
@@ -228,6 +245,8 @@ class Agent:
         self,
         message: str | UserMessage,
         images: list[str] | None = None,
+        *,
+        run_id: str | None = None,
     ) -> AgentRunResult:
         """Start a new Run and return its structured result."""
 
@@ -240,9 +259,17 @@ class Agent:
             prompt = UserMessage(content=content)
         else:
             prompt = message
-        return await self._start_run(prompts=[prompt], continue_mode=False)
+        return await self._start_run(
+            prompts=[prompt],
+            continue_mode=False,
+            run_id=run_id,
+        )
 
-    async def continue_run(self) -> AgentRunResult:
+    async def continue_run(
+        self,
+        *,
+        run_id: str | None = None,
+    ) -> AgentRunResult:
         """继续上一次未完成的 Agent 运行。
 
         典型场景：Agent 返回了工具调用请求但尚未执行完毕，
@@ -256,7 +283,11 @@ class Agent:
         """
         if self._state.is_streaming:
             raise RuntimeError("Agent is already running")
-        return await self._start_run(prompts=[], continue_mode=True)
+        return await self._start_run(
+            prompts=[],
+            continue_mode=True,
+            run_id=run_id,
+        )
 
     async def wait_for_idle(self) -> None:
         """等待当前流式任务完成，使 Agent 进入空闲状态。"""
@@ -274,6 +305,7 @@ class Agent:
         self,
         prompts: list[AgentMessage],
         continue_mode: bool,
+        run_id: str | None,
     ) -> AgentRunResult:
         """启动一次 Agent 运行的核心方法。
 
@@ -301,6 +333,7 @@ class Agent:
             model=self._state.model,
             convert_to_llm=self._options.convert_to_llm,
             transform_context=self._options.transform_context,
+            prepare_context=self._options.prepare_context,
             get_api_key=self._options.get_api_key,
             get_steering_messages=self._drain_steering_messages,
             get_follow_up_messages=self._drain_follow_up_messages,
@@ -323,6 +356,7 @@ class Agent:
             system_prompt=self._state.system_prompt,
             messages=list(self._state.messages),
             tools=list(self._state.tools),
+            recovered_task=self._options.recovered_task,
         )
 
         # 根据模式选择对应的循环入口
@@ -331,6 +365,8 @@ class Agent:
                 context=context,
                 config=cfg,
                 emit=self._dispatch_event,
+                run_id=run_id,
+                stream_fn=self._options.stream_fn,
             )
         else:
             coro = run_agent_loop(
@@ -338,6 +374,8 @@ class Agent:
                 context=context,
                 config=cfg,
                 emit=self._dispatch_event,
+                run_id=run_id,
+                stream_fn=self._options.stream_fn,
             )
 
         # 创建异步任务并等待完成

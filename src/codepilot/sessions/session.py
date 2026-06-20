@@ -23,6 +23,7 @@ from codepilot.protocols import (
     Message,
     SimpleStreamOptions,
     TextContent,
+    ToolResultMessage,
     UserMessage,
 )
 from codepilot.core import Agent, AgentEvent, AgentMessage, AgentOptions
@@ -39,6 +40,7 @@ from .compaction import (
     format_messages_for_summary,
 )
 from .store import SessionStore, new_session_id
+from .memory import MemoryRetriever, MemoryStore, MemoryWriter
 from .types import AgentSessionOptions
 
 logger = logging.getLogger("codepilot.sessions.session")
@@ -74,6 +76,16 @@ class AgentSession:
             provider=options.model.provider,
             system_prompt=options.system_prompt,
         )
+        self.memory_store = MemoryStore(self.store)
+        self.memory_writer = MemoryWriter(
+            store=self.memory_store,
+            workspace_dir=self.workspace_dir,
+        )
+        self.memory_retriever = MemoryRetriever(
+            store=self.memory_store,
+            workspace_dir=self.workspace_dir,
+        )
+        prepare_context = self._prepare_context_for_session(options.prepare_context)
 
         # 加载已持久化的历史消息；优先读取会话消息，若无则读取上下文消息
         persisted_messages = self.store.load_session_messages()
@@ -90,6 +102,7 @@ class AgentSession:
             messages=merged_messages,
             thinking_level=options.thinking_level,
             tool_execution=options.tool_execution,
+            max_tool_calls_per_turn=options.max_tool_calls_per_turn,
             get_api_key=options.get_api_key,
             before_tool_call=options.before_tool_call,
             after_tool_call=options.after_tool_call,
@@ -97,6 +110,8 @@ class AgentSession:
             max_model_retries=options.max_retries,
             retry_base_delay_ms=options.retry_base_delay_ms,
             session_id=self.session_id,
+            stream_fn=options.stream_fn,
+            prepare_context=prepare_context,
         )
         if options.convert_to_llm is not None:
             agent_opts.convert_to_llm = options.convert_to_llm
@@ -109,8 +124,12 @@ class AgentSession:
         self.max_context_tokens = options.max_context_tokens           # token 数量上限
         self.retain_recent_messages = options.retain_recent_messages   # 压缩时保留的最近消息数
         self.summary_builder = options.summary_builder                 # 自定义摘要构建器
+        self.latest_context_report: dict | None = None
+        self.prepare_context = prepare_context
+        self.stream_fn = options.stream_fn
 
         self.tool_execution = options.tool_execution
+        self.max_tool_calls_per_turn = options.max_tool_calls_per_turn
         # 重试机制配置
         self.retry_enabled = options.retry_enabled
         self.max_retries = options.max_retries
@@ -186,15 +205,21 @@ class AgentSession:
             "total_cost": total_cost,
         }
 
-    async def continue_run(self) -> AgentRunResult:
+    async def continue_run(
+        self,
+        *,
+        run_id: str | None = None,
+    ) -> AgentRunResult:
         """继续上一次未完成的 Agent 运行（例如工具调用后的延续）。
 
         Returns:
             继续运行产生的结构化 Run 结果。
         """
         await self._run_lifecycle_hooks(text="", is_continue=True, hooks=self.before_prompt_hooks)
-        result = await self.agent.continue_run()
+        self.agent.set_recovered_task(self._active_task_projection())
+        result = await self.agent.continue_run(run_id=run_id)
         self.store.append_run_result(result)
+        self._finalize_memory(result)
         await self._compact_context_if_needed()
         await self._run_lifecycle_hooks(text="", is_continue=True, hooks=self.after_prompt_hooks)
         return result
@@ -204,6 +229,7 @@ class AgentSession:
         text: str,
         *,
         images: list[str] | None = None,
+        run_id: str | None = None,
     ) -> AgentRunResult:
         """Run one user task and persist its structured result."""
 
@@ -212,10 +238,17 @@ class AgentSession:
             is_continue=False,
             hooks=self.before_prompt_hooks,
         )
+        self._remember_task(text, run_id=run_id)
+        self.agent.set_recovered_task(self._active_task_projection())
         self._check_context_freshness()
         await self._check_and_compact_before_prompt()
-        result = await self.agent.run(text, images=images)
+        result = await self.agent.run(
+            text,
+            images=images,
+            run_id=run_id,
+        )
         self.store.append_run_result(result)
+        self._finalize_memory(result)
         await self._compact_context_if_needed()
         await self._run_lifecycle_hooks(
             text=text,
@@ -284,6 +317,23 @@ class AgentSession:
         """切换到另一个会话。"""
         branch_switch_session(self, session_id)
 
+    def rebind_store(self, store: SessionStore) -> None:
+        """Rebind persistence, memory, and context preparation after session switch."""
+        self.store = store
+        self.session_id = store.session_id
+        self.agent.set_session_id(self.session_id)
+        self.memory_store = MemoryStore(store)
+        self.memory_writer = MemoryWriter(
+            store=self.memory_store,
+            workspace_dir=self.workspace_dir,
+        )
+        self.memory_retriever = MemoryRetriever(
+            store=self.memory_store,
+            workspace_dir=self.workspace_dir,
+        )
+        self.prepare_context = self._prepare_context_for_session(self.prepare_context)
+        self.agent.set_prepare_context(self.prepare_context)
+
     def record_checkpoint(self, label: str, details: dict | None = None) -> SessionCheckpoint:
         """在当前会话中记录一个检查点（checkpoint）。
 
@@ -301,9 +351,122 @@ class AgentSession:
     async def _on_agent_event(self, event: AgentEvent) -> None:
         """Agent 事件回调：将事件持久化到存储，并在消息结束时保存上下文消息。"""
         self.store.append_event(event)
+        if event["type"] == "context_prepared":
+            report = event.get("report")
+            if isinstance(report, dict):
+                self.latest_context_report = report
+                memory_ids = report.get("retrieved_memory_ids")
+                if isinstance(memory_ids, list) and memory_ids:
+                    self.store.append_event(
+                        {
+                            "type": "memory_retrieved",
+                            "sessionId": self.session_id,
+                            "memoryIds": memory_ids,
+                            "reasons": report.get("memory_retrieval_reasons", {}),
+                        }
+                    )
         if event["type"] == "message_end":
             message = event["message"]
             self.store.append_context_message(message)
+            if isinstance(message, ToolResultMessage):
+                self._observe_tool_memory(
+                    message,
+                    run_id=event.get("runId"),
+                )
+
+    def _prepare_context_for_session(self, prepare_context):
+        if prepare_context is None:
+            return None
+        owner = getattr(prepare_context, "__self__", None)
+        if owner is not None and hasattr(owner, "clone"):
+            owner = owner.clone()
+            prepare_context = owner.compile
+        if owner is not None and hasattr(owner, "bind_memory_retriever"):
+            owner.bind_memory_retriever(self.memory_retriever)
+        return prepare_context
+
+    def _remember_task(self, text: str, *, run_id: str | None) -> None:
+        try:
+            record = self.memory_writer.remember_task(text, run_id=run_id)
+            self.store.append_event(
+                {
+                    "type": "memory_updated",
+                    "sessionId": self.session_id,
+                    "memoryId": record.id,
+                    "kind": record.kind,
+                }
+            )
+        except Exception as exc:
+            logger.warning("failed to remember task: %s", exc)
+            self.store.append_event(
+                {
+                    "type": "memory_warning",
+                    "sessionId": self.session_id,
+                    "operation": "remember_task",
+                    "message": str(exc),
+                }
+            )
+
+    def _active_task_projection(self) -> dict[str, object] | None:
+        for record in self.memory_store.load_session():
+            if record.kind != "task" or record.status != "active":
+                continue
+            content = dict(record.content)
+            if not isinstance(content.get("task_progress"), dict):
+                return None
+            return content
+        return None
+
+    def _observe_tool_memory(
+        self,
+        message: ToolResultMessage,
+        *,
+        run_id: str | None,
+    ) -> None:
+        try:
+            records = self.memory_writer.observe_tool_result(message, run_id=run_id)
+            for record in records:
+                self.store.append_event(
+                    {
+                        "type": "memory_updated",
+                        "sessionId": self.session_id,
+                        "memoryId": record.id,
+                        "kind": record.kind,
+                    }
+                )
+        except Exception as exc:
+            logger.warning("failed to observe tool memory: %s", exc)
+            self.store.append_event(
+                {
+                    "type": "memory_warning",
+                    "sessionId": self.session_id,
+                    "operation": "observe_tool_result",
+                    "message": str(exc),
+                }
+            )
+
+    def _finalize_memory(self, result: AgentRunResult) -> None:
+        try:
+            records = self.memory_writer.finalize_run(result)
+            for record in records:
+                self.store.append_event(
+                    {
+                        "type": "memory_updated",
+                        "sessionId": self.session_id,
+                        "memoryId": record.id,
+                        "kind": record.kind,
+                    }
+                )
+        except Exception as exc:
+            logger.warning("failed to finalize memory: %s", exc)
+            self.store.append_event(
+                {
+                    "type": "memory_warning",
+                    "sessionId": self.session_id,
+                    "operation": "finalize_run",
+                    "message": str(exc),
+                }
+            )
 
     def _check_context_freshness(self) -> None:
         freshness = self.store.run_store.evaluate_freshness()

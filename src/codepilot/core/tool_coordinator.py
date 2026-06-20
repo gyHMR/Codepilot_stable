@@ -271,10 +271,30 @@ class ToolCallCoordinator:
         *,
         signal: Any | None,
     ) -> list[ToolResultMessage]:
-        immediate_results: list[ToolResultMessage] = []
-        prepared_calls: list[PreparedToolCall] = []
+        results: dict[int, ToolResultMessage] = {}
+        parallel_batch: list[tuple[int, PreparedToolCall]] = []
 
-        for tool_call in tool_calls:
+        async def flush_parallel_batch() -> None:
+            if not parallel_batch:
+                return
+            batch = list(parallel_batch)
+            parallel_batch.clear()
+            executed_results = await asyncio.gather(
+                *[
+                    self._execute_prepared(prepared, signal=signal)
+                    for _, prepared in batch
+                ]
+            )
+            for (index, prepared), executed in zip(batch, executed_results):
+                results[index] = await self._finalize(
+                    current_context,
+                    assistant_message,
+                    prepared,
+                    executed,
+                    signal=signal,
+                )
+
+        for index, tool_call in enumerate(tool_calls):
             await self._emit_tool_start(tool_call)
             prepared, immediate, immediate_is_error = await self._prepare(
                 current_context,
@@ -283,30 +303,33 @@ class ToolCallCoordinator:
                 signal=signal,
             )
             if prepared is None:
-                immediate_results.append(
-                    await self._finish_immediate(tool_call, immediate, immediate_is_error)
+                await flush_parallel_batch()
+                results[index] = await self._finish_immediate(
+                    tool_call,
+                    immediate,
+                    immediate_is_error,
                 )
-            else:
-                prepared_calls.append(prepared)
-
-        tasks = [
-            asyncio.create_task(self._execute_prepared(prepared, signal=signal))
-            for prepared in prepared_calls
-        ]
-        executed_results = await asyncio.gather(*tasks)
-
-        finalized: list[ToolResultMessage] = []
-        for prepared, executed in zip(prepared_calls, executed_results):
-            finalized.append(
-                await self._finalize(
+                continue
+            metadata = prepared.tool.metadata
+            parallel_safe = bool(
+                metadata
+                and metadata.concurrency_safe
+                and not metadata.exclusive
+            )
+            if parallel_safe:
+                parallel_batch.append((index, prepared))
+                continue
+            await flush_parallel_batch()
+            executed = await self._execute_prepared(prepared, signal=signal)
+            results[index] = await self._finalize(
                     current_context,
                     assistant_message,
                     prepared,
                     executed,
                     signal=signal,
-                )
             )
-        return [*immediate_results, *finalized]
+        await flush_parallel_batch()
+        return [results[index] for index in range(len(tool_calls))]
 
     async def _too_many_tool_calls(
         self,
@@ -367,6 +390,26 @@ class ToolCallCoordinator:
                 "approved": result.approved,
                 "approvalId": result.approval_id,
                 "errorReason": tool_error_reason(result, is_error),
+                "permission": (
+                    result.metadata.get("permission_decision")
+                    if isinstance(result.metadata, dict)
+                    else None
+                ),
+                "durationMs": (
+                    result.metadata.get("duration_ms")
+                    if isinstance(result.metadata, dict)
+                    else None
+                ),
+                "affectedPaths": list(result.affected_paths),
+                "workspaceChanged": result.workspace_changed,
+                "outputTruncated": bool(
+                    isinstance(result.metadata, dict)
+                    and (
+                        result.metadata.get("truncated")
+                        or result.metadata.get("stdout_truncated")
+                        or result.metadata.get("stderr_truncated")
+                    )
+                ),
             }
         )
 
@@ -376,6 +419,14 @@ class ToolCallCoordinator:
         result: AgentToolResult,
         is_error: bool,
     ) -> ToolResultMessage:
+        metadata = dict(result.metadata)
+        target_path = (
+            tool_call.arguments.get("path")
+            if isinstance(tool_call.arguments, dict)
+            else None
+        )
+        if isinstance(target_path, str) and target_path:
+            metadata.setdefault("tool_target_path", target_path)
         message = ToolResultMessage(
             tool_call_id=tool_call.id,
             tool_name=tool_call.name,
@@ -383,6 +434,8 @@ class ToolCallCoordinator:
             details=result.details,
             is_error=is_error,
             status=result.status,
+            approved=result.approved,
+            approval_id=result.approval_id,
             error_code=result.error_code,
             exit_code=result.exit_code,
             affected_paths=list(result.affected_paths),
@@ -390,7 +443,7 @@ class ToolCallCoordinator:
             diff_summary=result.diff_summary,
             verification=dict(result.verification) if result.verification else None,
             timestamp=now_ms(),
-            metadata=dict(result.metadata),
+            metadata=metadata,
         )
         await self._emitter.emit({"type": "message_start", "message": message})
         await self._emitter.emit({"type": "message_end", "message": message})
