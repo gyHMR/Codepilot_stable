@@ -1,12 +1,13 @@
 """
-Codepilot Agent Run core
-========================
+Codepilot Agent Run 核心模块
+============================
 
-This package owns one Agent Run's execution loop:
-- Agent and AgentLoop coordinate the run lifecycle.
-- RunState records mechanical execution facts.
-- TaskState and TaskController track task progress from tool feedback.
-- LLMStreamRunner and ToolCallCoordinator adapt model and tool steps.
+本包负责一次 Agent Run 的完整执行循环：
+- Agent / AgentLoop  协调运行生命周期。
+- RunState           记录本次运行的机械性执行事实（计数器、受影响路径等）。
+- TaskState / TaskController  根据工具反馈跟踪任务进度。
+- LLMStreamRunner    将 LLM 流式响应转换为 Agent 消息事件。
+- ToolCallCoordinator  准备、执行并上报工具调用。
 """
 
 from .agent import Agent, AgentOptions

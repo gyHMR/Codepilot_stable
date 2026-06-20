@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-"""Interactive one-shot tool approval for CLI sessions."""
+"""CLI 会话的交互式工具审批提供者。
+
+当工具执行需要用户审批时，在终端显示工具信息并等待用户确认。
+"""
 
 import asyncio
 from typing import Callable
@@ -15,6 +18,8 @@ from codepilot.tools.types import ToolMetadata, ToolRuntimeRequest
 
 
 class CliApprovalProvider:
+    """CLI 工具审批提供者：在终端显示审批提示并等待用户输入 y/N。"""
+
     def __init__(
         self,
         *,
@@ -30,6 +35,7 @@ class CliApprovalProvider:
         metadata: ToolMetadata | None,
         decision: ToolDecision,
     ) -> ApprovalDecision:
+        """请求用户审批：渲染审批信息，等待用户输入，返回审批结果。"""
         approval = build_approval_request(request, metadata, decision)
         self._render(approval)
         answer = await asyncio.to_thread(
@@ -44,6 +50,7 @@ class CliApprovalProvider:
         )
 
     def _render(self, approval: ApprovalRequest) -> None:
+        """渲染审批提示信息：工具名、原因、风险等级、能力要求和参数预览。"""
         self.output_fn("")
         self.output_fn("Tool approval required")
         self.output_fn(f"  Tool: {approval.tool_name}")

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-"""Web Console backend application factory.
+"""Web Console 后端应用工厂。
 
-This is intentionally framework-neutral. A future FastAPI/aiohttp adapter can
-wrap WebConsoleBackend without moving runtime logic into the interface layer.
+本模块刻意保持框架无关性。未来的 FastAPI/aiohttp 适配器可以包装
+WebConsoleBackend，而无需将运行时逻辑移入接口层。
 """
 
 from codepilot.runtime.service import RuntimeService
@@ -12,6 +12,7 @@ from .api import WebConsoleBackend, describe_web_contract
 
 
 def create_web_app(runtime: RuntimeService | None = None) -> WebConsoleBackend:
+    """创建 Web Console 后端实例（可选传入已有的 RuntimeService）。"""
     return WebConsoleBackend(runtime=runtime)
 
 

@@ -10,7 +10,7 @@ from .openai_compatible import stream_openai_compatible, stream_simple_openai_co
 
 
 def register_builtin_api_providers() -> None:
-    """Register built-in wire protocol adapters."""
+    """注册内置的线路协议适配器（Anthropic Messages 和 OpenAI-compatible）。"""
     register_api_provider(
         ApiProvider(
             api="anthropic-messages",

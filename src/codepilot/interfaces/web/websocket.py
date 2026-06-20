@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Framework-neutral WebSocket event streaming helpers."""
+"""框架无关的 WebSocket 事件流辅助工具。"""
 
 from dataclasses import dataclass
 from typing import AsyncIterator
@@ -13,9 +13,11 @@ from .schemas import WebEventEnvelope
 
 @dataclass
 class WebSocketSessionStream:
+    """WebSocket 会话事件流：将 RuntimeService 的事件转换为 WebEventEnvelope 异步迭代器。"""
     runtime: RuntimeService
     session_id: str
 
     async def continue_events(self) -> AsyncIterator[WebEventEnvelope]:
+        """继续会话并将 Agent 事件转换为 Web 事件信封逐个 yield。"""
         async for event in self.runtime.continue_session(self.session_id):
             yield agent_event_to_web(event)

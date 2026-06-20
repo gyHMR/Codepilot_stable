@@ -9,7 +9,6 @@ Anthropic Messages API 流式 provider。
 3) 映射 stop reason 并输出统一 done/error 事件。
 """
 
-import asyncio
 import json
 from typing import Any
 
@@ -85,6 +84,8 @@ def stream_anthropic(
                     headers=headers,
                     json=payload,
                 ) as response:
+                    if not response.is_success:
+                        await response.aread()
                     response.raise_for_status()
                     stream.push(llm_event("start", partial=out))
 
@@ -224,7 +225,7 @@ def stream_anthropic(
             stream.push(llm_event("error", reason="error", error=out, errorInfo=out.error_info))
             stream.end(out)
 
-    asyncio.create_task(_run())
+    stream.start_background(_run())
     return stream
 
 

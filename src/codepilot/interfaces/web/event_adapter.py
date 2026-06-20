@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Adapters from runtime/core events to Web Console event envelopes."""
+"""运行时/核心事件到 Web Console 事件信封的适配器。"""
 
 from dataclasses import asdict, is_dataclass
 from typing import Any
@@ -11,6 +11,7 @@ from .schemas import WebEventEnvelope
 
 
 def agent_event_to_web(event: AgentEvent) -> WebEventEnvelope:
+    """将 Agent 事件转换为 Web 事件信封。"""
     return WebEventEnvelope(
         type="agent_event",
         session_id=event.get("sessionId"),
@@ -19,6 +20,7 @@ def agent_event_to_web(event: AgentEvent) -> WebEventEnvelope:
 
 
 def error_to_web(message: str, *, session_id: str | None = None, code: str = "error") -> WebEventEnvelope:
+    """将错误信息转换为 Web 错误事件信封。"""
     return WebEventEnvelope(
         type="error",
         session_id=session_id,
@@ -27,6 +29,7 @@ def error_to_web(message: str, *, session_id: str | None = None, code: str = "er
 
 
 def _jsonable(value: Any) -> Any:
+    """递归将值转换为 JSON 可序列化格式（处理 dataclass、dict、list、set 等）。"""
     if is_dataclass(value):
         return {k: _jsonable(v) for k, v in asdict(value).items()}
     if isinstance(value, dict):

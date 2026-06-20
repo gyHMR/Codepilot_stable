@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""LLM capability-aware runner used by the core agent loop."""
+"""LLM 能力感知运行器：由核心 Agent 循环调用，负责调用 LLM 并处理流式响应。"""
 
 from typing import Any, Awaitable, Callable
 
@@ -22,10 +22,12 @@ from .events import AgentEventEmitter, maybe_await
 from .types import AgentContext, AgentLoopConfig, ContextPreparationRequest
 
 
+# 流式调用函数类型：接收模型、上下文和选项，返回事件流
 StreamFn = Callable[
     [Model, Context, SimpleStreamOptions | None],
     AssistantMessageEventStream | Awaitable[AssistantMessageEventStream],
 ]
+# 非流式调用函数类型：接收模型、上下文和选项，返回完整的助手消息
 CompleteFn = Callable[
     [Model, Context, SimpleStreamOptions | None],
     AssistantMessage | Awaitable[AssistantMessage],
@@ -33,7 +35,7 @@ CompleteFn = Callable[
 
 
 class LLMStreamRunner:
-    """Converts provider stream events into Agent message events."""
+    """LLM 流式运行器：将 provider 的流式事件转换为 Agent 消息事件。"""
 
     def __init__(
         self,
@@ -54,6 +56,7 @@ class LLMStreamRunner:
         *,
         signal: Any | None = None,
     ) -> AssistantMessage:
+        """调用 LLM 获取助手响应（流式或非流式，取决于模型能力）。"""
         prepared_context = _with_current_task_context(context)
         if self._config.prepare_context:
             prepared = await maybe_await(
@@ -170,6 +173,7 @@ class LLMStreamRunner:
         *,
         added_partial: bool,
     ) -> AssistantMessage:
+        """完成流式响应：获取最终消息，更新上下文，发射 message_end 事件。"""
         final_message = await response_stream.result()
         if added_partial:
             context.messages[-1] = final_message
@@ -187,6 +191,7 @@ class LLMStreamRunner:
         context: AgentContext,
         final_message: AssistantMessage,
     ) -> AssistantMessage:
+        """完成非流式响应：将消息追加到上下文，发射 start/end 事件。"""
         context.messages.append(final_message)
         await self._emitter.emit({"type": "message_start", "message": final_message})
         await self._emitter.emit({"type": "message_end", "message": final_message})
@@ -198,6 +203,7 @@ class LLMStreamRunner:
         messages: list[Message],
         capabilities: ModelCapabilities,
     ) -> AssistantMessage | None:
+        """校验模型能力：如果消息包含图片但模型不支持视觉，则返回错误消息。"""
         if capabilities.vision:
             return None
         has_images = any(
@@ -227,6 +233,7 @@ class LLMStreamRunner:
         )
 
     async def _emit_llm_error(self, message: AssistantMessage) -> None:
+        """如果助手消息包含 LLM 错误，则发射 error 事件通知外部。"""
         if message.stop_reason != "error":
             return
         info = message.error_info or LLMErrorInfo(
@@ -253,6 +260,7 @@ class LLMStreamRunner:
 
 
 def _with_current_task_context(context: AgentContext) -> AgentContext:
+    """将当前任务信息注入系统提示词末尾（如果尚未包含）。"""
     if not context.current_task:
         return context
     marker = "## Current Task"

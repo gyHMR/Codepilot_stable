@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""One complete Agent Run: prompt -> model attempts -> tools -> RunResult."""
+"""一次完整的 Agent Run：用户提示 → 模型推理 → 工具执行 → 返回 RunResult。"""
 
 import asyncio
 from typing import Any
@@ -32,7 +32,7 @@ async def run_agent_loop(
     *,
     run_id: str | None = None,
 ) -> AgentRunResult:
-    """Run a new user task and return its explicit result."""
+    """运行一个新的用户任务并返回结构化结果。"""
 
     state = RunState(run_id=run_id or new_run_id(), session_id=config.session_id)
     emitter = AgentEventEmitter(
@@ -75,7 +75,7 @@ async def run_agent_loop_continue(
     *,
     run_id: str | None = None,
 ) -> AgentRunResult:
-    """Continue an in-memory unfinished Run."""
+    """继续一个内存中尚未完成的 Run（例如需要执行工具调用后继续推理）。"""
 
     if not context.messages:
         raise ValueError("Cannot continue: no messages in context")
@@ -109,6 +109,8 @@ async def run_agent_loop_continue(
         stream_fn=stream_fn,
     )
 
+
+# ── 内部函数 ────────────────────────────────────────────────────
 
 async def _run_safely(
     current_context: AgentContext,
@@ -181,6 +183,7 @@ async def _run_loop(
     signal: Any | None,
     stream_fn: StreamFn | None,
 ) -> AgentRunResult:
+    """核心执行循环：模型推理 → 工具执行 → 任务状态更新，直到任务完成或出错。"""
     llm_runner = LLMStreamRunner(config=config, emitter=emitter, stream_fn=stream_fn)
     tool_coordinator = ToolCallCoordinator(config=config, emitter=emitter)
     task_controller = TaskController()
@@ -414,6 +417,7 @@ async def _stop_with_error(
     stop_reason: AgentRunStopReason,
     task: TaskSummary | None = None,
 ) -> AgentRunResult:
+    """因错误终止运行：记录错误信息，发射 error 事件，返回失败状态的 RunResult。"""
     assistant.error_message = message
     error = ErrorInfo(
         code=code,
@@ -450,6 +454,7 @@ async def _finish_run(
     emitter: AgentEventEmitter,
     result: AgentRunResult,
 ) -> AgentRunResult:
+    """完成运行：发射 agent_end 事件并返回最终结果。"""
     await emitter.emit(
         {
             "type": "agent_end",
@@ -469,6 +474,7 @@ async def _inject_messages(
     new_messages: list[AgentMessage],
     emitter: AgentEventEmitter,
 ) -> None:
+    """将引导/后续消息注入上下文：发射 message_start/end 事件后追加到消息列表。"""
     for message in messages:
         await emitter.emit({"type": "message_start", "message": message})
         await emitter.emit({"type": "message_end", "message": message})
@@ -477,12 +483,14 @@ async def _inject_messages(
 
 
 async def _drain(callback):
+    """排空回调队列：调用回调并返回结果列表，回调为 None 时返回空列表。"""
     if callback is None:
         return []
     return await maybe_await(callback())
 
 
 def _last_assistant(messages: list[AgentMessage]) -> AssistantMessage | None:
+    """从消息列表末尾反向查找最近一条助手消息。"""
     return next(
         (message for message in reversed(messages) if isinstance(message, AssistantMessage)),
         None,

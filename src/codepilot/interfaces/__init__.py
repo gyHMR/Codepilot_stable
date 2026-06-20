@@ -1,3 +1,7 @@
-"""User-facing interface adapters."""
+"""用户接口适配层。
+
+本包包含面向用户的接口实现（CLI、Web），负责将用户输入转化为
+RuntimeService 调用，并将事件渲染为人类可读的输出。
+"""
 
 __all__ = []

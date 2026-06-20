@@ -9,7 +9,6 @@ OpenAI 标准 Chat Completions 流式 provider。
 3) 最终组装成 AssistantMessage。
 """
 
-import asyncio
 import json
 from typing import Any
 
@@ -83,6 +82,8 @@ def stream_openai_compatible(
                     headers=headers,
                     json=payload,
                 ) as response:
+                    if not response.is_success:
+                        await response.aread()
                     response.raise_for_status()
                     stream.push(llm_event("start", partial=out))
 
@@ -216,7 +217,7 @@ def stream_openai_compatible(
             stream.push(llm_event("error", reason="error", error=out, errorInfo=out.error_info))
             stream.end(out)
 
-    asyncio.create_task(_run())
+    stream.start_background(_run())
     return stream
 
 

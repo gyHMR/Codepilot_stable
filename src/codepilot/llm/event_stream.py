@@ -9,7 +9,8 @@ from __future__ import annotations
 """
 
 import asyncio
-from typing import AsyncIterator, Optional, cast
+from collections.abc import Coroutine
+from typing import Any, AsyncIterator, Optional, cast
 
 from codepilot.protocols import AssistantMessage, LLMStreamEvent, LLMStreamEventType
 
@@ -36,6 +37,19 @@ class AssistantMessageEventStream:
         if self._closed:
             return
         self._queue.put_nowait(event)
+
+    def start_background(self, coroutine: Coroutine[Any, Any, None]) -> None:
+        """启动 provider 任务，并将意外异常绑定到当前事件流。"""
+
+        task = asyncio.create_task(coroutine)
+        task.add_done_callback(self._handle_background_done)
+
+    def _handle_background_done(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            self.fail(error)
 
     def end(self, message: AssistantMessage) -> None:
         """正常结束：写入最终消息并关闭流。"""

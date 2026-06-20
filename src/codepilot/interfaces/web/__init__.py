@@ -1,9 +1,7 @@
-"""
-Web Console integration boundary.
+"""Web Console 集成边界层。
 
-This package intentionally contains only contracts for now. A future HTTP or
-WebSocket server should adapt browser requests to runtime/sessions/tools here
-without duplicating Agent logic.
+本包目前只包含契约定义和骨架实现。未来的 HTTP/WebSocket 服务器应在此处
+将浏览器请求适配到 runtime/sessions/tools，而不重复 Agent 核心逻辑。
 """
 
 from .api import WebConsoleBackend, describe_web_contract, web_route_specs

@@ -89,6 +89,7 @@ class TerminalRenderer:
         self._stream_started = False
         self._current_tool: str | None = None
         self._tool_start_time: float = 0
+        self._tool_start_times: dict[str, float] = {}
 
         if use_rich:
             from rich.console import Console
@@ -293,10 +294,13 @@ class TerminalRenderer:
                 text.append(f" {target}", style="dim")
             self._console.print(text)
         else:
-            self._print(f"● {tool_name} {target}")
+            self._print(f"● {tool_name}" + (f" {target}" if target else ""))
 
         self._current_tool = tool_name
         self._tool_start_time = time.time()
+        tool_call_id = str(event.get("toolCallId", ""))
+        if tool_call_id:
+            self._tool_start_times[tool_call_id] = self._tool_start_time
 
     def _handle_tool_end(self, event: AgentEvent) -> None:
         """处理工具执行结束事件。"""
@@ -304,7 +308,9 @@ class TerminalRenderer:
         is_error = event.get("isError", False)
         error_reason = event.get("errorReason")
 
-        elapsed = time.time() - self._tool_start_time if self._tool_start_time else 0
+        tool_call_id = str(event.get("toolCallId", ""))
+        started_at = self._tool_start_times.pop(tool_call_id, 0) if tool_call_id else self._tool_start_time
+        elapsed = time.time() - started_at if started_at else 0
         elapsed_str = f"{elapsed:.1f}s" if elapsed >= 1 else f"{elapsed * 1000:.0f}ms"
 
         if self._console:
@@ -371,6 +377,11 @@ class TerminalRenderer:
         message = event.get("message", "")
         provider = event.get("provider", "")
         model = event.get("model", "")
+        error_info = event.get("errorInfo")
+        details = getattr(error_info, "details", None)
+        if details is None and isinstance(error_info, dict):
+            details = error_info.get("details")
+        provider_response = details.get("response_text", "") if isinstance(details, dict) else ""
 
         if self._stream_started:
             self._print()
@@ -384,6 +395,8 @@ class TerminalRenderer:
             content.append(error, style="bold red")
             if message:
                 content.append(f"\n{message}")
+            if provider_response:
+                content.append(f"\nProvider response: {provider_response}", style="dim")
             if provider:
                 content.append(f"\nProvider: {provider}", style="dim")
             if model:
@@ -401,6 +414,8 @@ class TerminalRenderer:
             self._print(f"Error: {error}")
             if message:
                 self._print(f"  {message}")
+            if provider_response:
+                self._print(f"  Provider response: {provider_response}")
             if provider:
                 self._print(f"  Provider: {provider}")
             if model:
@@ -409,15 +424,27 @@ class TerminalRenderer:
     def _extract_tool_target(self, tool_name: str, args: dict[str, Any]) -> str:
         """提取工具调用的目标信息。"""
 
-        if tool_name in {"Read", "Write", "Edit"}:
-            return str(args.get("file_path", ""))
-        if tool_name == "Grep":
+        normalized_name = tool_name.lower()
+        if normalized_name in {"read", "write", "edit"}:
+            path = str(args.get("path") or args.get("file_path") or "")
+            if normalized_name == "read" and path and args.get("offset") is not None:
+                offset = int(args["offset"])
+                limit = args.get("limit")
+                if limit is not None:
+                    return f"{path}:{offset}-{offset + int(limit) - 1}"
+                return f"{path}:{offset}"
+            return path
+        if normalized_name == "ls":
+            return str(args.get("path") or ".")
+        if normalized_name == "grep":
             pattern = args.get("pattern", "")
             path = args.get("path", "")
             return f'"{pattern}" {path}' if path else f'"{pattern}"'
-        if tool_name == "Glob":
-            return str(args.get("pattern", ""))
-        if tool_name == "Bash":
+        if normalized_name in {"glob", "find"}:
+            pattern = str(args.get("pattern", ""))
+            path = str(args.get("path", ""))
+            return f"{pattern} {path}".strip()
+        if normalized_name == "bash":
             cmd = args.get("command", "")
             if len(cmd) > 50:
                 cmd = cmd[:47] + "..."
@@ -457,6 +484,7 @@ class TerminalRenderer:
         self._stream_started = False
         self._current_tool = None
         self._tool_start_time = 0
+        self._tool_start_times.clear()
 
 
 class SimpleRenderer:

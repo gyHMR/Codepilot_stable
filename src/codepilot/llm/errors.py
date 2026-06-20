@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""LLM 错误分类：将 provider/http 异常转换为结构化的 LLMErrorInfo。"""
+
 from typing import Any
 
 import httpx
@@ -7,8 +9,17 @@ import httpx
 from codepilot.protocols import LLMErrorInfo, LLMErrorKind, Model
 
 
+def _safe_response_text(response: httpx.Response, limit: int = 1000) -> str:
+    """安全读取已缓存的 HTTP 响应体，避免错误处理再次抛出异常。"""
+
+    try:
+        return response.text[:limit]
+    except (httpx.ResponseNotRead, httpx.StreamConsumed):
+        return ""
+
+
 def classify_llm_error(exc: Exception, model: Model) -> LLMErrorInfo:
-    """Convert provider/http exceptions into structured LLM error info."""
+    """将 provider/http 异常分类为结构化的 LLMErrorInfo（含错误类型、是否可重试等）。"""
 
     kind: LLMErrorKind = "unknown"
     retryable = False
@@ -17,7 +28,9 @@ def classify_llm_error(exc: Exception, model: Model) -> LLMErrorInfo:
 
     if isinstance(exc, httpx.HTTPStatusError):
         status_code = exc.response.status_code
-        details["response_text"] = exc.response.text[:1000]
+        response_text = _safe_response_text(exc.response)
+        if response_text:
+            details["response_text"] = response_text
         if status_code in {401, 403}:
             kind = "auth"
         elif status_code == 429:
@@ -26,7 +39,7 @@ def classify_llm_error(exc: Exception, model: Model) -> LLMErrorInfo:
         elif status_code in {408, 500, 502, 503, 504}:
             kind = "provider_response"
             retryable = True
-        elif status_code in {400, 413} and "context" in exc.response.text.lower():
+        elif status_code in {400, 413} and "context" in response_text.lower():
             kind = "context_length"
         else:
             kind = "provider_response"

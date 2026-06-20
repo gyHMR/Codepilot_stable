@@ -19,7 +19,7 @@ from codepilot.interfaces.cli.renderer import (
     SimpleRenderer,
 )
 from codepilot.runtime.service import SessionStatus
-from codepilot.protocols import AssistantMessage, TextContent, Usage, Cost
+from codepilot.protocols import AssistantMessage, LLMErrorInfo, TextContent, Usage, Cost
 
 
 # ── TerminalRenderer 测试 ─────────────────────────────────────────
@@ -85,6 +85,64 @@ class TestTerminalRenderer:
         assert renderer._current_tool == "Read"
         assert renderer._tool_start_time > 0
 
+    def test_handle_lowercase_read_and_ls_show_targets(self):
+        output = MagicMock()
+        renderer = TerminalRenderer(use_rich=False, output=output)
+
+        renderer.handle_event({
+            "type": "tool_execution_start",
+            "toolCallId": "read-1",
+            "toolName": "read",
+            "args": {"path": "src/codepilot/core/agent_loop.py", "offset": 10, "limit": 20},
+        })
+        renderer.handle_event({
+            "type": "tool_execution_start",
+            "toolCallId": "ls-1",
+            "toolName": "ls",
+            "args": {"path": "src/codepilot"},
+        })
+
+        rendered = [call.args[0] for call in output.call_args_list]
+        assert "● read src/codepilot/core/agent_loop.py:10-29" in rendered
+        assert "● ls src/codepilot" in rendered
+
+    def test_parallel_tool_timings_are_tracked_by_call_id(self, monkeypatch):
+        output = MagicMock()
+        renderer = TerminalRenderer(use_rich=False, output=output)
+        timestamps = iter([10.0, 11.0, 12.0, 13.0])
+        monkeypatch.setattr(
+            "codepilot.interfaces.cli.renderer.time.time",
+            lambda: next(timestamps),
+        )
+
+        renderer.handle_event({
+            "type": "tool_execution_start",
+            "toolCallId": "read-1",
+            "toolName": "read",
+            "args": {"path": "a.py"},
+        })
+        renderer.handle_event({
+            "type": "tool_execution_start",
+            "toolCallId": "ls-1",
+            "toolName": "ls",
+            "args": {"path": "src"},
+        })
+        renderer.handle_event({
+            "type": "tool_execution_end",
+            "toolCallId": "read-1",
+            "toolName": "read",
+            "isError": False,
+        })
+        renderer.handle_event({
+            "type": "tool_execution_end",
+            "toolCallId": "ls-1",
+            "toolName": "ls",
+            "isError": False,
+        })
+
+        rendered = [call.args[0] for call in output.call_args_list]
+        assert rendered[-2:] == ["  Completed in 2.0s", "  Completed in 2.0s"]
+
     def test_handle_error(self):
         """测试处理错误事件。"""
         output = MagicMock()
@@ -100,6 +158,32 @@ class TestTerminalRenderer:
 
         renderer.handle_event(event)
         output.assert_called()
+
+    def test_handle_error_shows_provider_response_body(self):
+        output = MagicMock()
+        renderer = TerminalRenderer(use_rich=False, output=output)
+        info = LLMErrorInfo(
+            code="llm.provider_response",
+            message="400 Bad Request",
+            retryable=False,
+            kind="provider_response",
+            provider="deepseek",
+            model="deepseek-chat",
+            status_code=400,
+            details={"response_text": '{"error":{"message":"Invalid request"}}'},
+        )
+
+        renderer.handle_event({
+            "type": "error",
+            "error": info.code,
+            "message": info.message,
+            "provider": info.provider,
+            "model": info.model,
+            "errorInfo": info,
+        })
+
+        rendered = [call.args[0] for call in output.call_args_list]
+        assert '  Provider response: {"error":{"message":"Invalid request"}}' in rendered
 
 
 # ── SimpleRenderer 测试 ──────────────────────────────────────────

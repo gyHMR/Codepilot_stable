@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Web Console 后端 API 骨架。
+
+提供 WebConsoleBackend 类，将 Web 请求适配到 RuntimeService，
+以及路由规格和契约描述函数。
+"""
+
 from typing import Any
 
 from codepilot.runtime.service import RuntimeService, UserInput
@@ -17,7 +23,7 @@ from .schemas import (
 
 
 def describe_web_contract() -> dict[str, Any]:
-    """Return the planned Web Console contract without starting a server."""
+    """返回 Web Console 的契约描述（无需启动服务器）。"""
 
     return {
         "transport": ["http", "websocket"],
@@ -43,6 +49,7 @@ def describe_web_contract() -> dict[str, Any]:
 
 
 def web_route_specs() -> list[WebRouteSpec]:
+    """返回 Web Console 的路由规格列表。"""
     return [
         WebRouteSpec("GET", "/api/sessions", "List runtime sessions"),
         WebRouteSpec("POST", "/api/sessions", "Create or resume a session"),
@@ -56,12 +63,13 @@ def web_route_specs() -> list[WebRouteSpec]:
 
 
 class WebConsoleBackend:
-    """Dependency-light backend skeleton for local Web Console APIs."""
+    """Web Console 后端骨架：轻量依赖，将 Web 请求委托给 RuntimeService。"""
 
     def __init__(self, runtime: RuntimeService | None = None) -> None:
         self.runtime = runtime or RuntimeService()
 
     def create_session(self, request: WebCreateSessionRequest) -> WebEventEnvelope:
+        """创建新会话：将 Web 请求转换为 CreateAgentSessionOptions 后调用 RuntimeService。"""
         handle = self.runtime.create_session(
             CreateAgentSessionOptions(
                 workspace_dir=request.workspace_dir,
@@ -80,19 +88,24 @@ class WebConsoleBackend:
         )
 
     def list_sessions(self) -> list[WebSessionSummary]:
+        """列出所有活跃会话。"""
         return [WebSessionSummary(session_id=item["session_id"]) for item in self.runtime.list_sessions()]
 
     def get_session(self, session_id: str) -> WebSessionSummary:
+        """获取单个会话摘要。"""
         session = self.runtime.get_session(session_id)
         return WebSessionSummary(session_id=session.session_id)
 
     def list_runs(self, session_id: str) -> list[dict[str, Any]]:
+        """列出指定会话的所有 Run 结果。"""
         return self.runtime.list_runs(session_id)
 
     def get_run_report(self, session_id: str, run_id: str) -> dict[str, Any]:
+        """获取指定 Run 的详细报告。"""
         return self.runtime.get_run_report(session_id, run_id)
 
     async def send_message(self, request: WebPromptRequest) -> list[WebEventEnvelope]:
+        """发送用户消息：通过 RuntimeService 发送并收集事件信封列表。"""
         session_id = request.session.session_id
         if not session_id:
             created = self.create_session(
@@ -109,6 +122,7 @@ class WebConsoleBackend:
         return events
 
     async def approve_tool(self, approval: WebToolApproval) -> WebEventEnvelope:
+        """审批工具调用：将审批决策传递给 RuntimeService。"""
         await self.runtime.approve_tool_call(approval.tool_call_id, approval.decision)
         return WebEventEnvelope(
             type="session_state",

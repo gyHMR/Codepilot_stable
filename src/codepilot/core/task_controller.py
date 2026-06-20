@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-"""Deterministic task feedback controller used by AgentLoop.
+"""AgentLoop 使用的确定性任务反馈控制器。
 
-The controller keeps the first version intentionally small: the model still
-decides semantic actions, while this module binds task progress to runtime
-evidence such as tool results, file changes, verification, and approvals.
+本模块的第一版刻意保持精简：模型仍负责决定语义层面的动作，
+而此模块将任务进度绑定到运行时证据上（工具结果、文件变更、验证结果、审批状态等）。
 """
 
 import uuid
@@ -18,14 +17,14 @@ from .task_state import CompletionCheck, ExecutionDecision, TaskState, TaskStep
 from .types import AgentMessage
 
 
-_MAX_STEPS = 6
-_MAX_STEP_TITLE_CHARS = 80
-_READ_TOOL_MARKERS = ("read", "grep", "find", "glob", "ls", "search", "status", "codegraph")
-_WRITE_TOOL_MARKERS = ("write", "edit", "patch", "apply")
+_MAX_STEPS = 6                   # 单个任务最大步骤数
+_MAX_STEP_TITLE_CHARS = 80       # 步骤标题最大字符数
+_READ_TOOL_MARKERS = ("read", "grep", "find", "glob", "ls", "search", "status", "codegraph")  # 只读工具名称标记
+_WRITE_TOOL_MARKERS = ("write", "edit", "patch", "apply")  # 写入工具名称标记
 
 
 class TaskController:
-    """Maintain a lightweight, evidence-bound task state for one run."""
+    """任务控制器：为一次运行维护轻量级的、与证据绑定的任务状态。"""
 
     def initialize(
         self,
@@ -36,6 +35,7 @@ class TaskController:
         constraints: Iterable[str] | None = None,
         recovered_task: Mapping[str, object] | None = None,
     ) -> TaskState:
+        """初始化任务状态：从用户消息中提取目标，生成初始步骤。"""
         if recovered_task is not None:
             recovered = self._from_recovered_task(prompts, recovered_task)
             if recovered is not None:
@@ -63,6 +63,7 @@ class TaskController:
         prompts: Iterable[AgentMessage],
         recovered_task: Mapping[str, object],
     ) -> TaskState | None:
+        """从恢复的任务记忆中重建 TaskState（用于会话恢复场景）。"""
         progress = recovered_task.get("task_progress")
         if not isinstance(progress, Mapping):
             return None
@@ -122,6 +123,7 @@ class TaskController:
         run: RunState,
         results: list[ToolResultMessage],
     ) -> ExecutionDecision:
+        """工具执行后更新任务状态并返回执行决策（继续/修复/重新规划/停止等）。"""
         if not results:
             return ExecutionDecision("continue", "no_tool_results", task.next_action)
 
@@ -181,6 +183,7 @@ class TaskController:
         return ExecutionDecision("continue", "next_step", task.next_action)
 
     def check_completion(self, task: TaskState, run: RunState) -> CompletionCheck:
+        """检查任务是否完成：验证阻塞步骤、工作区变更、未完成步骤等条件。"""
         if any(step.status == "blocked" for step in task.steps):
             check = CompletionCheck(
                 satisfied=False,
@@ -238,6 +241,7 @@ class TaskController:
         return check
 
     def completion_steering(self, check: CompletionCheck) -> UserMessage:
+        """生成完成引导消息：当工作区已修改但未通过验证时，提示 Agent 运行验证。"""
         text = (
             "工作区已经发生修改，但当前没有与最新工作区状态一致的成功验证。\n"
             "请运行最相关的测试或检查；如果环境无法验证，请明确记录原因和剩余风险。"
@@ -253,6 +257,7 @@ class TaskController:
         )
 
     def render_context(self, task: TaskState) -> str:
+        """将任务状态渲染为 Markdown 格式的上下文文本（注入系统提示词）。"""
         lines = [
             "## Current Task",
             f"Goal: {task.goal}",
@@ -280,6 +285,7 @@ class TaskController:
         return "\n".join(lines)
 
     def summarize(self, task: TaskState) -> TaskSummary:
+        """生成任务摘要：包含已完成、待处理、阻塞步骤和完成状态。"""
         return TaskSummary(
             task_id=task.task_id,
             goal=task.goal,
@@ -298,9 +304,11 @@ class TaskController:
         )
 
     def event_payload(self, task: TaskState) -> dict[str, object]:
+        """将任务状态转换为字典格式，用于事件上报。"""
         return asdict(task)
 
     def _normalize_steps(self, raw_steps: Iterable[str]) -> list[TaskStep]:
+        """规范化步骤列表：去重、截断标题、限制最大步骤数。"""
         seen: set[str] = set()
         steps: list[TaskStep] = []
         for raw in raw_steps:
@@ -321,6 +329,7 @@ class TaskController:
         return steps
 
     def _current_step(self, task: TaskState) -> TaskStep | None:
+        """获取当前正在执行的步骤。"""
         if task.current_step_id is None:
             return None
         return next(
@@ -329,6 +338,7 @@ class TaskController:
         )
 
     def _advance(self, task: TaskState) -> None:
+        """推进到下一个待处理步骤。"""
         for step in task.steps:
             if step.status in {"pending", "in_progress"}:
                 step.status = "in_progress"
@@ -339,6 +349,7 @@ class TaskController:
         task.next_action = None
 
     def _block_current_step(self, task: TaskState, note: str) -> None:
+        """将当前步骤标记为阻塞状态。"""
         step = self._current_step(task)
         if step is not None:
             step.status = "blocked"
@@ -349,6 +360,7 @@ class TaskController:
         task: TaskState,
         results: list[ToolResultMessage],
     ) -> None:
+        """失败后重新规划：保留已完成步骤，替换当前和后续步骤。"""
         task.replan_count += 1
         current = self._current_step(task)
         if current is None:
@@ -368,6 +380,7 @@ class TaskController:
         task.phase = "acting"
 
     def _has_failed_verification(self, results: list[ToolResultMessage]) -> bool:
+        """检查工具结果中是否包含失败的验证。"""
         return any(
             isinstance(result.verification, dict)
             and result.verification.get("status") == "failed"
@@ -375,6 +388,7 @@ class TaskController:
         )
 
     def _result_has_progress(self, result: ToolResultMessage) -> bool:
+        """判断工具结果是否代表实质进展（成功、验证通过或工作区变更）。"""
         if result.status != "success":
             return False
         if isinstance(result.verification, dict):
@@ -389,11 +403,13 @@ class TaskController:
         return False
 
     def _record_completion(self, task: TaskState, check: CompletionCheck) -> None:
+        """将完成检查结果记录到任务状态中。"""
         task.completion_satisfied = check.satisfied
         task.completion_reason = check.reason
 
 
 def _goal_from_prompts(prompts: Iterable[AgentMessage]) -> str:
+    """从用户消息中提取任务目标（取最后一条用户消息的文本内容）。"""
     for message in reversed(list(prompts)):
         if isinstance(message, UserMessage):
             if isinstance(message.content, str):
@@ -406,6 +422,7 @@ def _goal_from_prompts(prompts: Iterable[AgentMessage]) -> str:
 
 
 def _evidence_refs(results: list[ToolResultMessage]) -> list[str]:
+    """从工具结果中提取证据引用列表（工具调用ID、审批ID、验证ID、文件路径）。"""
     refs: list[str] = []
     for result in results:
         if result.tool_call_id:

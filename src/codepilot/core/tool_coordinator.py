@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Tool call preparation, execution, and event reporting."""
+"""工具调用的准备、执行与事件上报。"""
 
 import asyncio
 from dataclasses import dataclass
@@ -20,6 +20,7 @@ from .types import (
 
 
 def error_tool_result(message: str, *, approved: bool = True) -> AgentToolResult:
+    """创建一个错误状态的工具执行结果。"""
     return AgentToolResult(
         content=[TextContent(text=message)],
         details={},
@@ -30,6 +31,7 @@ def error_tool_result(message: str, *, approved: bool = True) -> AgentToolResult
 
 
 def tool_error_reason(result: AgentToolResult, is_error: bool) -> str | None:
+    """从工具结果的 details 中提取错误原因字符串。"""
     if not is_error:
         return None
     if isinstance(result.details, dict):
@@ -45,7 +47,7 @@ def bind_tool_result(
     *,
     is_error: bool,
 ) -> AgentToolResult:
-    """Attach call identity and keep status/error fields consistent."""
+    """将工具调用身份信息绑定到结果上，并保持 status/error 字段一致性。"""
 
     result.tool_call_id = tool_call.id
     result.tool_name = tool_call.name
@@ -57,6 +59,7 @@ def bind_tool_result(
 
 @dataclass
 class PreparedToolCall:
+    """已准备的工具调用：包含原始调用信息、匹配到的工具实例和解析后的参数。"""
     tool_call: ToolCall
     tool: AgentTool
     args: dict[str, Any]
@@ -64,12 +67,13 @@ class PreparedToolCall:
 
 @dataclass
 class ExecutedToolCall:
+    """已执行的工具调用：包含执行结果和是否出错标志。"""
     result: AgentToolResult
     is_error: bool
 
 
 class ToolCallCoordinator:
-    """Coordinates a batch of tool calls without owning tool permissions."""
+    """工具调用协调器：负责一批工具调用的准备、执行和事件上报（不管理工具权限）。"""
 
     def __init__(self, *, config: AgentLoopConfig, emitter: AgentEventEmitter) -> None:
         self._config = config
@@ -82,6 +86,7 @@ class ToolCallCoordinator:
         *,
         signal: Any | None = None,
     ) -> list[ToolResultMessage]:
+        """执行一批工具调用：根据配置选择并行或串行执行模式。"""
         tool_calls = [
             content for content in assistant_message.content if isinstance(content, ToolCall)
         ]
@@ -113,6 +118,7 @@ class ToolCallCoordinator:
         *,
         signal: Any | None,
     ) -> tuple[PreparedToolCall | None, AgentToolResult, bool]:
+        """准备单个工具调用：查找工具、校验权限、执行 before_tool_call 钩子。"""
         tool = next((t for t in current_context.tools if t.name == tool_call.name), None)
         if tool is None:
             return None, error_tool_result(
@@ -159,6 +165,7 @@ class ToolCallCoordinator:
         *,
         signal: Any | None,
     ) -> ExecutedToolCall:
+        """执行已准备的工具调用：调用工具的 execute 方法并处理更新事件。"""
         try:
             updates: list[Awaitable[Any] | Any] = []
 
@@ -198,6 +205,7 @@ class ToolCallCoordinator:
         *,
         signal: Any | None,
     ) -> ToolResultMessage:
+        """完成工具调用：执行 after_tool_call 钩子，绑定结果身份，发射事件。"""
         result = executed.result
         is_error = executed.is_error or bool(result.is_error)
 
@@ -228,6 +236,8 @@ class ToolCallCoordinator:
         await self._emit_tool_end(prepared.tool_call, result, is_error)
         return await self._emit_tool_result_message(prepared.tool_call, result, is_error)
 
+    # ── 执行策略 ────────────────────────────────────────────────
+
     async def _execute_sequential(
         self,
         current_context: AgentContext,
@@ -236,6 +246,7 @@ class ToolCallCoordinator:
         *,
         signal: Any | None,
     ) -> list[ToolResultMessage]:
+        """串行执行工具调用：逐个准备、执行、完成。"""
         results: list[ToolResultMessage] = []
         for tool_call in tool_calls:
             await self._emit_tool_start(tool_call)
@@ -271,10 +282,12 @@ class ToolCallCoordinator:
         *,
         signal: Any | None,
     ) -> list[ToolResultMessage]:
+        """并行执行工具调用：安全的工具放入批次并行执行，不安全的串行执行。"""
         results: dict[int, ToolResultMessage] = {}
         parallel_batch: list[tuple[int, PreparedToolCall]] = []
 
         async def flush_parallel_batch() -> None:
+            """刷新并行批次：将积累的可并行工具一次性用 asyncio.gather 执行。"""
             if not parallel_batch:
                 return
             batch = list(parallel_batch)
@@ -331,10 +344,13 @@ class ToolCallCoordinator:
         await flush_parallel_batch()
         return [results[index] for index in range(len(tool_calls))]
 
+    # ── 辅助方法 ────────────────────────────────────────────────
+
     async def _too_many_tool_calls(
         self,
         tool_calls: list[ToolCall],
     ) -> list[ToolResultMessage]:
+        """处理单轮工具调用数量超限的情况：为每个调用生成错误结果。"""
         results: list[ToolResultMessage] = []
         message = (
             f"Too many tool calls in one turn: {len(tool_calls)} "
@@ -358,12 +374,16 @@ class ToolCallCoordinator:
         result: AgentToolResult,
         is_error: bool,
     ) -> ToolResultMessage:
+        """立即完成工具调用（用于准备阶段就失败的情况）：绑定结果并发射事件。"""
         bind_tool_result(tool_call, result, is_error=is_error)
         is_error = result.is_error
         await self._emit_tool_end(tool_call, result, is_error)
         return await self._emit_tool_result_message(tool_call, result, is_error)
 
+    # ── 事件发射 ────────────────────────────────────────────────
+
     async def _emit_tool_start(self, tool_call: ToolCall) -> None:
+        """发射工具执行开始事件。"""
         await self._emitter.emit(
             {
                 "type": "tool_execution_start",
@@ -379,6 +399,7 @@ class ToolCallCoordinator:
         result: AgentToolResult,
         is_error: bool,
     ) -> None:
+        """发射工具执行结束事件：包含结果、状态、权限、耗时等完整信息。"""
         await self._emitter.emit(
             {
                 "type": "tool_execution_end",
@@ -419,6 +440,7 @@ class ToolCallCoordinator:
         result: AgentToolResult,
         is_error: bool,
     ) -> ToolResultMessage:
+        """构建 ToolResultMessage 并发射 message_start/end 事件。"""
         metadata = dict(result.metadata)
         target_path = (
             tool_call.arguments.get("path")

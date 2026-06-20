@@ -25,7 +25,7 @@ SimpleStreamFn = Callable[[Model, Context, SimpleStreamOptions | None], Assistan
 
 
 class LLMProvider(Protocol):
-    """Protocol implemented by model API adapters."""
+    """LLM Provider 协议：由各模型 API 适配器实现。"""
 
     api: str
 
@@ -48,16 +48,16 @@ class LLMProvider(Protocol):
 
 @dataclass
 class ApiProvider:
-    """Registered implementation for one model wire protocol."""
+    """已注册的 API Provider 实现：对应一种模型线路协议（如 anthropic-messages、openai-compatible）。"""
+    api: str                                    # 协议标识（如 "openai-compatible"）
+    stream: StreamFn                            # 标准流式调用函数
+    stream_simple: SimpleStreamFn               # 简化流式调用函数
+    name: str = ""                              # 人类可读名称
+    provider_id: str = ""                       # Provider 标识
+    metadata: dict[str, object] = field(default_factory=dict)  # 附加元数据
 
-    api: str
-    stream: StreamFn
-    stream_simple: SimpleStreamFn
-    name: str = ""
-    provider_id: str = ""
-    metadata: dict[str, object] = field(default_factory=dict)
 
-
+# 全局 Provider 注册表：api -> ApiProvider
 _REGISTRY: dict[str, ApiProvider] = {}
 
 
@@ -77,6 +77,7 @@ def clear_api_providers() -> None:
 
 
 def _resolve_provider(api: str) -> ApiProvider:
+    """按 api 标识解析 Provider，未注册时抛出 RuntimeError。"""
     provider = get_api_provider(api)
     if provider is None:
         raise RuntimeError(f"No API provider registered for api: {api}")
@@ -88,6 +89,7 @@ def stream(
     context: Context,
     options: StreamOptions | None = None,
 ) -> AssistantMessageEventStream:
+    """按 model.api 分发到对应 Provider 的标准流式调用。"""
     return _resolve_provider(model.api).stream(model, context, options)
 
 
@@ -96,6 +98,7 @@ async def complete(
     context: Context,
     options: StreamOptions | None = None,
 ) -> AssistantMessage:
+    """流式调用并等待最终结果（complete = stream + await result）。"""
     return await stream(model, context, options).result()
 
 
@@ -104,6 +107,7 @@ def stream_simple(
     context: Context,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
+    """按 model.api 分发到对应 Provider 的简化流式调用。"""
     effective_options = options or SimpleStreamOptions()
     return _resolve_provider(model.api).stream_simple(
         model,
@@ -117,4 +121,5 @@ async def complete_simple(
     context: Context,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessage:
+    """简化流式调用并等待最终结果。"""
     return await stream_simple(model, context, options).result()
