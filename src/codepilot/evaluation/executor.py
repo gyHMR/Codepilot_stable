@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Execution engine for Eval cases and stateful scenarios."""
+"""评估用例和状态化场景的执行引擎。"""
 
 import asyncio
 import shutil
@@ -40,6 +40,8 @@ from .types import (
 
 
 class EvaluationExecutor:
+    """评估执行器：负责准备 workspace、运行 prompt/scenario、收集证据并评估断言。"""
+
     def __init__(
         self,
         *,
@@ -585,7 +587,7 @@ class EvaluationExecutor:
         session_options: CreateAgentSessionOptions,
         profile: EvalRuntimeProfile,
     ) -> CreateAgentSessionOptions:
-        """Apply Eval-owned runtime controls without mutating caller options."""
+        """应用评估运行时配置（不修改调用方的选项）。"""
 
         return replace(
             session_options,

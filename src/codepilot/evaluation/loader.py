@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Strict JSON loader for Codepilot evaluation definitions."""
+"""Codepilot 评估定义的严格 JSON 加载器。"""
 
 import json
 from pathlib import Path
@@ -21,7 +21,7 @@ from .types import (
 
 
 class EvalCaseValidationError(ValueError):
-    """Benchmark JSON does not match the supported Eval schema."""
+    """评估用例验证错误：JSON 不符合 Eval schema。"""
 
 
 _DOMAINS = {
@@ -47,6 +47,7 @@ _ASSERTION_DIMENSIONS: dict[str, EvalDimension] = {
 
 
 def load_eval_definition(path: str | Path) -> EvalDefinition:
+    """从 JSON 文件加载单个评估定义。"""
     source = Path(path)
     try:
         payload = json.loads(source.read_text(encoding="utf-8"))
@@ -58,6 +59,7 @@ def load_eval_definition(path: str | Path) -> EvalDefinition:
 
 
 def load_eval_suite(path: str | Path) -> list[EvalDefinition]:
+    """加载评估套件：从单个 JSON 文件或目录中递归加载所有评估定义。"""
     root = Path(path)
     if root.is_file():
         return [load_eval_definition(root)]
@@ -83,6 +85,7 @@ def parse_eval_definition(
     *,
     source: str = "<memory>",
 ) -> EvalDefinition:
+    """从字典解析评估定义（EvalCase 或 EvalScenario）。"""
     case_id = _required_text(payload, "id", source)
     fixture = _required_text(payload, "fixture", source)
     domain = payload.get("domain")

@@ -1,55 +1,70 @@
 from __future__ import annotations
 
-"""Codepilot 评估套件的命令行入口。"""
+"""Run the Codepilot reliability benchmark suite.
+
+Example:
+    python scripts/run_reliability_eval.py --provider openai --model gpt-4o-mini
+"""
 
 import argparse
 import asyncio
 import json
+import sys
 from pathlib import Path
 
-from codepilot.runtime import CreateAgentSessionOptions
 
-from .service import EvaluationService
-from .types import EvalRunOptions
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from codepilot.evaluation.service import EvaluationService
+from codepilot.evaluation.types import EvalRunOptions
+from codepilot.runtime import CreateAgentSessionOptions
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """构建命令行参数解析器。"""
     parser = argparse.ArgumentParser(
-        prog="python -m codepilot.evaluation",
-        description="Run a Codepilot evaluation suite and write audit artifacts.",
+        description="Run Codepilot reliability evaluation cases.",
     )
-    parser.add_argument("suite", type=Path, help="Case JSON file or suite directory")
+    parser.add_argument(
+        "--suite",
+        type=Path,
+        default=ROOT / "benchmarks" / "reliability",
+        help="Reliability suite directory or case JSON file.",
+    )
     parser.add_argument(
         "--fixtures-root",
         type=Path,
-        default=Path("benchmarks/fixtures"),
+        default=ROOT / "benchmarks" / "fixtures",
     )
     parser.add_argument(
         "--artifact-root",
         type=Path,
-        default=Path(".codepilot/evals"),
+        default=ROOT / ".codepilot" / "evals",
     )
     parser.add_argument("--provider", required=True)
     parser.add_argument("--model", dest="model_id", required=True)
-    parser.add_argument("--benchmark-name", default="")
+    parser.add_argument("--eval-id", default=None)
+    parser.add_argument("--benchmark-name", default="reliability")
     parser.add_argument("--system-prompt", default=None)
     parser.add_argument(
         "--remove-workspaces",
         action="store_true",
-        help="Delete isolated case workspaces after each result is saved.",
+        help="Delete isolated case workspaces after saving case artifacts.",
     )
     return parser
 
 
-async def _run(args: argparse.Namespace) -> int:
+async def run(args: argparse.Namespace) -> int:
     service = EvaluationService()
     result = await service.run_suite(
         args.suite,
         EvalRunOptions(
             fixtures_root=args.fixtures_root,
             artifact_root=args.artifact_root,
-            benchmark_name=args.benchmark_name or args.suite.stem,
+            eval_id=args.eval_id,
+            benchmark_name=args.benchmark_name,
             keep_workspace=not args.remove_workspaces,
             session_options=CreateAgentSessionOptions(
                 workspace_dir=args.fixtures_root,
@@ -65,9 +80,7 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI 主入口：解析参数，运行评估套件，输出摘要。"""
-    args = build_parser().parse_args(argv)
-    return asyncio.run(_run(args))
+    return asyncio.run(run(build_parser().parse_args(argv)))
 
 
 if __name__ == "__main__":

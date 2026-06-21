@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Persistence and reproducibility metadata for Eval artifacts."""
+"""评估产物的持久化和可重现性元数据。"""
 
 import hashlib
 import json
@@ -24,6 +24,8 @@ EVAL_SCHEMA_VERSION = "2"
 
 
 class EvalArtifactStore:
+    """评估产物存储：管理 manifest、用例结果、workspace 和报告的写入。"""
+
     def __init__(self, root: str | Path, eval_id: str) -> None:
         self.root = Path(root) / eval_id
         self.cases_root = self.root / "cases"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Assertion dispatch and multi-dimensional result aggregation."""
+"""断言分发和多维度结果聚合。"""
 
 from collections import defaultdict
 from typing import Iterable
@@ -23,6 +23,7 @@ def run_assertions(
     specs: Iterable[AssertionSpec],
     evidence: EvalEvidence,
 ) -> list[AssertionResult]:
+    """执行断言列表：按类型分发到 outcome 或 audit 断言引擎。"""
     evidence.changes = compute_workspace_changes(
         evidence.workspace,
         evidence.baseline,
@@ -51,6 +52,7 @@ def run_assertions(
 def build_dimension_results(
     assertion_results: list[AssertionResult],
 ) -> list[DimensionResult]:
+    """将断言结果按维度聚合为 DimensionResult 列表。"""
     grouped: dict[EvalDimension, list[AssertionResult]] = defaultdict(list)
     for result in assertion_results:
         grouped[result.dimension].append(result)

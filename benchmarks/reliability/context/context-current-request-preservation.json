@@ -1,0 +1,21 @@
+{
+  "id": "context-current-request-preservation",
+  "domain": "context",
+  "fixture": "audit_sandbox",
+  "prompt": "先准备仓库上下文，然后回答：state.txt 当前写了什么？不要修改文件。",
+  "budgets": {
+    "timeout_seconds": 120,
+    "max_tool_calls": 6
+  },
+  "assertions": [
+    {
+      "type": "context",
+      "expect_current_request_preserved": true
+    },
+    {
+      "type": "run",
+      "expect_status": "completed",
+      "expect_workspace_changed": false
+    }
+  ]
+}

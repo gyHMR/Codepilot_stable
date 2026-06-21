@@ -105,7 +105,20 @@ class ContextCompiler:
         context: AgentContext,
         request: ContextPreparationRequest,
     ) -> PreparedAgentContext:
-        """编译上下文：刷新仓库快照，按预算选择各段落，返回准备好的上下文。"""
+        """编译上下文：在每次 LLM 调用前，将所有上下文源编译为带预算的输入。
+
+        完整流程：
+        1. 刷新仓库快照，计算与上次的差异（delta）
+        2. 观察消息中的工具结果，更新活跃文件和证据
+        3. 校验所有来源的新鲜度（文件哈希、记忆状态、验证结果）
+        4. 按 ContextPolicy 的比例分配 token 预算到各段落
+        5. 为每个段落选择条目（按优先级排序，超预算则丢弃）
+        6. 组装 system_prompt（仓库上下文 + 治理上下文 + 当前任务）
+        7. 选择历史消息后缀（保留最近的消息，丢弃较早的）
+        8. 生成 ContextReport（含裁剪统计和丢弃记录）
+
+        返回 PreparedAgentContext（system_prompt + messages + tools + report）。
+        """
         snapshot, delta = self.repository.refresh(self.state.last_repository_snapshot)
         self._apply_repository_delta(delta)
         self.state.last_repository_snapshot = snapshot
@@ -261,6 +274,7 @@ class ContextCompiler:
         )
 
     def _apply_repository_delta(self, delta: RepositoryDelta) -> None:
+        """将仓库差异应用到会话状态：使变更路径的摘要和证据失效。"""
         changed = [*delta.modified_paths, *delta.deleted_paths]
         if changed:
             self.state.invalidate_paths(changed)
@@ -268,6 +282,11 @@ class ContextCompiler:
             self.state.invalidate_verification()
 
     def _active_file_items(self) -> list[ContextItem]:
+        """将活跃文件转换为上下文条目列表（按角色和访问次数评分）。
+
+        角色优先级：target(100) > test(80) > dependency(70) > config(60) > reference(40)
+        访问次数作为加分项（最多 +10）。
+        """
         role_score = {
             "target": 100,
             "test": 80,
@@ -299,6 +318,10 @@ class ContextCompiler:
         return items
 
     def _evidence_items(self) -> list[ContextItem]:
+        """将上下文证据转换为上下文条目列表（按信任度评分，跳过过时证据）。
+
+        信任度优先级：observed(100) > derived(80) > user_given(60) > model_claim(20)
+        """
         trust_score = {
             "observed": 100,
             "derived": 80,
@@ -334,6 +357,14 @@ class ContextCompiler:
         self,
         context: AgentContext,
     ) -> tuple[list[ContextItem], list[RetrievedMemory]]:
+        """检索相关记忆并转换为上下文条目列表。
+
+        包含两部分：
+        1. 固定记忆（pinned_memory）：用户手动维护的 MEMORY.md，优先级 1000
+        2. 检索到的记忆：根据当前用户消息和活跃文件路径查询，按评分排序
+
+        返回值：(上下文条目列表, 检索到的记忆列表用于 report)
+        """
         if self.memory_retriever is None:
             return [], []
         latest = _latest_user_message(context.messages)
@@ -390,6 +421,16 @@ def _select_items(
     items: list[ContextItem],
     budget: int,
 ) -> tuple[list[ContextItem], list[DroppedContextItem]]:
+    """按优先级选择条目，直到预算用尽。
+
+    选择策略：
+    1. 按 priority 降序排列
+    2. 跳过 freshness 为 stale/missing 的条目
+    3. 如果累计 token 超出预算，丢弃后续条目
+    4. 如果第一个条目就超预算，截断其内容
+
+    返回：(选中的条目, 被丢弃的条目记录)
+    """
     selected: list[ContextItem] = []
     dropped: list[DroppedContextItem] = []
     used = 0
@@ -419,6 +460,15 @@ def _select_message_suffix(
     messages: list,
     budget: int,
 ) -> tuple[list, list[DroppedContextItem]]:
+    """从消息列表末尾选择后缀，保留最近的消息直到预算用尽。
+
+    策略：
+    1. 从末尾向前遍历，累加 token 直到超出预算
+    2. 确保最新的用户消息一定被保留（即使超预算也会追加）
+    3. 被丢弃的消息记录在 dropped 列表中
+
+    返回：(选中的消息列表, 被丢弃的消息记录)
+    """
     if not messages:
         return [], []
     selected_reversed = []

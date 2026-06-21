@@ -67,6 +67,17 @@ class SessionContextState:
         *,
         repository_fingerprint: str | None = None,
     ) -> None:
+        """观察工具结果，更新活跃文件、证据和新鲜度状态。
+
+        处理逻辑：
+        1. 去重：同一 tool_call_id 只处理一次
+        2. 更新活跃文件：将 affected_paths 和 file_state 记录为 active_files
+        3. 如果工具修改了工作区：使相关路径的摘要和证据失效
+        4. 提取工具结果文本作为证据（信任度=observed）
+        5. 提取验证结果作为证据
+
+        证据列表最多保留 80 条（最新的优先）。
+        """
         if message.tool_call_id and message.tool_call_id in self.observed_tool_call_ids:
             return
         if message.tool_call_id:
@@ -131,6 +142,12 @@ class SessionContextState:
         reason: str,
         source_hash: str | None = None,
     ) -> None:
+        """记录文件访问（新建或更新 active_files 条目）。
+
+        - 新文件：创建 ActiveFile 记录
+        - 已有文件：递增 access_count，更新 reason 和 role
+        - role 升级规则：reference → target（target 优先级更高）
+        """
         normalized = Path(path).as_posix()
         current = self.active_files.get(normalized)
         if current is None:
@@ -165,6 +182,14 @@ class SessionContextState:
                 evidence.freshness = "stale"
 
     def validate_sources(self, repository_fingerprint: str) -> list[str]:
+        """校验所有来源的新鲜度，返回过时条目列表。
+
+        检查内容：
+        1. file_summaries：对比 SHA256 与磁盘文件
+        2. verification 证据：对比 workspace_fingerprint 与当前仓库指纹
+
+        返回格式：["file_summary:path:stale", "evidence:source:missing", ...]
+        """
         stale: list[str] = []
         for path, summary in list(self.file_summaries.items()):
             state = file_state_for_path(self.workspace_dir, path)

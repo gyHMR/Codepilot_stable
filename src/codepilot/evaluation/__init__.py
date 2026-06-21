@@ -1,4 +1,4 @@
-"""Codepilot evaluation and lightweight experiment framework."""
+"""Codepilot 评估与轻量级实验框架。"""
 
 from .assertions import (
     build_dimension_results,

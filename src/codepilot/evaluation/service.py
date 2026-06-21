@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Public EvaluationService facade."""
+"""评估服务门面：对外暴露的评估 API。"""
 
 import uuid
 from pathlib import Path
@@ -23,6 +23,8 @@ from .types import (
 
 
 class EvaluationService:
+    """评估服务：协调加载、执行、产物管理和报告生成。"""
+
     def __init__(
         self,
         *,

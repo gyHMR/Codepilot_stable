@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Assertions over unified Run audit bundles."""
+"""对统一 Run 审计包的断言（运行状态、追踪、上下文、记忆、安全、任务）。"""
 
 from collections import Counter
 from typing import Any
@@ -12,6 +12,7 @@ def run_audit_assertion(
     spec: AssertionSpec,
     evidence: EvalEvidence,
 ) -> AssertionResult:
+    """执行审计断言：按类型分发到 run/trace/context/memory/security/task 断言。"""
     if spec.type == "run":
         return _assert_run(spec, evidence)
     if spec.type == "trace":

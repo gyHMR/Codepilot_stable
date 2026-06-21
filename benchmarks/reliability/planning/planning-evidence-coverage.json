@@ -1,0 +1,23 @@
+{
+  "id": "planning-evidence-coverage",
+  "domain": "planning",
+  "fixture": "audit_sandbox",
+  "prompt": "检查 README.md 和 state.txt，分步骤说明它们是否一致，并在结束前给出你实际检查过的证据。不要修改文件。",
+  "budgets": {
+    "timeout_seconds": 120,
+    "max_tool_calls": 8,
+    "max_replans": 2
+  },
+  "assertions": [
+    {
+      "type": "task",
+      "expect_completion_satisfied": true,
+      "require_evidence_refs": true
+    },
+    {
+      "type": "run",
+      "expect_status": "completed",
+      "expect_workspace_changed": false
+    }
+  ]
+}

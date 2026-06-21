@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Aggregation and human-readable reporting for Eval suites."""
+"""评估套件的聚合统计和人类可读报告生成。"""
 
 from collections import Counter, defaultdict
 from typing import Any
@@ -9,6 +9,7 @@ from .types import EvalResult
 
 
 def build_suite_summary(results: list[EvalResult]) -> dict[str, Any]:
+    """构建评估套件摘要：统计通过率、维度分布、失败分类和指标。"""
     overall = Counter(result.overall for result in results)
     dimensions: dict[str, Counter[str]] = defaultdict(Counter)
     failures: Counter[str] = Counter()
@@ -41,6 +42,7 @@ def render_suite_markdown(
     results: list[EvalResult],
     summary: dict[str, Any],
 ) -> str:
+    """将评估结果渲染为 Markdown 格式的报告。"""
     lines = [
         "# Codepilot Evaluation Report",
         "",

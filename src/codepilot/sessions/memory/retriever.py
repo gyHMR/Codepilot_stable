@@ -20,6 +20,22 @@ class MemoryRetriever:
         self.workspace_dir = Path(workspace_dir)
 
     def retrieve(self, query: MemoryQuery) -> list[RetrievedMemory]:
+        """检索与查询相关的记忆，按评分排序返回。
+
+        评分规则（各项累加）：
+        - task 类型: +100（任务记忆最重要）
+        - 关联路径匹配: +40（与当前活跃文件相关）
+        - 关键词匹配: +10/词，最高 +30
+        - 信任度 verified/observed: +20
+        - project 作用域: +10
+        - 信任度 model_claim: -20（模型自称的低可信度）
+
+        过滤规则：
+        - 跳过 status != "active" 的记录
+        - 跳过只出现 1 次且无 resolution 的 failure 记忆（噪音过滤）
+
+        最终按 kind 限制数量（task:1, file:3, failure:2, decision:2, project:3）。
+        """
         records = [*self.store.load_session(), *self.store.load_project()]
         query_terms = _terms(query.text)
         active_paths = {Path(path).as_posix() for path in query.active_paths}
@@ -66,12 +82,14 @@ class MemoryRetriever:
         return _apply_kind_limits(ranked, query.limit)
 
     def validate_freshness(self) -> list[MemoryRecord]:
+        """校验记忆新鲜度（委托给 MemoryWriter.validate_freshness）。"""
         return MemoryWriter(
             store=self.store,
             workspace_dir=self.workspace_dir,
         ).validate_freshness()
 
     def pinned_memory(self) -> str:
+        """加载用户固定的项目记忆（.codepilot/MEMORY.md）。"""
         return load_global_memory(self.workspace_dir)
 
 

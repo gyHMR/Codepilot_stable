@@ -1,0 +1,30 @@
+{
+  "id": "memory-repeat-read-control",
+  "domain": "memory",
+  "fixture": "audit_sandbox",
+  "steps": [
+    {
+      "type": "prompt",
+      "text": "读取 README.md 和 state.txt，说明它们分别是什么。不要修改文件。"
+    },
+    {
+      "type": "prompt",
+      "text": "基于你刚才已经掌握的信息，再说明 README.md 和 state.txt 的关系；只有不确定时才重新读取文件。不要修改文件。"
+    }
+  ],
+  "budgets": {
+    "timeout_seconds": 120,
+    "max_tool_calls": 8
+  },
+  "assertions": [
+    {
+      "type": "memory",
+      "max_repeated_reads": 4
+    },
+    {
+      "type": "run",
+      "expect_status": "completed",
+      "expect_workspace_changed": false
+    }
+  ]
+}

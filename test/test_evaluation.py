@@ -151,7 +151,7 @@ def test_minimal_module_benchmarks_are_valid() -> None:
     root = Path(__file__).resolve().parents[1]
     definitions = load_eval_suite(root / "benchmarks")
 
-    assert len(definitions) == 9
+    assert len(definitions) == 17
     assert {
         item.domain for item in definitions
     } == {

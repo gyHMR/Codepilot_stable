@@ -154,6 +154,7 @@ class AgentSession:
 
     @property
     def last_run_result(self) -> AgentRunResult | None:
+        """返回最近一次 Run 的结构化结果（含状态、停止原因、消息等）。"""
         return self.agent.last_run_result
 
     @property
@@ -231,8 +232,28 @@ class AgentSession:
         images: list[str] | None = None,
         run_id: str | None = None,
     ) -> AgentRunResult:
-        """Run one user task and persist its structured result."""
+        """执行一次用户任务并持久化结构化结果。
 
+        完整流程：
+        1. 执行 before_prompt 生命周期钩子
+        2. 将任务写入结构化记忆（_remember_task）
+        3. 恢复活跃任务投影（供 Agent 决策参考）
+        4. 检查上下文新鲜度（文件是否被外部修改）
+        5. 检测并压缩溢出的上下文
+        6. 调用 Agent.run() 执行 LLM 推理和工具调用
+        7. 持久化 Run 结果
+        8. 将 Run 结果写入记忆（_finalize_memory）
+        9. 根据需要压缩上下文
+        10. 执行 after_prompt 生命周期钩子
+
+        Args:
+            text: 用户输入文本。
+            images: 可选的图片列表（base64 编码）。
+            run_id: 可选的 Run ID（不提供则自动生成）。
+
+        Returns:
+            结构化的 Run 结果。
+        """
         await self._run_lifecycle_hooks(
             text=text,
             is_continue=False,
@@ -318,10 +339,18 @@ class AgentSession:
         branch_switch_session(self, session_id)
 
     def rebind_store(self, store: SessionStore) -> None:
-        """Rebind persistence, memory, and context preparation after session switch."""
+        """会话切换后重新绑定持久化存储、记忆和上下文编译器。
+
+        当 switch_session 切换到另一个会话时，需要将所有内部状态
+        指向新的 SessionStore，否则后续操作会写入旧会话目录。
+
+        Args:
+            store: 新的 SessionStore 实例。
+        """
         self.store = store
         self.session_id = store.session_id
         self.agent.set_session_id(self.session_id)
+        # 重建记忆子系统（它们依赖 SessionStore 的 memory_file 路径）
         self.memory_store = MemoryStore(store)
         self.memory_writer = MemoryWriter(
             store=self.memory_store,
@@ -331,6 +360,7 @@ class AgentSession:
             store=self.memory_store,
             workspace_dir=self.workspace_dir,
         )
+        # 重新编译上下文准备函数（绑定新的 memory_retriever）
         self.prepare_context = self._prepare_context_for_session(self.prepare_context)
         self.agent.set_prepare_context(self.prepare_context)
 
@@ -376,17 +406,40 @@ class AgentSession:
                 )
 
     def _prepare_context_for_session(self, prepare_context):
+        """为当前会话准备上下文编译函数。
+
+        如果 prepare_context 是一个绑定方法（如 ContextCompiler.compile），
+        则克隆其所属实例以实现会话间隔离，并绑定当前会话的 memory_retriever。
+
+        Args:
+            prepare_context: 原始的上下文准备函数（可为 None）。
+
+        Returns:
+            绑定到当前会话的上下文准备函数。
+        """
         if prepare_context is None:
             return None
+        # 检测是否为绑定方法（有 __self__ 属性）
         owner = getattr(prepare_context, "__self__", None)
         if owner is not None and hasattr(owner, "clone"):
+            # 克隆编译器实例，避免多会话共享同一状态
             owner = owner.clone()
             prepare_context = owner.compile
         if owner is not None and hasattr(owner, "bind_memory_retriever"):
+            # 绑定当前会话的记忆检索器
             owner.bind_memory_retriever(self.memory_retriever)
         return prepare_context
 
     def _remember_task(self, text: str, *, run_id: str | None) -> None:
+        """将用户任务写入结构化记忆（作为活跃任务记录）。
+
+        如果已有活跃任务且目标不同，则创建新任务记录替代旧的。
+        失败时记录 warning 事件，不影响主流程。
+
+        Args:
+            text: 用户输入文本。
+            run_id: 当前 Run ID。
+        """
         try:
             record = self.memory_writer.remember_task(text, run_id=run_id)
             self.store.append_event(
@@ -409,6 +462,14 @@ class AgentSession:
             )
 
     def _active_task_projection(self) -> dict[str, object] | None:
+        """获取当前活跃任务的投影（供 Agent 在推理时参考）。
+
+        从记忆中查找 kind="task" 且 status="active" 的记录，
+        返回其 content 字典（包含 goal、task_progress 等字段）。
+
+        Returns:
+            活跃任务的内容字典；无活跃任务或无 task_progress 时返回 None。
+        """
         for record in self.memory_store.load_session():
             if record.kind != "task" or record.status != "active":
                 continue
@@ -424,6 +485,17 @@ class AgentSession:
         *,
         run_id: str | None,
     ) -> None:
+        """观察工具结果并更新记忆。
+
+        当工具执行完成时调用，MemoryWriter 会根据工具类型：
+        - read 工具：记录文件摘要
+        - 失败的工具：记录失败教训
+        - 成功的工具：解析之前的失败记录
+
+        Args:
+            message: 工具结果消息。
+            run_id: 当前 Run ID。
+        """
         try:
             records = self.memory_writer.observe_tool_result(message, run_id=run_id)
             for record in records:
@@ -447,6 +519,17 @@ class AgentSession:
             )
 
     def _finalize_memory(self, result: AgentRunResult) -> None:
+        """Run 结束后将结果写入记忆。
+
+        MemoryWriter.finalize_run() 会更新活跃任务的：
+        - task_progress（completed_steps、pending_steps、blocked_steps）
+        - next_action（下一步建议）
+        - confirmed_findings（已确认的发现）
+        - blocked_on（阻塞原因）
+
+        Args:
+            result: Agent Run 结果。
+        """
         try:
             records = self.memory_writer.finalize_run(result)
             for record in records:
@@ -470,6 +553,11 @@ class AgentSession:
             )
 
     def _check_context_freshness(self) -> None:
+        """检查上下文新鲜度：对比上次 Run 跟踪的文件与当前工作区状态。
+
+        如果文件被外部修改（changed）或删除（missing），则注入一条
+        steering message 提醒 Agent 重新读取相关文件，避免基于过时信息推理。
+        """
         freshness = self.store.run_store.evaluate_freshness()
         if not freshness.checked_paths and freshness.status == "valid":
             return

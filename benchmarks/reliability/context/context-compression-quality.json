@@ -1,0 +1,21 @@
+{
+  "id": "context-compression-quality",
+  "domain": "context",
+  "fixture": "context_heavy",
+  "prompt": "阅读 README.md 和 docs/architecture.md，总结这个小项目的目标、模块和最重要的约束。不要修改文件。",
+  "budgets": {
+    "timeout_seconds": 120,
+    "max_tool_calls": 8
+  },
+  "assertions": [
+    {
+      "type": "context",
+      "expect_current_request_preserved": true
+    },
+    {
+      "type": "run",
+      "expect_status": "completed",
+      "expect_workspace_changed": false
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Assertions over the final isolated workspace."""
+"""对隔离工作区的结果断言（命令执行、文件检查、diff 检查）。"""
 
 import fnmatch
 import hashlib
@@ -15,6 +15,7 @@ _IGNORED_ROOTS = {".codepilot", ".git", "__pycache__", ".pytest_cache"}
 
 
 def capture_workspace_baseline(workspace: Path) -> dict[str, str]:
+    """捕获工作区基线快照（路径 -> SHA256）。"""
     return {
         _relative_path(workspace, path): _sha256_file(path)
         for path in _workspace_files(workspace)
@@ -25,6 +26,7 @@ def compute_workspace_changes(
     workspace: Path,
     baseline: dict[str, str],
 ) -> list[WorkspaceChange]:
+    """对比基线和当前工作区，计算变更列表。"""
     current = capture_workspace_baseline(workspace)
     changes: list[WorkspaceChange] = []
     for path in sorted(set(baseline) | set(current)):

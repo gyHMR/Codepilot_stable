@@ -127,6 +127,7 @@ class SessionStore:
         return self.event_recorder.load(limit=limit)
 
     def summarize_events(self) -> dict[str, Any]:
+        """统计事件摘要（事件计数、工具调用数、错误数等）。"""
         return self.event_recorder.summarize()
 
     def append_run_result(self, result: AgentRunResult) -> None:
@@ -138,6 +139,7 @@ class SessionStore:
         self.touch_updated_at()
 
     def load_run_results(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        """加载 Run 结果列表（优先从 RunStore 加载，fallback 到 runs.jsonl）。"""
         records = self.run_store.load_run_results(limit=limit)
         if records:
             return records
@@ -196,8 +198,19 @@ class SessionStore:
         self.touch_updated_at()
 
     def append_session_message(self, message: Message) -> str:
-        """追加消息到会话消息树（支持分支/切换），返回 entry_id。"""
+        """追加消息到会话消息树（支持分支/切换），返回 entry_id。
 
+        消息树是一条 JSONL 链，每条记录包含 id 和 parent_id，
+        形成单向链表结构。fork 时从某个节点分叉出新分支，
+        switch_to_entry 时沿 parent_id 回溯恢复消息。
+
+        流程：
+        1. 读取现有 JSONL 行
+        2. 从 meta.json 获取当前 leaf_id 作为 parent_id
+        3. 生成新 entry_id，构建消息条目
+        4. 追加到 JSONL 文件
+        5. 更新 meta.json 的 leaf_id 指向新条目
+        """
         lines = self._read_session_lines()
         header = lines[0] if lines and lines[0].get("type") == "session" else None
         entries = lines[1:] if header else lines
@@ -221,6 +234,11 @@ class SessionStore:
         return entry_id
 
     def rewrite_session_messages(self, messages: list[Message]) -> None:
+        """重写整个会话消息树（用于 fork 时复制消息，或压缩后重建）。
+
+        与 append_session_message 不同，此方法会完全替换 JSONL 内容，
+        为每条消息重新生成 entry_id 并重建 parent_id 链。
+        """
         lines = self._read_session_lines()
         header = lines[0] if lines and lines[0].get("type") == "session" else {
             "type": "session",
@@ -285,10 +303,12 @@ class SessionStore:
         return messages
 
     def list_entry_ids(self) -> list[str]:
+        """列出会话消息树中所有条目的 ID（包括分叉分支的条目）。"""
         lines = self._read_session_lines()
         return [str(line.get("id")) for line in lines if line.get("type") == "message" and isinstance(line.get("id"), str)]
 
     def get_leaf_id(self) -> str | None:
+        """获取当前会话的叶子条目 ID（即最新消息的 ID）。"""
         meta = self.read_meta() or {}
         leaf = meta.get("leaf_id")
         return leaf if isinstance(leaf, str) else None
@@ -348,6 +368,11 @@ class SessionStore:
         return path
 
     def set_leaf(self, entry_id: str) -> None:
+        """设置会话的叶子指针（用于 switch_to_entry 切换分支）。
+
+        不修改 JSONL 内容，只更新 meta.json 的 leaf_id 字段。
+        后续 load_session_messages 会沿新的 leaf_id 回溯恢复消息。
+        """
         lines = self._read_session_lines()
         ids = {str(line.get("id")) for line in lines if line.get("type") == "message" and isinstance(line.get("id"), str)}
         if entry_id not in ids:

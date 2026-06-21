@@ -34,6 +34,21 @@ class MemoryWriter:
         self.workspace_dir = Path(workspace_dir)
 
     def remember_task(self, text: str, *, run_id: str | None = None) -> MemoryRecord:
+        """将用户任务写入记忆。
+
+        逻辑：
+        - 如果无活跃任务记录 → 创建新的 task 记忆（goal=text）
+        - 如果已有活跃任务且目标不同 → 重置内容（新任务替代旧任务）
+        - 如果已有活跃任务且目标相同 → 仅更新 goal 文本
+
+        task 记忆的 content 结构：
+        - goal: 任务目标
+        - constraints: 约束条件列表
+        - confirmed_findings: 已确认的发现
+        - open_questions: 未解决的问题
+        - blocked_on: 阻塞原因
+        - next_action: 下一步建议
+        """
         safe_text = sanitize_memory_text(text, limit=1200)
         records = self.store.load_session()
         existing = next(
@@ -80,6 +95,17 @@ class MemoryWriter:
         *,
         run_id: str | None = None,
     ) -> list[MemoryRecord]:
+        """观察工具结果并更新记忆（由 AgentSession._observe_tool_memory 调用）。
+
+        处理逻辑：
+        1. 如果工具修改了工作区 → 使相关文件记忆失效
+        2. read 工具成功 → 记录文件摘要（_remember_file）
+        3. 工具失败且错误码在 _FAILURE_CODES 中 → 记录失败教训（_remember_failure）
+        4. 工具成功 → 解析之前的失败记录（_resolve_failures）
+        5. 工具结果含 verification → 更新活跃任务的 confirmed_findings
+
+        返回值：本次创建/更新的记忆记录列表。
+        """
         created: list[MemoryRecord] = []
         tool_name = message.tool_name.lower()
         details = message.details if isinstance(message.details, dict) else {}
@@ -117,6 +143,13 @@ class MemoryWriter:
         return created
 
     def finalize_run(self, result: AgentRunResult) -> list[MemoryRecord]:
+        """Run 结束后更新活跃任务记忆。
+
+        处理逻辑：
+        1. 如果 AgentRunResult 包含 task 摘要 → 用 _project_task_summary 更新
+        2. 如果 Run 完成且任务满意 → 清空 next_action，记录完成发现
+        3. 如果 Run 出错 → 将错误信息追加到 blocked_on
+        """
         task = self._active_task()
         if task is None:
             return []
@@ -182,6 +215,7 @@ class MemoryWriter:
         task.trust = "verified" if summary.completion_satisfied else "observed"
 
     def add_project(self, text: str) -> MemoryRecord:
+        """添加项目级知识记忆（scope=project，持久化到 project.jsonl）。"""
         content = sanitize_memory_text(text, limit=1600)
         if not content:
             raise ValueError("Memory content is empty after sensitive-data filtering")
@@ -196,6 +230,11 @@ class MemoryWriter:
         return self.store.update(record)
 
     def promote(self, memory_id: str) -> MemoryRecord:
+        """将 session 级记忆提升为 project 级（scope=session → scope=project）。
+
+        创建一条新记录（保留原内容），原记录不变。
+        task 类型会被转换为 project 类型。
+        """
         source = self.store.get(memory_id)
         if source is None:
             raise ValueError(f"Memory not found: {memory_id}")
@@ -216,6 +255,10 @@ class MemoryWriter:
         return promoted
 
     def invalidate_paths(self, paths: list[str]) -> list[MemoryRecord]:
+        """使关联指定路径的 file 记忆失效（status → stale）。
+
+        当工具修改了工作区文件时调用，确保过时的文件摘要不会被注入上下文。
+        """
         normalized = {Path(path).as_posix() for path in paths}
         changed: list[MemoryRecord] = []
         for record in self.store.load_session():
@@ -230,6 +273,12 @@ class MemoryWriter:
         return changed
 
     def validate_freshness(self) -> list[MemoryRecord]:
+        """校验所有 file 记忆的新鲜度（对比 source_hash 与当前文件 SHA256）。
+
+        遍历 session 和 project 记忆中所有 kind="file" 的记录，
+        检查其 source_hashes 是否与磁盘文件一致。
+        不一致则标记为 stale，一致则恢复为 active。
+        """
         changed: list[MemoryRecord] = []
         for record in [*self.store.load_session(), *self.store.load_project()]:
             if record.kind != "file" or record.status not in {"active", "stale"}:
