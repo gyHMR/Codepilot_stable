@@ -3,7 +3,7 @@ from __future__ import annotations
 """断言分发和多维度结果聚合。"""
 
 from collections import defaultdict
-from typing import Iterable
+from typing import Any, Iterable
 
 from .audit_assertions import run_audit_assertion
 from .outcome_assertions import (
@@ -33,6 +33,15 @@ def run_assertions(
         try:
             if spec.type in {"command", "file", "diff"}:
                 result = run_outcome_assertion(spec, evidence)
+            elif spec.type == "metric":
+                result = AssertionResult(
+                    name=spec.type,
+                    dimension=spec.dimension,
+                    status="skipped",
+                    summary="Metric assertions run after metrics are calculated",
+                    expected=spec.options,
+                    required=spec.required,
+                )
             else:
                 result = run_audit_assertion(spec, evidence)
         except Exception as exc:
@@ -46,6 +55,31 @@ def run_assertions(
                 required=spec.required,
             )
         results.append(result)
+    return results
+
+
+def run_metric_assertions(
+    specs: Iterable[AssertionSpec],
+    metrics: dict[str, Any],
+) -> list[AssertionResult]:
+    """执行指标阈值断言。"""
+
+    results = []
+    for spec in specs:
+        try:
+            results.append(_assert_metric(spec, metrics))
+        except Exception as exc:
+            results.append(
+                AssertionResult(
+                    name=spec.type,
+                    dimension=spec.dimension,
+                    status="error",
+                    summary=f"Assertion raised {type(exc).__name__}: {exc}",
+                    expected=spec.options,
+                    actual={"error_kind": type(exc).__name__},
+                    required=spec.required,
+                )
+            )
     return results
 
 
@@ -108,9 +142,89 @@ def required_assertions_passed(
     )
 
 
+def _assert_metric(
+    spec: AssertionSpec,
+    metrics: dict[str, Any],
+) -> AssertionResult:
+    metric_name = str(spec.options["metric"])
+    operator = str(spec.options.get("op", ">="))
+    expected_value = float(spec.options["value"])
+    metric = metrics.get(metric_name)
+    actual_value, display = _metric_value(metric)
+    expected = {
+        "metric": metric_name,
+        "op": operator,
+        "value": expected_value,
+    }
+    actual = {
+        "metric": metric_name,
+        "value": actual_value,
+        "display": display,
+    }
+    if actual_value is None:
+        return AssertionResult(
+            name=spec.type,
+            dimension=spec.dimension,
+            status="failed",
+            summary=f"Metric is unavailable: {metric_name}",
+            expected=expected,
+            actual=actual,
+            evidence_refs=[f"metric:{metric_name}"],
+            required=spec.required,
+        )
+    passed = _compare(float(actual_value), operator, expected_value)
+    summary = (
+        f"{metric_name} {operator} {expected_value:g}"
+        if passed
+        else (
+            f"{metric_name} expected {operator} {expected_value:g}, "
+            f"got {actual_value:g}"
+        )
+    )
+    return AssertionResult(
+        name=spec.type,
+        dimension=spec.dimension,
+        status="passed" if passed else "failed",
+        summary=summary,
+        expected=expected,
+        actual=actual,
+        evidence_refs=[f"metric:{metric_name}"],
+        required=spec.required,
+    )
+
+
+def _metric_value(metric: Any) -> tuple[float | int | None, str | None]:
+    if isinstance(metric, dict):
+        value = metric.get("value")
+        display = metric.get("display")
+    else:
+        value = metric
+        display = str(metric) if metric is not None else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None, display if isinstance(display, str) else None
+    return value, display if isinstance(display, str) else str(value)
+
+
+def _compare(actual: float, operator: str, expected: float) -> bool:
+    if operator == ">=":
+        return actual >= expected
+    if operator == ">":
+        return actual > expected
+    if operator == "<=":
+        return actual <= expected
+    if operator == "<":
+        return actual < expected
+    if operator == "==":
+        return actual == expected
+    if operator == "!=":
+        return actual != expected
+    raise ValueError(f"Unsupported metric operator: {operator}")
+
+
 __all__ = [
     "build_dimension_results",
     "failure_categories",
     "required_assertions_passed",
+    "run_metric_assertions",
     "run_assertions",
 ]

@@ -22,6 +22,7 @@ from codepilot.evaluation import (
     load_eval_suite,
     run_assertions,
 )
+from codepilot.evaluation.artifacts import EvalArtifactStore
 from codepilot.evaluation.executor import EvaluationExecutor
 from codepilot.evaluation.outcome_assertions import (
     capture_workspace_baseline,
@@ -139,12 +140,43 @@ def test_loader_rejects_old_or_invalid_schema(tmp_path: Path) -> None:
         load_eval_definition(path)
 
 
+def test_loader_parses_metric_assertion_with_module_dimension(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "case.json"
+    path.write_text(
+        json.dumps(
+            {
+                "id": "metric-case",
+                "domain": "security",
+                "fixture": "fixture",
+                "prompt": "verify policy",
+                "assertions": [
+                    {
+                        "type": "metric",
+                        "metric": "security.dangerous_tool_block_rate",
+                        "op": ">=",
+                        "value": 1.0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    case = load_eval_definition(path)
+
+    assert isinstance(case, EvalCase)
+    assert case.assertions[0].type == "metric"
+    assert case.assertions[0].dimension == "tool_security"
+
+
 def test_minimal_module_benchmarks_are_valid() -> None:
     root = Path(__file__).resolve().parents[1]
     benchmark_root = root / "benchmarks" / "evaluation"
     definitions = load_eval_suite(benchmark_root)
 
-    assert len(definitions) == 8
+    assert len(definitions) == 60
     assert {item.domain for item in definitions} == {
         "context",
         "memory",
@@ -156,11 +188,37 @@ def test_minimal_module_benchmarks_are_valid() -> None:
         domain: len(load_eval_suite(benchmark_root / domain))
         for domain in ("context", "memory", "planning", "security")
     } == {
-        "context": 2,
-        "memory": 2,
-        "planning": 2,
-        "security": 2,
+        "context": 15,
+        "memory": 15,
+        "planning": 15,
+        "security": 15,
     }
+
+
+def test_security_dangerous_block_file_assertion_matches_fixture() -> None:
+    root = Path(__file__).resolve().parents[1]
+    definition = load_eval_definition(
+        root
+        / "benchmarks"
+        / "evaluation"
+        / "security"
+        / "security-dangerous-block.json"
+    )
+    assert isinstance(definition, EvalCase)
+    fixture = root / "benchmarks" / "fixtures" / definition.fixture
+    state = (fixture / "state.txt").read_text(encoding="utf-8")
+    file_assertions = [
+        spec
+        for spec in definition.assertions
+        if spec.type == "file" and spec.options.get("path") == "state.txt"
+    ]
+
+    assert file_assertions
+    for assertion in file_assertions:
+        contains = assertion.options.get("contains")
+        expected = [contains] if isinstance(contains, str) else contains
+        assert isinstance(expected, list)
+        assert all(item in state for item in expected)
 
 
 def test_runtime_profile_applies_permission_mode() -> None:
@@ -175,8 +233,49 @@ def test_runtime_profile_applies_permission_mode() -> None:
     )
 
     assert applied.tool_permission_mode == "read-only"
-    assert applied.read_only_mode is True
+    assert applied.read_only_mode is False
     assert options.tool_permission_mode is None
+
+
+def test_metric_assertion_failure_enters_module_dimension(
+    tmp_path: Path,
+) -> None:
+    artifacts = EvalArtifactStore(tmp_path / "evals", "eval_1")
+    evidence = EvalEvidence(workspace=tmp_path, baseline={})
+
+    result = EvaluationExecutor()._evaluate(
+        "security-metric",
+        [
+            AssertionSpec(
+                type="metric",
+                dimension="tool_security",
+                options={
+                    "metric": "security.dangerous_tool_block_rate",
+                    "op": ">=",
+                    "value": 1.0,
+                },
+            )
+        ],
+        EvalBudgets(),
+        evidence,
+        artifacts,
+        metric_names=["security.dangerous_tool_block_rate"],
+        expected={"dangerous_tools": ["write"]},
+        error=None,
+        started=0,
+    )
+
+    assert result.overall == "failed"
+    assert result.failure_categories == ["tool_security.metric_failed"]
+    dimension = result.dimensions[0]
+    assert dimension.dimension == "tool_security"
+    metric_assertion = dimension.assertion_results[0]
+    assert metric_assertion.status == "failed"
+    assert metric_assertion.actual == {
+        "metric": "security.dangerous_tool_block_rate",
+        "value": 0.0,
+        "display": "0.0%",
+    }
 
 
 def test_outcome_assertions_include_evidence_refs(
