@@ -57,5 +57,7 @@ Agents.md
 docs/*
 !docs/examples/
 !docs/examples/**
+!docs/design/
+!docs/design/**
 参考文档/
 benchmarks/

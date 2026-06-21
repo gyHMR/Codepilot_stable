@@ -1,105 +1,23 @@
 # Codepilot
 
-> 本地 AI 编程智能体 —— 适合 Agent 方向实习/求职的工程项目
-
-![Python](https://img.shields.io/badge/Python-%3E%3D3.10-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
-![Version](https://img.shields.io/badge/Version-0.3.0-orange)
-
----
+一个仿照 Claude Code 的本地 AI 编程智能体，适用于 Agent 学习、Agent实习项目。
 
 ## 项目介绍
 
 Codepilot 是一个基于 Python 构建的本地编程智能体（Coding Agent），参考了 Claude Code 的设计理念：理解代码仓库、编辑代码、运行验证，并保留结构化的运行结果。
 
-**本项目可作为 Agent 开发岗位的实习/求职项目：**
+**适用场景：**
 
-- 项目覆盖 LLM Agent 的完整技术栈——工具调用、会话管理、上下文治理、记忆系统、任务规划、安全控制、评估框架
-- 代码结构清晰、分层明确，每一层都可以独立阅读和修改，适合逐模块学习
-- 内置完整的评估体系（4 模块、12 指标），可以在简历/面试中展示你对 Agent 质量度量的理解
-- 通过扩展机制（Python 扩展 / Markdown 技能 / MCP 桥接）可以快速做出个人亮点
+- **Agent 学习**：通过阅读和修改本项目，理解 LLM Agent 的核心架构（工具调用、会话管理、上下文压缩、重试机制等）
+- **Agent 实践**：在此基础上扩展自定义工具、接入新的模型 Provider、实现新的交互模式
 
-**适用人群：** 计算机/AI 相关专业学生、需要 Agent方向实习项目作品的求职者。
 
----
+**核心特性：**
 
-## 项目特色
-
-### 上下文治理
-
-> 设计文档：[docs/design/context-design.md](docs/design/context-design.md)
-
-传统 Agent 直接将所有文件内容塞进 prompt，导致 token 浪费、上下文污染。Codepilot 采用两层架构解决这一问题：
-
-- **Bootstrap 阶段**：首次启动时生成仓库快照（`RepositorySnapshot`），快速建立全局认知
-- **Compile 阶段**：每次对话前执行 7 步编译流水线，按需组装上下文
-- **预算分配**：将 token 预算按比例分配给仓库状态（10%）、活跃文件（10%）、近期证据（10%）、记忆（10%）、历史（50%）、当前任务（10%），确保关键信息优先
-- **新鲜度追踪**：三层失效机制（文件哈希 → 时间戳 → 会话状态），避免使用过期上下文
-
-### 结构化记忆
-
-> 设计文档：[docs/design/memory-design.md](docs/design/memory-design.md)
-
-抛弃传统的 `MEMORY.md` 纯文本记忆方式，采用证据驱动的结构化记忆：
-
-- **三级信任体系**：每条记忆标注来源可信度——`observed`（工具返回） > `verified`（多次验证） > `user_given`（用户告知） > `model_claim`（模型推断）
-- **五种记忆类型**：`task`（任务）、`file`（文件）、`failure`（失败）、`decision`（决策）、`project`（项目），覆盖 Agent 工作中的主要信息类型
-- **新鲜度校验**：通过文件哈希检测记忆关联的文件是否已变更，过期记忆自动降级
-- **保守写入策略**：`MemoryWriter` 只在有明确证据时才写入，避免幻觉污染记忆
-
-### 任务规划
-
-> 设计文档：[docs/design/task-design.md](docs/design/task-design.md)
-
-将模型的语义理解与运行时的任务边界分离：
-
-- **证据绑定**：每个任务步骤必须关联执行证据（工具输出、文件变更），无证据的步骤不能标记为完成
-- **动态计划**：执行过程中可根据工具返回结果动态调整计划，而非死板执行预设步骤
-- **CompletionGate**：完成门控机制，防止模型过早声明任务完成
-- **重规划机制**：当某步骤失败时，自动触发重规划而非直接放弃
-- **会话恢复**：支持从持久化的任务状态恢复中断的会话
-
-### 工具安全
-
-> 设计文档：[docs/design/tool-design.md](docs/design/tool-design.md)
-
-解决传统 Agent 中模型可以自行授权工具调用的安全隐患：
-
-- **模型不可自我授权**：权限判断在运行时层完成，模型只能"请求"，不能"决定"
-- **Decide-then-Execute**：先决策再执行，决策阶段不产生副作用
-- **Shell 命令分类**：自动将 Shell 命令分为 `verification`（只读验证）、`mutation`（写入变更）、`high_risk`（高风险）、`unknown` 四类，分别执行不同策略
-- **工作区沙箱**：文件操作限制在工作区目录内，防止路径逃逸
-- **权限审批**：`ask` 模式下，敏感操作需要用户交互确认
-
-### 评估框架
-
-> 设计文档：[docs/design/eval-design.md](docs/design/eval-design.md)
-
-内置完整的 Agent 质量评估体系：
-
-- **证据驱动**：所有断言都基于实际运行证据（工具调用记录、上下文快照、文件变更），而非简单的输入/输出匹配
-- **4 模块 12 指标**：覆盖上下文治理、记忆、任务规划、工具安全四大维度
-- **确定性检查 + 消融实验**：`check` 命令用于快速验证（无需调用模型），`experiment` 命令用于 on/off 消融对比
-- **JSON Benchmark**：每个测试用例是独立的 JSON 文件，支持场景化多步测试
-
-### 多模型支持
-
-支持多种 LLM 提供商，通过统一的 Provider 抽象屏蔽 API 差异：
-
-| 协议 | 支持的提供商 |
-|------|-------------|
-| `anthropic-messages` | Anthropic Claude |
-| `openai-compatible` | OpenAI、DeepSeek、及任意兼容 API |
-
-### 扩展机制
-
-三种扩展方式，从简单到复杂逐步深入：
-
-- **Markdown 技能**：用 `.md` 文件定义提示词模板，零代码扩展 Agent 能力
-- **Python 扩展**：编写 Python 模块注册自定义工具和钩子
-- **MCP 桥接**：通过 Model Context Protocol 接入外部工具服务
-
----
+- 多模型支持：Anthropic、OpenAI、DeepSeek 及任意 OpenAI-compatible API
+- 内置编程工具：文件读写、代码搜索、Shell 执行
+- 会话管理：持久化、分支、检查点、上下文压缩
+- 安全控制：只读模式、危险命令拦截、编辑严格匹配
 
 ## 快速开始
 
