@@ -358,6 +358,10 @@ def _list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
     return [item for item in _list(value) if isinstance(item, dict)]
 
