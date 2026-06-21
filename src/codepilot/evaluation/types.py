@@ -28,6 +28,7 @@ AssertionStatus = Literal["passed", "failed", "error", "skipped"]
 # 断言类型：命令/文件/差异/运行/追踪/上下文/记忆/安全/任务
 AssertionType = Literal[
     "command", "file", "diff", "run", "trace", "context", "memory", "security", "task",
+    "metric",
 ]
 # 场景步骤类型
 ScenarioStepType = Literal[

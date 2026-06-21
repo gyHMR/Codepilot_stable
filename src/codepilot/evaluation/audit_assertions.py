@@ -77,6 +77,18 @@ def _assert_run(
             failures.append(
                 f"freshness expected {expected['freshness']!r}, got {statuses!r}"
             )
+    if "expect_final_contains" in spec.options:
+        needles = _strings(spec.options["expect_final_contains"])
+        final_answer = _final_answer_text(bundle.result)
+        missing = [
+            needle for needle in needles
+            if needle not in final_answer
+        ]
+        expected["final_contains"] = needles
+        actual["final_answer"] = final_answer
+        actual["missing"] = missing
+        if missing:
+            failures.append(f"final answer missing expected text: {missing}")
     return _result(
         spec,
         failures,
@@ -523,6 +535,29 @@ def _task_refs(events: list[dict[str, Any]], run_id: str) -> list[str]:
 
 def _tool_call_id(event: dict[str, Any]) -> str:
     return str(event.get("toolCallId") or event.get("tool_call_id") or "")
+
+
+def _final_answer_text(result: dict[str, Any]) -> str:
+    final = result.get("final_message")
+    if isinstance(final, dict):
+        return _message_text(final)
+    messages = _list_of_dicts(result.get("messages"))
+    for message in reversed(messages):
+        if message.get("role") == "assistant":
+            return _message_text(message)
+    return ""
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    return "\n".join(
+        str(block.get("text", ""))
+        for block in _list_of_dicts(content)
+        if block.get("type") in {None, "text"}
+        and isinstance(block.get("text"), str)
+    )
 
 
 def _strings(value: Any) -> list[str]:

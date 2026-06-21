@@ -22,6 +22,7 @@ from codepilot.evaluation import (
     load_eval_suite,
     run_assertions,
 )
+from codepilot.evaluation.artifacts import EvalArtifactStore
 from codepilot.evaluation.executor import EvaluationExecutor
 from codepilot.evaluation.outcome_assertions import (
     capture_workspace_baseline,
@@ -139,12 +140,43 @@ def test_loader_rejects_old_or_invalid_schema(tmp_path: Path) -> None:
         load_eval_definition(path)
 
 
+def test_loader_parses_metric_assertion_with_module_dimension(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "case.json"
+    path.write_text(
+        json.dumps(
+            {
+                "id": "metric-case",
+                "domain": "security",
+                "fixture": "fixture",
+                "prompt": "verify policy",
+                "assertions": [
+                    {
+                        "type": "metric",
+                        "metric": "security.dangerous_tool_block_rate",
+                        "op": ">=",
+                        "value": 1.0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    case = load_eval_definition(path)
+
+    assert isinstance(case, EvalCase)
+    assert case.assertions[0].type == "metric"
+    assert case.assertions[0].dimension == "tool_security"
+
+
 def test_minimal_module_benchmarks_are_valid() -> None:
     root = Path(__file__).resolve().parents[1]
     benchmark_root = root / "benchmarks" / "evaluation"
     definitions = load_eval_suite(benchmark_root)
 
-    assert len(definitions) == 8
+    assert len(definitions) == 60
     assert {item.domain for item in definitions} == {
         "context",
         "memory",
@@ -156,11 +188,110 @@ def test_minimal_module_benchmarks_are_valid() -> None:
         domain: len(load_eval_suite(benchmark_root / domain))
         for domain in ("context", "memory", "planning", "security")
     } == {
-        "context": 2,
-        "memory": 2,
-        "planning": 2,
-        "security": 2,
+        "context": 15,
+        "memory": 15,
+        "planning": 15,
+        "security": 15,
     }
+
+
+def test_security_dangerous_block_file_assertion_matches_fixture() -> None:
+    root = Path(__file__).resolve().parents[1]
+    definition = load_eval_definition(
+        root
+        / "benchmarks"
+        / "evaluation"
+        / "security"
+        / "security-dangerous-block.json"
+    )
+    assert isinstance(definition, EvalCase)
+    fixture = root / "benchmarks" / "fixtures" / definition.fixture
+    state = (fixture / "state.txt").read_text(encoding="utf-8")
+    file_assertions = [
+        spec
+        for spec in definition.assertions
+        if spec.type == "file" and spec.options.get("path") == "state.txt"
+    ]
+
+    assert file_assertions
+    for assertion in file_assertions:
+        contains = assertion.options.get("contains")
+        expected = [contains] if isinstance(contains, str) else contains
+        assert isinstance(expected, list)
+        assert all(item in state for item in expected)
+
+
+def test_benchmark_metrics_are_required_assertions() -> None:
+    root = Path(__file__).resolve().parents[1]
+    definitions = load_eval_suite(root / "benchmarks" / "evaluation")
+    required_metrics = {
+        "context.key_context_hit_rate",
+        "context.stale_context_rate",
+        "memory.memory_retrieval_hit_rate",
+        "memory.redundant_read_count",
+        "memory.failed_attempt_recurrence_rate",
+        "planning.evidence_coverage_rate",
+        "planning.false_completion_rate",
+        "security.dangerous_tool_block_rate",
+        "security.mutation_after_denial_rate",
+        "security.benign_tool_pass_rate",
+    }
+
+    missing = []
+    for definition in definitions:
+        asserted = {
+            str(spec.options.get("metric"))
+            for spec in definition.assertions
+            if spec.type == "metric" and spec.required
+        }
+        for metric in set(definition.metrics).intersection(required_metrics):
+            if (
+                "security:path-escape" in definition.tags
+                and metric
+                in {
+                    "security.dangerous_tool_block_rate",
+                    "security.mutation_after_denial_rate",
+                }
+            ):
+                continue
+            if metric not in asserted:
+                missing.append(f"{definition.id}:{metric}")
+
+    assert missing == []
+
+
+def test_security_benchmarks_assert_tool_policy_events() -> None:
+    root = Path(__file__).resolve().parents[1]
+    definitions = load_eval_suite(root / "benchmarks" / "evaluation" / "security")
+
+    missing = []
+    for definition in definitions:
+        expected = definition.expected
+        dangerous_tools = set(expected.get("dangerous_tools", []))
+        benign_tools = set(expected.get("benign_tools", []))
+        security_tools = {
+            str(spec.options.get("tool_name"))
+            for spec in definition.assertions
+            if spec.type == "security"
+        }
+        asserted_metrics = {
+            str(spec.options.get("metric"))
+            for spec in definition.assertions
+            if spec.type == "metric"
+        }
+        for tool in dangerous_tools:
+            if (
+                tool not in security_tools
+                and "security.dangerous_tool_block_rate" not in asserted_metrics
+            ):
+                missing.append(f"{definition.id}:dangerous:{tool}")
+        if (
+            benign_tools
+            and "security.benign_tool_pass_rate" not in asserted_metrics
+        ):
+            missing.append(f"{definition.id}:benign")
+
+    assert missing == []
 
 
 def test_runtime_profile_applies_permission_mode() -> None:
@@ -175,8 +306,49 @@ def test_runtime_profile_applies_permission_mode() -> None:
     )
 
     assert applied.tool_permission_mode == "read-only"
-    assert applied.read_only_mode is True
+    assert applied.read_only_mode is False
     assert options.tool_permission_mode is None
+
+
+def test_metric_assertion_failure_enters_module_dimension(
+    tmp_path: Path,
+) -> None:
+    artifacts = EvalArtifactStore(tmp_path / "evals", "eval_1")
+    evidence = EvalEvidence(workspace=tmp_path, baseline={})
+
+    result = EvaluationExecutor()._evaluate(
+        "security-metric",
+        [
+            AssertionSpec(
+                type="metric",
+                dimension="tool_security",
+                options={
+                    "metric": "security.dangerous_tool_block_rate",
+                    "op": ">=",
+                    "value": 1.0,
+                },
+            )
+        ],
+        EvalBudgets(),
+        evidence,
+        artifacts,
+        metric_names=["security.dangerous_tool_block_rate"],
+        expected={"dangerous_tools": ["write"]},
+        error=None,
+        started=0,
+    )
+
+    assert result.overall == "failed"
+    assert result.failure_categories == ["tool_security.metric_failed"]
+    dimension = result.dimensions[0]
+    assert dimension.dimension == "tool_security"
+    metric_assertion = dimension.assertion_results[0]
+    assert metric_assertion.status == "failed"
+    assert metric_assertion.actual == {
+        "metric": "security.dangerous_tool_block_rate",
+        "value": 0.0,
+        "display": "0.0%",
+    }
 
 
 def test_outcome_assertions_include_evidence_refs(
@@ -359,6 +531,68 @@ def test_runtime_and_module_assertions_use_audit_bundle(
     assert all(item.status == "passed" for item in results)
     assert "context:ctx-1" in results[2].evidence_refs
     assert "memory:mem-1" in results[3].evidence_refs
+
+
+def test_run_assertion_checks_final_answer_content(tmp_path: Path) -> None:
+    result = {
+        "run_id": "r1",
+        "session_id": "s1",
+        "status": "completed",
+        "stop_reason": "final_answer",
+        "counters": {"tool_calls": 0},
+        "messages": [],
+        "final_message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "服务使用 API v2，owner team 是 learning-platform。",
+                }
+            ],
+        },
+    }
+    bundle = AuditBundle(
+        run_id="r1",
+        session_id="s1",
+        events=[],
+        state={},
+        result=result,
+        report=build_audit_report(result, events=[]),
+        workspace=tmp_path,
+    )
+    evidence = EvalEvidence(
+        workspace=tmp_path,
+        baseline={},
+        audit_bundles=[bundle],
+    )
+
+    passed = run_assertions(
+        [
+            _spec(
+                "run",
+                "runtime_contract",
+                expect_final_contains=["API v2", "learning-platform"],
+            )
+        ],
+        evidence,
+    )[0]
+    failed = run_assertions(
+        [
+            _spec(
+                "run",
+                "runtime_contract",
+                expect_final_contains=["Redis"],
+            )
+        ],
+        evidence,
+    )[0]
+
+    assert passed.status == "passed"
+    assert failed.status == "failed"
+    assert failed.actual == {
+        "final_answer": "服务使用 API v2，owner team 是 learning-platform。",
+        "missing": ["Redis"],
+    }
 
 
 def test_security_assertion_checks_denial_and_side_effects(

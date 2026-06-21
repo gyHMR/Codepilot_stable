@@ -117,6 +117,35 @@ def test_completion_gate_requires_fresh_verification_after_workspace_change() ->
     assert ok.reason == "all_steps_completed"
 
 
+def test_completion_gate_treats_unavailable_tool_as_blocked() -> None:
+    from codepilot.core.run_state import RunState
+    from codepilot.core.task_controller import TaskController
+    from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
+
+    controller = TaskController()
+    task = controller.initialize(
+        [UserMessage(content="使用 write 修改 state.txt")],
+    )
+    run = RunState(run_id="run_1", session_id="session_1")
+    missing_tool = ToolResultMessage(
+        tool_call_id="write_1",
+        tool_name="write",
+        content=[TextContent(text="Tool write not found")],
+        status="error",
+        is_error=True,
+    )
+
+    decision = controller.after_tool_results(task, run, [missing_tool])
+    check = controller.check_completion(task, run)
+
+    assert decision.action == "stop"
+    assert decision.reason == "tool_unavailable"
+    assert check.satisfied is False
+    assert check.reason == "blocked_steps"
+    assert task.steps[0].status == "blocked"
+    assert task.steps[0].note == "工具不可用"
+
+
 def test_replan_preserves_completed_steps_and_stops_after_limit() -> None:
     from codepilot.core.run_state import RunState
     from codepilot.core.task_controller import TaskController

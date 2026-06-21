@@ -55,13 +55,7 @@ Planing/
 Agents.md
 # Keep most ad-hoc docs ignored, but allow tracked architecture docs and demos.
 docs/*
-!docs/design/
-docs/design/*
 !docs/examples/
-docs/examples/*
-!docs/examples/extensions/
-docs/examples/extensions/*
-!docs/examples/extensions/demo_extension.py
-!docs/examples/extensions/demo_mcp_config.json
-!docs/examples/extensions/demo_skill.md
+!docs/examples/**
+benchmarks/
 参考文档/

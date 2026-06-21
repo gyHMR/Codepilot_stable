@@ -140,6 +140,23 @@ class TaskController:
             self._block_current_step(task, "工具权限拒绝")
             return ExecutionDecision("replan", "permission_denied", task.next_action)
 
+        unavailable = [
+            result for result in results if _is_tool_unavailable(result)
+        ]
+        if unavailable:
+            step = self._current_step(task)
+            if step is not None:
+                step.status = "blocked"
+                step.note = "工具不可用"
+                step.evidence_refs.extend(_evidence_refs(unavailable))
+            task.phase = "waiting"
+            task.next_action = "报告工具不可用并等待用户指示"
+            return ExecutionDecision(
+                "stop",
+                "tool_unavailable",
+                task.next_action,
+            )
+
         if self._has_failed_verification(results):
             step = self._current_step(task)
             if step is not None:
@@ -434,6 +451,19 @@ def _evidence_refs(results: list[ToolResultMessage]) -> list[str]:
         for path in result.affected_paths:
             refs.append(f"file:{path}")
     return refs
+
+
+def _is_tool_unavailable(result: ToolResultMessage) -> bool:
+    if result.status != "error" and not result.is_error:
+        return False
+    if result.error_code == "tool_not_found":
+        return True
+    text = " ".join(
+        block.text
+        for block in result.content
+        if isinstance(block, TextContent)
+    ).lower()
+    return text.startswith("tool ") and " not found" in text
 
 
 __all__ = ["TaskController"]

@@ -23,6 +23,7 @@ from .assertions import (
     failure_categories,
     required_assertions_passed,
     run_assertions,
+    run_metric_assertions,
 )
 from .outcome_assertions import capture_workspace_baseline
 from .metrics import calculate_case_metrics
@@ -334,11 +335,41 @@ class EvaluationExecutor:
         started: float,
         precomputed: list[AssertionResult] | None = None,
     ) -> EvalResult:
+        metric_assertions = [
+            spec for spec in assertions if spec.type == "metric"
+        ]
+        regular_assertions = [
+            spec for spec in assertions if spec.type != "metric"
+        ]
         assertion_results = [
             *(precomputed or []),
-            *run_assertions(assertions, evidence),
+            *run_assertions(regular_assertions, evidence),
             *self._budget_assertions(budgets, evidence),
         ]
+        metric_names_to_calculate = list(
+            dict.fromkeys(
+                [
+                    *(metric_names or []),
+                    *[
+                        str(spec.options.get("metric"))
+                        for spec in metric_assertions
+                        if spec.options.get("metric")
+                    ],
+                ]
+            )
+        )
+        metrics = {
+            **self._metrics(evidence, assertion_results),
+            **calculate_case_metrics(
+                metric_names_to_calculate,
+                expected or {},
+                evidence,
+                assertion_results,
+            ),
+        }
+        assertion_results.extend(
+            run_metric_assertions(metric_assertions, metrics)
+        )
         dimensions = build_dimension_results(assertion_results)
         if error:
             overall = "execution_error"
@@ -348,15 +379,6 @@ class EvaluationExecutor:
             overall = "passed"
         else:
             overall = "failed"
-        metrics = {
-            **self._metrics(evidence, assertion_results),
-            **calculate_case_metrics(
-                metric_names or [],
-                expected or {},
-                evidence,
-                assertion_results,
-            ),
-        }
         return EvalResult(
             case_id=case_id,
             overall=overall,
@@ -607,7 +629,10 @@ class EvaluationExecutor:
         return replace(
             session_options,
             tool_permission_mode=profile.permission_mode,
-            read_only_mode=profile.permission_mode == "read-only",
+            # Eval security cases need mutating tools to remain visible so
+            # PermissionPolicy can emit denied/approval evidence instead of
+            # turning the call into "Tool not found".
+            read_only_mode=False,
             context_governance_enabled=profile.context_governance_enabled,
             memory_enabled=profile.memory_enabled,
             task_control_enabled=profile.task_control_enabled,
