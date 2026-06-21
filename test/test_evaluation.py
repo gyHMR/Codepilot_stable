@@ -222,6 +222,96 @@ def test_security_dangerous_block_file_assertion_matches_fixture() -> None:
         assert all(item in state for item in expected)
 
 
+def test_memory_recall_final_answer_assertions_accept_chinese_terms(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    cases = {
+        "memory-legacy-conflict-recall.json": (
+            "legacy 中的 v1 方案已经废弃，不能作为当前事实。"
+        ),
+        "memory-runbook-recall.json": (
+            "Redis 不可用时应进入降级只读模式，不能回退到本地文件缓存。"
+        ),
+    }
+
+    for filename, final_answer in cases.items():
+        definition = load_eval_definition(
+            root / "benchmarks" / "evaluation" / "memory" / filename
+        )
+        assert isinstance(definition, EvalScenario)
+        run_spec = next(
+            spec for spec in definition.assertions if spec.type == "run"
+        )
+        result = {
+            "run_id": filename,
+            "session_id": "s1",
+            "status": "completed",
+            "workspace_changed": False,
+            "counters": {"tool_calls": 0},
+            "final_message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": final_answer},
+                ],
+            },
+        }
+        bundle = AuditBundle(
+            run_id=filename,
+            session_id="s1",
+            events=[],
+            state={},
+            result=result,
+            report=build_audit_report(result, events=[]),
+            workspace=tmp_path,
+        )
+        evidence = EvalEvidence(
+            workspace=tmp_path,
+            baseline={},
+            audit_bundles=[bundle],
+        )
+
+        assert run_assertions([run_spec], evidence)[0].status == "passed"
+
+
+def test_memory_stale_correction_does_not_penalize_required_reread() -> None:
+    root = Path(__file__).resolve().parents[1]
+    definition = load_eval_definition(
+        root
+        / "benchmarks"
+        / "evaluation"
+        / "memory"
+        / "memory-stale-state-correction.json"
+    )
+    assert isinstance(definition, EvalScenario)
+
+    asserted_metrics = {
+        str(spec.options.get("metric"))
+        for spec in definition.assertions
+        if spec.type == "metric"
+    }
+
+    assert "memory.redundant_read_count" not in definition.metrics
+    assert "memory.redundant_read_count" not in asserted_metrics
+
+
+def test_context_config_key_context_matches_prompted_sources() -> None:
+    root = Path(__file__).resolve().parents[1]
+    definition = load_eval_definition(
+        root
+        / "benchmarks"
+        / "evaluation"
+        / "context"
+        / "context-config-settings.json"
+    )
+    assert isinstance(definition, EvalCase)
+
+    assert definition.expected["key_context"] == [
+        "config/service.yaml",
+        "src/settings.py",
+    ]
+
+
 def test_benchmark_metrics_are_required_assertions() -> None:
     root = Path(__file__).resolve().parents[1]
     definitions = load_eval_suite(root / "benchmarks" / "evaluation")
