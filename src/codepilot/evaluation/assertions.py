@@ -156,12 +156,25 @@ def _assert_metric(
         "op": operator,
         "value": expected_value,
     }
+    if bool(spec.options.get("allow_na", False)):
+        expected["allow_na"] = True
     actual = {
         "metric": metric_name,
         "value": actual_value,
         "display": display,
     }
     if actual_value is None:
+        if bool(spec.options.get("allow_na", False)):
+            return AssertionResult(
+                name=spec.type,
+                dimension=spec.dimension,
+                status="passed",
+                summary=f"Metric is unavailable and allowed: {metric_name}",
+                expected=expected,
+                actual=actual,
+                evidence_refs=[f"metric:{metric_name}"],
+                required=spec.required,
+            )
         return AssertionResult(
             name=spec.type,
             dimension=spec.dimension,

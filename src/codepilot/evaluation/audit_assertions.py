@@ -78,13 +78,14 @@ def _assert_run(
                 f"freshness expected {expected['freshness']!r}, got {statuses!r}"
             )
     if "expect_final_contains" in spec.options:
-        needles = _strings(spec.options["expect_final_contains"])
+        groups = _text_match_groups(spec.options["expect_final_contains"])
         final_answer = _final_answer_text(bundle.result)
-        missing = [
-            needle for needle in needles
-            if needle not in final_answer
+        missing_groups = [
+            group for group in groups
+            if not any(needle in final_answer for needle in group)
         ]
-        expected["final_contains"] = needles
+        missing = _format_missing_groups(missing_groups)
+        expected["final_contains"] = _format_missing_groups(groups)
         actual["final_answer"] = final_answer
         actual["missing"] = missing
         if missing:
@@ -449,7 +450,12 @@ def _assert_task(
             )
     if bool(spec.options.get("require_evidence_refs", False)):
         expected["evidence_refs"] = "non-empty"
-        if int(actual["evidence_ref_count"] or 0) <= 0:
+        evidence_ref_count = max(
+            int(actual["evidence_ref_count"] or 0),
+            _task_evidence_ref_count(bundle.events),
+        )
+        actual["evidence_ref_count"] = evidence_ref_count
+        if evidence_ref_count <= 0:
             failures.append("completed task steps have no evidence references")
     if bool(spec.options.get("forbid_false_completion", False)):
         expected["false_completion"] = False
@@ -533,6 +539,18 @@ def _task_refs(events: list[dict[str, Any]], run_id: str) -> list[str]:
     ]
 
 
+def _task_evidence_ref_count(events: list[dict[str, Any]]) -> int:
+    refs: list[str] = []
+    for event in events:
+        if event.get("type") != "task_step_updated":
+            continue
+        refs.extend(str(ref) for ref in _list(event.get("evidence_refs")))
+        task = _dict(event.get("task"))
+        for step in _list_of_dicts(task.get("steps")):
+            refs.extend(str(ref) for ref in _list(step.get("evidence_refs")))
+    return len(dict.fromkeys(refs))
+
+
 def _tool_call_id(event: dict[str, Any]) -> str:
     return str(event.get("toolCallId") or event.get("tool_call_id") or "")
 
@@ -562,6 +580,32 @@ def _message_text(message: dict[str, Any]) -> str:
 
 def _strings(value: Any) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else [str(value)]
+
+
+def _text_match_groups(value: Any) -> list[list[str]]:
+    if isinstance(value, str):
+        return [[value]]
+    if not isinstance(value, list):
+        raise ValueError("expect_final_contains must be a string or array")
+    groups: list[list[str]] = []
+    for item in value:
+        if isinstance(item, str):
+            groups.append([item])
+        elif (
+            isinstance(item, list)
+            and item
+            and all(isinstance(needle, str) for needle in item)
+        ):
+            groups.append(list(item))
+        else:
+            raise ValueError(
+                "expect_final_contains items must be strings or non-empty string arrays"
+            )
+    return groups
+
+
+def _format_missing_groups(groups: list[list[str]]) -> list[str | list[str]]:
+    return [group[0] if len(group) == 1 else group for group in groups]
 
 
 def _dict(value: Any) -> dict[str, Any]:

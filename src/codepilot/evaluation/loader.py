@@ -267,6 +267,13 @@ def _validate_assertion_options(
             raise EvalCaseValidationError(
                 f"{source}.value must be a number"
             )
+        if (
+            "allow_na" in options
+            and not isinstance(options.get("allow_na"), bool)
+        ):
+            raise EvalCaseValidationError(
+                f"{source}.allow_na must be a boolean"
+            )
 
 
 def _metric_dimension(metric: str) -> EvalDimension:

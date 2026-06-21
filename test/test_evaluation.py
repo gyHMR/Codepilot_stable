@@ -23,6 +23,7 @@ from codepilot.evaluation import (
     run_assertions,
 )
 from codepilot.evaluation.artifacts import EvalArtifactStore
+from codepilot.evaluation.assertions import run_metric_assertions
 from codepilot.evaluation.executor import EvaluationExecutor
 from codepilot.evaluation.outcome_assertions import (
     capture_workspace_baseline,
@@ -533,6 +534,75 @@ def test_runtime_and_module_assertions_use_audit_bundle(
     assert "memory:mem-1" in results[3].evidence_refs
 
 
+def test_task_report_counts_nested_step_evidence_refs(
+    tmp_path: Path,
+) -> None:
+    events = [
+        {
+            "type": "task_step_updated",
+            "runId": "r1",
+            "eventId": "r1:1",
+            "timestamp": 1,
+            "task": {
+                "steps": [
+                    {
+                        "id": "step_1",
+                        "status": "completed",
+                        "evidence_refs": ["tool:read-1"],
+                    },
+                    {
+                        "id": "step_2",
+                        "status": "completed",
+                        "evidence_refs": ["tool:test-1", "file:app.py"],
+                    },
+                ],
+            },
+        }
+    ]
+    result = {
+        "run_id": "r1",
+        "session_id": "s1",
+        "status": "completed",
+        "stop_reason": "final_answer",
+        "counters": {"tool_calls": 0},
+        "messages": [],
+        "workspace_changed": False,
+        "task": {
+            "completion_satisfied": True,
+            "completion_reason": "all_steps_completed",
+            "completed_steps": ["inspect", "verify"],
+            "pending_steps": [],
+            "blocked_steps": [],
+        },
+    }
+    report = build_audit_report(result, events=events)
+    bundle = AuditBundle(
+        run_id="r1",
+        session_id="s1",
+        events=events,
+        state={},
+        result=result,
+        report=report,
+        workspace=tmp_path,
+    )
+    evidence = EvalEvidence(
+        workspace=tmp_path,
+        baseline={},
+        audit_bundles=[bundle],
+    )
+
+    assertion = _spec(
+        "task",
+        "task_planning",
+        expect_completion_satisfied=True,
+        require_evidence_refs=True,
+    )
+    task_result = run_assertions([assertion], evidence)[0]
+
+    assert report["task"]["evidence_ref_count"] == 3
+    assert task_result.status == "passed"
+
+
 def test_run_assertion_checks_final_answer_content(tmp_path: Path) -> None:
     result = {
         "run_id": "r1",
@@ -546,7 +616,7 @@ def test_run_assertion_checks_final_answer_content(tmp_path: Path) -> None:
             "content": [
                 {
                     "type": "text",
-                    "text": "服务使用 API v2，owner team 是 learning-platform。",
+                    "text": "服务使用 API v2，负责人团队是 learning-platform。",
                 }
             ],
         },
@@ -576,6 +646,19 @@ def test_run_assertion_checks_final_answer_content(tmp_path: Path) -> None:
         ],
         evidence,
     )[0]
+    alternative_passed = run_assertions(
+        [
+            _spec(
+                "run",
+                "runtime_contract",
+                expect_final_contains=[
+                    "API v2",
+                    ["owner team", "负责人团队"],
+                ],
+            )
+        ],
+        evidence,
+    )[0]
     failed = run_assertions(
         [
             _spec(
@@ -588,10 +671,36 @@ def test_run_assertion_checks_final_answer_content(tmp_path: Path) -> None:
     )[0]
 
     assert passed.status == "passed"
+    assert alternative_passed.status == "passed"
     assert failed.status == "failed"
     assert failed.actual == {
-        "final_answer": "服务使用 API v2，owner team 是 learning-platform。",
+        "final_answer": "服务使用 API v2，负责人团队是 learning-platform。",
         "missing": ["Redis"],
+    }
+
+
+def test_metric_assertion_can_allow_unavailable_metric() -> None:
+    result = run_metric_assertions(
+        [
+            AssertionSpec(
+                type="metric",
+                dimension="memory",
+                options={
+                    "metric": "memory.failed_attempt_recurrence_rate",
+                    "op": "<=",
+                    "value": 0.0,
+                    "allow_na": True,
+                },
+            )
+        ],
+        {},
+    )[0]
+
+    assert result.status == "passed"
+    assert result.actual == {
+        "metric": "memory.failed_attempt_recurrence_rate",
+        "value": None,
+        "display": None,
     }
 
 

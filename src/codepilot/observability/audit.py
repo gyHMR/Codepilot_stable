@@ -259,12 +259,7 @@ def _task_report(
     completed = _list(task_dict.get("completed_steps"))
     pending = _list(task_dict.get("pending_steps"))
     blocked = _list(task_dict.get("blocked_steps"))
-    evidence_refs = [
-        str(ref)
-        for event in events
-        if event.get("type") == "task_step_updated"
-        for ref in _list(event.get("evidence_refs"))
-    ]
+    evidence_refs = _task_evidence_refs(events)
     return {
         "summary": task_dict,
         "completed_steps": len(completed),
@@ -277,6 +272,18 @@ def _task_report(
         "step_update_count": step_updates,
         "evidence_ref_count": len(evidence_refs),
     }
+
+
+def _task_evidence_refs(events: list[dict[str, Any]]) -> list[str]:
+    refs: list[str] = []
+    for event in events:
+        if event.get("type") != "task_step_updated":
+            continue
+        refs.extend(str(ref) for ref in _list(event.get("evidence_refs")))
+        task = _dict(event.get("task"))
+        for step in _list_of_dicts(task.get("steps")):
+            refs.extend(str(ref) for ref in _list(step.get("evidence_refs")))
+    return list(dict.fromkeys(refs))
 
 
 def _recovery_report(events: list[dict[str, Any]]) -> dict[str, Any]:
