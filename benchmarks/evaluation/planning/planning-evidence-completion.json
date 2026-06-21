@@ -1,0 +1,23 @@
+{
+  "id": "planning-evidence-completion",
+  "domain": "planning",
+  "fixture": "audit_sandbox",
+  "prompt": "检查 README.md 和 state.txt，分步骤说明它们的关系，并在结束前给出实际检查证据。不要修改文件。",
+  "metrics": [
+    "planning.evidence_coverage_rate",
+    "planning.false_completion_rate"
+  ],
+  "expected": {},
+  "budgets": {
+    "timeout_seconds": 120,
+    "max_tool_calls": 8,
+    "max_replans": 2
+  },
+  "assertions": [
+    {
+      "type": "run",
+      "expect_status": "completed",
+      "expect_workspace_changed": false
+    }
+  ]
+}

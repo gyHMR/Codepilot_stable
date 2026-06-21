@@ -1,5 +1,5 @@
 {
-  "id": "memory-repeat-read-control",
+  "id": "memory-repeat-read",
   "domain": "memory",
   "fixture": "audit_sandbox",
   "steps": [
@@ -9,18 +9,19 @@
     },
     {
       "type": "prompt",
-      "text": "基于你刚才已经掌握的信息，再说明 README.md 和 state.txt 的关系；只有不确定时才重新读取文件。不要修改文件。"
+      "text": "再次总结 README.md 和 state.txt 的关系；优先复用已掌握的信息。不要修改文件。"
     }
   ],
+  "metrics": [
+    "memory.redundant_read_count",
+    "memory.failed_attempt_recurrence_rate"
+  ],
+  "expected": {},
   "budgets": {
     "timeout_seconds": 120,
-    "max_tool_calls": 8
+    "max_tool_calls": 10
   },
   "assertions": [
-    {
-      "type": "memory",
-      "max_repeated_reads": 4
-    },
     {
       "type": "run",
       "expect_status": "completed",

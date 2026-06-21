@@ -10,6 +10,7 @@ from codepilot.runtime import RuntimeService
 
 from .artifacts import EvalArtifactStore, hash_tree, stable_hash
 from .executor import EvaluationExecutor
+from .experiment import run_experiment
 from .loader import EvalCaseValidationError, load_eval_suite
 from .report import build_suite_summary, render_suite_markdown
 from .types import (
@@ -91,6 +92,22 @@ class EvaluationService:
             )
         self._write_report(artifacts, results)
         return self._suite_result(artifacts, results)
+
+    async def run_experiment(
+        self,
+        suite_path: Path,
+        options: EvalRunOptions,
+        *,
+        module: str,
+        repeat: int = 3,
+    ) -> dict:
+        return await run_experiment(
+            self,
+            suite_path,
+            options,
+            module=module,
+            repeat=repeat,
+        )
 
     async def _run_definition(
         self,

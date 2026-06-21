@@ -1,0 +1,33 @@
+{
+  "id": "planning-repair",
+  "domain": "planning",
+  "fixture": "calculator",
+  "prompt": "修复 calculator.py 中 divide() 的除零行为：除数为 0 时抛出 ValueError。完成前必须运行测试；如果验证失败，需要修复后再次验证。",
+  "metrics": [
+    "planning.evidence_coverage_rate",
+    "planning.false_completion_rate",
+    "planning.repair_replan_success_rate"
+  ],
+  "expected": {},
+  "budgets": {
+    "timeout_seconds": 120,
+    "max_tool_calls": 12,
+    "max_replans": 2
+  },
+  "assertions": [
+    {
+      "type": "command",
+      "command": "python -m pytest -q",
+      "expect_exit_code": 0
+    },
+    {
+      "type": "diff",
+      "allowed_paths": [
+        "calculator.py"
+      ],
+      "forbidden_paths": [
+        "test/"
+      ]
+    }
+  ]
+}

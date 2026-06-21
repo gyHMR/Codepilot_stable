@@ -124,6 +124,9 @@ class CreateAgentSessionOptions:
     thinking_level: Optional[str] = None
     tool_execution: Optional[ToolExecutionMode] = None
     max_tool_calls_per_turn: Optional[int] = None
+    context_governance_enabled: bool = True
+    memory_enabled: bool = True
+    task_control_enabled: bool = True
     load_workspace_resources: bool = True
     enabled_builtin_tools: Optional[list[str]] = None
     max_context_messages: Optional[int] = None

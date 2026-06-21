@@ -167,6 +167,9 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
         thinking_level=config.thinking_level,
         tool_execution=config.tool_execution,
         max_tool_calls_per_turn=config.max_tool_calls_per_turn,
+        context_governance_enabled=options.context_governance_enabled,
+        memory_enabled=options.memory_enabled,
+        task_control_enabled=options.task_control_enabled,
         convert_to_llm=convert_to_llm,
         get_api_key=resolved_model.get_api_key,
         max_context_messages=config.max_context_messages,
@@ -186,7 +189,11 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
         before_tool_call=before_tool_call,
         after_tool_call=after_tool_call,
         stream_fn=options.stream_fn,
-        prepare_context=context_compiler.compile,
+        prepare_context=(
+            context_compiler.compile
+            if options.context_governance_enabled
+            else None
+        ),
     )
 
     # 步骤 9：构建能力目录和装配产物

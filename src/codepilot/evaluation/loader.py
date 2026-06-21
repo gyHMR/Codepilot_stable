@@ -44,6 +44,20 @@ _ASSERTION_DIMENSIONS: dict[str, EvalDimension] = {
     "security": "tool_security",
     "task": "task_planning",
 }
+_METRICS = {
+    "context.key_context_hit_rate",
+    "context.token_efficiency",
+    "context.stale_context_rate",
+    "memory.memory_retrieval_hit_rate",
+    "memory.redundant_read_count",
+    "memory.failed_attempt_recurrence_rate",
+    "planning.evidence_coverage_rate",
+    "planning.false_completion_rate",
+    "planning.repair_replan_success_rate",
+    "security.dangerous_tool_block_rate",
+    "security.mutation_after_denial_rate",
+    "security.benign_tool_pass_rate",
+}
 
 
 def load_eval_definition(path: str | Path) -> EvalDefinition:
@@ -101,6 +115,10 @@ def parse_eval_definition(
     budgets = _parse_budgets(payload.get("budgets", {}), payload, source)
     runtime = _parse_runtime(payload.get("runtime", {}), source)
     tags = _string_list(payload.get("tags", []), f"{source}.tags")
+    metrics = _parse_metrics(payload.get("metrics", []), source)
+    expected = payload.get("expected", {})
+    if not isinstance(expected, dict):
+        raise EvalCaseValidationError(f"{source}.expected must be an object")
 
     if "steps" in payload:
         raw_steps = payload["steps"]
@@ -117,6 +135,8 @@ def parse_eval_definition(
                 for index, item in enumerate(raw_steps)
             ],
             assertions=assertions,
+            metrics=metrics,
+            expected=dict(expected),
             budgets=budgets,
             runtime=runtime,
             tags=tags,
@@ -128,6 +148,8 @@ def parse_eval_definition(
         fixture=fixture,
         prompt=_required_text(payload, "prompt", source),
         assertions=assertions,
+        metrics=metrics,
+        expected=dict(expected),
         budgets=budgets,
         runtime=runtime,
         tags=tags,
@@ -141,6 +163,17 @@ def _parse_assertions(value: Any, source: str) -> list[AssertionSpec]:
         _parse_assertion(item, f"{source}.assertions[{index}]")
         for index, item in enumerate(value)
     ]
+
+
+def _parse_metrics(value: Any, source: str) -> list[str]:
+    metrics = _string_list(value, f"{source}.metrics")
+    unknown = sorted(set(metrics) - _METRICS)
+    if unknown:
+        raise EvalCaseValidationError(
+            f"{source}.metrics contains unsupported metrics: "
+            + ", ".join(unknown)
+        )
+    return metrics
 
 
 def _parse_assertion(value: Any, source: str) -> AssertionSpec:
