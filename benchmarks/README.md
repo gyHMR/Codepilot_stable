@@ -1,41 +1,28 @@
 # Codepilot Benchmarks
 
-目录按 Eval 层次组织：
+轻量评估任务统一放在 `evaluation/`：
 
-- `coding/`：真实模型代码任务；
-- `harness/`：确定模型输出下的 Runtime 合同回归；
-- `recovery/`：Session 与工作区恢复场景；
-- `fixtures/`：每个案例使用的独立小型工程。
-
-示例：
-
-```python
-import asyncio
-
-from codepilot.evaluation import EvaluationService, EvalRunOptions
-from codepilot.runtime import CreateAgentSessionOptions
-
-options = EvalRunOptions(
-    fixtures_root="benchmarks/fixtures",
-    artifact_root=".codepilot/evals",
-    benchmark_name="coding-smoke",
-    session_options=CreateAgentSessionOptions(
-        workspace_dir=".",
-        provider="deepseek",
-        model_id="deepseek-chat",
-    ),
-)
-
-result = asyncio.run(
-    EvaluationService().run_suite(
-        "benchmarks/coding",
-        options,
-    )
-)
-print(result.summary)
+```text
+evaluation/
+├── context/   # 关键上下文命中、过期上下文排除
+├── memory/    # 记忆召回、重复读取
+├── planning/  # 证据完成、失败后修复
+└── security/  # 危险工具阻止、正常工具放行
 ```
 
-Harness Regression 可通过
-`CreateAgentSessionOptions(stream_fn=...)` 注入 Session 级确定性模型流。
-脚本行为属于 Python callable，不写入 JSON；可复用的 Harness 脚本与案例组合应放在
-`harness/` 的 Python runner 中。基础贯通测试见 `test/test_evaluation.py`。
+当前每个模块提供两个示例。以后扩展时，只需在对应目录增加 JSON 和
+fixture，不需要修改评估框架。
+
+用例通过：
+
+- `metrics` 声明要计算的指标；
+- `expected` 提供关键文件、Memory 召回或工具类型等简单答案；
+- `assertions` 检查任务是否正常完成以及文件结果是否正确。
+
+常用命令：
+
+```bash
+python -m codepilot.evaluation check
+python -m codepilot.evaluation run context
+python -m codepilot.evaluation experiment memory --repeat 3
+```

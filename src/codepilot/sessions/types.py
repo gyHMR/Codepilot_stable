@@ -110,6 +110,9 @@ class AgentSessionOptions:
     # 每轮对话中允许的最大工具调用次数
     # 防止 Agent 在单轮中执行过多工具调用，默认为 8
     max_tool_calls_per_turn: int = 8
+    context_governance_enabled: bool = True
+    memory_enabled: bool = True
+    task_control_enabled: bool = True
 
     # 消息转换函数
     # 在发送消息给 LLM 之前，将内部 AgentMessage 格式转换为 LLM Message 格式

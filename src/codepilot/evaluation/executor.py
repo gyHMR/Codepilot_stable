@@ -25,6 +25,7 @@ from .assertions import (
     run_assertions,
 )
 from .outcome_assertions import capture_workspace_baseline
+from .metrics import calculate_case_metrics
 from .types import (
     AssertionResult,
     AssertionSpec,
@@ -71,7 +72,7 @@ class EvaluationExecutor:
             replace(
                 self._apply_runtime_profile(
                     options.session_options,
-                    case.runtime,
+                    replace(case.runtime, **options.runtime_overrides),
                 ),
                 workspace_dir=workspace,
                 session_id=None,
@@ -106,6 +107,8 @@ class EvaluationExecutor:
             case.budgets,
             evidence,
             artifacts,
+            metric_names=case.metrics,
+            expected=case.expected,
             error=error,
             started=started,
         )
@@ -135,7 +138,7 @@ class EvaluationExecutor:
         session_options = replace(
             self._apply_runtime_profile(
                 options.session_options,
-                scenario.runtime,
+                replace(scenario.runtime, **options.runtime_overrides),
             ),
             workspace_dir=workspace,
             session_id=None,
@@ -306,6 +309,8 @@ class EvaluationExecutor:
             scenario.budgets,
             evidence,
             artifacts,
+            metric_names=scenario.metrics,
+            expected=scenario.expected,
             error=error,
             started=started,
             precomputed=step_assertions,
@@ -323,6 +328,8 @@ class EvaluationExecutor:
         evidence: EvalEvidence,
         artifacts: EvalArtifactStore,
         *,
+        metric_names: list[str] | None = None,
+        expected: dict | None = None,
         error: str | None,
         started: float,
         precomputed: list[AssertionResult] | None = None,
@@ -341,7 +348,15 @@ class EvaluationExecutor:
             overall = "passed"
         else:
             overall = "failed"
-        metrics = self._metrics(evidence, assertion_results)
+        metrics = {
+            **self._metrics(evidence, assertion_results),
+            **calculate_case_metrics(
+                metric_names or [],
+                expected or {},
+                evidence,
+                assertion_results,
+            ),
+        }
         return EvalResult(
             case_id=case_id,
             overall=overall,
@@ -477,20 +492,20 @@ class EvaluationExecutor:
             for bundle in evidence.audit_bundles
         ]
         return {
-            "run_count": len(evidence.audit_bundles),
-            "assertion_count": len(assertion_results),
-            "assertions_passed": sum(
+            "runtime.run_count": len(evidence.audit_bundles),
+            "runtime.assertion_count": len(assertion_results),
+            "runtime.assertions_passed": sum(
                 result.status == "passed" for result in assertion_results
             ),
-            "model_attempts": sum(
+            "runtime.model_attempts": sum(
                 int(summary.get("model_attempts", 0) or 0)
                 for summary in run_summaries
             ),
-            "tool_calls": sum(
+            "runtime.tool_calls": sum(
                 int(summary.get("tool_calls", 0) or 0)
                 for summary in run_summaries
             ),
-            "changed_path_count": len(evidence.changes),
+            "runtime.changed_path_count": len(evidence.changes),
         }
 
     @staticmethod
@@ -593,6 +608,9 @@ class EvaluationExecutor:
             session_options,
             tool_permission_mode=profile.permission_mode,
             read_only_mode=profile.permission_mode == "read-only",
+            context_governance_enabled=profile.context_governance_enabled,
+            memory_enabled=profile.memory_enabled,
+            task_control_enabled=profile.task_control_enabled,
         )
 
     @staticmethod

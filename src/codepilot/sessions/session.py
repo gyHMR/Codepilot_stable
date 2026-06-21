@@ -85,6 +85,7 @@ class AgentSession:
             store=self.memory_store,
             workspace_dir=self.workspace_dir,
         )
+        self.memory_enabled = options.memory_enabled
         prepare_context = self._prepare_context_for_session(options.prepare_context)
 
         # 加载已持久化的历史消息；优先读取会话消息，若无则读取上下文消息
@@ -112,6 +113,7 @@ class AgentSession:
             session_id=self.session_id,
             stream_fn=options.stream_fn,
             prepare_context=prepare_context,
+            task_control_enabled=options.task_control_enabled,
         )
         if options.convert_to_llm is not None:
             agent_opts.convert_to_llm = options.convert_to_llm
@@ -217,10 +219,13 @@ class AgentSession:
             继续运行产生的结构化 Run 结果。
         """
         await self._run_lifecycle_hooks(text="", is_continue=True, hooks=self.before_prompt_hooks)
-        self.agent.set_recovered_task(self._active_task_projection())
+        self.agent.set_recovered_task(
+            self._active_task_projection() if self.memory_enabled else None
+        )
         result = await self.agent.continue_run(run_id=run_id)
         self.store.append_run_result(result)
-        self._finalize_memory(result)
+        if self.memory_enabled:
+            self._finalize_memory(result)
         await self._compact_context_if_needed()
         await self._run_lifecycle_hooks(text="", is_continue=True, hooks=self.after_prompt_hooks)
         return result
@@ -259,8 +264,11 @@ class AgentSession:
             is_continue=False,
             hooks=self.before_prompt_hooks,
         )
-        self._remember_task(text, run_id=run_id)
-        self.agent.set_recovered_task(self._active_task_projection())
+        if self.memory_enabled:
+            self._remember_task(text, run_id=run_id)
+            self.agent.set_recovered_task(self._active_task_projection())
+        else:
+            self.agent.set_recovered_task(None)
         self._check_context_freshness()
         await self._check_and_compact_before_prompt()
         result = await self.agent.run(
@@ -269,7 +277,8 @@ class AgentSession:
             run_id=run_id,
         )
         self.store.append_run_result(result)
-        self._finalize_memory(result)
+        if self.memory_enabled:
+            self._finalize_memory(result)
         await self._compact_context_if_needed()
         await self._run_lifecycle_hooks(
             text=text,
@@ -386,7 +395,7 @@ class AgentSession:
             if isinstance(report, dict):
                 self.latest_context_report = report
                 memory_ids = report.get("retrieved_memory_ids")
-                if isinstance(memory_ids, list) and memory_ids:
+                if self.memory_enabled and isinstance(memory_ids, list) and memory_ids:
                     self.store.append_event(
                         {
                             "type": "memory_retrieved",
@@ -399,7 +408,7 @@ class AgentSession:
         if event["type"] == "message_end":
             message = event["message"]
             self.store.append_context_message(message)
-            if isinstance(message, ToolResultMessage):
+            if self.memory_enabled and isinstance(message, ToolResultMessage):
                 self._observe_tool_memory(
                     message,
                     run_id=event.get("runId"),
@@ -425,7 +434,11 @@ class AgentSession:
             # 克隆编译器实例，避免多会话共享同一状态
             owner = owner.clone()
             prepare_context = owner.compile
-        if owner is not None and hasattr(owner, "bind_memory_retriever"):
+        if (
+            self.memory_enabled
+            and owner is not None
+            and hasattr(owner, "bind_memory_retriever")
+        ):
             # 绑定当前会话的记忆检索器
             owner.bind_memory_retriever(self.memory_retriever)
         return prepare_context

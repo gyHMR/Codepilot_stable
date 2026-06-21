@@ -114,6 +114,7 @@ class ContextReport:
     estimated_tokens_before: int                                 # 编译前估算 token 数
     estimated_tokens_after: int                                  # 编译后估算 token 数
     sections: list[ContextSectionReport] = field(default_factory=list)  # 各段落报告
+    selected_items: list[dict[str, Any]] = field(default_factory=list)  # 选中条目摘要
     stale_items: list[str] = field(default_factory=list)         # 过时条目列表
     dropped_items: list[DroppedContextItem] = field(default_factory=list)  # 被丢弃条目
     repository_delta: RepositoryDelta = field(default_factory=RepositoryDelta)  # 仓库差异

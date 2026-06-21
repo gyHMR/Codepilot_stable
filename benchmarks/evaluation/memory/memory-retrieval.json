@@ -1,0 +1,33 @@
+{
+  "id": "memory-retrieval",
+  "domain": "memory",
+  "fixture": "audit_sandbox",
+  "steps": [
+    {
+      "type": "prompt",
+      "text": "读取 state.txt，并记住它的内容。不要修改文件。"
+    },
+    {
+      "type": "prompt",
+      "text": "刚才 state.txt 的内容是什么？优先使用已经记录的记忆。不要修改文件。"
+    }
+  ],
+  "metrics": [
+    "memory.memory_retrieval_hit_rate",
+    "memory.redundant_read_count"
+  ],
+  "expected": {
+    "expect_memory_retrieval": true
+  },
+  "budgets": {
+    "timeout_seconds": 120,
+    "max_tool_calls": 8
+  },
+  "assertions": [
+    {
+      "type": "run",
+      "expect_status": "completed",
+      "expect_workspace_changed": false
+    }
+  ]
+}

@@ -186,17 +186,22 @@ async def _run_loop(
     """核心执行循环：模型推理 → 工具执行 → 任务状态更新，直到任务完成或出错。"""
     llm_runner = LLMStreamRunner(config=config, emitter=emitter, stream_fn=stream_fn)
     tool_coordinator = ToolCallCoordinator(config=config, emitter=emitter)
-    task_controller = TaskController()
-    task = task_controller.initialize(
-        current_context.messages,
-        recovered_task=current_context.recovered_task,
+    task_controller = TaskController() if config.task_control_enabled else None
+    task = (
+        task_controller.initialize(
+            current_context.messages,
+            recovered_task=current_context.recovered_task,
+        )
+        if task_controller is not None
+        else None
     )
-    await emitter.emit(
-        {
-            "type": "task_plan_created",
-            "task": task_controller.event_payload(task),
-        }
-    )
+    if task_controller is not None and task is not None:
+        await emitter.emit(
+            {
+                "type": "task_plan_created",
+                "task": task_controller.event_payload(task),
+            }
+        )
     first_iteration = True
     pending_messages = await _drain(config.get_steering_messages)
     model_retries = 0
@@ -218,7 +223,11 @@ async def _run_loop(
                 )
                 pending_messages = []
 
-            current_context.current_task = task_controller.render_context(task)
+            current_context.current_task = (
+                task_controller.render_context(task)
+                if task_controller is not None and task is not None
+                else None
+            )
             state.counters.model_attempts += 1
             assistant = await llm_runner.stream_assistant_response(
                 current_context,
@@ -312,27 +321,32 @@ async def _run_loop(
                     signal=signal,
                 )
                 state.collect_tool_results(tool_results)
-                decision = task_controller.after_tool_results(task, state, tool_results)
-                await emitter.emit(
-                    {
-                        "type": "task_step_updated",
-                        "task": task_controller.event_payload(task),
-                    }
+                decision = (
+                    task_controller.after_tool_results(task, state, tool_results)
+                    if task_controller is not None and task is not None
+                    else None
                 )
-                await emitter.emit(
-                    {
-                        "type": "task_decision",
-                        "decision": {
-                            "action": decision.action,
-                            "reason": decision.reason,
-                            "next_action": decision.next_action,
-                        },
-                        "task": task_controller.event_payload(task),
-                    }
-                )
+                if task_controller is not None and task is not None and decision is not None:
+                    await emitter.emit(
+                        {
+                            "type": "task_step_updated",
+                            "task": task_controller.event_payload(task),
+                        }
+                    )
+                    await emitter.emit(
+                        {
+                            "type": "task_decision",
+                            "decision": {
+                                "action": decision.action,
+                                "reason": decision.reason,
+                                "next_action": decision.next_action,
+                            },
+                            "task": task_controller.event_payload(task),
+                        }
+                    )
                 current_context.messages.extend(tool_results)
                 new_messages.extend(tool_results)
-                if decision.action == "stop":
+                if decision is not None and decision.action == "stop":
                     return await _stop_with_error(
                         emitter,
                         state,
@@ -341,7 +355,11 @@ async def _run_loop(
                         code="run.replan_limit",
                         message=decision.reason,
                         stop_reason="replan_limit",
-                        task=task_controller.summarize(task),
+                        task=(
+                            task_controller.summarize(task)
+                            if task_controller is not None and task is not None
+                            else None
+                        ),
                     )
 
             await emitter.emit(
@@ -356,7 +374,11 @@ async def _run_loop(
                         stop_reason="approval_required",
                         messages=new_messages,
                         final_message=assistant,
-                        task=task_controller.summarize(task),
+                        task=(
+                            task_controller.summarize(task)
+                            if task_controller is not None and task is not None
+                            else None
+                        ),
                     ),
                 )
             if any(result.status == "cancelled" for result in tool_results):
@@ -367,28 +389,33 @@ async def _run_loop(
                         stop_reason="aborted",
                         messages=new_messages,
                         final_message=assistant,
-                        task=task_controller.summarize(task),
+                        task=(
+                            task_controller.summarize(task)
+                            if task_controller is not None and task is not None
+                            else None
+                        ),
                     ),
                 )
             pending_messages = await _drain(config.get_steering_messages)
 
-        completion = task_controller.check_completion(task, state)
-        await emitter.emit(
-            {
-                "type": "completion_checked",
-                "completion": {
-                    "satisfied": completion.satisfied,
-                    "reason": completion.reason,
-                    "missing": list(completion.missing),
-                    "can_continue": completion.can_continue,
-                    "unverified": completion.unverified,
-                },
-                "task": task_controller.event_payload(task),
-            }
-        )
-        if not completion.satisfied and completion.can_continue:
-            pending_messages = [task_controller.completion_steering(completion)]
-            continue
+        if task_controller is not None and task is not None:
+            completion = task_controller.check_completion(task, state)
+            await emitter.emit(
+                {
+                    "type": "completion_checked",
+                    "completion": {
+                        "satisfied": completion.satisfied,
+                        "reason": completion.reason,
+                        "missing": list(completion.missing),
+                        "can_continue": completion.can_continue,
+                        "unverified": completion.unverified,
+                    },
+                    "task": task_controller.event_payload(task),
+                }
+            )
+            if not completion.satisfied and completion.can_continue:
+                pending_messages = [task_controller.completion_steering(completion)]
+                continue
 
         followups = await _drain(config.get_follow_up_messages)
         if followups:
@@ -401,7 +428,11 @@ async def _run_loop(
                 stop_reason="final_answer",
                 messages=new_messages,
                 final_message=_last_assistant(new_messages),
-                task=task_controller.summarize(task),
+                task=(
+                    task_controller.summarize(task)
+                    if task_controller is not None and task is not None
+                    else None
+                ),
             ),
         )
 

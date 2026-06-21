@@ -139,29 +139,27 @@ def test_loader_rejects_old_or_invalid_schema(tmp_path: Path) -> None:
         load_eval_definition(path)
 
 
-def test_example_coding_benchmarks_are_valid() -> None:
-    root = Path(__file__).resolve().parents[1]
-    definitions = load_eval_suite(root / "benchmarks" / "coding")
-
-    assert len(definitions) == 3
-    assert all(isinstance(item, EvalCase) for item in definitions)
-
-
 def test_minimal_module_benchmarks_are_valid() -> None:
     root = Path(__file__).resolve().parents[1]
-    definitions = load_eval_suite(root / "benchmarks")
+    benchmark_root = root / "benchmarks" / "evaluation"
+    definitions = load_eval_suite(benchmark_root)
 
-    assert len(definitions) == 17
-    assert {
-        item.domain for item in definitions
-    } == {
-        "runtime",
-        "coding",
+    assert len(definitions) == 8
+    assert {item.domain for item in definitions} == {
         "context",
         "memory",
         "security",
         "planning",
-        "recovery",
+    }
+    assert all(item.metrics for item in definitions)
+    assert {
+        domain: len(load_eval_suite(benchmark_root / domain))
+        for domain in ("context", "memory", "planning", "security")
+    } == {
+        "context": 2,
+        "memory": 2,
+        "planning": 2,
+        "security": 2,
     }
 
 
