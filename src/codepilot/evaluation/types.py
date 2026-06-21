@@ -28,6 +28,7 @@ AssertionStatus = Literal["passed", "failed", "error", "skipped"]
 # 断言类型：命令/文件/差异/运行/追踪/上下文/记忆/安全/任务
 AssertionType = Literal[
     "command", "file", "diff", "run", "trace", "context", "memory", "security", "task",
+    "metric",
 ]
 # 场景步骤类型
 ScenarioStepType = Literal[
@@ -78,6 +79,8 @@ class EvalCase:
     fixture: str                   # fixture 目录名
     prompt: str                    # 用户提示词
     assertions: list[AssertionSpec]  # 断言列表
+    metrics: list[str] = field(default_factory=list)  # 需要计算的指标
+    expected: dict[str, Any] = field(default_factory=dict)  # 指标答案
     budgets: EvalBudgets = EvalBudgets()
     runtime: EvalRuntimeProfile = EvalRuntimeProfile()
     tags: list[str] = field(default_factory=list)
@@ -95,6 +98,8 @@ class EvalScenario:
     fixture: str
     steps: list[ScenarioStep]        # 步骤列表
     assertions: list[AssertionSpec]
+    metrics: list[str] = field(default_factory=list)
+    expected: dict[str, Any] = field(default_factory=dict)
     budgets: EvalBudgets = EvalBudgets()
     runtime: EvalRuntimeProfile = EvalRuntimeProfile()
     tags: list[str] = field(default_factory=list)
@@ -160,6 +165,7 @@ class EvalRunOptions:
     eval_id: str | None = None                      # 评估 ID（自动生成）
     benchmark_name: str = ""                        # 基准名称
     keep_workspace: bool = True                     # 是否保留工作区
+    runtime_overrides: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -252,6 +252,14 @@ class ContextCompiler:
             estimated_tokens_before=before_tokens,
             estimated_tokens_after=after_tokens,
             sections=section_reports,
+            selected_items=[
+                _context_item_summary(item)
+                for item in [
+                    *selected_active,
+                    *selected_evidence,
+                    *selected_memory,
+                ]
+            ],
             stale_items=stale_items,
             dropped_items=[
                 *dropped_active,
@@ -272,7 +280,6 @@ class ContextCompiler:
             tools=list(context.tools),
             report=report,
         )
-
     def _apply_repository_delta(self, delta: RepositoryDelta) -> None:
         """将仓库差异应用到会话状态：使变更路径的摘要和证据失效。"""
         changed = [*delta.modified_paths, *delta.deleted_paths]
@@ -414,6 +421,19 @@ class ContextCompiler:
                 )
             )
         return items, retrieved
+
+
+def _context_item_summary(item: ContextItem) -> dict[str, object]:
+    """返回评估所需的轻量条目摘要，不复制完整上下文内容。"""
+
+    return {
+        "id": item.id,
+        "kind": item.kind,
+        "source": item.source,
+        "path": item.path,
+        "estimated_tokens": item.estimated_tokens,
+        "freshness": item.freshness,
+    }
 
 
 def _select_items(

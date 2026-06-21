@@ -43,7 +43,29 @@ _ASSERTION_DIMENSIONS: dict[str, EvalDimension] = {
     "memory": "memory",
     "security": "tool_security",
     "task": "task_planning",
+    "metric": "runtime_contract",
 }
+_METRICS = {
+    "context.key_context_hit_rate",
+    "context.token_efficiency",
+    "context.stale_context_rate",
+    "memory.memory_retrieval_hit_rate",
+    "memory.redundant_read_count",
+    "memory.failed_attempt_recurrence_rate",
+    "planning.evidence_coverage_rate",
+    "planning.false_completion_rate",
+    "planning.repair_replan_success_rate",
+    "security.dangerous_tool_block_rate",
+    "security.mutation_after_denial_rate",
+    "security.benign_tool_pass_rate",
+}
+_METRIC_DIMENSIONS: dict[str, EvalDimension] = {
+    "context": "context_governance",
+    "memory": "memory",
+    "planning": "task_planning",
+    "security": "tool_security",
+}
+_METRIC_OPERATORS = {">=", ">", "<=", "<", "==", "!="}
 
 
 def load_eval_definition(path: str | Path) -> EvalDefinition:
@@ -101,6 +123,10 @@ def parse_eval_definition(
     budgets = _parse_budgets(payload.get("budgets", {}), payload, source)
     runtime = _parse_runtime(payload.get("runtime", {}), source)
     tags = _string_list(payload.get("tags", []), f"{source}.tags")
+    metrics = _parse_metrics(payload.get("metrics", []), source)
+    expected = payload.get("expected", {})
+    if not isinstance(expected, dict):
+        raise EvalCaseValidationError(f"{source}.expected must be an object")
 
     if "steps" in payload:
         raw_steps = payload["steps"]
@@ -117,6 +143,8 @@ def parse_eval_definition(
                 for index, item in enumerate(raw_steps)
             ],
             assertions=assertions,
+            metrics=metrics,
+            expected=dict(expected),
             budgets=budgets,
             runtime=runtime,
             tags=tags,
@@ -128,6 +156,8 @@ def parse_eval_definition(
         fixture=fixture,
         prompt=_required_text(payload, "prompt", source),
         assertions=assertions,
+        metrics=metrics,
+        expected=dict(expected),
         budgets=budgets,
         runtime=runtime,
         tags=tags,
@@ -143,6 +173,17 @@ def _parse_assertions(value: Any, source: str) -> list[AssertionSpec]:
     ]
 
 
+def _parse_metrics(value: Any, source: str) -> list[str]:
+    metrics = _string_list(value, f"{source}.metrics")
+    unknown = sorted(set(metrics) - _METRICS)
+    if unknown:
+        raise EvalCaseValidationError(
+            f"{source}.metrics contains unsupported metrics: "
+            + ", ".join(unknown)
+        )
+    return metrics
+
+
 def _parse_assertion(value: Any, source: str) -> AssertionSpec:
     if not isinstance(value, dict):
         raise EvalCaseValidationError(f"{source} must be an object")
@@ -151,10 +192,19 @@ def _parse_assertion(value: Any, source: str) -> AssertionSpec:
         raise EvalCaseValidationError(
             f"{source}.type is not a supported assertion"
         )
-    dimension = value.get(
-        "dimension",
-        _ASSERTION_DIMENSIONS[str(assertion_type)],
-    )
+    options = {
+        key: item
+        for key, item in value.items()
+        if key not in {"type", "dimension", "required"}
+    }
+    _validate_assertion_options(str(assertion_type), options, source)
+    dimension = value.get("dimension")
+    if dimension is None:
+        dimension = (
+            _metric_dimension(str(options["metric"]))
+            if assertion_type == "metric"
+            else _ASSERTION_DIMENSIONS[str(assertion_type)]
+        )
     if dimension not in {
         "coding_outcome",
         "runtime_contract",
@@ -166,12 +216,6 @@ def _parse_assertion(value: Any, source: str) -> AssertionSpec:
         "efficiency",
     }:
         raise EvalCaseValidationError(f"{source}.dimension is not supported")
-    options = {
-        key: item
-        for key, item in value.items()
-        if key not in {"type", "dimension", "required"}
-    }
-    _validate_assertion_options(str(assertion_type), options, source)
     return AssertionSpec(
         type=cast(AssertionType, assertion_type),
         dimension=cast(EvalDimension, dimension),
@@ -200,6 +244,34 @@ def _validate_assertion_options(
     elif assertion_type == "diff":
         for key in ("allowed_paths", "forbidden_paths"):
             _string_list(options.get(key, []), f"{source}.{key}")
+    elif assertion_type == "metric":
+        metric = options.get("metric")
+        if not isinstance(metric, str) or not metric.strip():
+            raise EvalCaseValidationError(
+                f"{source}.metric must be a non-empty string"
+            )
+        if metric not in _METRICS:
+            raise EvalCaseValidationError(
+                f"{source}.metric is not a supported metric"
+            )
+        op = options.get("op", ">=")
+        if op not in _METRIC_OPERATORS:
+            raise EvalCaseValidationError(
+                f"{source}.op must be one of: {', '.join(sorted(_METRIC_OPERATORS))}"
+            )
+        value = options.get("value")
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+        ):
+            raise EvalCaseValidationError(
+                f"{source}.value must be a number"
+            )
+
+
+def _metric_dimension(metric: str) -> EvalDimension:
+    prefix = metric.split(".", 1)[0]
+    return _METRIC_DIMENSIONS.get(prefix, "runtime_contract")
 
 
 def _parse_step(value: Any, source: str) -> ScenarioStep:

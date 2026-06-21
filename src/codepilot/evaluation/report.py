@@ -14,11 +14,19 @@ def build_suite_summary(results: list[EvalResult]) -> dict[str, Any]:
     dimensions: dict[str, Counter[str]] = defaultdict(Counter)
     failures: Counter[str] = Counter()
     totals: Counter[str] = Counter()
+    metric_values: dict[str, list[float]] = defaultdict(list)
     for result in results:
         failures.update(result.failure_categories)
         for key, value in result.metrics.items():
             if isinstance(value, int) and not isinstance(value, bool):
                 totals[key] += value
+            elif isinstance(value, dict):
+                metric_value = value.get("value")
+                if isinstance(metric_value, (int, float)) and not isinstance(
+                    metric_value,
+                    bool,
+                ):
+                    metric_values[key].append(float(metric_value))
         for dimension in result.dimensions:
             dimensions[dimension.dimension][dimension.status] += 1
     total = len(results)
@@ -34,6 +42,11 @@ def build_suite_summary(results: list[EvalResult]) -> dict[str, Any]:
         },
         "failure_categories": dict(sorted(failures.items())),
         "metrics": dict(sorted(totals.items())),
+        "metric_averages": {
+            name: sum(values) / len(values)
+            for name, values in sorted(metric_values.items())
+            if values
+        },
         "duration_ms": sum(result.duration_ms or 0 for result in results),
     }
 
@@ -66,6 +79,21 @@ def render_suite_markdown(
             f"{statuses.get('error', 0)} | "
             f"{statuses.get('not_applicable', 0)} |"
         )
+    metric_averages = summary.get("metric_averages", {})
+    if metric_averages:
+        lines.extend(
+            [
+                "",
+                "## Metrics",
+                "",
+                "| Metric | Average |",
+                "|---|---:|",
+            ]
+        )
+        for name, value in metric_averages.items():
+            lines.append(
+                f"| {_metric_label(name)} | {_metric_display(name, value)} |"
+            )
     lines.extend(["", "## Cases", ""])
     for result in results:
         lines.extend(
@@ -96,6 +124,30 @@ def render_suite_markdown(
             lines.append(f"- `{name}`: {count}")
         lines.append("")
     return "\n".join(lines)
+
+
+def _metric_label(name: str) -> str:
+    labels = {
+        "context.key_context_hit_rate": "Key Context Hit Rate",
+        "context.token_efficiency": "Token Efficiency",
+        "context.stale_context_rate": "Stale Context Rate",
+        "memory.memory_retrieval_hit_rate": "Memory Retrieval Hit Rate",
+        "memory.redundant_read_count": "Redundant Read Count",
+        "memory.failed_attempt_recurrence_rate": "Failed Attempt Recurrence Rate",
+        "planning.evidence_coverage_rate": "Evidence Coverage Rate",
+        "planning.false_completion_rate": "False Completion Rate",
+        "planning.repair_replan_success_rate": "Repair/Replan Success Rate",
+        "security.dangerous_tool_block_rate": "Dangerous Tool Block Rate",
+        "security.mutation_after_denial_rate": "Mutation After Denial Rate",
+        "security.benign_tool_pass_rate": "Benign Tool Pass Rate",
+    }
+    return labels.get(name, name)
+
+
+def _metric_display(name: str, value: float) -> str:
+    if name.endswith("_count"):
+        return f"{value:.2f}"
+    return f"{value:.1%}"
 
 
 __all__ = ["build_suite_summary", "render_suite_markdown"]
