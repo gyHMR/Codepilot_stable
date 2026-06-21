@@ -221,6 +221,79 @@ def test_security_dangerous_block_file_assertion_matches_fixture() -> None:
         assert all(item in state for item in expected)
 
 
+def test_benchmark_metrics_are_required_assertions() -> None:
+    root = Path(__file__).resolve().parents[1]
+    definitions = load_eval_suite(root / "benchmarks" / "evaluation")
+    required_metrics = {
+        "context.key_context_hit_rate",
+        "context.stale_context_rate",
+        "memory.memory_retrieval_hit_rate",
+        "memory.redundant_read_count",
+        "memory.failed_attempt_recurrence_rate",
+        "planning.evidence_coverage_rate",
+        "planning.false_completion_rate",
+        "security.dangerous_tool_block_rate",
+        "security.mutation_after_denial_rate",
+        "security.benign_tool_pass_rate",
+    }
+
+    missing = []
+    for definition in definitions:
+        asserted = {
+            str(spec.options.get("metric"))
+            for spec in definition.assertions
+            if spec.type == "metric" and spec.required
+        }
+        for metric in set(definition.metrics).intersection(required_metrics):
+            if (
+                "security:path-escape" in definition.tags
+                and metric
+                in {
+                    "security.dangerous_tool_block_rate",
+                    "security.mutation_after_denial_rate",
+                }
+            ):
+                continue
+            if metric not in asserted:
+                missing.append(f"{definition.id}:{metric}")
+
+    assert missing == []
+
+
+def test_security_benchmarks_assert_tool_policy_events() -> None:
+    root = Path(__file__).resolve().parents[1]
+    definitions = load_eval_suite(root / "benchmarks" / "evaluation" / "security")
+
+    missing = []
+    for definition in definitions:
+        expected = definition.expected
+        dangerous_tools = set(expected.get("dangerous_tools", []))
+        benign_tools = set(expected.get("benign_tools", []))
+        security_tools = {
+            str(spec.options.get("tool_name"))
+            for spec in definition.assertions
+            if spec.type == "security"
+        }
+        asserted_metrics = {
+            str(spec.options.get("metric"))
+            for spec in definition.assertions
+            if spec.type == "metric"
+        }
+        for tool in dangerous_tools:
+            if (
+                tool not in security_tools
+                and "security.dangerous_tool_block_rate" not in asserted_metrics
+            ):
+                missing.append(f"{definition.id}:dangerous:{tool}")
+        if (
+            benign_tools
+            and "security.benign_tool_pass_rate" not in asserted_metrics
+        ):
+            missing.append(f"{definition.id}:benign")
+
+    assert missing == []
+
+
 def test_runtime_profile_applies_permission_mode() -> None:
     options = CreateAgentSessionOptions(
         workspace_dir=".",
@@ -458,6 +531,68 @@ def test_runtime_and_module_assertions_use_audit_bundle(
     assert all(item.status == "passed" for item in results)
     assert "context:ctx-1" in results[2].evidence_refs
     assert "memory:mem-1" in results[3].evidence_refs
+
+
+def test_run_assertion_checks_final_answer_content(tmp_path: Path) -> None:
+    result = {
+        "run_id": "r1",
+        "session_id": "s1",
+        "status": "completed",
+        "stop_reason": "final_answer",
+        "counters": {"tool_calls": 0},
+        "messages": [],
+        "final_message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "服务使用 API v2，owner team 是 learning-platform。",
+                }
+            ],
+        },
+    }
+    bundle = AuditBundle(
+        run_id="r1",
+        session_id="s1",
+        events=[],
+        state={},
+        result=result,
+        report=build_audit_report(result, events=[]),
+        workspace=tmp_path,
+    )
+    evidence = EvalEvidence(
+        workspace=tmp_path,
+        baseline={},
+        audit_bundles=[bundle],
+    )
+
+    passed = run_assertions(
+        [
+            _spec(
+                "run",
+                "runtime_contract",
+                expect_final_contains=["API v2", "learning-platform"],
+            )
+        ],
+        evidence,
+    )[0]
+    failed = run_assertions(
+        [
+            _spec(
+                "run",
+                "runtime_contract",
+                expect_final_contains=["Redis"],
+            )
+        ],
+        evidence,
+    )[0]
+
+    assert passed.status == "passed"
+    assert failed.status == "failed"
+    assert failed.actual == {
+        "final_answer": "服务使用 API v2，owner team 是 learning-platform。",
+        "missing": ["Redis"],
+    }
 
 
 def test_security_assertion_checks_denial_and_side_effects(
