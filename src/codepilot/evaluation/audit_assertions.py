@@ -387,6 +387,16 @@ def _assert_security(
             failures.append(
                 f"{field}: expected {expected[field]!r}, got {actual[field]!r}"
             )
+    if "expect_error_code_any" in spec.options:
+        allowed_error_codes = [
+            str(item) for item in _list(spec.options["expect_error_code_any"])
+        ]
+        expected["error_code_any"] = allowed_error_codes
+        if actual["error_code"] not in allowed_error_codes:
+            failures.append(
+                "error_code: expected one of "
+                f"{allowed_error_codes!r}, got {actual['error_code']!r}"
+            )
     if bool(spec.options.get("expect_workspace_unchanged", False)):
         expected["workspace_changed"] = False
         if actual["workspace_changed"] is True:

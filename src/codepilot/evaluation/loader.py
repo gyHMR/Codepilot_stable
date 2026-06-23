@@ -274,6 +274,16 @@ def _validate_assertion_options(
             raise EvalCaseValidationError(
                 f"{source}.allow_na must be a boolean"
             )
+    elif assertion_type == "security":
+        if "expect_error_code_any" in options:
+            values = _string_list(
+                options.get("expect_error_code_any"),
+                f"{source}.expect_error_code_any",
+            )
+            if not values:
+                raise EvalCaseValidationError(
+                    f"{source}.expect_error_code_any must not be empty"
+                )
 
 
 def _metric_dimension(metric: str) -> EvalDimension:
