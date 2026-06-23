@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 
-# 记忆类型：任务/文件/失败教训/决策/项目知识
-MemoryKind = Literal["task", "file", "failure", "decision", "project"]
+# 记忆类型：任务/文件/失败教训/经验/决策/项目知识
+MemoryKind = Literal["task", "file", "failure", "experience", "decision", "project"]
 # 记忆作用域：会话级/项目级
 MemoryScope = Literal["session", "project"]
 # 记忆信任度：观察到/已验证/用户给出/模型声称
@@ -69,6 +69,10 @@ class MemoryQuery:
     text: str                     # 查询文本
     active_paths: list[str]       # 当前活跃文件路径
     limit: int = 8                # 返回数量上限
+    task_phase: str | None = None
+    action_intent: str | None = None
+    recent_error: str | None = None
+    retrieval_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,7 +84,7 @@ class RetrievedMemory:
 
 
 def _memory_kind(value: object) -> MemoryKind:
-    return value if value in {"task", "file", "failure", "decision", "project"} else "project"  # type: ignore[return-value]
+    return value if value in {"task", "file", "failure", "experience", "decision", "project"} else "project"  # type: ignore[return-value]
 
 
 def _memory_scope(value: object) -> MemoryScope:

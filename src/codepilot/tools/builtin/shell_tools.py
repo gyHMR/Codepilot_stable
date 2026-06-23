@@ -32,6 +32,122 @@ def _is_verification_command(command: str) -> bool:
     return classify_shell_command(command) == "verification"
 
 
+def _decode_utf8(raw: bytes) -> tuple[str, str]:
+    try:
+        return raw.decode("utf-8"), "ok"
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", errors="replace"), "decoded_with_replacement"
+
+
+def _output_quality(
+    *,
+    stdout_status: str = "ok",
+    stderr_status: str = "ok",
+    stdout_truncated: bool = False,
+    stderr_truncated: bool = False,
+    stdout_original_chars: int | None = None,
+    stderr_original_chars: int | None = None,
+    stdout_returned_chars: int | None = None,
+    stderr_returned_chars: int | None = None,
+) -> dict[str, Any]:
+    decoded_with_replacement = (
+        stdout_status == "decoded_with_replacement"
+        or stderr_status == "decoded_with_replacement"
+    )
+    truncated = stdout_truncated or stderr_truncated
+    return {
+        "encoding": "utf-8",
+        "decode_status": "decoded_with_replacement" if decoded_with_replacement else "ok",
+        "truncated": truncated,
+        "original_chars": (
+            (stdout_original_chars or 0)
+            + (stderr_original_chars or 0)
+        ),
+        "returned_chars": (
+            (stdout_returned_chars or 0)
+            + (stderr_returned_chars or 0)
+        ),
+        "may_be_binary": decoded_with_replacement,
+        "reliable_for_reasoning": not decoded_with_replacement and not truncated,
+    }
+
+
+def _recovery_hint(error_code: str | None) -> dict[str, Any] | None:
+    hints: dict[str, tuple[str, str, str, bool]] = {
+        "shell_exit_nonzero": (
+            "run_repair",
+            "Use stderr and verification summary to debug the failure before retrying.",
+            "debug_failure",
+            False,
+        ),
+        "shell_timeout": (
+            "ask_user",
+            "The command timed out. Narrow the command or ask before increasing scope.",
+            "narrow_command",
+            True,
+        ),
+        "shell_execution_error": (
+            "ask_user",
+            "Shell execution failed before a normal exit code was available.",
+            "debug_failure",
+            True,
+        ),
+        "invalid_timeout": (
+            "refine_edit",
+            "Use a timeout within the configured allowed range.",
+            "run_verification",
+            False,
+        ),
+        "missing_command": (
+            "refine_edit",
+            "Provide a concrete command before invoking bash.",
+            "run_verification",
+            False,
+        ),
+    }
+    spec = hints.get(error_code or "")
+    if spec is None:
+        return None
+    category, message, suggested, requires_user = spec
+    return {
+        "category": category,
+        "message": message,
+        "suggested_action_intent": suggested,
+        "requires_user_confirmation": requires_user,
+    }
+
+
+def _effect_confidence(effects: _WorkspaceEffects) -> tuple[str, str]:
+    if effects.available:
+        return "git", "medium"
+    return "unavailable", "low"
+
+
+def _change_evidence(
+    before: _WorkspaceEffects,
+    after: _WorkspaceEffects,
+    affected_paths: list[str],
+) -> dict[str, Any]:
+    detection, confidence = _effect_confidence(after)
+    before_hashes = {
+        path: before.hashes.get(path, "<missing>")
+        for path in affected_paths
+    }
+    after_hashes = {
+        path: after.hashes.get(path, "<missing>")
+        for path in affected_paths
+    }
+    return {
+        "change_kind": "unknown",
+        "before_hashes": before_hashes,
+        "after_hashes": after_hashes,
+        "affected_paths": list(affected_paths),
+        "effect_detection": detection,
+        "effect_detection_confidence": confidence,
+        "safe_revert_available": False,
+    }
+
+
 def _shell_result(
     message: str,
     *,
@@ -58,6 +174,10 @@ def _shell_result(
             "exit_code": exit_code,
             "summary": message[-500:],
         }
+    effective_metadata = dict(metadata or {})
+    hint = _recovery_hint(error_code)
+    if hint is not None:
+        effective_metadata.setdefault("recovery_hint", hint)
     return AgentToolResult(
         content=[TextContent(text=message)],
         status=status,  # type: ignore[arg-type]
@@ -72,7 +192,7 @@ def _shell_result(
             "exit_code": exit_code,
             "shell_class": classify_shell_command(command),
         },
-        metadata=metadata or {},
+        metadata=effective_metadata,
     )
 
 
@@ -145,14 +265,10 @@ def create_shell_tools(
                 proc.communicate(),
                 timeout=timeout_seconds,
             )
-            out = truncate_output(
-                stdout.decode("utf-8", errors="replace"),
-                execution_policy.stdout_limit,
-            )
-            err = truncate_output(
-                stderr.decode("utf-8", errors="replace"),
-                execution_policy.stderr_limit,
-            )
+            stdout_text, stdout_status = _decode_utf8(stdout)
+            stderr_text, stderr_status = _decode_utf8(stderr)
+            out = truncate_output(stdout_text, execution_policy.stdout_limit)
+            err = truncate_output(stderr_text, execution_policy.stderr_limit)
             after = _workspace_effects(sandbox.root)
             affected, changed, diff_summary = _compare_effects(
                 sandbox.root,
@@ -172,18 +288,29 @@ def create_shell_tools(
                 affected_paths=affected,
                 workspace_changed=changed,
                 diff_summary=diff_summary,
-                metadata={
-                    "timed_out": False,
-                    "stdout_truncated": out.truncated,
-                    "stderr_truncated": err.truncated,
-                    "stdout_original_chars": out.original_chars,
-                    "stderr_original_chars": err.original_chars,
-                    "stdout_returned_chars": out.returned_chars,
-                    "stderr_returned_chars": err.returned_chars,
-                    "effect_detection": "git" if after.available else "unavailable",
-                    "timeout_seconds": timeout_seconds,
-                },
-            )
+	                metadata={
+	                    "timed_out": False,
+	                    "stdout_truncated": out.truncated,
+	                    "stderr_truncated": err.truncated,
+	                    "stdout_original_chars": out.original_chars,
+	                    "stderr_original_chars": err.original_chars,
+	                    "stdout_returned_chars": out.returned_chars,
+	                    "stderr_returned_chars": err.returned_chars,
+	                    "effect_detection": "git" if after.available else "unavailable",
+	                    "timeout_seconds": timeout_seconds,
+	                    "output_quality": _output_quality(
+	                        stdout_status=stdout_status,
+	                        stderr_status=stderr_status,
+	                        stdout_truncated=out.truncated,
+	                        stderr_truncated=err.truncated,
+	                        stdout_original_chars=out.original_chars,
+	                        stderr_original_chars=err.original_chars,
+	                        stdout_returned_chars=out.returned_chars,
+	                        stderr_returned_chars=err.returned_chars,
+	                    ),
+	                    "change_evidence": _change_evidence(before, after, affected),
+	                },
+	            )
         except asyncio.TimeoutError:
             await _terminate_process(proc)
             after = _workspace_effects(sandbox.root)
@@ -200,12 +327,13 @@ def create_shell_tools(
                 affected_paths=affected,
                 workspace_changed=changed,
                 diff_summary=diff_summary,
-                metadata={
-                    "timed_out": True,
-                    "effect_detection": "git" if after.available else "unavailable",
-                    "timeout_seconds": timeout_seconds,
-                },
-            )
+	                metadata={
+	                    "timed_out": True,
+	                    "effect_detection": "git" if after.available else "unavailable",
+	                    "timeout_seconds": timeout_seconds,
+	                    "change_evidence": _change_evidence(before, after, affected),
+	                },
+	            )
         except asyncio.CancelledError:
             await _terminate_process(proc)
             after = _workspace_effects(sandbox.root)
@@ -222,12 +350,13 @@ def create_shell_tools(
                 affected_paths=affected,
                 workspace_changed=changed,
                 diff_summary=diff_summary,
-                metadata={
-                    "timed_out": False,
-                    "cancelled": True,
-                    "effect_detection": "git" if after.available else "unavailable",
-                },
-            )
+	                metadata={
+	                    "timed_out": False,
+	                    "cancelled": True,
+	                    "effect_detection": "git" if after.available else "unavailable",
+	                    "change_evidence": _change_evidence(before, after, affected),
+	                },
+	            )
         except Exception as exc:
             await _terminate_process(proc)
             after = _workspace_effects(sandbox.root)
@@ -244,11 +373,12 @@ def create_shell_tools(
                 affected_paths=affected,
                 workspace_changed=changed,
                 diff_summary=diff_summary,
-                metadata={
-                    "exception_type": type(exc).__name__,
-                    "effect_detection": "git" if after.available else "unavailable",
-                },
-            )
+	                metadata={
+	                    "exception_type": type(exc).__name__,
+	                    "effect_detection": "git" if after.available else "unavailable",
+	                    "change_evidence": _change_evidence(before, after, affected),
+	                },
+	            )
 
     if allow("bash"):
         tools.append(

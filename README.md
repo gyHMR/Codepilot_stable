@@ -186,7 +186,7 @@ src/codepilot/
 | **llm** | 模型调用抽象，Provider 注册与流式响应处理 | `registry.py`, `provider/` |
 | **tools** | 工具注册、执行、权限控制和沙箱隔离 | `registry.py`, `runtime.py`, `builtin/` |
 | **sessions** | 会话持久化、分支管理、上下文压缩、记忆 | `session.py`, `store.py`, `memory/`, `context/` |
-| **runtime** | 8 步组装流水线：配置→模型→工具→提示词→钩子→命令 | `service.py`, `assembly.py` |
+| **runtime** | 9 步组装流水线：配置→模型→工具→提示词→钩子→命令→会话 | `service.py`, `assembly.py` |
 | **extensions** | Python 扩展、Markdown 技能、MCP 工具桥接 | `python_ext/`, `skill.py`, `mcp/` |
 | **interfaces** | CLI（交互式/打印/RPC）和 Web 接口 | `cli/cli.py`, `cli/runner.py` |
 | **evaluation** | 评估框架：加载、执行、断言、指标、报告 | `service.py`, `executor.py`, `metrics.py` |
@@ -214,7 +214,7 @@ src/codepilot/
 会话生命周期管理、持久化存储、上下文压缩（token/消息数阈值触发）、结构化记忆读写、上下文编译。
 
 ### Layer 5 — runtime（运行时组装）
-8 步组装流水线将配置、模型、工具、提示词、钩子、命令组装为完整的 Agent 会话，是连接底层能力与上层接口的桥梁。
+9 步组装流水线将配置、模型、工具、提示词、钩子、命令和会话选项组装为完整的 Agent 会话，是连接底层能力与上层接口的桥梁。
 
 ### Layer 6 — extensions（扩展系统）
 支持 Python 模块扩展、Markdown 技能模板、MCP 工具桥接三种扩展方式。

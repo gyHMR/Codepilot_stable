@@ -76,6 +76,7 @@ class LLMStreamRunner:
                 tools=list(prepared.tools),
                 current_task=context.current_task,
                 recovered_task=context.recovered_task,
+                task_signal=context.task_signal,
             )
             await self._emitter.emit(
                 {
@@ -273,4 +274,5 @@ def _with_current_task_context(context: AgentContext) -> AgentContext:
         tools=context.tools,
         current_task=context.current_task,
         recovered_task=context.recovered_task,
+        task_signal=context.task_signal,
     )

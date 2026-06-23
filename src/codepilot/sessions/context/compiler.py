@@ -44,6 +44,17 @@ _STATIC_MEMORY_SECTION = re.compile(
     r"(?:^|\n\n)长期记忆（MEMORY）：\n.*?(?=\n\n(?:## |当前日期：)|\Z)",
     re.DOTALL,
 )
+_SECRET_PATTERNS = [
+    re.compile(
+        r"(?i)(api[_-]?key|token|password|secret|cookie)\s*[:=]\s*\S+"
+    ),
+    re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+        re.DOTALL,
+    ),
+    re.compile(r"\b(?:sk|pk)-[A-Za-z0-9_-]{8,}\b"),
+    re.compile(r"(?i)authorization:\s*bearer\s+\S+"),
+]
 
 
 @dataclass(frozen=True)
@@ -142,11 +153,13 @@ class ContextCompiler:
                 if record.status == "stale"
             )
         total_budget = self.policy.input_budget(request)
-        repository_budget = int(total_budget * self.policy.repository_ratio)
-        active_budget = int(total_budget * self.policy.active_files_ratio)
-        evidence_budget = int(total_budget * self.policy.recent_evidence_ratio)
-        memory_budget = int(total_budget * self.policy.memory_ratio)
-        history_budget = int(total_budget * self.policy.history_ratio)
+        context_mode = _resolve_context_mode(context)
+        budget_profile = _budget_profile(context_mode, self.policy)
+        repository_budget = int(total_budget * budget_profile["repository"])
+        active_budget = int(total_budget * budget_profile["active_files"])
+        evidence_budget = int(total_budget * budget_profile["recent_evidence"])
+        memory_budget = int(total_budget * budget_profile["memory"])
+        history_budget = int(total_budget * budget_profile["history"])
 
         repository_text = _truncate_to_tokens(
             render_repository_snapshot(snapshot, delta),
@@ -169,6 +182,14 @@ class ContextCompiler:
             "memory",
             memory_items,
             memory_budget,
+        )
+        selected_active, active_sanitization = _sanitize_items(selected_active)
+        selected_evidence, evidence_sanitization = _sanitize_items(selected_evidence)
+        selected_memory, memory_sanitization = _sanitize_items(selected_memory)
+        sanitization = _merge_sanitization(
+            active_sanitization,
+            evidence_sanitization,
+            memory_sanitization,
         )
 
         governance_text = _render_governance_context(
@@ -237,7 +258,7 @@ class ContextCompiler:
             ),
             ContextSectionReport(
                 name="current_request",
-                budget_tokens=int(total_budget * self.policy.task_ratio),
+                budget_tokens=int(total_budget * budget_profile["task"]),
                 candidate_items=1 if _latest_user_message(context.messages) else 0,
                 selected_items=1 if _latest_user_message(selected_messages) else 0,
                 estimated_tokens_before=_latest_user_tokens(context.messages),
@@ -273,6 +294,26 @@ class ContextCompiler:
                 item.record.id: list(item.reasons)
                 for item in retrieved_memories
             },
+            context_mode=context_mode,
+            budget_profile=budget_profile,
+            relevance_reasons={
+                item["id"]: ["priority_score"]
+                for item in [
+                    *[
+                        _context_item_summary(context_item)
+                        for context_item in selected_active
+                    ],
+                    *[
+                        _context_item_summary(context_item)
+                        for context_item in selected_evidence
+                    ],
+                    *[
+                        _context_item_summary(context_item)
+                        for context_item in selected_memory
+                    ],
+                ]
+            },
+            sanitization=sanitization,
         )
         return PreparedAgentContext(
             system_prompt=system_prompt,
@@ -380,6 +421,10 @@ class ContextCompiler:
             MemoryQuery(
                 text=query_text,
                 active_paths=list(self.state.active_files),
+                task_phase=_optional_signal(context, "phase"),
+                action_intent=_optional_signal(context, "action_intent"),
+                recent_error=_optional_signal(context, "recent_error_code"),
+                retrieval_mode=_resolve_context_mode(context),
             )
         )
         items: list[ContextItem] = []
@@ -555,6 +600,140 @@ def _append_current_task(system_prompt: str, current_task: str) -> str:
     if "## Current Task" in system_prompt:
         return system_prompt
     return f"{system_prompt.rstrip()}\n\n{current_task}".strip()
+
+
+def _optional_signal(context: AgentContext, key: str) -> str | None:
+    if not isinstance(context.task_signal, dict):
+        return None
+    value = context.task_signal.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _resolve_context_mode(context: AgentContext) -> str:
+    signal = context.task_signal if isinstance(context.task_signal, dict) else {}
+    last_decision = signal.get("last_decision")
+    action_intent = signal.get("action_intent")
+    recent_error = signal.get("recent_error_code")
+    phase = signal.get("phase")
+    if last_decision == "repair" or action_intent == "debug_failure" or recent_error:
+        return "repair"
+    if phase == "verifying" or action_intent == "run_verification":
+        return "verify"
+    if phase == "finished" or last_decision == "finish":
+        return "final"
+    if phase == "understanding":
+        return "plan"
+    latest = _latest_user_message(context.messages)
+    text = _user_message_text(latest) if latest is not None else ""
+    if any(marker in text for marker in ("设计", "架构", "怎么", "为什么", "解释")):
+        return "qa"
+    return "act"
+
+
+def _budget_profile(mode: str, policy: ContextPolicy) -> dict[str, float]:
+    defaults = {
+        "repository": policy.repository_ratio,
+        "active_files": policy.active_files_ratio,
+        "recent_evidence": policy.recent_evidence_ratio,
+        "memory": policy.memory_ratio,
+        "history": policy.history_ratio,
+        "task": policy.task_ratio,
+    }
+    profiles: dict[str, dict[str, float]] = {
+        "plan": {
+            "repository": 0.15,
+            "active_files": 0.15,
+            "recent_evidence": 0.12,
+            "memory": 0.18,
+            "history": 0.20,
+            "task": 0.20,
+        },
+        "act": defaults,
+        "repair": {
+            "repository": 0.08,
+            "active_files": 0.22,
+            "recent_evidence": 0.24,
+            "memory": 0.20,
+            "history": 0.12,
+            "task": 0.14,
+        },
+        "verify": {
+            "repository": 0.05,
+            "active_files": 0.12,
+            "recent_evidence": 0.30,
+            "memory": 0.12,
+            "history": 0.16,
+            "task": 0.25,
+        },
+        "final": {
+            "repository": 0.05,
+            "active_files": 0.08,
+            "recent_evidence": 0.22,
+            "memory": 0.10,
+            "history": 0.25,
+            "task": 0.30,
+        },
+        "qa": {
+            "repository": 0.10,
+            "active_files": 0.12,
+            "recent_evidence": 0.10,
+            "memory": 0.20,
+            "history": 0.30,
+            "task": 0.18,
+        },
+    }
+    return dict(profiles.get(mode, defaults))
+
+
+def _sanitize_items(items: list[ContextItem]) -> tuple[list[ContextItem], dict[str, int]]:
+    selected: list[ContextItem] = []
+    redacted_count = 0
+    for item in items:
+        text, count = _sanitize_text(item.content)
+        redacted_count += count
+        selected.append(
+            replace(
+                item,
+                content=f"[data-not-instruction] {text}",
+                estimated_tokens=_estimate_text_tokens(text),
+            )
+        )
+    return selected, {
+        "redacted_count": redacted_count,
+        "untrusted_items": len(items),
+        "prompt_injection_warnings": sum(
+            1
+            for item in selected
+            if "ignore previous instructions" in item.content.lower()
+        ),
+    }
+
+
+def _sanitize_text(text: str) -> tuple[str, int]:
+    redacted = text
+    count = 0
+    for pattern in _SECRET_PATTERNS:
+        redacted, replacements = pattern.subn(_redaction_replacement, redacted)
+        count += replacements
+    return redacted, count
+
+
+def _redaction_replacement(match: re.Match[str]) -> str:
+    if match.lastindex:
+        return f"{match.group(1)}=[REDACTED]"
+    return "[REDACTED]"
+
+
+def _merge_sanitization(*items: dict[str, int]) -> dict[str, int]:
+    result = {
+        "redacted_count": 0,
+        "untrusted_items": 0,
+        "prompt_injection_warnings": 0,
+    }
+    for item in items:
+        for key in result:
+            result[key] += int(item.get(key, 0))
+    return result
 
 
 def _item_section_report(

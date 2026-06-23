@@ -9,13 +9,125 @@ from codepilot.tools.sandbox import WorkspaceSandbox, file_state_for_path
 from codepilot.tools.types import AgentTool, AgentToolResult
 
 
+def _output_quality(
+    *,
+    decode_status: str = "ok",
+    truncated: bool = False,
+    original_chars: int | None = None,
+    returned_chars: int | None = None,
+    may_be_binary: bool = False,
+) -> dict[str, Any]:
+    return {
+        "encoding": "utf-8" if decode_status != "invalid_utf8" else "unknown",
+        "decode_status": decode_status,
+        "truncated": truncated,
+        "original_chars": original_chars,
+        "returned_chars": returned_chars,
+        "may_be_binary": may_be_binary,
+        "reliable_for_reasoning": (
+            decode_status == "ok"
+            and not truncated
+            and not may_be_binary
+        ),
+    }
+
+
+def _recovery_hint(error_code: str) -> dict[str, Any] | None:
+    hints: dict[str, tuple[str, str, str, bool]] = {
+        "invalid_utf8": (
+            "ask_user",
+            "The file is not valid UTF-8 text. Do not treat it as reliable source text.",
+            "inspect_non_text_file",
+            True,
+        ),
+        "stale_file": (
+            "retry_read",
+            "The file changed since it was read. Read it again before editing.",
+            "read_context",
+            False,
+        ),
+        "multiple_matches": (
+            "refine_edit",
+            "Read a larger target region and provide unique old_text or occurrence_index.",
+            "edit_file",
+            False,
+        ),
+        "no_match": (
+            "retry_read",
+            "Read the current file content before retrying the edit.",
+            "read_context",
+            False,
+        ),
+        "unexpected_match_count": (
+            "refine_edit",
+            "Re-read the target area and adjust the expected match count or old_text.",
+            "edit_file",
+            False,
+        ),
+        "path_not_found": (
+            "retry_read",
+            "List or search the workspace to confirm the current path.",
+            "read_context",
+            False,
+        ),
+        "path_not_file": (
+            "retry_read",
+            "List or search the workspace to confirm the current path.",
+            "read_context",
+            False,
+        ),
+    }
+    spec = hints.get(error_code)
+    if spec is None:
+        return None
+    category, message, suggested, requires_user = spec
+    return {
+        "category": category,
+        "message": message,
+        "suggested_action_intent": suggested,
+        "requires_user_confirmation": requires_user,
+    }
+
+
+def _metadata_for_error(error_code: str) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    hint = _recovery_hint(error_code)
+    if hint is not None:
+        metadata["recovery_hint"] = hint
+    if error_code == "invalid_utf8":
+        metadata["output_quality"] = _output_quality(
+            decode_status="invalid_utf8",
+            may_be_binary=True,
+        )
+    return metadata
+
+
 def _error_result(message: str, error_code: str, **details: Any) -> AgentToolResult:
     return AgentToolResult(
         content=[TextContent(text=message)],
         status="error",
         error_code=error_code,
         details=details,
+        metadata=_metadata_for_error(error_code),
     )
+
+
+def _change_evidence(
+    *,
+    change_kind: str,
+    path: str,
+    before_hash: str,
+    after_hash: str,
+) -> dict[str, Any]:
+    return {
+        "change_kind": change_kind,
+        "before_hashes": {path: before_hash},
+        "after_hashes": {path: after_hash},
+        "affected_paths": [path],
+        "effect_detection": "direct",
+        "effect_detection_confidence": "high",
+        "safe_revert_available": False,
+    }
 
 
 def _replace_nth(text: str, old: str, new: str, nth: int) -> str:
@@ -102,6 +214,11 @@ def create_file_tools(
             rendered = rendered[:max_chars] + "\n...<truncated>..."
             truncated = True
         state = file_state_for_path(workspace, path_text)
+        quality = _output_quality(
+            truncated=truncated,
+            original_chars=len(raw),
+            returned_chars=len(rendered),
+        )
         return AgentToolResult(
             content=[TextContent(text=rendered)],
             details={"file_state": state},
@@ -112,6 +229,7 @@ def create_file_tools(
                 "total_lines": len(lines),
                 "truncated": truncated,
                 "char_truncated": char_truncated,
+                "output_quality": quality,
             },
         )
 
@@ -146,6 +264,11 @@ def create_file_tools(
             )
         changed = original != content
         relative_path = target.relative_to(workspace).as_posix()
+        before_hash = (
+            file_state_for_path(workspace, relative_path).get("sha256", "<missing>")
+            if target.exists()
+            else "<missing>"
+        )
         if not changed:
             state = file_state_for_path(workspace, relative_path)
             return AgentToolResult(
@@ -154,7 +277,15 @@ def create_file_tools(
                 workspace_changed=False,
                 diff_summary="No content change",
                 details={"changed": False, "file_state": state},
-                metadata={"file_state": state},
+                metadata={
+                    "file_state": state,
+                    "change_evidence": _change_evidence(
+                        change_kind="unchanged",
+                        path=relative_path,
+                        before_hash=str(before_hash),
+                        after_hash=str(state.get("sha256", before_hash)),
+                    ),
+                },
             )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
@@ -169,7 +300,15 @@ def create_file_tools(
                 f"{len(original or '')} -> {len(content)} characters"
             ),
             details={"changed": True, "action": action, "file_state": state},
-            metadata={"file_state": state},
+            metadata={
+                "file_state": state,
+                "change_evidence": _change_evidence(
+                    change_kind="create" if original is None else "update",
+                    path=relative_path,
+                    before_hash=str(before_hash),
+                    after_hash=str(state.get("sha256", "<missing>")),
+                ),
+            },
         )
 
     async def edit_tool(tool_call_id: str, params: dict[str, Any], signal=None, on_update=None) -> AgentToolResult:
@@ -217,6 +356,7 @@ def create_file_tools(
                 "invalid_utf8",
             )
         current_state = file_state_for_path(workspace, path_text)
+        before_hash = str(current_state.get("sha256", "<missing>"))
         if (
             expected_file_hash is not None
             and current_state.get("sha256") != str(expected_file_hash)
@@ -268,6 +408,7 @@ def create_file_tools(
         target.write_text(updated, encoding="utf-8")
         relative_path = target.relative_to(workspace).as_posix()
         state = file_state_for_path(workspace, relative_path)
+        after_hash = str(state.get("sha256", "<missing>"))
         return AgentToolResult(
             content=[TextContent(text=f"Edited file: {relative_path} (replacements={replaced})")],
             affected_paths=[relative_path],
@@ -277,7 +418,15 @@ def create_file_tools(
                 f"{'s' if replaced != 1 else ''}"
             ),
             details={"replacements": replaced, "file_state": state},
-            metadata={"file_state": state},
+            metadata={
+                "file_state": state,
+                "change_evidence": _change_evidence(
+                    change_kind="update" if updated != original else "unchanged",
+                    path=relative_path,
+                    before_hash=before_hash,
+                    after_hash=after_hash,
+                ),
+            },
         )
 
     if allow("ls"):

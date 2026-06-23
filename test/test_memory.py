@@ -127,6 +127,29 @@ def test_memory_writer_tracks_task_file_versions_and_failures(tmp_path: Path) ->
     assert lesson.content["occurrence_count"] == 2
 
 
+def test_memory_writer_promotes_project_constraint_from_user_correction(
+    tmp_path: Path,
+) -> None:
+    from codepilot.sessions.memory import MemoryStore, MemoryWriter
+    from codepilot.sessions.persistence.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "session_project_constraint")
+    session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
+    store = MemoryStore(session_store)
+    writer = MemoryWriter(store=store, workspace_dir=tmp_path)
+
+    writer.remember_task("这个项目是学生学习和求职展示项目，不要做生产级复杂设计")
+
+    project_records = store.load_project()
+    assert any(
+        record.kind == "project"
+        and record.content.get("category") == "project_constraint"
+        and "清晰" in record.content.get("knowledge", "")
+        and "生产级" in record.content.get("knowledge", "")
+        for record in project_records
+    )
+
+
 def test_memory_writer_projects_unfinished_task_summary(tmp_path: Path) -> None:
     from codepilot.protocols import AgentRunResult, TaskSummary
     from codepilot.sessions.memory import MemoryStore, MemoryWriter, render_memory
@@ -170,6 +193,164 @@ def test_memory_writer_projects_unfinished_task_summary(tmp_path: Path) -> None:
     rendered = render_memory(record)
     assert "Next: 报告连续失败并等待用户指示" in rendered
     assert "Pending: 重新运行相关验证" in rendered
+
+
+def test_memory_writer_extracts_verified_experience_from_edit_repair_loop(
+    tmp_path: Path,
+) -> None:
+    from codepilot.protocols import AgentRunResult, TaskSummary, TextContent, ToolResultMessage
+    from codepilot.sessions.memory import MemoryStore, MemoryWriter, render_memory
+    from codepilot.sessions.persistence.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "session_experience")
+    session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
+    store = MemoryStore(session_store)
+    writer = MemoryWriter(store=store, workspace_dir=tmp_path)
+    writer.remember_task("修复 edit 失败", run_id="run_1")
+
+    result = AgentRunResult(
+        run_id="run_1",
+        session_id="session_experience",
+        status="completed",
+        stop_reason="final_answer",
+        messages=[
+            ToolResultMessage(
+                tool_call_id="edit_bad",
+                tool_name="edit",
+                status="error",
+                is_error=True,
+                error_code="multiple_matches",
+                content=[TextContent(text="Multiple matches found")],
+                affected_paths=["src/app.py"],
+                metadata={
+                    "recovery_hint": {
+                        "category": "refine_edit",
+                        "suggested_action_intent": "edit_file",
+                    }
+                },
+            ),
+            ToolResultMessage(
+                tool_call_id="edit_good",
+                tool_name="edit",
+                status="success",
+                content=[TextContent(text="Edited file")],
+                affected_paths=["src/app.py"],
+                workspace_changed=True,
+            ),
+            ToolResultMessage(
+                tool_call_id="test_good",
+                tool_name="bash",
+                status="success",
+                verification={
+                    "status": "passed",
+                    "command": "python -m pytest test/test_app.py -q",
+                    "exit_code": 0,
+                    "summary": "passed",
+                },
+            ),
+        ],
+        task=TaskSummary(
+            task_id="task_1",
+            goal="修复 edit 失败",
+            completed_steps=["修复并验证"],
+            completion_satisfied=True,
+            completion_reason="all_steps_completed",
+        ),
+    )
+
+    writer.finalize_run(result)
+    experiences = [
+        record for record in store.load_session() if record.kind == "experience"
+    ]
+
+    assert len(experiences) == 1
+    experience = experiences[0]
+    assert experience.content["failure_signal"] == "multiple_matches"
+    assert experience.content["maturity"] == "verified"
+    assert "intent:edit_file" in experience.content["applies_when"]
+    assert "先 read" in experience.content["better_action"]
+    assert "Experience[verified]" in render_memory(experience)
+
+    writer.finalize_run(result)
+    experiences = [
+        record for record in store.load_session() if record.kind == "experience"
+    ]
+    assert len(experiences) == 1
+    assert experiences[0].content["occurrence_count"] == 2
+
+
+def test_memory_retriever_uses_phase_intent_and_error_without_hard_filter(
+    tmp_path: Path,
+) -> None:
+    from codepilot.sessions.memory import (
+        MemoryQuery,
+        MemoryRecord,
+        MemoryRetriever,
+        MemoryStore,
+    )
+    from codepilot.sessions.persistence.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "session_experience_retrieval")
+    session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
+    store = MemoryStore(session_store)
+    store.update(
+        MemoryRecord(
+            id="exp_verified",
+            kind="experience",
+            scope="session",
+            content={
+                "lesson_type": "tool_usage",
+                "situation": "edit old_text 不唯一",
+                "failed_attempt": "直接短文本 edit",
+                "failure_signal": "multiple_matches",
+                "better_action": "先 read 目标区域，再使用唯一 old_text",
+                "applies_when": ["phase:repair", "intent:edit_file", "error:multiple_matches"],
+                "avoid_when": [],
+                "evidence_refs": ["tool:edit_bad", "tool:edit_good", "verification:test_good"],
+                "maturity": "verified",
+                "occurrence_count": 1,
+                "fingerprint": "fp1",
+            },
+            source="experience_extractor",
+            trust="verified",
+        )
+    )
+    store.update(
+        MemoryRecord(
+            id="exp_candidate",
+            kind="experience",
+            scope="session",
+            content={
+                "lesson_type": "tool_usage",
+                "situation": "candidate",
+                "better_action": "unverified",
+                "applies_when": ["intent:edit_file"],
+                "maturity": "candidate",
+            },
+            source="experience_extractor",
+            trust="observed",
+        )
+    )
+    retriever = MemoryRetriever(store=store, workspace_dir=tmp_path)
+
+    with_signal = retriever.retrieve(
+        MemoryQuery(
+            text="",
+            active_paths=[],
+            task_phase="repair",
+            action_intent="edit_file",
+            recent_error="multiple_matches",
+        )
+    )
+    assert [item.record.id for item in with_signal] == ["exp_verified"]
+    assert "phase:repair" in with_signal[0].reasons
+    assert "intent:edit_file" in with_signal[0].reasons
+    assert "error:multiple_matches" in with_signal[0].reasons
+
+    without_intent = retriever.retrieve(
+        MemoryQuery(text="old_text", active_paths=[])
+    )
+    assert [item.record.id for item in without_intent] == ["exp_verified"]
 
 
 def test_memory_writer_clears_next_action_only_when_completion_is_satisfied(

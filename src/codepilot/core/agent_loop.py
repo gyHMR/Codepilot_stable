@@ -47,6 +47,7 @@ async def run_agent_loop(
         tools=context.tools,
         current_task=context.current_task,
         recovered_task=context.recovered_task,
+        task_signal=context.task_signal,
     )
 
     await emitter.emit({"type": "agent_start"})
@@ -95,6 +96,7 @@ async def run_agent_loop_continue(
         tools=context.tools,
         current_task=context.current_task,
         recovered_task=context.recovered_task,
+        task_signal=context.task_signal,
     )
     await emitter.emit({"type": "agent_start"})
     await emitter.emit({"type": "turn_start"})
@@ -225,6 +227,11 @@ async def _run_loop(
 
             current_context.current_task = (
                 task_controller.render_context(task)
+                if task_controller is not None and task is not None
+                else None
+            )
+            current_context.task_signal = (
+                task_controller.control_signal(task)
                 if task_controller is not None and task is not None
                 else None
             )

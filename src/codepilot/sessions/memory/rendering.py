@@ -38,6 +38,18 @@ def render_memory(record: MemoryRecord) -> str:
             f"cause={content.get('cause') or 'unknown'}; "
             f"resolution={content.get('resolution') or 'not confirmed'}"
         )
+    if record.kind == "experience":
+        maturity = content.get("maturity", "active")
+        applies = content.get("applies_when", [])
+        applies_text = ", ".join(str(item) for item in applies[:4]) if isinstance(applies, list) else ""
+        evidence = content.get("evidence_refs", [])
+        evidence_text = "; ".join(str(item) for item in evidence[:3]) if isinstance(evidence, list) else ""
+        return (
+            f"Experience[{maturity}]: When {content.get('situation', '')}; "
+            f"Prefer {content.get('better_action', '')}; "
+            f"Avoid {content.get('failed_attempt', '')}; "
+            f"Applies: {applies_text}; Evidence: {evidence_text}"
+        )
     if record.kind == "decision":
         return f"Decision: {content.get('decision', '')}; rationale={content.get('rationale', '')}"
     return f"Project knowledge: {content.get('knowledge', '')}"

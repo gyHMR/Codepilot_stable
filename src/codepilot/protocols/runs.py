@@ -11,7 +11,7 @@ Agent 运行结果与状态类型定义。
 """
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from .errors import ErrorInfo
 from .messages import AssistantMessage, Message
@@ -94,6 +94,10 @@ class TaskSummary:
     next_action: str | None = None
     completion_satisfied: bool = False
     completion_reason: str = ""
+    attempts: list[dict[str, Any]] = field(default_factory=list)
+    change_sets: list[dict[str, Any]] = field(default_factory=list)
+    replans: list[dict[str, Any]] = field(default_factory=list)
+    control_signal: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
