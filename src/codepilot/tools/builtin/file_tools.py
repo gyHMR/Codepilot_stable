@@ -76,6 +76,18 @@ def _recovery_hint(error_code: str) -> dict[str, Any] | None:
             "read_context",
             False,
         ),
+        "path_escapes_workspace": (
+            "retry_read",
+            "Use a path inside the current workspace.",
+            "read_context",
+            False,
+        ),
+        "invalid_argument": (
+            "refine_edit",
+            "Correct the tool argument type or range before retrying.",
+            "refine_tool_args",
+            False,
+        ),
     }
     spec = hints.get(error_code)
     if spec is None:
@@ -110,6 +122,53 @@ def _error_result(message: str, error_code: str, **details: Any) -> AgentToolRes
         details=details,
         metadata=_metadata_for_error(error_code),
     )
+
+
+def _coerce_int(
+    value: Any,
+    *,
+    name: str,
+    default: int | None = None,
+    minimum: int | None = None,
+) -> tuple[int | None, AgentToolResult | None]:
+    if value is None:
+        return default, None
+    if isinstance(value, bool):
+        return None, _error_result(
+            f"{name} must be an integer",
+            "invalid_argument",
+            argument=name,
+        )
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None, _error_result(
+            f"{name} must be an integer",
+            "invalid_argument",
+            argument=name,
+        )
+    if minimum is not None and parsed < minimum:
+        return None, _error_result(
+            f"{name} must be >= {minimum}",
+            "invalid_argument",
+            argument=name,
+            minimum=minimum,
+        )
+    return parsed, None
+
+
+def _resolve_path(
+    sandbox: WorkspaceSandbox,
+    path_text: str,
+) -> tuple[Any | None, AgentToolResult | None]:
+    try:
+        return sandbox.resolve_path(path_text), None
+    except ValueError:
+        return None, _error_result(
+            f"Path escapes workspace boundary: {path_text}",
+            "path_escapes_workspace",
+            path=path_text,
+        )
 
 
 def _change_evidence(
@@ -158,8 +217,17 @@ def create_file_tools(
     async def ls_tool(tool_call_id: str, params: dict[str, Any], signal=None, on_update=None) -> AgentToolResult:
         _ = tool_call_id, signal, on_update
         path_text = str(params.get("path", "."))
-        max_entries = int(params.get("max_entries", 100))
-        target = sandbox.resolve_path(path_text)
+        max_entries, arg_error = _coerce_int(
+            params.get("max_entries"),
+            name="max_entries",
+            default=100,
+            minimum=1,
+        )
+        if arg_error is not None:
+            return arg_error
+        target, path_error = _resolve_path(sandbox, path_text)
+        if path_error is not None:
+            return path_error
         if not target.exists():
             return _error_result(f"Path not found: {path_text}", "path_not_found")
         if not target.is_dir():
@@ -176,23 +244,40 @@ def create_file_tools(
     async def read_tool(tool_call_id: str, params: dict[str, Any], signal=None, on_update=None) -> AgentToolResult:
         _ = tool_call_id, signal, on_update
         path_text = str(params.get("path", ""))
-        max_chars = int(params.get("max_chars", 4000))
-        offset = int(params.get("offset", 1))
-        limit_raw = params.get("limit")
-        limit = int(limit_raw) if limit_raw is not None else None
         if not path_text:
             return _error_result("Missing path", "missing_path")
-        target = sandbox.resolve_path(path_text)
+        max_chars, arg_error = _coerce_int(
+            params.get("max_chars"),
+            name="max_chars",
+            default=4000,
+            minimum=1,
+        )
+        if arg_error is not None:
+            return arg_error
+        offset, arg_error = _coerce_int(
+            params.get("offset"),
+            name="offset",
+            default=1,
+            minimum=1,
+        )
+        if arg_error is not None:
+            return arg_error
+        limit, arg_error = _coerce_int(
+            params.get("limit"),
+            name="limit",
+            default=None,
+            minimum=1,
+        )
+        if arg_error is not None:
+            return arg_error
+        target, path_error = _resolve_path(sandbox, path_text)
+        if path_error is not None:
+            return path_error
         if not target.exists():
             return _error_result(f"Path not found: {path_text}", "path_not_found")
         if not target.is_file():
             return _error_result(f"Not a file: {path_text}", "not_a_file")
 
-        if offset < 1 or (limit is not None and limit < 1):
-            return _error_result(
-                "offset and limit must be positive integers",
-                "invalid_line_range",
-            )
         try:
             raw = target.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -247,7 +332,9 @@ def create_file_tools(
                 content_chars=len(content),
             )
 
-        target = sandbox.resolve_path(path_text)
+        target, path_error = _resolve_path(sandbox, path_text)
+        if path_error is not None:
+            return path_error
         if target.exists() and not target.is_file():
             return _error_result(
                 f"Target is not a file: {path_text}",
@@ -324,24 +411,30 @@ def create_file_tools(
             return _error_result("Missing path", "missing_path")
         if old_text == "":
             return _error_result("old_text cannot be empty", "empty_old_text")
-        occurrence_index = None if occurrence_index_raw is None else int(occurrence_index_raw)
-        expected_occurrences = None if expected_occurrences_raw is None else int(expected_occurrences_raw)
-        if occurrence_index is not None and occurrence_index <= 0:
-            return _error_result(
-                "occurrence_index must be >= 1",
-                "invalid_occurrence_index",
-            )
+        occurrence_index, arg_error = _coerce_int(
+            occurrence_index_raw,
+            name="occurrence_index",
+            default=None,
+            minimum=1,
+        )
+        if arg_error is not None:
+            return arg_error
+        expected_occurrences, arg_error = _coerce_int(
+            expected_occurrences_raw,
+            name="expected_occurrences",
+            default=None,
+            minimum=0,
+        )
+        if arg_error is not None:
+            return arg_error
         if len(old_text) + len(new_text) > max_write_chars:
             return _error_result(
                 "Edit payload is too large",
                 "content_too_large",
             )
-        if expected_occurrences is not None and expected_occurrences < 0:
-            return _error_result(
-                "expected_occurrences must be >= 0",
-                "invalid_expected_occurrences",
-            )
-        target = sandbox.resolve_path(path_text)
+        target, path_error = _resolve_path(sandbox, path_text)
+        if path_error is not None:
+            return path_error
         if not target.exists() or not target.is_file():
             return _error_result(
                 f"Path not found or not file: {path_text}",

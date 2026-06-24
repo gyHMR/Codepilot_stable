@@ -112,7 +112,12 @@ class ExecutedToolCall:
 
 
 class ToolCallCoordinator:
-    """工具调用协调器：负责一批工具调用的准备、执行和事件上报（不管理工具权限）。"""
+    """工具调用协调器：负责一批工具调用的准备、执行和事件上报。
+
+    这一层只处理 agent loop 视角的编排边界：当前上下文中是否存在该工具、
+    unmanaged 工具是否允许进入流程，以及 before/after hook 的短路或后处理。
+    真正的权限策略、审批、参数语义和路径安全分别由 ToolRuntime 与具体工具负责。
+    """
 
     def __init__(self, *, config: AgentLoopConfig, emitter: AgentEventEmitter) -> None:
         self._config = config
@@ -157,7 +162,16 @@ class ToolCallCoordinator:
         *,
         signal: Any | None,
     ) -> tuple[PreparedToolCall | None, AgentToolResult, bool]:
-        """准备单个工具调用：查找工具、校验权限、执行 before_tool_call 钩子。"""
+        """准备单个工具调用。
+
+        这里做的是“调度前检查”：
+        - 工具是否在当前 AgentContext 中可见；
+        - 非 ToolRuntime 托管的工具是否被允许；
+        - before_tool_call 钩子是否要求拦截。
+
+        不在这里做具体参数语义、路径或 shell 安全判断；这些必须留在
+        ToolRuntime 和工具自身 execute 中作为可独立生效的运行时防线。
+        """
         tool = next((t for t in current_context.tools if t.name == tool_call.name), None)
         if tool is None:
             return None, error_tool_result(

@@ -81,9 +81,11 @@ def create_mcp_proxy_tools(configs: list[MCPToolConfig], client: MCPClient | Non
                     content=[TextContent(text=f"MCP call failed `{_cfg.server}.{_cfg.tool}`: {exc}")],
                     is_error=True,
                 )
+            text, metadata = _normalize_mcp_result(result)
             return AgentToolResult(
-                content=[TextContent(text=_normalize_mcp_result(result))],
+                content=[TextContent(text=text)],
                 details={"server": _cfg.server, "tool": _cfg.tool},
+                metadata=metadata,
             )
 
         tools.append(
@@ -98,13 +100,63 @@ def create_mcp_proxy_tools(configs: list[MCPToolConfig], client: MCPClient | Non
     return tools
 
 
-def _normalize_mcp_result(value: Any) -> str:
+def _output_quality(
+    *,
+    decode_status: str,
+    original_chars: int,
+    returned_chars: int,
+    may_be_binary: bool = False,
+) -> dict[str, Any]:
+    return {
+        "output_quality": {
+            "encoding": "utf-8",
+            "decode_status": decode_status,
+            "truncated": False,
+            "original_chars": original_chars,
+            "returned_chars": returned_chars,
+            "may_be_binary": may_be_binary,
+            "reliable_for_reasoning": decode_status == "ok" and not may_be_binary,
+        }
+    }
+
+
+def _normalize_mcp_result(value: Any) -> tuple[str, dict[str, Any]]:
     if isinstance(value, str):
-        return value
+        return value, _output_quality(
+            decode_status="ok",
+            original_chars=len(value),
+            returned_chars=len(value),
+        )
     if isinstance(value, bytes):
-        return value.decode("utf-8", errors="ignore")
+        try:
+            text = value.decode("utf-8")
+            status = "ok"
+        except UnicodeDecodeError:
+            text = value.decode("utf-8", errors="replace")
+            status = "decoded_with_replacement"
+        return text, _output_quality(
+            decode_status=status,
+            original_chars=len(value),
+            returned_chars=len(text),
+            may_be_binary=status != "ok",
+        )
     if isinstance(value, dict):
-        return str(value)
+        text = str(value)
+        return text, _output_quality(
+            decode_status="ok",
+            original_chars=len(text),
+            returned_chars=len(text),
+        )
     if isinstance(value, list):
-        return "\n".join(str(x) for x in value)
-    return str(value)
+        text = "\n".join(str(x) for x in value)
+        return text, _output_quality(
+            decode_status="ok",
+            original_chars=len(text),
+            returned_chars=len(text),
+        )
+    text = str(value)
+    return text, _output_quality(
+        decode_status="ok",
+        original_chars=len(text),
+        returned_chars=len(text),
+    )

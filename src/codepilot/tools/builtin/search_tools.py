@@ -33,6 +33,39 @@ def _error_result(message: str, error_code: str) -> AgentToolResult:
     )
 
 
+def _coerce_int(
+    value: Any,
+    *,
+    name: str,
+    default: int,
+    minimum: int = 1,
+) -> tuple[int | None, AgentToolResult | None]:
+    if value is None:
+        return default, None
+    if isinstance(value, bool):
+        return None, _error_result(f"{name} must be an integer", "invalid_argument")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None, _error_result(f"{name} must be an integer", "invalid_argument")
+    if parsed < minimum:
+        return None, _error_result(f"{name} must be >= {minimum}", "invalid_argument")
+    return parsed, None
+
+
+def _resolve_path(
+    sandbox: WorkspaceSandbox,
+    path_text: str,
+) -> tuple[Any | None, AgentToolResult | None]:
+    try:
+        return sandbox.resolve_path(path_text), None
+    except ValueError:
+        return None, _error_result(
+            f"Path escapes workspace boundary: {path_text}",
+            "path_escapes_workspace",
+        )
+
+
 def create_search_tools(sandbox: WorkspaceSandbox, *, allow: Callable[[str], bool]) -> list[AgentTool]:
     workspace = sandbox.root
     tools: list[AgentTool] = []
@@ -42,12 +75,20 @@ def create_search_tools(sandbox: WorkspaceSandbox, *, allow: Callable[[str], boo
         pattern = str(params.get("pattern", ""))
         start_path = str(params.get("path", "."))
         glob_pattern = str(params.get("glob", "**/*"))
-        max_matches = int(params.get("max_matches", 200))
+        max_matches, arg_error = _coerce_int(
+            params.get("max_matches"),
+            name="max_matches",
+            default=200,
+        )
+        if arg_error is not None:
+            return arg_error
         case_sensitive = bool(params.get("case_sensitive", True))
         if not pattern:
             return _error_result("Missing pattern", "missing_pattern")
 
-        root = sandbox.resolve_path(start_path)
+        root, path_error = _resolve_path(sandbox, start_path)
+        if path_error is not None:
+            return path_error
         if not root.exists():
             return _error_result(f"Path not found: {start_path}", "path_not_found")
 
@@ -105,8 +146,16 @@ def create_search_tools(sandbox: WorkspaceSandbox, *, allow: Callable[[str], boo
         _ = tool_call_id, signal, on_update
         start_path = str(params.get("path", "."))
         pattern = str(params.get("pattern", "**/*"))
-        max_results = int(params.get("max_results", 200))
-        root = sandbox.resolve_path(start_path)
+        max_results, arg_error = _coerce_int(
+            params.get("max_results"),
+            name="max_results",
+            default=200,
+        )
+        if arg_error is not None:
+            return arg_error
+        root, path_error = _resolve_path(sandbox, start_path)
+        if path_error is not None:
+            return path_error
         if not root.exists():
             return _error_result(f"Path not found: {start_path}", "path_not_found")
 

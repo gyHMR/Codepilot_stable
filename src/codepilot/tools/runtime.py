@@ -248,12 +248,28 @@ class ToolRuntime:
                 error_code="tool_exception",
                 details={"tool": request.name, "reason": "tool_exception", "error_kind": type(exc).__name__},
             )
+            result.approved = True
+            result.approval_id = approval_id
+            result.metadata.setdefault(
+                "permission_decision",
+                {
+                    "decision": decision.kind,
+                    "reason": decision.reason,
+                    **decision.details,
+                },
+            )
+            result.metadata.setdefault(
+                "duration_ms",
+                int((time.monotonic() - started_at) * 1000),
+            )
             result.tool_call_id = request.tool_call_id
             result.tool_name = request.name
             return ToolRuntimeResult(
                 result=result,
                 status="error",
                 is_error=True,
+                approved=result.approved,
+                approval_id=approval_id,
             )
 
     @staticmethod

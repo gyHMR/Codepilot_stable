@@ -109,11 +109,16 @@ def classify_shell_command(command: str) -> ShellCommandClass:
     if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _HIGH_RISK_PATTERNS):
         return "high_risk"
     first = _first_command(normalized)
-    if any(first.startswith(prefix) for prefix in _VERIFICATION_PREFIXES):
+    if any(_matches_command_prefix(first, prefix) for prefix in _VERIFICATION_PREFIXES):
         return "verification"
-    if any(first.startswith(prefix) for prefix in _MUTATION_PREFIXES):
+    if any(_matches_command_prefix(first, prefix) for prefix in _MUTATION_PREFIXES):
         return "mutation"
     return "unknown"
+
+
+def _matches_command_prefix(command: str, prefix: str) -> bool:
+    prefix = " ".join(prefix.strip().lower().split())
+    return command == prefix or command.startswith(prefix + " ")
 
 
 def build_shell_environment(extra_allowed: tuple[str, ...] = ()) -> dict[str, str]:

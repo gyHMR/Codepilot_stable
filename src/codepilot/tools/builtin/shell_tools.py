@@ -124,13 +124,16 @@ def _effect_confidence(effects: _WorkspaceEffects) -> tuple[str, str]:
 
 
 def _change_evidence(
+    root: Path,
     before: _WorkspaceEffects,
     after: _WorkspaceEffects,
     affected_paths: list[str],
 ) -> dict[str, Any]:
     detection, confidence = _effect_confidence(after)
     before_hashes = {
-        path: before.hashes.get(path, "<missing>")
+        path: before.hashes.get(path)
+        or _git_head_fingerprint(root, path)
+        or "<missing>"
         for path in affected_paths
     }
     after_hashes = {
@@ -288,29 +291,29 @@ def create_shell_tools(
                 affected_paths=affected,
                 workspace_changed=changed,
                 diff_summary=diff_summary,
-	                metadata={
-	                    "timed_out": False,
-	                    "stdout_truncated": out.truncated,
-	                    "stderr_truncated": err.truncated,
-	                    "stdout_original_chars": out.original_chars,
-	                    "stderr_original_chars": err.original_chars,
-	                    "stdout_returned_chars": out.returned_chars,
-	                    "stderr_returned_chars": err.returned_chars,
-	                    "effect_detection": "git" if after.available else "unavailable",
-	                    "timeout_seconds": timeout_seconds,
-	                    "output_quality": _output_quality(
-	                        stdout_status=stdout_status,
-	                        stderr_status=stderr_status,
-	                        stdout_truncated=out.truncated,
-	                        stderr_truncated=err.truncated,
-	                        stdout_original_chars=out.original_chars,
-	                        stderr_original_chars=err.original_chars,
-	                        stdout_returned_chars=out.returned_chars,
-	                        stderr_returned_chars=err.returned_chars,
-	                    ),
-	                    "change_evidence": _change_evidence(before, after, affected),
-	                },
-	            )
+                metadata={
+                    "timed_out": False,
+                    "stdout_truncated": out.truncated,
+                    "stderr_truncated": err.truncated,
+                    "stdout_original_chars": out.original_chars,
+                    "stderr_original_chars": err.original_chars,
+                    "stdout_returned_chars": out.returned_chars,
+                    "stderr_returned_chars": err.returned_chars,
+                    "effect_detection": "git" if after.available else "unavailable",
+                    "timeout_seconds": timeout_seconds,
+                    "output_quality": _output_quality(
+                        stdout_status=stdout_status,
+                        stderr_status=stderr_status,
+                        stdout_truncated=out.truncated,
+                        stderr_truncated=err.truncated,
+                        stdout_original_chars=out.original_chars,
+                        stderr_original_chars=err.original_chars,
+                        stdout_returned_chars=out.returned_chars,
+                        stderr_returned_chars=err.returned_chars,
+                    ),
+                    "change_evidence": _change_evidence(sandbox.root, before, after, affected),
+                },
+            )
         except asyncio.TimeoutError:
             await _terminate_process(proc)
             after = _workspace_effects(sandbox.root)
@@ -327,13 +330,13 @@ def create_shell_tools(
                 affected_paths=affected,
                 workspace_changed=changed,
                 diff_summary=diff_summary,
-	                metadata={
-	                    "timed_out": True,
-	                    "effect_detection": "git" if after.available else "unavailable",
-	                    "timeout_seconds": timeout_seconds,
-	                    "change_evidence": _change_evidence(before, after, affected),
-	                },
-	            )
+                metadata={
+                    "timed_out": True,
+                    "effect_detection": "git" if after.available else "unavailable",
+                    "timeout_seconds": timeout_seconds,
+                    "change_evidence": _change_evidence(sandbox.root, before, after, affected),
+                },
+            )
         except asyncio.CancelledError:
             await _terminate_process(proc)
             after = _workspace_effects(sandbox.root)
@@ -350,13 +353,13 @@ def create_shell_tools(
                 affected_paths=affected,
                 workspace_changed=changed,
                 diff_summary=diff_summary,
-	                metadata={
-	                    "timed_out": False,
-	                    "cancelled": True,
-	                    "effect_detection": "git" if after.available else "unavailable",
-	                    "change_evidence": _change_evidence(before, after, affected),
-	                },
-	            )
+                metadata={
+                    "timed_out": False,
+                    "cancelled": True,
+                    "effect_detection": "git" if after.available else "unavailable",
+                    "change_evidence": _change_evidence(sandbox.root, before, after, affected),
+                },
+            )
         except Exception as exc:
             await _terminate_process(proc)
             after = _workspace_effects(sandbox.root)
@@ -373,12 +376,12 @@ def create_shell_tools(
                 affected_paths=affected,
                 workspace_changed=changed,
                 diff_summary=diff_summary,
-	                metadata={
-	                    "exception_type": type(exc).__name__,
-	                    "effect_detection": "git" if after.available else "unavailable",
-	                    "change_evidence": _change_evidence(before, after, affected),
-	                },
-	            )
+                metadata={
+                    "exception_type": type(exc).__name__,
+                    "effect_detection": "git" if after.available else "unavailable",
+                    "change_evidence": _change_evidence(sandbox.root, before, after, affected),
+                },
+            )
 
     if allow("bash"):
         tools.append(
@@ -481,6 +484,22 @@ def _path_fingerprint(path: Path) -> str:
     except OSError:
         return "<unreadable>"
     return digest.hexdigest()
+
+
+def _git_head_fingerprint(root: Path, relative_path: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "show", f"HEAD:./{relative_path}"],
+            cwd=root,
+            capture_output=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return hashlib.sha256(result.stdout).hexdigest()
 
 
 def _git_diff_stat(root: Path) -> str | None:

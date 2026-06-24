@@ -89,7 +89,7 @@ class AgentOptions:
         convert_to_llm: 将内部 AgentMessage 转换为 LLM Message 的函数。
         transform_context: 发送前对消息上下文进行变换的钩子（如裁剪、脱敏等）。
         get_api_key: 获取 API Key 的回调函数，用于动态获取密钥。
-        before_tool_call: 工具调用前的拦截钩子，可用于权限校验或参数修改。
+        before_tool_call: 工具调用前的策略拦截钩子，可用于项目规则、扩展策略或临时禁用。
         after_tool_call: 工具调用后的拦截钩子，可用于结果后处理。
         max_tool_iterations: 单次运行允许的最大工具反馈迭代次数。
         max_tool_calls_per_turn: 单轮允许的最大工具调用数量，None 表示不限制。

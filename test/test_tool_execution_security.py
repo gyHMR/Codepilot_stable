@@ -60,6 +60,31 @@ def test_permission_policy_uses_mode_and_shell_classification() -> None:
     ).requires_approval
 
 
+def test_shell_verification_classification_requires_token_boundary() -> None:
+    from codepilot.tools.permissions import PermissionPolicy, ToolRequest
+
+    bash = _metadata("bash", read_only=False, exclusive=True)
+    policy = PermissionPolicy(mode="workspace-write")
+
+    for command in [
+        "pytest-malicious",
+        "pytest_bad",
+        "python -m pytestx",
+        "git statusx",
+        "ruff checkmate",
+    ]:
+        decision = policy.decide(
+            ToolRequest(
+                name="bash",
+                params={"command": command},
+                metadata=bash,
+            )
+        )
+
+        assert decision.requires_approval
+        assert decision.reason == "unknown_shell_command"
+
+
 def test_model_cannot_authorize_dangerous_shell() -> None:
     from codepilot.tools.permissions import PermissionPolicy, ToolRequest
 
@@ -471,6 +496,44 @@ async def _file_tool_evidence_case(tmp_path: Path) -> None:
     assert created["after_hashes"]["created.py"] != "<missing>"
 
 
+def test_builtin_tools_return_structured_errors_for_invalid_args_and_path_escape(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_builtin_tool_structured_error_case(tmp_path))
+
+
+async def _builtin_tool_structured_error_case(tmp_path: Path) -> None:
+    from codepilot.tools.builtin import create_builtin_tools
+
+    target = tmp_path / "app.py"
+    target.write_text("print('hello')\n", encoding="utf-8", newline="\n")
+    tools = {tool.name: tool for tool in create_builtin_tools(tmp_path)}
+
+    invalid_read_limit = await tools["read"].execute(
+        "read_bad_limit",
+        {"path": "app.py", "max_chars": "not-int"},
+    )
+    escaped_path = await tools["read"].execute(
+        "read_escape",
+        {"path": "../outside.py"},
+    )
+    invalid_grep_limit = await tools["grep"].execute(
+        "grep_bad_limit",
+        {"pattern": "hello", "max_matches": "not-int"},
+    )
+    invalid_find_limit = await tools["find"].execute(
+        "find_bad_limit",
+        {"max_results": "not-int"},
+    )
+
+    assert invalid_read_limit.error_code == "invalid_argument"
+    assert invalid_read_limit.metadata["recovery_hint"]["category"] == "refine_edit"
+    assert escaped_path.error_code == "path_escapes_workspace"
+    assert escaped_path.metadata["recovery_hint"]["category"] == "retry_read"
+    assert invalid_grep_limit.error_code == "invalid_argument"
+    assert invalid_find_limit.error_code == "invalid_argument"
+
+
 def test_shell_reports_output_quality_and_git_change_evidence(
     tmp_path: Path,
     monkeypatch,
@@ -526,6 +589,39 @@ async def _shell_quality_and_change_evidence_case(tmp_path: Path, monkeypatch) -
     assert "generated.txt" in evidence["affected_paths"]
 
 
+def test_shell_change_evidence_records_before_hash_for_clean_tracked_file(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_shell_clean_tracked_before_hash_case(tmp_path))
+
+
+async def _shell_clean_tracked_before_hash_case(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    from codepilot.tools.builtin import create_builtin_tools
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("before\n", encoding="utf-8", newline="\n")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, check=True, capture_output=True)
+
+    bash = next(tool for tool in create_builtin_tools(tmp_path) if tool.name == "bash")
+    command = (
+        f'"{sys.executable}" -c "from pathlib import Path; '
+        "Path('tracked.txt').write_text('after\\\\n', encoding='utf-8')\""
+    )
+    result = await bash.execute("bash_hashes", {"command": command})
+
+    evidence = result.metadata["change_evidence"]
+    assert evidence["affected_paths"] == ["tracked.txt"]
+    assert evidence["before_hashes"]["tracked.txt"] != "<missing>"
+    assert evidence["before_hashes"]["tracked.txt"] != evidence["after_hashes"]["tracked.txt"]
+
+
 def test_external_tool_without_metadata_defaults_to_medium_risk_approval() -> None:
     from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry
 
@@ -549,6 +645,61 @@ def test_external_tool_without_metadata_defaults_to_medium_risk_approval() -> No
     assert metadata.requires_approval is True
     assert metadata.read_only is False
     assert metadata.exclusive is True
+
+
+def test_runtime_exception_preserves_permission_duration_and_approval() -> None:
+    asyncio.run(_runtime_exception_evidence_case())
+
+
+async def _runtime_exception_evidence_case() -> None:
+    from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry
+    from codepilot.tools.approval import ApprovalDecision
+    from codepilot.tools.permissions import PermissionPolicy
+    from codepilot.tools.runtime import ToolRuntime
+    from codepilot.tools.types import ToolRuntimeRequest
+
+    async def execute(*_args) -> AgentToolResult:
+        raise RuntimeError("boom")
+
+    class Approve:
+        async def request_approval(self, request, metadata, decision):
+            _ = request, metadata, decision
+            return ApprovalDecision(
+                approved=True,
+                reason="user_approved",
+                approval_id="approval_1",
+            )
+
+    registry = ToolRegistry()
+    registry.register(
+        AgentTool(
+            name="write",
+            label="write",
+            description="write",
+            parameters={},
+            execute=execute,
+        ),
+        metadata=_metadata("write", read_only=False, exclusive=True),
+    )
+    runtime = ToolRuntime(
+        registry,
+        permission_policy=PermissionPolicy(mode="ask"),
+        approval_provider=Approve(),
+    )
+
+    result = await runtime.execute(
+        ToolRuntimeRequest(
+            tool_call_id="call_1",
+            name="write",
+            params={"path": "a.txt", "content": "x"},
+        )
+    )
+
+    assert result.status == "error"
+    assert result.approval_id == "approval_1"
+    assert result.result.approval_id == "approval_1"
+    assert result.result.metadata["permission_decision"]["decision"] == "approval_required"
+    assert isinstance(result.result.metadata["duration_ms"], int)
 
 
 def test_shell_failure_preserves_workspace_side_effects(tmp_path: Path) -> None:
@@ -613,6 +764,39 @@ async def _cli_approval_case() -> None:
     assert decision.approved is True
     assert decision.approval_id
     assert any("python script.py" in line for line in outputs)
+
+
+def test_mcp_bytes_result_reports_unreliable_output_quality() -> None:
+    asyncio.run(_mcp_bytes_quality_case())
+
+
+async def _mcp_bytes_quality_case() -> None:
+    from codepilot.extensions.mcp import MCPToolConfig, create_mcp_proxy_tools
+
+    class Client:
+        async def call_tool(self, server, tool, arguments):
+            _ = server, tool, arguments
+            return b"\xffok"
+
+    proxy = create_mcp_proxy_tools(
+        [
+            MCPToolConfig(
+                name="mcp_bytes",
+                description="bytes",
+                parameters={},
+                server="server",
+                tool="bytes",
+            )
+        ],
+        Client(),
+    )[0]
+
+    result = await proxy.execute("mcp_1", {})
+
+    assert "\ufffd" in result.content[0].text
+    quality = result.metadata["output_quality"]
+    assert quality["decode_status"] == "decoded_with_replacement"
+    assert quality["reliable_for_reasoning"] is False
 
 
 def test_tool_result_message_preserves_approval_evidence() -> None:
