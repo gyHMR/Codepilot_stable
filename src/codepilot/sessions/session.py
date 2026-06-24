@@ -26,7 +26,7 @@ from codepilot.protocols import (
     ToolResultMessage,
     UserMessage,
 )
-from codepilot.core import Agent, AgentEvent, AgentMessage, AgentOptions
+from codepilot.core import Agent, AgentEvent, AgentMessage, AgentOptions, new_run_id
 
 from codepilot.extensions.types import ExtensionLifecycleContext
 from .context.compaction import (
@@ -39,6 +39,13 @@ from .history.branching import fork_session as branch_fork_session
 from .history.branching import switch_session as branch_switch_session
 from .history.branching import switch_to_entry as branch_switch_to_entry
 from .history.checkpoint import SessionCheckpoint, record_checkpoint
+from .history.git_rollback import (
+    GitRollbackBaseline,
+    GitRollbackResult,
+    build_rollback_metadata,
+    capture_git_baseline,
+    revert_run_changes,
+)
 from .memory import MemoryRetriever, MemoryStore, MemoryWriter
 from .persistence.store import SessionStore, new_session_id
 from .types import AgentSessionOptions
@@ -218,12 +225,15 @@ class AgentSession:
         Returns:
             继续运行产生的结构化 Run 结果。
         """
+        run_id = run_id or new_run_id()
+        rollback_baseline = capture_git_baseline(self.workspace_dir)
         await self._run_lifecycle_hooks(text="", is_continue=True, hooks=self.before_prompt_hooks)
         self.agent.set_recovered_task(
             self._active_task_projection() if self.memory_enabled else None
         )
         result = await self.agent.continue_run(run_id=run_id)
         self.store.append_run_result(result)
+        self._write_rollback_metadata(result, rollback_baseline)
         if self.memory_enabled:
             self._finalize_memory(result)
         await self._compact_context_if_needed()
@@ -259,6 +269,8 @@ class AgentSession:
         Returns:
             结构化的 Run 结果。
         """
+        run_id = run_id or new_run_id()
+        rollback_baseline = capture_git_baseline(self.workspace_dir)
         await self._run_lifecycle_hooks(
             text=text,
             is_continue=False,
@@ -277,6 +289,7 @@ class AgentSession:
             run_id=run_id,
         )
         self.store.append_run_result(result)
+        self._write_rollback_metadata(result, rollback_baseline)
         if self.memory_enabled:
             self._finalize_memory(result)
         await self._compact_context_if_needed()
@@ -385,7 +398,66 @@ class AgentSession:
         """
         return record_checkpoint(self.store, session_id=self.session_id, label=label, details=details)
 
+    def revert_last_run(self) -> GitRollbackResult:
+        """撤销当前会话最近一次支持 Git clean-worktree 回退的 Run。"""
+
+        runs = self.store.load_run_results(limit=1)
+        if not runs:
+            return GitRollbackResult(
+                status="not_eligible",
+                run_id="",
+                reason="no_run_results",
+            )
+        run_id = runs[-1].get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            return GitRollbackResult(
+                status="not_eligible",
+                run_id="",
+                reason="missing_run_id",
+            )
+        return self.revert_run(run_id)
+
+    def revert_run(self, run_id: str) -> GitRollbackResult:
+        """按 run_id 撤销该 Run 记录的工作区文件修改。"""
+
+        try:
+            state = self.store.run_store.load_run_state(run_id)
+        except FileNotFoundError:
+            return GitRollbackResult(
+                status="not_eligible",
+                run_id=run_id,
+                reason="missing_run_state",
+            )
+        result = revert_run_changes(self.workspace_dir, state)
+        self.store.append_event(
+            {
+                "type": "run_reverted",
+                "sessionId": self.session_id,
+                "targetRunId": run_id,
+                "status": result.status,
+                "reason": result.reason,
+                "restoredPaths": list(result.restored_paths),
+                "removedPaths": list(result.removed_paths),
+                "conflictedPaths": list(result.conflicted_paths),
+            }
+        )
+        return result
+
     # ── 内部方法 ────────────────────────────────────────────────
+
+    def _write_rollback_metadata(
+        self,
+        result: AgentRunResult,
+        baseline: GitRollbackBaseline,
+    ) -> None:
+        self.store.write_rollback_metadata(
+            result.run_id,
+            build_rollback_metadata(
+                baseline,
+                affected_paths=list(result.affected_paths),
+                workspace_changed=bool(result.workspace_changed),
+            ),
+        )
 
     async def _on_agent_event(self, event: AgentEvent) -> None:
         """Agent 事件回调：将事件持久化到存储，并在消息结束时保存上下文消息。"""

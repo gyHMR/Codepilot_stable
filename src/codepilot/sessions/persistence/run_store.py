@@ -120,6 +120,27 @@ class RunStore:
             raise FileNotFoundError(f"Run result not found: {run_id}")
         return json.loads(result_file.read_text(encoding="utf-8"))
 
+    def load_run_state(self, run_id: str) -> dict[str, Any]:
+        """加载某次 Run 的 state.json。"""
+        state = self._read_json(self._run_dir(run_id) / "state.json")
+        if state is None:
+            raise FileNotFoundError(f"Run state not found: {run_id}")
+        return state
+
+    def write_rollback_metadata(self, run_id: str, metadata: dict[str, Any]) -> None:
+        """将 Git 回退元数据写入 Run state。"""
+        run_dir = self._run_dir(run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        state = self._read_json(run_dir / "state.json") or {
+            "schema_version": RUN_ARTIFACT_SCHEMA_VERSION,
+            "run_id": run_id,
+            "session_id": self.session_id,
+            "workspace_path": str(self.workspace_dir.resolve()),
+        }
+        state["rollback"] = redact_artifact(metadata)
+        state["updated_at"] = _utc_now_iso()
+        self._write_json(run_dir / "state.json", state)
+
     def load_run_results(self, *, limit: int | None = None) -> list[dict[str, Any]]:
         """加载当前 session 的所有 Run 结果（按 updated_at 排序）。
 

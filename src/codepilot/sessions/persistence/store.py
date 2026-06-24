@@ -138,6 +138,11 @@ class SessionStore:
             fp.write(json.dumps(record, ensure_ascii=False) + "\n")
         self.touch_updated_at()
 
+    def write_rollback_metadata(self, run_id: str, metadata: dict[str, Any]) -> None:
+        """为指定 Run 写入 Git 回退元数据。"""
+        self.run_store.write_rollback_metadata(run_id, metadata)
+        self.touch_updated_at()
+
     def load_run_results(self, *, limit: int | None = None) -> list[dict[str, Any]]:
         """加载 Run 结果列表（优先从 RunStore 加载，fallback 到 runs.jsonl）。"""
         records = self.run_store.load_run_results(limit=limit)
