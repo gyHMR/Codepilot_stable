@@ -179,6 +179,18 @@ class TaskController:
             task.recent_failure_type = "tool_unavailable"
             return self._decision(task, "stop", "tool_unavailable")
 
+        if self._has_non_verification_error(results):
+            step = self._current_step(task)
+            task.action_intent = "debug_failure"
+            task.recent_error_code = _first_error_code(results) or "tool_error"
+            task.recent_failure_type = "tool_error"
+            if step is not None:
+                step.failure_count += 1
+                step.status = "in_progress"
+                step.note = "工具执行失败，需要修复或调整方案"
+                step.evidence_refs.extend(_evidence_refs(results))
+            return self._decision(task, "repair", "tool_error")
+
         if self._has_failed_verification(results):
             step = self._current_step(task)
             task.action_intent = "debug_failure"
@@ -261,7 +273,7 @@ class TaskController:
             for step in task.steps
             if step.status not in {"completed", "blocked"}
         ]
-        if incomplete and not run.workspace_changed:
+        if incomplete and not run.workspace_changed and task.recent_error_code is None:
             for step in task.steps:
                 if step.status == "in_progress":
                     step.status = "completed"
@@ -487,6 +499,13 @@ class TaskController:
             for result in results
         )
 
+    def _has_non_verification_error(self, results: list[ToolResultMessage]) -> bool:
+        return any(
+            (result.status != "success" or result.is_error)
+            and not isinstance(result.verification, dict)
+            for result in results
+        )
+
     def _has_passed_verification(self, results: list[ToolResultMessage]) -> bool:
         return any(
             isinstance(result.verification, dict)
@@ -573,12 +592,16 @@ class TaskController:
             step.note = "已产生文件变更，等待验证"
             task.phase = "verifying"
             task.action_intent = "edit_file"
+            task.recent_error_code = None
+            task.recent_failure_type = None
             return
         name = result.tool_name.lower()
         if any(marker in name for marker in _READ_TOOL_MARKERS):
             step.status = "in_progress"
             step.progress_state = "evidence_collected"
             task.action_intent = "read_context"
+            task.recent_error_code = None
+            task.recent_failure_type = None
 
     def _complete_verified_steps(
         self,

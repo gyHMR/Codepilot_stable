@@ -258,6 +258,8 @@ class MemoryWriter:
             return None
         if "生产级" not in text and "过度设计" not in text and "复杂设计" not in text:
             return None
+        if not _expresses_non_production_constraint(text):
+            return None
         knowledge = (
             "Codepilot 是学生学习与求职展示项目；后续设计应优先保持清晰、"
             "可解释、可演示，避免生产级复杂平台化。"
@@ -462,7 +464,9 @@ class MemoryWriter:
                 or record.content.get("action") != message.tool_name
             ):
                 continue
-            if record.related_paths and not success_paths.intersection(record.related_paths):
+            if not record.related_paths:
+                continue
+            if not success_paths.intersection(record.related_paths):
                 continue
             record.content["resolution"] = sanitize_memory_text(
                 message.diff_summary or _tool_result_text(message) or "later call succeeded",
@@ -493,6 +497,24 @@ def _tool_result_text(message: ToolResultMessage) -> str:
         for block in message.content
         if getattr(block, "text", "")
     ).strip()
+
+
+def _expresses_non_production_constraint(text: str) -> bool:
+    negative_markers = (
+        "不要",
+        "不做",
+        "不是生产级",
+        "非生产级",
+        "避免",
+        "别",
+        "无需",
+        "不需要",
+        "不按生产级",
+        "不要生产级",
+        "避免生产级",
+        "避免过度设计",
+    )
+    return any(marker in text for marker in negative_markers)
 
 
 __all__ = ["MemoryWriter"]

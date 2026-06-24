@@ -42,29 +42,36 @@ class ExperienceExtractor:
         result: AgentRunResult,
         messages: list[ToolResultMessage],
     ) -> list[ExperienceCandidate]:
-        if not _has_passed_verification(messages):
-            return []
-        failed = next(
+        failed_match = next(
             (
-                message for message in messages
+                (index, message) for index, message in enumerate(messages)
                 if message.tool_name == "edit"
                 and message.is_error
                 and message.error_code in {"multiple_matches", "unexpected_match_count"}
             ),
             None,
         )
-        if failed is None:
+        if failed_match is None:
             return []
-        succeeded = next(
+        failed_index, failed = failed_match
+        succeeded_match = next(
             (
-                message for message in messages
+                (index, message)
+                for index, message in enumerate(
+                    messages[failed_index + 1:],
+                    failed_index + 1,
+                )
                 if message.tool_name == "edit"
                 and not message.is_error
                 and message.status == "success"
             ),
             None,
         )
-        if succeeded is None:
+        if succeeded_match is None:
+            return []
+        succeeded_index, succeeded = succeeded_match
+        passed_verifications = _passed_verifications_after(messages, succeeded_index)
+        if not passed_verifications:
             return []
         paths = _paths_from([failed, succeeded])
         content = {
@@ -79,7 +86,7 @@ class ExperienceExtractor:
                 f"error:{failed.error_code}",
             ],
             "avoid_when": [],
-            "evidence_refs": _evidence_refs([failed, succeeded, *_passed_verifications(messages)]),
+            "evidence_refs": _evidence_refs([failed, succeeded, *passed_verifications]),
             "maturity": "verified" if result.status == "completed" else "active",
             "occurrence_count": 1,
             "last_seen_at": utc_now_iso(),
@@ -92,15 +99,19 @@ class ExperienceExtractor:
         result: AgentRunResult,
         messages: list[ToolResultMessage],
     ) -> list[ExperienceCandidate]:
-        failed = next(
+        failed_match = next(
             (
-                message for message in messages
+                (index, message) for index, message in enumerate(messages)
                 if isinstance(message.verification, dict)
                 and message.verification.get("status") == "failed"
             ),
             None,
         )
-        if failed is None or not _has_passed_verification(messages):
+        if failed_match is None:
+            return []
+        failed_index, failed = failed_match
+        passed_verifications = _passed_verifications_after(messages, failed_index)
+        if not passed_verifications:
             return []
         content = {
             "lesson_type": "verification_repair",
@@ -114,7 +125,7 @@ class ExperienceExtractor:
                 "error:verification_failed",
             ],
             "avoid_when": [],
-            "evidence_refs": _evidence_refs([failed, *_passed_verifications(messages)]),
+            "evidence_refs": _evidence_refs([failed, *passed_verifications]),
             "maturity": "verified" if result.status == "completed" else "active",
             "occurrence_count": 1,
             "last_seen_at": utc_now_iso(),
@@ -169,17 +180,12 @@ class MemoryConsolidator:
         )
 
 
-def _has_passed_verification(messages: list[ToolResultMessage]) -> bool:
-    return any(
-        isinstance(message.verification, dict)
-        and message.verification.get("status") == "passed"
-        for message in messages
-    )
-
-
-def _passed_verifications(messages: list[ToolResultMessage]) -> list[ToolResultMessage]:
+def _passed_verifications_after(
+    messages: list[ToolResultMessage],
+    index: int,
+) -> list[ToolResultMessage]:
     return [
-        message for message in messages
+        message for message in messages[index + 1:]
         if isinstance(message.verification, dict)
         and message.verification.get("status") == "passed"
     ]

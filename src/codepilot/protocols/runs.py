@@ -26,6 +26,7 @@ AgentRunStatus = Literal[
     "failed",            # 运行失败
     "aborted",           # 被用户中止
     "waiting_approval",  # 等待用户审批（如危险工具调用）
+    "waiting_user",      # 等待用户确认或补充指示（如任务阻塞/回退确认）
 ]
 
 # Agent 运行停止原因
@@ -37,6 +38,8 @@ AgentRunStopReason = Literal[
     "approval_required",     # 需要用户审批
     "repeated_tool_call",    # 检测到重复的工具调用（可能陷入循环）
     "replan_limit",          # 连续失败后达到重新规划上限
+    "task_blocked",          # 任务控制器判断当前任务阻塞，需要用户确认/指示
+    "task_incomplete",       # 任务控制器判断完成条件未满足
     "internal_error",        # 内部错误
 ]
 

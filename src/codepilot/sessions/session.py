@@ -231,6 +231,8 @@ class AgentSession:
         self.agent.set_recovered_task(
             self._active_task_projection() if self.memory_enabled else None
         )
+        self._check_context_freshness()
+        await self._check_and_compact_before_prompt()
         result = await self.agent.continue_run(run_id=run_id)
         self.store.append_run_result(result)
         self._write_rollback_metadata(result, rollback_baseline)
@@ -704,8 +706,10 @@ class AgentSession:
     async def _check_and_compact_before_prompt(self) -> None:
         """在调用 LLM 之前检测上下文是否溢出。
 
-        如果已溢出，则强制触发上下文压缩，以确保请求不会因超出窗口而失败。
+        先应用会话自己的消息数/token 阈值，再检查 provider 上下文窗口。
+        这样 run/continue_run 在每次模型调用前都能使用同一套压缩入口。
         """
+        await self._compact_context_if_needed()
         model = self.agent.state.model
         ctx = Context(
             messages=self.agent.state.messages,

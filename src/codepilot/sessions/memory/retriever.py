@@ -74,6 +74,15 @@ class MemoryRetriever:
             if record.scope == "project":
                 score += 10
                 reasons.append("project_memory")
+            if query.retrieval_mode == "qa" and record.kind in {"decision", "project"}:
+                score += 20
+                reasons.append(f"mode:qa_{record.kind}_memory")
+            elif query.retrieval_mode == "repair" and record.kind in {"experience", "failure"}:
+                score += 15
+                reasons.append(f"mode:repair_{record.kind}_memory")
+            elif query.retrieval_mode in {"verify", "final"} and record.kind == "task":
+                score += 10
+                reasons.append(f"mode:{query.retrieval_mode}_task_memory")
             if record.kind == "experience":
                 applies = {
                     str(item)

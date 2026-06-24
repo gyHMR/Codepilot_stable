@@ -45,6 +45,10 @@ def test_compaction_prompt_preserves_working_context_facts() -> None:
     assert "下一步" in COMPACTION_SYSTEM_PROMPT
 
 
+def test_agent_session_compacts_before_continue_run(tmp_path: Path) -> None:
+    asyncio.run(_run_continue_pre_compaction_case(tmp_path))
+
+
 async def _run_compaction_case(tmp_path: Path) -> None:
     from codepilot.protocols import AssistantMessage, TextContent, UserMessage
     from codepilot.runtime.types import AgentSessionOptions
@@ -80,6 +84,69 @@ async def _run_compaction_case(tmp_path: Path) -> None:
         assert report["summary_created"] is True
         assert isinstance(report["tokens_before"], int)
         assert isinstance(report["tokens_after"], int)
+    finally:
+        session.close()
+
+
+async def _run_continue_pre_compaction_case(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from codepilot.protocols import AgentRunResult, AssistantMessage, TextContent, UserMessage
+    from codepilot.runtime.types import AgentSessionOptions
+    from codepilot.sessions.session import AgentSession
+
+    class FakeAgent:
+        def __init__(self, messages):
+            self.state = SimpleNamespace(
+                messages=list(messages),
+                system_prompt="sys",
+                tools=[],
+                model=_test_model(),
+            )
+            self.message_count_at_continue: int | None = None
+
+        def set_messages(self, messages):
+            self.state.messages = list(messages)
+
+        def set_recovered_task(self, task):
+            _ = task
+
+        async def continue_run(self, *, run_id=None):
+            self.message_count_at_continue = len(self.state.messages)
+            return AgentRunResult(
+                run_id=run_id or "run_continue",
+                session_id="session_continue",
+                status="completed",
+                stop_reason="final_answer",
+                messages=[],
+            )
+
+    messages = [
+        UserMessage(content="old user"),
+        AssistantMessage(content=[TextContent(text="old assistant")]),
+        UserMessage(content="recent user"),
+        AssistantMessage(content=[TextContent(text="recent assistant")]),
+    ]
+    session = AgentSession(
+        AgentSessionOptions(
+            model=_test_model(),
+            workspace_dir=tmp_path,
+            system_prompt="sys",
+            messages=messages,
+            max_context_messages=3,
+            retain_recent_messages=2,
+            summary_builder=lambda older: f"summary-count={len(older)}",
+            memory_enabled=False,
+        )
+    )
+    fake_agent = FakeAgent(messages)
+    session.agent = fake_agent  # type: ignore[assignment]
+
+    try:
+        await session.continue_run(run_id="run_continue")
+        assert fake_agent.message_count_at_continue == 3
+        assert isinstance(fake_agent.state.messages[0], UserMessage)
+        assert "summary-count=2" in str(fake_agent.state.messages[0].content)
     finally:
         session.close()
 

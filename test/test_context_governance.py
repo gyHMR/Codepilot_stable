@@ -102,6 +102,46 @@ def test_context_compiler_keeps_tool_result_with_matching_assistant_call(
     asyncio.run(_tool_result_pairing_case(tmp_path))
 
 
+def test_context_compaction_repairs_tool_result_pairing() -> None:
+    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage, UserMessage
+    from codepilot.sessions.context.compaction import build_compacted_context
+
+    messages = [
+        UserMessage(content="请读取 service.py"),
+        AssistantMessage(
+            content=[ToolCall(id="read_1", name="read", arguments={"path": "service.py"})],
+            stop_reason="toolUse",
+        ),
+        UserMessage(content="中间历史会被摘要替代"),
+        ToolResultMessage(
+            tool_call_id="read_1",
+            tool_name="read",
+            content=[TextContent(text="value = 1")],
+        ),
+    ]
+
+    compacted = build_compacted_context(
+        messages=messages,
+        summary_text="已经请求读取 service.py",
+        retain_recent_messages=2,
+        reason="test",
+    )
+
+    for index, message in enumerate(compacted.messages):
+        if not isinstance(message, ToolResultMessage):
+            continue
+        assert any(
+            isinstance(previous, AssistantMessage)
+            and any(
+                isinstance(block, ToolCall)
+                and block.id == message.tool_call_id
+                for block in previous.content
+            )
+            for previous in compacted.messages[:index]
+        )
+    assert compacted.report["repaired_tool_pairs"] == 1
+
+
 async def _tool_result_pairing_case(tmp_path: Path) -> None:
     from codepilot.core import AgentContext, ContextPreparationRequest
     from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage, UserMessage
@@ -218,6 +258,14 @@ async def _repair_mode_sanitizer_case(tmp_path: Path) -> None:
     assert "data-not-instruction" in prepared.system_prompt
     assert prepared.report.sanitization["redacted_count"] >= 1
     assert prepared.report.sanitization["untrusted_items"] >= 1
+    assert any(
+        "action_intent:debug_failure" in reasons
+        for reasons in prepared.report.relevance_reasons.values()
+    )
+    assert any(
+        "recent_error:verification_failed" in reasons
+        for reasons in prepared.report.relevance_reasons.values()
+    )
 
 
 def test_context_compiler_uses_qa_mode_for_design_questions(tmp_path: Path) -> None:
@@ -255,8 +303,86 @@ def test_context_compiler_marks_hash_bound_summary_stale(tmp_path: Path) -> None
     asyncio.run(_stale_summary_case(tmp_path))
 
 
+def test_context_compiler_marks_active_file_stale_after_external_change(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_stale_active_file_case(tmp_path))
+
+
+def test_session_context_state_caps_verification_only_evidence(
+    tmp_path: Path,
+) -> None:
+    from codepilot.protocols import ToolResultMessage
+    from codepilot.sessions.context.state import SessionContextState
+
+    state = SessionContextState(workspace_dir=tmp_path)
+    for index in range(90):
+        state.observe_tool_result(
+            ToolResultMessage(
+                tool_call_id=f"verify_{index}",
+                tool_name="bash",
+                verification={
+                    "status": "passed",
+                    "command": f"pytest #{index}",
+                    "exit_code": 0,
+                },
+            ),
+            repository_fingerprint="fp",
+        )
+
+    assert len(state.evidence) == 80
+
+
 def test_context_compiler_refreshes_deleted_top_level_directory(tmp_path: Path) -> None:
     asyncio.run(_deleted_top_level_directory_case(tmp_path))
+
+
+async def _stale_active_file_case(tmp_path: Path) -> None:
+    from codepilot.core import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
+    from codepilot.sessions.context.compiler import ContextCompiler
+    from codepilot.sessions.context.state import SessionContextState
+    from codepilot.tools.sandbox import file_state_for_path
+
+    target = tmp_path / "service.py"
+    target.write_text("value = 1\n", encoding="utf-8", newline="\n")
+    state_v1 = file_state_for_path(tmp_path, "service.py")
+    messages = [
+        UserMessage(content="inspect service.py"),
+        ToolResultMessage(
+            tool_call_id="read_1",
+            tool_name="read",
+            content=[TextContent(text="value = 1")],
+            details={"file_state": state_v1},
+        ),
+    ]
+    compiler = ContextCompiler(
+        workspace=str(tmp_path),
+        state=SessionContextState(workspace_dir=tmp_path),
+    )
+    request = ContextPreparationRequest(
+        session_id="session_1",
+        model_context_window=4000,
+        model_max_output_tokens=500,
+    )
+
+    first = await compiler.compile(
+        AgentContext(system_prompt="rules", messages=messages),
+        request,
+    )
+    assert any(item["id"] == "active:service.py" for item in first.report.selected_items)
+
+    target.write_text("value = 2\n", encoding="utf-8", newline="\n")
+    second = await compiler.compile(
+        AgentContext(system_prompt="rules", messages=messages),
+        request,
+    )
+
+    assert "active_file:service.py:stale" in second.report.stale_items
+    assert any(
+        item.item_id == "active:service.py" and item.reason == "stale"
+        for item in second.report.dropped_items
+    )
 
 
 async def _deleted_top_level_directory_case(tmp_path: Path) -> None:

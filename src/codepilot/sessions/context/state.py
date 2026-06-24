@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from codepilot.protocols import RepositorySnapshot, ToolResultMessage
+from codepilot.protocols import ContextFreshness, RepositorySnapshot, ToolResultMessage
 from codepilot.tools.sandbox import file_state_for_path
 
 
@@ -95,6 +95,9 @@ class ActiveFile:
 
     # 最后访问时间戳
     last_accessed_at: float = field(default_factory=time.time)
+
+    # 新鲜度：fresh/stale/missing/unknown
+    freshness: ContextFreshness = "unknown"
 
 
 @dataclass
@@ -370,6 +373,7 @@ class SessionContextState:
                     freshness="fresh",
                 )
             )
+            self.evidence = self.evidence[-80:]
 
     def touch_file(
         self,
@@ -409,6 +413,7 @@ class SessionContextState:
                 role=role,
                 reason=reason,
                 source_hash=source_hash,
+                freshness="fresh" if source_hash else "unknown",
             )
             return
 
@@ -424,6 +429,7 @@ class SessionContextState:
         # 更新哈希（如果提供）
         if source_hash:
             current.source_hash = source_hash
+            current.freshness = "fresh"
 
     def invalidate_paths(self, paths: list[str]) -> None:
         """
@@ -447,6 +453,10 @@ class SessionContextState:
             for evidence in self.evidence:
                 if evidence.path == normalized:
                     evidence.freshness = "stale"
+
+            active = self.active_files.get(normalized)
+            if active is not None:
+                active.freshness = "stale"
 
     def invalidate_verification(self) -> None:
         """
@@ -499,6 +509,22 @@ class SessionContextState:
             # 记录过时条目
             if summary.freshness != "fresh":
                 stale.append(f"file_summary:{path}:{summary.freshness}")
+
+        # 检查活跃文件
+        for path, active in list(self.active_files.items()):
+            state = file_state_for_path(self.workspace_dir, path)
+
+            if not state.get("exists"):
+                active.freshness = "missing"
+            elif active.source_hash and state.get("sha256") != active.source_hash:
+                active.freshness = "stale"
+            elif active.source_hash:
+                active.freshness = "fresh"
+            else:
+                active.freshness = "unknown"
+
+            if active.freshness in {"stale", "missing"}:
+                stale.append(f"active_file:{path}:{active.freshness}")
 
         # 检查验证证据
         for evidence in self.evidence:

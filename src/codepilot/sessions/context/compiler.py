@@ -303,20 +303,11 @@ class ContextCompiler:
             context_mode=context_mode,
             budget_profile=budget_profile,
             relevance_reasons={
-                item["id"]: ["priority_score"]
+                item.id: _relevance_reasons(item, context, context_mode)
                 for item in [
-                    *[
-                        _context_item_summary(context_item)
-                        for context_item in selected_active
-                    ],
-                    *[
-                        _context_item_summary(context_item)
-                        for context_item in selected_evidence
-                    ],
-                    *[
-                        _context_item_summary(context_item)
-                        for context_item in selected_memory
-                    ],
+                    *selected_active,
+                    *selected_evidence,
+                    *selected_memory,
                 ]
             },
             sanitization=sanitization,
@@ -366,7 +357,7 @@ class ContextCompiler:
                     estimated_tokens=_estimate_text_tokens(content),
                     path=active.path,
                     source_hash=active.source_hash,
-                    freshness="fresh" if active.source_hash else "unknown",
+                    freshness=active.freshness,
                 )
             )
         return items
@@ -670,6 +661,35 @@ def _optional_signal(context: AgentContext, key: str) -> str | None:
         return None
     value = context.task_signal.get(key)
     return value if isinstance(value, str) and value else None
+
+
+def _relevance_reasons(
+    item: ContextItem,
+    context: AgentContext,
+    context_mode: str,
+) -> list[str]:
+    reasons = ["priority_score", f"context_mode:{context_mode}"]
+    if item.path:
+        reasons.append(f"path:{item.path}")
+    if item.kind == "active_file":
+        reasons.append("active_file")
+    elif item.kind == "verification":
+        reasons.append("verification_evidence")
+    elif item.kind == "tool_result":
+        reasons.append("tool_result_evidence")
+    elif item.kind.startswith("memory."):
+        reasons.append("memory_retrieval_score")
+
+    action_intent = _optional_signal(context, "action_intent")
+    if action_intent:
+        reasons.append(f"action_intent:{action_intent}")
+    recent_error = _optional_signal(context, "recent_error_code")
+    if recent_error:
+        reasons.append(f"recent_error:{recent_error}")
+    current_step = _optional_signal(context, "current_step_title")
+    if current_step:
+        reasons.append("current_step")
+    return reasons
 
 
 def _resolve_context_mode(context: AgentContext) -> str:

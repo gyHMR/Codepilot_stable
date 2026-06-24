@@ -39,6 +39,8 @@ Agent 核心执行循环模块。
     - "max_iterations": 达到最大工具迭代次数
     - "approval_required": 工具执行需要用户审批
     - "replan_limit": 任务重新规划次数超限
+    - "task_blocked": 任务控制器判断需要用户确认或外部指示
+    - "task_incomplete": 任务控制器判断完成条件未满足
 """
 
 from __future__ import annotations
@@ -569,6 +571,7 @@ async def _run_loop(
             ]
             has_more_tool_calls = bool(tool_calls)
             tool_results: list[ToolResultMessage] = []
+            decision = None
 
             # ── 执行工具调用 ──────────────────────────────────
             if has_more_tool_calls:
@@ -647,23 +650,6 @@ async def _run_loop(
                 current_context.messages.extend(tool_results)
                 new_messages.extend(tool_results)
 
-                # 如果任务控制器决定停止（如重新规划次数超限）
-                if decision is not None and decision.action == "stop":
-                    return await _stop_with_error(
-                        emitter,
-                        state,
-                        new_messages,
-                        assistant,
-                        code="run.replan_limit",
-                        message=decision.reason,
-                        stop_reason="replan_limit",
-                        task=(
-                            task_controller.summarize(task)
-                            if task_controller is not None and task is not None
-                            else None
-                        ),
-                    )
-
             # 发射轮次结束事件
             await emitter.emit(
                 {"type": "turn_end", "message": assistant, "toolResults": tool_results}
@@ -705,6 +691,55 @@ async def _run_loop(
                     ),
                 )
 
+            # 如果任务控制器建议受控回退 → 暂停，等待用户确认
+            if decision is not None and decision.action == "propose_revert":
+                return await _finish_run(
+                    emitter,
+                    state.result(
+                        status="waiting_user",
+                        stop_reason="task_blocked",
+                        messages=new_messages,
+                        final_message=assistant,
+                        task=(
+                            task_controller.summarize(task)
+                            if task_controller is not None and task is not None
+                            else None
+                        ),
+                    ),
+                )
+
+            # 如果任务控制器决定停止，按具体原因返回，不把所有 stop 都归为 replan_limit
+            if decision is not None and decision.action == "stop":
+                if decision.reason == "replan_limit_exceeded":
+                    return await _stop_with_error(
+                        emitter,
+                        state,
+                        new_messages,
+                        assistant,
+                        code="run.replan_limit",
+                        message=decision.reason,
+                        stop_reason="replan_limit",
+                        task=(
+                            task_controller.summarize(task)
+                            if task_controller is not None and task is not None
+                            else None
+                        ),
+                    )
+                return await _finish_run(
+                    emitter,
+                    state.result(
+                        status="waiting_user",
+                        stop_reason="task_blocked",
+                        messages=new_messages,
+                        final_message=assistant,
+                        task=(
+                            task_controller.summarize(task)
+                            if task_controller is not None and task is not None
+                            else None
+                        ),
+                    ),
+                )
+
             # 获取新的待处理消息（可能由工具执行触发）
             pending_messages = await _drain(config.get_steering_messages)
 
@@ -733,6 +768,21 @@ async def _run_loop(
             if not completion.satisfied and completion.can_continue:
                 pending_messages = [task_controller.completion_steering(completion)]
                 continue
+            if not completion.satisfied:
+                return await _finish_run(
+                    emitter,
+                    state.result(
+                        status="waiting_user",
+                        stop_reason=(
+                            "task_blocked"
+                            if completion.reason == "blocked_steps"
+                            else "task_incomplete"
+                        ),
+                        messages=new_messages,
+                        final_message=_last_assistant(new_messages),
+                        task=task_controller.summarize(task),
+                    ),
+                )
 
         # ── 检查后续消息 ────────────────────────────────────────
 

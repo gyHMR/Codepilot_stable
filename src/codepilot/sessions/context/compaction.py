@@ -8,6 +8,7 @@ from codepilot.protocols import (
     AssistantMessage,
     Message,
     TextContent,
+    ToolCall,
     ToolResultMessage,
     UserMessage,
 )
@@ -50,7 +51,10 @@ def build_compacted_context(
     summary_message = UserMessage(
         content=[TextContent(text=f"[Context Summary]\n{summary_text}")],
     )
-    compacted = [summary_message, *recent]
+    compacted, repaired_tool_pairs, unresolved_tool_results = _repair_tool_message_pairs(
+        [summary_message, *recent],
+        messages,
+    )
     tokens_before = estimate_context_tokens(messages, system_prompt)
     tokens_after = estimate_context_tokens(compacted, system_prompt)
     report = {
@@ -59,9 +63,63 @@ def build_compacted_context(
         "tokens_after": tokens_after,
         "retained_messages": retain,
         "truncated_tool_results": sum(isinstance(msg, ToolResultMessage) for msg in older),
+        "repaired_tool_pairs": repaired_tool_pairs,
+        "unresolved_tool_results": unresolved_tool_results,
         "summary_created": bool(summary_text.strip()),
     }
     return ContextCompactionResult(messages=compacted, report=report)
+
+
+def _repair_tool_message_pairs(
+    compacted: list[Message],
+    original: list[Message],
+) -> tuple[list[Message], int, int]:
+    """Ensure retained ToolResultMessage items still have their Assistant ToolCall.
+
+    Session-level compaction rewrites the persisted message list directly.  The
+    normal ContextCompiler repair only happens right before provider calls, so
+    compaction must also preserve the minimal provider-legal message sequence.
+    """
+
+    repaired: list[Message] = []
+    seen_tool_call_ids: set[str] = set()
+    repaired_count = 0
+    unresolved_count = 0
+    original_tool_calls = _tool_calls_by_id(original)
+
+    for message in compacted:
+        if isinstance(message, ToolResultMessage):
+            if message.tool_call_id not in seen_tool_call_ids:
+                tool_call = original_tool_calls.get(message.tool_call_id)
+                if tool_call is not None:
+                    repaired.append(
+                        AssistantMessage(
+                            content=[tool_call],
+                            stop_reason="toolUse",
+                        )
+                    )
+                    seen_tool_call_ids.add(tool_call.id)
+                    repaired_count += 1
+                else:
+                    unresolved_count += 1
+        elif isinstance(message, AssistantMessage):
+            seen_tool_call_ids.update(
+                block.id for block in message.content if isinstance(block, ToolCall)
+            )
+        repaired.append(message)
+
+    return repaired, repaired_count, unresolved_count
+
+
+def _tool_calls_by_id(messages: list[Message]) -> dict[str, ToolCall]:
+    calls: dict[str, ToolCall] = {}
+    for message in messages:
+        if not isinstance(message, AssistantMessage):
+            continue
+        for block in message.content:
+            if isinstance(block, ToolCall) and block.id:
+                calls.setdefault(block.id, block)
+    return calls
 
 
 def format_messages_for_summary(messages: list[Message], *, limit: int = 40, text_limit: int = 180) -> str:

@@ -240,7 +240,10 @@ async def _run_agent_loop_after_tool_hook_error_case() -> None:
         stream_fn=fake_stream,
     )
 
-    assert result.status == "completed"
+    assert result.status == "waiting_user"
+    assert result.stop_reason == "task_incomplete"
+    assert result.task is not None
+    assert result.task.completion_satisfied is False
     tool_end = next(event for event in events if event["type"] == "tool_execution_end")
     assert tool_end["isError"] is True
     assert tool_end["status"] == "error"

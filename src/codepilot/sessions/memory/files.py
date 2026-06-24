@@ -13,6 +13,7 @@ _SECRET_PATTERNS = [
     re.compile(r"(?i)(api[_-]?key|token|password|secret|cookie)\s*[:=]\s*\S+"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
     re.compile(r"\b(?:sk|pk)-[A-Za-z0-9_-]{12,}\b"),
+    re.compile(r"(?i)authorization:\s*bearer\s+\S+"),
 ]
 
 

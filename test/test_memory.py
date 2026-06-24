@@ -279,6 +279,141 @@ def test_memory_writer_extracts_verified_experience_from_edit_repair_loop(
     assert experiences[0].content["occurrence_count"] == 2
 
 
+def test_memory_writer_does_not_extract_experience_from_out_of_order_evidence(
+    tmp_path: Path,
+) -> None:
+    from codepilot.protocols import AgentRunResult, TextContent, ToolResultMessage
+    from codepilot.sessions.memory import MemoryStore, MemoryWriter
+    from codepilot.sessions.persistence.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "session_experience_order")
+    session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
+    store = MemoryStore(session_store)
+    writer = MemoryWriter(store=store, workspace_dir=tmp_path)
+    writer.remember_task("修复 edit 失败", run_id="run_order")
+
+    writer.finalize_run(
+        AgentRunResult(
+            run_id="run_order",
+            session_id="session_experience_order",
+            status="completed",
+            stop_reason="final_answer",
+            messages=[
+                ToolResultMessage(
+                    tool_call_id="test_old_pass",
+                    tool_name="bash",
+                    status="success",
+                    verification={
+                        "status": "passed",
+                        "command": "python -m pytest test/test_app.py -q",
+                        "exit_code": 0,
+                    },
+                ),
+                ToolResultMessage(
+                    tool_call_id="edit_bad",
+                    tool_name="edit",
+                    status="error",
+                    is_error=True,
+                    error_code="multiple_matches",
+                    content=[TextContent(text="Multiple matches found")],
+                    affected_paths=["src/app.py"],
+                ),
+                ToolResultMessage(
+                    tool_call_id="edit_good",
+                    tool_name="edit",
+                    status="success",
+                    content=[TextContent(text="Edited unrelated file")],
+                    affected_paths=["src/app.py"],
+                    workspace_changed=True,
+                ),
+                ToolResultMessage(
+                    tool_call_id="test_new_fail",
+                    tool_name="bash",
+                    status="error",
+                    is_error=True,
+                    verification={
+                        "status": "failed",
+                        "command": "python -m pytest test/test_app.py -q",
+                        "exit_code": 1,
+                    },
+                ),
+            ],
+        )
+    )
+
+    assert [
+        record for record in store.load_session() if record.kind == "experience"
+    ] == []
+
+
+def test_memory_writer_does_not_resolve_pathless_failure_from_unrelated_success(
+    tmp_path: Path,
+) -> None:
+    from codepilot.protocols import TextContent, ToolResultMessage
+    from codepilot.sessions.memory import MemoryStore, MemoryWriter
+    from codepilot.sessions.persistence.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "session_failure_resolution")
+    session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
+    store = MemoryStore(session_store)
+    writer = MemoryWriter(store=store, workspace_dir=tmp_path)
+
+    failure = writer.observe_tool_result(
+        ToolResultMessage(
+            tool_call_id="bash_bad",
+            tool_name="bash",
+            status="error",
+            is_error=True,
+            error_code="dangerous_command",
+            content=[TextContent(text="rm -rf is blocked")],
+        ),
+        run_id="run_failure",
+    )[0]
+    writer.observe_tool_result(
+        ToolResultMessage(
+            tool_call_id="bash_good",
+            tool_name="bash",
+            status="success",
+            content=[TextContent(text="pytest passed")],
+        ),
+        run_id="run_failure",
+    )
+
+    assert store.get(failure.id).content["resolution"] is None  # type: ignore[union-attr]
+
+
+def test_memory_writer_does_not_infer_project_constraint_from_production_request(
+    tmp_path: Path,
+) -> None:
+    from codepilot.sessions.memory import MemoryStore, MemoryWriter
+    from codepilot.sessions.persistence.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "session_project_constraint_negative")
+    session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
+    store = MemoryStore(session_store)
+    writer = MemoryWriter(store=store, workspace_dir=tmp_path)
+
+    writer.remember_task("这个项目现在要按生产级复杂设计推进", run_id="run_prod")
+
+    assert not any(
+        record.kind == "project"
+        and record.content.get("category") == "project_constraint"
+        for record in store.load_project()
+    )
+
+
+def test_memory_sanitizer_redacts_authorization_bearer() -> None:
+    from codepilot.sessions.memory import sanitize_memory_text
+
+    sanitized = sanitize_memory_text(
+        "Authorization: Bearer secret-token-value",
+        limit=200,
+    )
+
+    assert "secret-token-value" not in sanitized
+    assert "[REDACTED]" in sanitized
+
+
 def test_memory_retriever_uses_phase_intent_and_error_without_hard_filter(
     tmp_path: Path,
 ) -> None:
@@ -351,6 +486,40 @@ def test_memory_retriever_uses_phase_intent_and_error_without_hard_filter(
         MemoryQuery(text="old_text", active_paths=[])
     )
     assert [item.record.id for item in without_intent] == ["exp_verified"]
+
+
+def test_memory_retriever_uses_qa_mode_to_surface_decision_memory(
+    tmp_path: Path,
+) -> None:
+    from codepilot.sessions.memory import (
+        MemoryQuery,
+        MemoryRecord,
+        MemoryRetriever,
+        MemoryStore,
+    )
+    from codepilot.sessions.persistence.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "session_qa_retrieval")
+    session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
+    store = MemoryStore(session_store)
+    store.update(
+        MemoryRecord(
+            id="decision_context",
+            kind="decision",
+            scope="session",
+            content={"decision": "上下文模块采用轻量预算治理，而不是向量数据库"},
+            source="user",
+            trust="user_given",
+        )
+    )
+    retriever = MemoryRetriever(store=store, workspace_dir=tmp_path)
+
+    retrieved = retriever.retrieve(
+        MemoryQuery(text="", active_paths=[], retrieval_mode="qa")
+    )
+
+    assert [item.record.id for item in retrieved] == ["decision_context"]
+    assert "mode:qa_decision_memory" in retrieved[0].reasons
 
 
 def test_memory_writer_clears_next_action_only_when_completion_is_satisfied(
