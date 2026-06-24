@@ -62,6 +62,10 @@ def test_agent_loop_propagates_tool_result_status_to_events() -> None:
     asyncio.run(_run_agent_loop_tool_status_case())
 
 
+def test_agent_loop_converts_after_tool_hook_exception_to_tool_error() -> None:
+    asyncio.run(_run_agent_loop_after_tool_hook_error_case())
+
+
 def test_agent_loop_stops_at_max_tool_iterations() -> None:
     asyncio.run(_run_agent_loop_max_tool_iterations_case())
 
@@ -187,6 +191,63 @@ async def _run_agent_loop_tool_status_case() -> None:
     summary = summarize_events(events)
     assert summary["tool_calls"] == 1
     assert summary["tool_errors"] == 1
+
+
+async def _run_agent_loop_after_tool_hook_error_case() -> None:
+    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
+    from codepilot.llm.event_stream import AssistantMessageEventStream
+    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage, UserMessage
+    from codepilot.observability import validate_agent_event
+    from codepilot.tools import AgentToolResult
+
+    async def fake_stream(_model, context, _options):
+        stream = AssistantMessageEventStream()
+        has_tool_result = any(isinstance(message, ToolResultMessage) for message in context.messages)
+        if has_tool_result:
+            stream.end(AssistantMessage(content=[TextContent(text="done")], stop_reason="stop"))
+        else:
+            stream.end(
+                AssistantMessage(
+                    content=[ToolCall(id="call_1", name="echo", arguments={"text": "hello"})],
+                    stop_reason="toolUse",
+                )
+            )
+        return stream
+
+    async def echo_tool(_tool_call_id: str, params: dict[str, Any], _signal=None, on_update=None):
+        _ = on_update
+        return AgentToolResult(content=[TextContent(text=params["text"])], details={"ok": True})
+
+    def broken_after_hook(_ctx, _signal=None):
+        raise RuntimeError("hook exploded")
+
+    events: list[dict[str, Any]] = []
+    result = await run_agent_loop(
+        prompts=[UserMessage(content="use echo")],
+        context=AgentContext(
+            system_prompt="",
+            messages=[],
+            tools=[_managed_tool("echo", echo_tool)],
+        ),
+        config=AgentLoopConfig(
+            model=_test_model(),
+            convert_to_llm=lambda m: m,
+            tool_execution="sequential",
+            session_id="s1",
+            after_tool_call=broken_after_hook,
+        ),
+        emit=events.append,
+        stream_fn=fake_stream,
+    )
+
+    assert result.status == "completed"
+    tool_end = next(event for event in events if event["type"] == "tool_execution_end")
+    assert tool_end["isError"] is True
+    assert tool_end["status"] == "error"
+    assert tool_end["errorReason"] == "after_tool_hook_error"
+    result_message = next(message for message in result.messages if isinstance(message, ToolResultMessage))
+    assert result_message.error_code == "after_tool_hook_error"
+    assert all(validate_agent_event(event) == [] for event in events)
 
 
 async def _run_agent_loop_max_tool_iterations_case() -> None:

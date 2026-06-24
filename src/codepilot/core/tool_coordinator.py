@@ -30,6 +30,45 @@ def error_tool_result(message: str, *, approved: bool = True) -> AgentToolResult
     )
 
 
+def hook_error_tool_result(
+    phase: str,
+    exc: Exception,
+    *,
+    approved: bool = True,
+) -> AgentToolResult:
+    """将工具钩子异常转换为结构化工具错误，避免事件流悬挂。"""
+    error_code = f"{phase}_tool_hook_error"
+    return AgentToolResult(
+        content=[TextContent(text=f"{phase}_tool_call hook failed: {exc}")],
+        details={
+            "reason": error_code,
+            "status": "error",
+            "error_kind": type(exc).__name__,
+        },
+        is_error=True,
+        status="error",
+        approved=approved,
+        error_code=error_code,
+    )
+
+
+def mark_hook_error_result(result: AgentToolResult, phase: str, exc: Exception) -> AgentToolResult:
+    """在保留原工具副作用证据的前提下，将 after hook 异常标记为工具错误。"""
+    error_code = f"{phase}_tool_hook_error"
+    original_details = result.details
+    result.content = [TextContent(text=f"{phase}_tool_call hook failed: {exc}")]
+    result.details = {
+        "reason": error_code,
+        "status": "error",
+        "error_kind": type(exc).__name__,
+        "original_details": original_details,
+    }
+    result.is_error = True
+    result.status = "error"
+    result.error_code = error_code
+    return result
+
+
 def tool_error_reason(result: AgentToolResult, is_error: bool) -> str | None:
     """从工具结果的 details 中提取错误原因字符串。"""
     if not is_error:
@@ -140,17 +179,24 @@ class ToolCallCoordinator:
 
         args = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
         if self._config.before_tool_call:
-            before = await maybe_await(
-                self._config.before_tool_call(
-                    BeforeToolCallContext(
-                        assistant_message=assistant_message,
-                        tool_call=tool_call,
-                        args=args,
-                        context=current_context,
-                    ),
-                    signal,
+            try:
+                before = await maybe_await(
+                    self._config.before_tool_call(
+                        BeforeToolCallContext(
+                            assistant_message=assistant_message,
+                            tool_call=tool_call,
+                            args=args,
+                            context=current_context,
+                        ),
+                        signal,
+                    )
                 )
-            )
+            except Exception as exc:
+                return None, hook_error_tool_result(
+                    "before",
+                    exc,
+                    approved=False,
+                ), True
             if before and before.block:
                 return None, error_tool_result(
                     before.reason or "Tool execution was blocked",
@@ -210,26 +256,30 @@ class ToolCallCoordinator:
         is_error = executed.is_error or bool(result.is_error)
 
         if self._config.after_tool_call:
-            after = await maybe_await(
-                self._config.after_tool_call(
-                    AfterToolCallContext(
-                        assistant_message=assistant_message,
-                        tool_call=prepared.tool_call,
-                        args=prepared.args,
-                        result=result,
-                        is_error=is_error,
-                        context=current_context,
-                    ),
-                    signal,
+            try:
+                after = await maybe_await(
+                    self._config.after_tool_call(
+                        AfterToolCallContext(
+                            assistant_message=assistant_message,
+                            tool_call=prepared.tool_call,
+                            args=prepared.args,
+                            result=result,
+                            is_error=is_error,
+                            context=current_context,
+                        ),
+                        signal,
+                    )
                 )
-            )
-            if after:
-                if after.content is not None:
-                    result.content = after.content
-                if after.details is not None:
-                    result.details = after.details
-                if after.is_error is not None:
-                    is_error = after.is_error
+                if after:
+                    if after.content is not None:
+                        result.content = after.content
+                    if after.details is not None:
+                        result.details = after.details
+                    if after.is_error is not None:
+                        is_error = after.is_error
+            except Exception as exc:
+                result = mark_hook_error_result(result, "after", exc)
+                is_error = True
 
         bind_tool_result(prepared.tool_call, result, is_error=is_error)
         is_error = result.is_error

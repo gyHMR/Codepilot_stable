@@ -526,7 +526,7 @@ async def _shell_quality_and_change_evidence_case(tmp_path: Path, monkeypatch) -
     assert "generated.txt" in evidence["affected_paths"]
 
 
-def test_external_tool_without_metadata_defaults_to_high_risk_approval() -> None:
+def test_external_tool_without_metadata_defaults_to_medium_risk_approval() -> None:
     from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry
 
     async def execute(*_args):
@@ -545,7 +545,7 @@ def test_external_tool_without_metadata_defaults_to_high_risk_approval() -> None
 
     metadata = registry.metadata_for("extension_sync_remote")
     assert metadata is not None
-    assert metadata.risk_level == "high"
+    assert metadata.risk_level == "medium"
     assert metadata.requires_approval is True
     assert metadata.read_only is False
     assert metadata.exclusive is True

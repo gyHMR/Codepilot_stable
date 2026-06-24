@@ -144,14 +144,22 @@ class TaskController:
             return self._decision(task, "stop", "cancelled")
 
         if any(result.status == "approval_required" for result in results):
-            self._block_current_step(task, "等待工具审批")
+            self._block_current_step(
+                task,
+                "等待工具审批",
+                evidence_refs=_evidence_refs(results),
+            )
             task.phase = "waiting"
             task.recent_error_code = "approval_required"
             task.recent_failure_type = "approval_required"
             return self._decision(task, "wait_approval", "approval_required")
 
         if any(result.status == "denied" for result in results):
-            self._block_current_step(task, "工具权限拒绝")
+            self._block_current_step(
+                task,
+                "工具权限拒绝",
+                evidence_refs=_evidence_refs(results),
+            )
             task.recent_error_code = _first_error_code(results) or "permission_denied"
             task.recent_failure_type = "permission_denied"
             return self._decision(task, "replan", "permission_denied")
@@ -425,12 +433,21 @@ class TaskController:
         task.current_step_id = None
         task.next_action = None
 
-    def _block_current_step(self, task: TaskState, note: str) -> None:
+    def _block_current_step(
+        self,
+        task: TaskState,
+        note: str,
+        *,
+        evidence_refs: list[str] | None = None,
+    ) -> None:
         """将当前步骤标记为阻塞状态。"""
         step = self._current_step(task)
         if step is not None:
             step.status = "blocked"
             step.note = note
+            for ref in evidence_refs or []:
+                if ref not in step.evidence_refs:
+                    step.evidence_refs.append(ref)
 
     def _replan_after_failure(
         self,

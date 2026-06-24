@@ -152,6 +152,49 @@ def test_completion_gate_treats_unavailable_tool_as_blocked() -> None:
     assert task.steps[0].note == "工具不可用"
 
 
+def test_permission_blocked_steps_keep_tool_evidence() -> None:
+    from codepilot.core.run_state import RunState
+    from codepilot.core.task_controller import TaskController
+    from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
+
+    controller = TaskController()
+    task = controller.initialize([UserMessage(content="写入文件")])
+    run = RunState(run_id="run_1", session_id="session_1")
+    denied = ToolResultMessage(
+        tool_call_id="write_1",
+        tool_name="write",
+        content=[TextContent(text="blocked")],
+        status="denied",
+        is_error=True,
+        error_code="read_only_mode",
+    )
+
+    decision = controller.after_tool_results(task, run, [denied])
+
+    assert decision.action == "replan"
+    assert task.steps[0].status == "blocked"
+    assert "tool:write_1" in task.steps[0].evidence_refs
+
+    task = controller.initialize([UserMessage(content="部署")])
+    approval = ToolResultMessage(
+        tool_call_id="deploy_1",
+        tool_name="deploy",
+        content=[TextContent(text="approval required")],
+        status="approval_required",
+        is_error=True,
+        approved=False,
+        approval_id="approval_1",
+        error_code="approval_required",
+    )
+
+    decision = controller.after_tool_results(task, run, [approval])
+
+    assert decision.action == "wait_approval"
+    assert task.steps[0].status == "blocked"
+    assert "tool:deploy_1" in task.steps[0].evidence_refs
+    assert "approval:approval_1" in task.steps[0].evidence_refs
+
+
 def test_replan_preserves_completed_steps_and_stops_after_limit() -> None:
     from codepilot.core.run_state import RunState
     from codepilot.core.task_controller import TaskController

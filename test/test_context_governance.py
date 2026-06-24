@@ -96,6 +96,61 @@ def test_context_compiler_uses_repair_mode_budget_and_sanitizes_tool_data(
     asyncio.run(_repair_mode_sanitizer_case(tmp_path))
 
 
+def test_context_compiler_keeps_tool_result_with_matching_assistant_call(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_tool_result_pairing_case(tmp_path))
+
+
+async def _tool_result_pairing_case(tmp_path: Path) -> None:
+    from codepilot.core import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage, UserMessage
+    from codepilot.sessions.context.compiler import ContextCompiler, ContextPolicy
+    from codepilot.sessions.context.state import SessionContextState
+
+    messages = [
+        UserMessage(content="请读取文件 " + "x" * 1000),
+        AssistantMessage(
+            content=[
+                TextContent(text="large assistant preface " + "y" * 1000),
+                ToolCall(id="read_1", name="read", arguments={"path": "service.py"})
+            ],
+            stop_reason="toolUse",
+        ),
+        ToolResultMessage(
+            tool_call_id="read_1",
+            tool_name="read",
+            content=[TextContent(text="small result")],
+        ),
+    ]
+
+    prepared = await ContextCompiler(
+        workspace=str(tmp_path),
+        state=SessionContextState(workspace_dir=tmp_path),
+        policy=ContextPolicy(minimum_input_budget=64, safety_margin_tokens=0),
+    ).compile(
+        AgentContext(system_prompt="rules", messages=messages),
+        ContextPreparationRequest(
+            session_id="session_1",
+            model_context_window=120,
+            model_max_output_tokens=40,
+        ),
+    )
+
+    for index, message in enumerate(prepared.messages):
+        if not isinstance(message, ToolResultMessage):
+            continue
+        assert any(
+            isinstance(previous, AssistantMessage)
+            and any(
+                isinstance(block, ToolCall)
+                and block.id == message.tool_call_id
+                for block in previous.content
+            )
+            for previous in prepared.messages[:index]
+        )
+
+
 async def _repair_mode_sanitizer_case(tmp_path: Path) -> None:
     from codepilot.core import AgentContext, ContextPreparationRequest
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage

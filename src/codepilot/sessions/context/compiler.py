@@ -17,12 +17,14 @@ from codepilot.core.types import (
 )
 from codepilot.llm.overflow import estimate_context_tokens
 from codepilot.protocols import (
+    AssistantMessage,
     ContextItem,
     ContextReport,
     ContextSectionReport,
     DroppedContextItem,
     RepositoryDelta,
     TextContent,
+    ToolCall,
     ToolResultMessage,
     UserMessage,
 )
@@ -210,6 +212,10 @@ class ContextCompiler:
         selected_messages, dropped_history = _select_message_suffix(
             context.messages,
             history_budget,
+        )
+        selected_messages = _repair_tool_message_pairs(
+            selected_messages,
+            context.messages,
         )
         before_tokens = estimate_context_tokens(context.messages, context.system_prompt)
         after_tokens = estimate_context_tokens(selected_messages, system_prompt)
@@ -563,6 +569,63 @@ def _select_message_suffix(
         if id(message) not in selected_ids
     ]
     return selected, dropped
+
+
+def _repair_tool_message_pairs(selected: list, original: list) -> list:
+    """确保 ToolResultMessage 不会在历史裁剪后失去匹配的 assistant tool_call。"""
+    if not selected:
+        return selected
+    result_call_ids = [
+        message.tool_call_id
+        for message in selected
+        if isinstance(message, ToolResultMessage) and message.tool_call_id
+    ]
+    if not result_call_ids:
+        return selected
+
+    selected_assistant_call_ids = _assistant_tool_call_ids(selected)
+    missing_call_ids = [
+        call_id
+        for call_id in result_call_ids
+        if call_id not in selected_assistant_call_ids
+    ]
+    if not missing_call_ids:
+        return selected
+
+    original_tool_calls: dict[str, ToolCall] = {}
+    for message in original:
+        if not isinstance(message, AssistantMessage):
+            continue
+        for block in message.content:
+            if isinstance(block, ToolCall) and block.id in missing_call_ids:
+                original_tool_calls[block.id] = block
+
+    repaired: list = []
+    inserted: set[str] = set()
+    for message in selected:
+        if isinstance(message, ToolResultMessage):
+            tool_call = original_tool_calls.get(message.tool_call_id)
+            if tool_call is not None and tool_call.id not in inserted:
+                repaired.append(
+                    AssistantMessage(
+                        content=[tool_call],
+                        stop_reason="toolUse",
+                    )
+                )
+                inserted.add(tool_call.id)
+        repaired.append(message)
+    return repaired
+
+
+def _assistant_tool_call_ids(messages: list) -> set[str]:
+    call_ids: set[str] = set()
+    for message in messages:
+        if not isinstance(message, AssistantMessage):
+            continue
+        for block in message.content:
+            if isinstance(block, ToolCall) and block.id:
+                call_ids.add(block.id)
+    return call_ids
 
 
 def _render_governance_context(
