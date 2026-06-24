@@ -109,6 +109,41 @@ def test_event_recorder_builds_eval_summary(tmp_path: Path) -> None:
     assert summary.has_errors
 
 
+def test_session_store_restores_assistant_error_info(tmp_path: Path) -> None:
+    from codepilot.protocols import AssistantMessage, LLMErrorInfo
+    from codepilot.sessions.persistence.store import SessionStore
+
+    store = SessionStore(tmp_path, "session_error")
+    store.ensure_initialized(model_id="m", provider="p", system_prompt="")
+    info = LLMErrorInfo(
+        code="llm.rate_limit",
+        message="rate limited",
+        retryable=True,
+        kind="rate_limit",
+        provider="p",
+        model="m",
+        status_code=429,
+        details={"retry_after": "1s"},
+    )
+    store.append_context_message(
+        AssistantMessage(
+            stop_reason="error",
+            error_message=info.message,
+            error_info=info,
+        )
+    )
+
+    restored = store.load_session_messages()
+
+    assert len(restored) == 1
+    message = restored[0]
+    assert isinstance(message, AssistantMessage)
+    assert message.error_info is not None
+    assert message.error_info.code == "llm.rate_limit"
+    assert message.error_info.retryable is True
+    assert message.error_info.status_code == 429
+
+
 def test_session_store_persists_run_results(tmp_path: Path) -> None:
     from codepilot.protocols import (
         AgentRunCounters,

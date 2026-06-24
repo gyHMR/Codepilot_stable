@@ -45,9 +45,10 @@ def test_task_controller_normalizes_steps_and_updates_from_tool_results() -> Non
     decision = controller.after_tool_results(task, run, [read])
 
     assert decision.action == "continue"
-    assert task.steps[0].status == "completed"
+    assert task.steps[0].status == "in_progress"
+    assert task.steps[0].progress_state == "evidence_collected"
     assert task.steps[0].evidence_refs == ["tool:read_1"]
-    assert task.steps[1].status == "in_progress"
+    assert task.steps[1].status == "pending"
 
     failed_verification = ToolResultMessage(
         tool_call_id="test_1",
@@ -65,8 +66,10 @@ def test_task_controller_normalizes_steps_and_updates_from_tool_results() -> Non
     decision = controller.after_tool_results(task, run, [failed_verification])
 
     assert decision.action == "repair"
-    assert task.steps[1].failure_count == 1
-    assert task.steps[1].status == "in_progress"
+    assert task.steps[0].failure_count == 1
+    assert task.steps[0].status == "in_progress"
+    assert task.recent_error_code == "verification_failed"
+    assert task.action_intent == "debug_failure"
 
 
 def test_completion_gate_requires_fresh_verification_after_workspace_change() -> None:
@@ -91,6 +94,8 @@ def test_completion_gate_requires_fresh_verification_after_workspace_change() ->
     )
     run.collect_tool_results([edit])
     controller.after_tool_results(task, run, [edit])
+    assert task.steps[0].status == "in_progress"
+    assert task.steps[0].progress_state == "changed"
 
     missing = controller.check_completion(task, run)
     assert missing.satisfied is False
@@ -115,6 +120,7 @@ def test_completion_gate_requires_fresh_verification_after_workspace_change() ->
     ok = controller.check_completion(task, run)
     assert ok.satisfied is True
     assert ok.reason == "all_steps_completed"
+    assert all(step.status == "completed" for step in task.steps)
 
 
 def test_completion_gate_treats_unavailable_tool_as_blocked() -> None:
@@ -146,6 +152,49 @@ def test_completion_gate_treats_unavailable_tool_as_blocked() -> None:
     assert task.steps[0].note == "工具不可用"
 
 
+def test_permission_blocked_steps_keep_tool_evidence() -> None:
+    from codepilot.core.run_state import RunState
+    from codepilot.core.task_controller import TaskController
+    from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
+
+    controller = TaskController()
+    task = controller.initialize([UserMessage(content="写入文件")])
+    run = RunState(run_id="run_1", session_id="session_1")
+    denied = ToolResultMessage(
+        tool_call_id="write_1",
+        tool_name="write",
+        content=[TextContent(text="blocked")],
+        status="denied",
+        is_error=True,
+        error_code="read_only_mode",
+    )
+
+    decision = controller.after_tool_results(task, run, [denied])
+
+    assert decision.action == "replan"
+    assert task.steps[0].status == "blocked"
+    assert "tool:write_1" in task.steps[0].evidence_refs
+
+    task = controller.initialize([UserMessage(content="部署")])
+    approval = ToolResultMessage(
+        tool_call_id="deploy_1",
+        tool_name="deploy",
+        content=[TextContent(text="approval required")],
+        status="approval_required",
+        is_error=True,
+        approved=False,
+        approval_id="approval_1",
+        error_code="approval_required",
+    )
+
+    decision = controller.after_tool_results(task, run, [approval])
+
+    assert decision.action == "wait_approval"
+    assert task.steps[0].status == "blocked"
+    assert "tool:deploy_1" in task.steps[0].evidence_refs
+    assert "approval:approval_1" in task.steps[0].evidence_refs
+
+
 def test_replan_preserves_completed_steps_and_stops_after_limit() -> None:
     from codepilot.core.run_state import RunState
     from codepilot.core.task_controller import TaskController
@@ -165,7 +214,8 @@ def test_replan_preserves_completed_steps_and_stops_after_limit() -> None:
     )
     run.collect_tool_results([read])
     controller.after_tool_results(task, run, [read])
-    assert task.steps[0].status == "completed"
+    assert task.steps[0].status == "in_progress"
+    assert task.steps[0].progress_state == "evidence_collected"
 
     first = _failed_verification("test_1")
     second = _failed_verification("test_2")
@@ -177,11 +227,11 @@ def test_replan_preserves_completed_steps_and_stops_after_limit() -> None:
     assert decision.action == "replan"
     assert decision.reason == "repeated_step_failure"
     assert task.replan_count == 1
-    assert task.steps[0].title == "定位失败"
-    assert task.steps[0].status == "completed"
-    assert task.steps[1].title == "根据最新失败证据调整方案"
-    assert task.steps[1].status == "in_progress"
-    assert task.steps[2].title == "重新运行相关验证"
+    assert task.steps[0].title == "根据最新失败证据调整方案"
+    assert task.steps[0].status == "in_progress"
+    assert task.steps[1].title == "重新运行相关验证"
+    assert task.replans
+    assert task.replans[-1].trigger == "verification_failed"
 
     for call_id in ["test_3", "test_4", "test_5", "test_6"]:
         failed = _failed_verification(call_id)
@@ -190,8 +240,82 @@ def test_replan_preserves_completed_steps_and_stops_after_limit() -> None:
 
     assert decision.action == "stop"
     assert decision.reason == "replan_limit_exceeded"
-    assert task.steps[1].status == "blocked"
+    assert task.steps[0].status == "blocked"
     assert task.next_action == "报告连续失败并等待用户指示"
+
+
+def test_repeated_failed_verification_after_change_proposes_revert() -> None:
+    from codepilot.core.run_state import RunState
+    from codepilot.core.task_controller import TaskController
+    from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
+
+    controller = TaskController()
+    task = controller.initialize(
+        [UserMessage(content="修改实现并验证")],
+        proposed_steps=["修改实现", "运行验证"],
+    )
+    run = RunState(run_id="run_1", session_id="session_1")
+    edit = ToolResultMessage(
+        tool_call_id="edit_1",
+        tool_name="edit",
+        content=[TextContent(text="edited")],
+        affected_paths=["src/app.py"],
+        workspace_changed=True,
+        metadata={
+            "change_evidence": {
+                "change_kind": "update",
+                "before_hashes": {"src/app.py": "old"},
+                "after_hashes": {"src/app.py": "new"},
+                "affected_paths": ["src/app.py"],
+                "effect_detection": "direct",
+                "effect_detection_confidence": "high",
+                "safe_revert_available": False,
+            }
+        },
+    )
+    run.collect_tool_results([edit])
+    controller.after_tool_results(task, run, [edit])
+
+    first = _failed_verification("test_1")
+    second = _failed_verification("test_2")
+    run.collect_tool_results([first])
+    assert controller.after_tool_results(task, run, [first]).action == "repair"
+    run.collect_tool_results([second])
+    decision = controller.after_tool_results(task, run, [second])
+
+    assert decision.action == "propose_revert"
+    assert task.rollback_required is True
+    assert task.rollback_targets == ["src/app.py"]
+    assert task.change_sets
+    assert task.change_sets[-1].status == "revert_required"
+
+
+def test_task_controller_exports_control_signal_and_attempts() -> None:
+    from codepilot.core.run_state import RunState
+    from codepilot.core.task_controller import TaskController
+    from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
+
+    controller = TaskController()
+    task = controller.initialize([UserMessage(content="读取文件")])
+    run = RunState(run_id="run_1", session_id="session_1")
+    result = ToolResultMessage(
+        tool_call_id="read_1",
+        tool_name="read",
+        content=[TextContent(text="content")],
+        status="success",
+    )
+
+    run.collect_tool_results([result])
+    controller.after_tool_results(task, run, [result])
+    signal = controller.control_signal(task)
+    summary = controller.summarize(task)
+
+    assert signal["task_id"] == task.task_id
+    assert signal["action_intent"] == "read_context"
+    assert signal["last_decision"] == "continue"
+    assert task.attempts[-1].tool_call_ids == ["read_1"]
+    assert summary.control_signal["action_intent"] == "read_context"
+    assert summary.attempts[-1]["attempt_id"].startswith("attempt_")
 
 
 def test_task_controller_rebuilds_task_state_from_memory_projection() -> None:

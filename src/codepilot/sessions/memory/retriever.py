@@ -44,6 +44,11 @@ class MemoryRetriever:
             if record.status != "active":
                 continue
             if (
+                record.kind == "experience"
+                and record.content.get("maturity") == "candidate"
+            ):
+                continue
+            if (
                 record.kind == "failure"
                 and int(record.content.get("occurrence_count", 1)) < 2
                 and not record.content.get("resolution")
@@ -69,6 +74,28 @@ class MemoryRetriever:
             if record.scope == "project":
                 score += 10
                 reasons.append("project_memory")
+            if record.kind == "experience":
+                applies = {
+                    str(item)
+                    for item in record.content.get("applies_when", [])
+                    if isinstance(item, str)
+                }
+                if query.task_phase and f"phase:{query.task_phase}" in applies:
+                    score += 25
+                    reasons.append(f"phase:{query.task_phase}")
+                if query.action_intent and f"intent:{query.action_intent}" in applies:
+                    score += 20
+                    reasons.append(f"intent:{query.action_intent}")
+                if query.recent_error and f"error:{query.recent_error}" in applies:
+                    score += 30
+                    reasons.append(f"error:{query.recent_error}")
+                maturity = str(record.content.get("maturity", "active"))
+                if maturity == "verified":
+                    score += 20
+                    reasons.append("maturity:verified")
+                elif maturity == "candidate":
+                    score -= 30
+                    reasons.append("maturity:candidate")
             if record.trust == "model_claim":
                 score -= 20
                 reasons.append("model_claim_penalty")
@@ -104,7 +131,14 @@ def _apply_kind_limits(
     ranked: list[RetrievedMemory],
     total_limit: int,
 ) -> list[RetrievedMemory]:
-    limits = {"task": 1, "file": 3, "failure": 2, "decision": 2, "project": 3}
+    limits = {
+        "task": 1,
+        "file": 3,
+        "failure": 2,
+        "experience": 2,
+        "decision": 2,
+        "project": 3,
+    }
     counts: dict[str, int] = {}
     selected: list[RetrievedMemory] = []
     for item in ranked:

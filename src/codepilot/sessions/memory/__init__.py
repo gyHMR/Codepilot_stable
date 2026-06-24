@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """结构化会话记忆和项目记忆。"""
 
+from .experience import ExperienceExtractor, MemoryConsolidator
 from .files import load_global_memory, sanitize_memory_text, save_global_memory
 from .records import (
     MEMORY_SCHEMA_VERSION,
@@ -21,7 +22,9 @@ from .writer import MemoryWriter
 
 __all__ = [
     "MEMORY_SCHEMA_VERSION",
+    "ExperienceExtractor",
     "MemoryKind",
+    "MemoryConsolidator",
     "MemoryQuery",
     "MemoryRecord",
     "MemoryRetriever",

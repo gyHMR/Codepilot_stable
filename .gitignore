@@ -61,4 +61,5 @@ docs/*
 !docs/design/**
 参考文档/
 working/
-benchmarks/
+benchmarks/*
+

@@ -13,7 +13,15 @@ from typing import Iterable, Mapping
 from codepilot.protocols import TaskSummary, TextContent, ToolResultMessage, UserMessage
 
 from .run_state import RunState
-from .task_state import CompletionCheck, ExecutionDecision, TaskState, TaskStep
+from .task_state import (
+    AttemptRecord,
+    ChangeSet,
+    CompletionCheck,
+    ExecutionDecision,
+    ReplanRecord,
+    TaskState,
+    TaskStep,
+)
 from .types import AgentMessage
 
 
@@ -125,20 +133,36 @@ class TaskController:
     ) -> ExecutionDecision:
         """工具执行后更新任务状态并返回执行决策（继续/修复/重新规划/停止等）。"""
         if not results:
-            return ExecutionDecision("continue", "no_tool_results", task.next_action)
+            return self._decision(task, "continue", "no_tool_results")
+
+        attempt = self._record_attempt(task, results)
+        self._record_change_sets(task, attempt, results)
 
         if any(result.status == "cancelled" for result in results):
             task.phase = "waiting"
-            return ExecutionDecision("stop", "cancelled", task.next_action)
+            task.recent_failure_type = "cancelled"
+            return self._decision(task, "stop", "cancelled")
 
         if any(result.status == "approval_required" for result in results):
-            self._block_current_step(task, "等待工具审批")
+            self._block_current_step(
+                task,
+                "等待工具审批",
+                evidence_refs=_evidence_refs(results),
+            )
             task.phase = "waiting"
-            return ExecutionDecision("wait_approval", "approval_required", task.next_action)
+            task.recent_error_code = "approval_required"
+            task.recent_failure_type = "approval_required"
+            return self._decision(task, "wait_approval", "approval_required")
 
         if any(result.status == "denied" for result in results):
-            self._block_current_step(task, "工具权限拒绝")
-            return ExecutionDecision("replan", "permission_denied", task.next_action)
+            self._block_current_step(
+                task,
+                "工具权限拒绝",
+                evidence_refs=_evidence_refs(results),
+            )
+            task.recent_error_code = _first_error_code(results) or "permission_denied"
+            task.recent_failure_type = "permission_denied"
+            return self._decision(task, "replan", "permission_denied")
 
         unavailable = [
             result for result in results if _is_tool_unavailable(result)
@@ -151,53 +175,60 @@ class TaskController:
                 step.evidence_refs.extend(_evidence_refs(unavailable))
             task.phase = "waiting"
             task.next_action = "报告工具不可用并等待用户指示"
-            return ExecutionDecision(
-                "stop",
-                "tool_unavailable",
-                task.next_action,
-            )
+            task.recent_error_code = "tool_not_found"
+            task.recent_failure_type = "tool_unavailable"
+            return self._decision(task, "stop", "tool_unavailable")
 
         if self._has_failed_verification(results):
             step = self._current_step(task)
+            task.action_intent = "debug_failure"
+            task.recent_error_code = "verification_failed"
+            task.recent_failure_type = "verification_failed"
+            self._mark_latest_changes_failed(task, results)
             if step is not None:
                 step.failure_count += 1
                 step.status = "in_progress"
                 step.note = "验证失败，需要修复"
                 step.evidence_refs.extend(_evidence_refs(results))
                 if step.failure_count >= 2:
+                    if task.change_sets:
+                        self._mark_rollback_required(task)
+                        self._record_replan(
+                            task,
+                            trigger="verification_failed",
+                            evidence_refs=_evidence_refs(results),
+                            requires_revert=True,
+                        )
+                        task.phase = "waiting"
+                        task.next_action = "报告可能需要撤销的变更并等待用户确认"
+                        return self._decision(
+                            task,
+                            "propose_revert",
+                            "repeated_failure_after_change",
+                        )
                     if task.replan_count >= task.max_replans_per_run:
                         step.status = "blocked"
                         step.note = "连续失败且已达到重新规划上限"
                         task.phase = "waiting"
                         task.next_action = "报告连续失败并等待用户指示"
-                        return ExecutionDecision(
-                            "stop",
-                            "replan_limit_exceeded",
-                            task.next_action,
-                        )
+                        return self._decision(task, "stop", "replan_limit_exceeded")
                     self._replan_after_failure(task, results)
-                    return ExecutionDecision(
-                        "replan",
-                        "repeated_step_failure",
-                        task.next_action,
-                    )
-            return ExecutionDecision("repair", "verification_failed", task.next_action)
+                    return self._decision(task, "replan", "repeated_step_failure")
+            return self._decision(task, "repair", "verification_failed")
 
-        for result in results:
-            if self._result_has_progress(result):
-                step = self._current_step(task)
-                if step is not None:
-                    step.status = "completed"
-                    step.note = None
-                    step.evidence_refs.extend(_evidence_refs([result]))
-                    self._advance(task)
+        if self._has_passed_verification(results):
+            self._complete_verified_steps(task, results)
+            self._mark_latest_changes_verified(task, results)
+        else:
+            for result in results:
+                self._update_progress_from_result(task, result)
 
         if all(step.status == "completed" for step in task.steps):
             task.phase = "finished"
-            return ExecutionDecision("finish", "all_steps_completed")
+            return self._decision(task, "finish", "all_steps_completed")
 
         task.phase = "verifying" if run.workspace_changed else "acting"
-        return ExecutionDecision("continue", "next_step", task.next_action)
+        return self._decision(task, "continue", "next_step")
 
     def check_completion(self, task: TaskState, run: RunState) -> CompletionCheck:
         """检查任务是否完成：验证阻塞步骤、工作区变更、未完成步骤等条件。"""
@@ -288,14 +319,27 @@ class TaskController:
                 if step.evidence_refs
                 else ""
             )
+            progress = (
+                f" progress={step.progress_state}"
+                if step.progress_state != "none"
+                else ""
+            )
             note = f" note={step.note}" if step.note else ""
-            lines.append(f"- [{step.status}] {step.title}{evidence}{note}")
+            lines.append(f"- [{step.status}] {step.title}{progress}{evidence}{note}")
         current = self._current_step(task)
         if current is not None:
             lines.append("")
             lines.append(f"Current step: {current.title}")
         if task.next_action:
             lines.append(f"Next action: {task.next_action}")
+        if task.action_intent:
+            lines.append(f"Action intent: {task.action_intent}")
+        if task.recent_error_code:
+            lines.append(f"Recent error: {task.recent_error_code}")
+        if task.rollback_required:
+            lines.append(
+                "Rollback required: " + ", ".join(task.rollback_targets)
+            )
         if task.constraints:
             lines.append("Constraints:")
             lines.extend(f"- {item}" for item in task.constraints)
@@ -318,11 +362,35 @@ class TaskController:
             next_action=task.next_action,
             completion_satisfied=task.completion_satisfied,
             completion_reason=task.completion_reason,
+            attempts=[asdict(item) for item in task.attempts],
+            change_sets=[asdict(item) for item in task.change_sets],
+            replans=[asdict(item) for item in task.replans],
+            control_signal=self.control_signal(task),
         )
 
     def event_payload(self, task: TaskState) -> dict[str, object]:
         """将任务状态转换为字典格式，用于事件上报。"""
         return asdict(task)
+
+    def control_signal(self, task: TaskState) -> dict[str, object]:
+        """输出给上下文与记忆模块的轻量任务控制信号。"""
+        current = self._current_step(task)
+        return {
+            "task_id": task.task_id,
+            "phase": task.phase,
+            "current_step_id": current.id if current else None,
+            "current_step_title": current.title if current else None,
+            "next_action": task.next_action,
+            "action_intent": task.action_intent,
+            "current_attempt_id": (
+                task.attempts[-1].attempt_id if task.attempts else None
+            ),
+            "recent_failure_type": task.recent_failure_type,
+            "recent_error_code": task.recent_error_code,
+            "rollback_required": task.rollback_required,
+            "rollback_targets": list(task.rollback_targets),
+            "last_decision": task.last_decision,
+        }
 
     def _normalize_steps(self, raw_steps: Iterable[str]) -> list[TaskStep]:
         """规范化步骤列表：去重、截断标题、限制最大步骤数。"""
@@ -365,12 +433,21 @@ class TaskController:
         task.current_step_id = None
         task.next_action = None
 
-    def _block_current_step(self, task: TaskState, note: str) -> None:
+    def _block_current_step(
+        self,
+        task: TaskState,
+        note: str,
+        *,
+        evidence_refs: list[str] | None = None,
+    ) -> None:
         """将当前步骤标记为阻塞状态。"""
         step = self._current_step(task)
         if step is not None:
             step.status = "blocked"
             step.note = note
+            for ref in evidence_refs or []:
+                if ref not in step.evidence_refs:
+                    step.evidence_refs.append(ref)
 
     def _replan_after_failure(
         self,
@@ -382,6 +459,12 @@ class TaskController:
         current = self._current_step(task)
         if current is None:
             return
+        self._record_replan(
+            task,
+            trigger="verification_failed",
+            evidence_refs=_evidence_refs(results),
+            requires_revert=False,
+        )
         current.title = "根据最新失败证据调整方案"
         current.status = "in_progress"
         current.failure_count = 0
@@ -403,6 +486,185 @@ class TaskController:
             and result.verification.get("status") == "failed"
             for result in results
         )
+
+    def _has_passed_verification(self, results: list[ToolResultMessage]) -> bool:
+        return any(
+            isinstance(result.verification, dict)
+            and result.verification.get("status") == "passed"
+            for result in results
+        )
+
+    def _record_attempt(
+        self,
+        task: TaskState,
+        results: list[ToolResultMessage],
+    ) -> AttemptRecord:
+        intent = _infer_action_intent(results)
+        current = self._current_step(task)
+        attempt = AttemptRecord(
+            attempt_id=f"attempt_{uuid.uuid4().hex[:12]}",
+            step_id=current.id if current else None,
+            action_intent=intent,
+            tool_call_ids=[
+                result.tool_call_id
+                for result in results
+                if result.tool_call_id
+            ],
+            evidence_refs=_evidence_refs(results),
+            status="failed" if any(result.is_error for result in results) else "succeeded",
+            failure_type=_first_error_code(results),
+            failure_reason=_first_error_code(results),
+        )
+        task.attempts.append(attempt)
+        task.action_intent = intent
+        return attempt
+
+    def _record_change_sets(
+        self,
+        task: TaskState,
+        attempt: AttemptRecord,
+        results: list[ToolResultMessage],
+    ) -> None:
+        for result in results:
+            evidence = result.metadata.get("change_evidence")
+            if not isinstance(evidence, dict):
+                continue
+            affected = [
+                str(path)
+                for path in evidence.get("affected_paths", result.affected_paths)
+                if isinstance(path, str)
+            ]
+            if not affected:
+                continue
+            task.change_sets.append(
+                ChangeSet(
+                    change_id=f"change_{uuid.uuid4().hex[:12]}",
+                    attempt_id=attempt.attempt_id,
+                    step_id=attempt.step_id,
+                    affected_paths=affected,
+                    before_hashes={
+                        str(key): str(value)
+                        for key, value in evidence.get("before_hashes", {}).items()
+                    } if isinstance(evidence.get("before_hashes"), dict) else {},
+                    after_hashes={
+                        str(key): str(value)
+                        for key, value in evidence.get("after_hashes", {}).items()
+                    } if isinstance(evidence.get("after_hashes"), dict) else {},
+                    tool_call_ids=[result.tool_call_id] if result.tool_call_id else [],
+                    diff_summary=result.diff_summary,
+                    status="pending",
+                )
+            )
+
+    def _update_progress_from_result(
+        self,
+        task: TaskState,
+        result: ToolResultMessage,
+    ) -> None:
+        if result.status != "success":
+            return
+        step = self._current_step(task)
+        if step is None:
+            return
+        step.evidence_refs.extend(_evidence_refs([result]))
+        if result.workspace_changed is True:
+            step.status = "in_progress"
+            step.progress_state = "changed"
+            step.note = "已产生文件变更，等待验证"
+            task.phase = "verifying"
+            task.action_intent = "edit_file"
+            return
+        name = result.tool_name.lower()
+        if any(marker in name for marker in _READ_TOOL_MARKERS):
+            step.status = "in_progress"
+            step.progress_state = "evidence_collected"
+            task.action_intent = "read_context"
+
+    def _complete_verified_steps(
+        self,
+        task: TaskState,
+        results: list[ToolResultMessage],
+    ) -> None:
+        refs = _evidence_refs(results)
+        for step in task.steps:
+            if step.status == "blocked":
+                continue
+            step.status = "completed"
+            step.progress_state = "verified"
+            step.note = None
+            for ref in refs:
+                if ref not in step.evidence_refs:
+                    step.evidence_refs.append(ref)
+        task.current_step_id = None
+        task.next_action = None
+        task.phase = "finished"
+        task.action_intent = "run_verification"
+        task.recent_error_code = None
+        task.recent_failure_type = None
+
+    def _mark_latest_changes_failed(
+        self,
+        task: TaskState,
+        results: list[ToolResultMessage],
+    ) -> None:
+        refs = _evidence_refs(results)
+        for change in task.change_sets:
+            if change.status in {"pending", "verified"}:
+                change.status = "failed"
+                change.verification_refs.extend(refs)
+
+    def _mark_latest_changes_verified(
+        self,
+        task: TaskState,
+        results: list[ToolResultMessage],
+    ) -> None:
+        refs = _evidence_refs(results)
+        for change in task.change_sets:
+            if change.status in {"pending", "failed"}:
+                change.status = "verified"
+                change.verification_refs.extend(refs)
+
+    def _mark_rollback_required(self, task: TaskState) -> None:
+        targets: list[str] = []
+        for change in task.change_sets:
+            if change.status in {"pending", "failed"}:
+                change.status = "revert_required"
+                targets.extend(change.affected_paths)
+        task.rollback_required = True
+        task.rollback_targets = sorted(set(targets))
+
+    def _record_replan(
+        self,
+        task: TaskState,
+        *,
+        trigger: str,
+        evidence_refs: list[str],
+        requires_revert: bool,
+    ) -> None:
+        current = self._current_step(task)
+        task.replans.append(
+            ReplanRecord(
+                replan_id=f"replan_{uuid.uuid4().hex[:12]}",
+                trigger=trigger,
+                failed_attempt_id=(
+                    task.attempts[-1].attempt_id if task.attempts else None
+                ),
+                abandoned_strategy=current.title if current else None,
+                new_strategy="根据最新失败证据调整方案",
+                evidence_refs=list(evidence_refs),
+                requires_revert=requires_revert,
+                rollback_targets=list(task.rollback_targets),
+            )
+        )
+
+    def _decision(
+        self,
+        task: TaskState,
+        action: str,
+        reason: str,
+    ) -> ExecutionDecision:
+        task.last_decision = action
+        return ExecutionDecision(action, reason, task.next_action)  # type: ignore[arg-type]
 
     def _result_has_progress(self, result: ToolResultMessage) -> bool:
         """判断工具结果是否代表实质进展（成功、验证通过或工作区变更）。"""
@@ -464,6 +726,36 @@ def _is_tool_unavailable(result: ToolResultMessage) -> bool:
         if isinstance(block, TextContent)
     ).lower()
     return text.startswith("tool ") and " not found" in text
+
+
+def _first_error_code(results: list[ToolResultMessage]) -> str | None:
+    return next(
+        (
+            result.error_code
+            for result in results
+            if result.error_code
+        ),
+        None,
+    )
+
+
+def _infer_action_intent(results: list[ToolResultMessage]) -> str:
+    if any(
+        isinstance(result.verification, dict)
+        and result.verification.get("status") == "failed"
+        for result in results
+    ):
+        return "debug_failure"
+    if any(isinstance(result.verification, dict) for result in results):
+        return "run_verification"
+    if any(result.workspace_changed is True for result in results):
+        return "edit_file"
+    names = " ".join(result.tool_name.lower() for result in results)
+    if any(marker in names for marker in _READ_TOOL_MARKERS):
+        return "read_context"
+    if any(marker in names for marker in _WRITE_TOOL_MARKERS):
+        return "edit_file"
+    return "tool_action"
 
 
 __all__ = ["TaskController"]

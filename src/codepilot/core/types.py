@@ -42,6 +42,7 @@ class AgentContext:
     tools: list[AgentTool] = field(default_factory=list)
     current_task: str | None = None
     recovered_task: dict[str, object] | None = None
+    task_signal: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)

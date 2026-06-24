@@ -120,6 +120,10 @@ class ContextReport:
     repository_delta: RepositoryDelta = field(default_factory=RepositoryDelta)  # 仓库差异
     retrieved_memory_ids: list[str] = field(default_factory=list)        # 检索到的记忆 ID
     memory_retrieval_reasons: dict[str, list[str]] = field(default_factory=dict)  # 记忆检索原因
+    context_mode: str | None = None
+    budget_profile: dict[str, float] = field(default_factory=dict)
+    relevance_reasons: dict[str, list[str]] = field(default_factory=dict)
+    sanitization: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

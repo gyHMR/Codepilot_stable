@@ -15,6 +15,7 @@ from codepilot.protocols import (
     AssistantMessage,
     Cost,
     ImageContent,
+    LLMErrorInfo,
     Message,
     TextContent,
     ThinkingContent,

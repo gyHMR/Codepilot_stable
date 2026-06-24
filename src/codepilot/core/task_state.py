@@ -8,6 +8,13 @@ from typing import Literal
 
 # 任务步骤状态：待处理 / 进行中 / 已完成 / 已阻塞
 TaskStepStatus = Literal["pending", "in_progress", "completed", "blocked"]
+# 任务步骤内的轻量进展状态：避免把“工具执行成功”直接等同于完成
+TaskProgressState = Literal[
+    "none",
+    "evidence_collected",
+    "changed",
+    "verified",
+]
 # 任务阶段：理解中 / 执行中 / 验证中 / 等待中 / 已完成
 TaskPhase = Literal["understanding", "acting", "verifying", "waiting", "finished"]
 # 执行决策动作：继续 / 修复 / 重新规划 / 等待审批 / 完成 / 停止
@@ -15,6 +22,7 @@ ExecutionAction = Literal[
     "continue",
     "repair",
     "replan",
+    "propose_revert",
     "wait_approval",
     "finish",
     "stop",
@@ -30,6 +38,48 @@ class TaskStep:
     evidence_refs: list[str] = field(default_factory=list)  # 证据引用（工具调用ID、文件路径等）
     failure_count: int = 0           # 失败次数
     note: str | None = None          # 备注信息
+    progress_state: TaskProgressState = "none"  # 步骤内证据/变更/验证状态
+
+
+@dataclass
+class AttemptRecord:
+    """一次工具行动尝试，用于把工具结果归因到任务步骤。"""
+    attempt_id: str
+    step_id: str | None
+    action_intent: str
+    tool_call_ids: list[str] = field(default_factory=list)
+    evidence_refs: list[str] = field(default_factory=list)
+    status: str = "running"
+    failure_type: str | None = None
+    failure_reason: str | None = None
+
+
+@dataclass
+class ChangeSet:
+    """一次文件变更证据集合（第一版只记录 hash 和路径，不做自动回滚）。"""
+    change_id: str
+    attempt_id: str
+    step_id: str | None
+    affected_paths: list[str] = field(default_factory=list)
+    before_hashes: dict[str, str] = field(default_factory=dict)
+    after_hashes: dict[str, str] = field(default_factory=dict)
+    tool_call_ids: list[str] = field(default_factory=list)
+    diff_summary: str | None = None
+    status: str = "pending"
+    verification_refs: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ReplanRecord:
+    """一次基于证据的重新规划记录。"""
+    replan_id: str
+    trigger: str
+    failed_attempt_id: str | None = None
+    abandoned_strategy: str | None = None
+    new_strategy: str = ""
+    evidence_refs: list[str] = field(default_factory=list)
+    requires_revert: bool = False
+    rollback_targets: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -48,6 +98,15 @@ class TaskState:
     completion_satisfied: bool = False  # 任务是否满足完成条件
     completion_reason: str = ""         # 完成/未完成原因
     completion_prompt_count: int = 0    # 完成提示次数（用于控制重复提示）
+    action_intent: str | None = None
+    recent_error_code: str | None = None
+    recent_failure_type: str | None = None
+    last_decision: str | None = None
+    rollback_required: bool = False
+    rollback_targets: list[str] = field(default_factory=list)
+    attempts: list[AttemptRecord] = field(default_factory=list)
+    change_sets: list[ChangeSet] = field(default_factory=list)
+    replans: list[ReplanRecord] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -72,6 +131,10 @@ __all__ = [
     "CompletionCheck",
     "ExecutionAction",
     "ExecutionDecision",
+    "AttemptRecord",
+    "ChangeSet",
+    "ReplanRecord",
+    "TaskProgressState",
     "TaskPhase",
     "TaskState",
     "TaskStep",

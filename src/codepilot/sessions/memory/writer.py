@@ -9,6 +9,7 @@ from typing import Any
 from codepilot.protocols import AgentRunResult, ToolResultMessage
 from codepilot.tools.sandbox import file_state_for_path
 
+from .experience import ExperienceExtractor, MemoryConsolidator
 from .files import sanitize_memory_text
 from .records import MemoryRecord, MemoryStatus, utc_now_iso
 from .store import MemoryStore
@@ -87,6 +88,7 @@ class MemoryWriter:
             existing.source_run_id = run_id
             existing.source = "user_prompt"
             existing.trust = "user_given"
+        self._maybe_remember_project_constraint(safe_text, run_id=run_id)
         return self.store.update(existing)
 
     def observe_tool_result(
@@ -151,8 +153,9 @@ class MemoryWriter:
         3. 如果 Run 出错 → 将错误信息追加到 blocked_on
         """
         task = self._active_task()
+        records: list[MemoryRecord] = []
         if task is None:
-            return []
+            return self._extract_experience(result)
         task.source_run_id = result.run_id
         if result.task is not None:
             self._project_task_summary(task, result)
@@ -171,7 +174,22 @@ class MemoryWriter:
             message = sanitize_memory_text(result.error.message, limit=500)
             if isinstance(blocked, list) and message not in blocked:
                 blocked.append(message)
-        return [self.store.update(task)]
+        records.append(self.store.update(task))
+        records.extend(self._extract_experience(result))
+        return records
+
+    def _extract_experience(self, result: AgentRunResult) -> list[MemoryRecord]:
+        extractor = ExperienceExtractor()
+        consolidator = MemoryConsolidator(self.store)
+        records: list[MemoryRecord] = []
+        for candidate in extractor.extract(result):
+            records.append(
+                consolidator.upsert_experience(
+                    candidate,
+                    run_id=result.run_id,
+                )
+            )
+        return records
 
     def _project_task_summary(
         self,
@@ -228,6 +246,44 @@ class MemoryWriter:
             trust="user_given",
         )
         return self.store.update(record)
+
+    def _maybe_remember_project_constraint(
+        self,
+        text: str,
+        *,
+        run_id: str | None,
+    ) -> MemoryRecord | None:
+        markers = ("学生", "求职", "学习", "生产级", "过度设计", "复杂设计")
+        if not any(marker in text for marker in markers):
+            return None
+        if "生产级" not in text and "过度设计" not in text and "复杂设计" not in text:
+            return None
+        knowledge = (
+            "Codepilot 是学生学习与求职展示项目；后续设计应优先保持清晰、"
+            "可解释、可演示，避免生产级复杂平台化。"
+        )
+        for record in self.store.load_project():
+            if (
+                record.kind == "project"
+                and record.content.get("category") == "project_constraint"
+                and record.content.get("knowledge") == knowledge
+            ):
+                record.source_run_id = run_id
+                return self.store.update(record)
+        return self.store.update(
+            MemoryRecord(
+                id=_new_memory_id(),
+                kind="project",
+                scope="project",
+                content={
+                    "category": "project_constraint",
+                    "knowledge": knowledge,
+                },
+                source="user_correction",
+                source_run_id=run_id,
+                trust="user_given",
+            )
+        )
 
     def promote(self, memory_id: str) -> MemoryRecord:
         """将 session 级记忆提升为 project 级（scope=session → scope=project）。

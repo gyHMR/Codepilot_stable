@@ -402,6 +402,155 @@ async def _bounded_read_search_case(tmp_path: Path) -> None:
     assert grep.content[0].text == "(no matches)"
 
 
+def test_read_invalid_utf8_reports_output_quality_and_recovery_hint(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_invalid_utf8_quality_case(tmp_path))
+
+
+async def _invalid_utf8_quality_case(tmp_path: Path) -> None:
+    from codepilot.tools.builtin import create_builtin_tools
+
+    target = tmp_path / "binary.dat"
+    target.write_bytes(b"\xff\xfe\x00")
+    tools = {tool.name: tool for tool in create_builtin_tools(tmp_path)}
+
+    result = await tools["read"].execute("read_bad_utf8", {"path": "binary.dat"})
+
+    assert result.error_code == "invalid_utf8"
+    quality = result.metadata["output_quality"]
+    assert quality["decode_status"] == "invalid_utf8"
+    assert quality["may_be_binary"] is True
+    assert quality["reliable_for_reasoning"] is False
+    hint = result.metadata["recovery_hint"]
+    assert hint["category"] == "ask_user"
+    assert hint["suggested_action_intent"] == "inspect_non_text_file"
+
+
+def test_file_tools_emit_recovery_hints_and_change_evidence(tmp_path: Path) -> None:
+    asyncio.run(_file_tool_evidence_case(tmp_path))
+
+
+async def _file_tool_evidence_case(tmp_path: Path) -> None:
+    from codepilot.tools.builtin import create_builtin_tools
+
+    target = tmp_path / "app.py"
+    target.write_text("value = 1\nvalue = 1\n", encoding="utf-8", newline="\n")
+    tools = {tool.name: tool for tool in create_builtin_tools(tmp_path)}
+
+    ambiguous = await tools["edit"].execute(
+        "edit_ambiguous",
+        {"path": "app.py", "old_text": "value = 1", "new_text": "value = 2"},
+    )
+    assert ambiguous.error_code == "multiple_matches"
+    assert ambiguous.metadata["recovery_hint"]["category"] == "refine_edit"
+
+    edited = await tools["edit"].execute(
+        "edit_1",
+        {
+            "path": "app.py",
+            "old_text": "value = 1",
+            "new_text": "value = 2",
+            "occurrence_index": 1,
+        },
+    )
+    evidence = edited.metadata["change_evidence"]
+    assert evidence["change_kind"] == "update"
+    assert evidence["effect_detection"] == "direct"
+    assert evidence["effect_detection_confidence"] == "high"
+    assert evidence["safe_revert_available"] is False
+    assert evidence["before_hashes"]["app.py"] != evidence["after_hashes"]["app.py"]
+
+    written = await tools["write"].execute(
+        "write_1",
+        {"path": "created.py", "content": "created = True\n"},
+    )
+    created = written.metadata["change_evidence"]
+    assert created["change_kind"] == "create"
+    assert created["before_hashes"]["created.py"] == "<missing>"
+    assert created["after_hashes"]["created.py"] != "<missing>"
+
+
+def test_shell_reports_output_quality_and_git_change_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    asyncio.run(_shell_quality_and_change_evidence_case(tmp_path, monkeypatch))
+
+
+async def _shell_quality_and_change_evidence_case(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+
+    from codepilot.tools.builtin.shell_tools import create_shell_tools
+    from codepilot.tools.sandbox import WorkspaceSandbox
+    from codepilot.tools.shell_policy import ShellExecutionPolicy
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    seed = tmp_path / "seed.txt"
+    seed.write_text("seed\n", encoding="utf-8", newline="\n")
+    subprocess.run(["git", "add", "seed.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, check=True, capture_output=True)
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            (tmp_path / "generated.txt").write_text(
+                "created\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            return b"A" * 30 + b"\xffTAIL", b""
+
+    async def fake_subprocess(*_args, **_kwargs):
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", fake_subprocess)
+    tool = create_shell_tools(
+        WorkspaceSandbox(tmp_path),
+        allow=lambda name: name == "bash",
+        policy=ShellExecutionPolicy(stdout_limit=20, stderr_limit=20),
+    )[0]
+
+    result = await tool.execute("bash_quality", {"command": "python script.py"})
+
+    quality = result.metadata["output_quality"]
+    assert quality["decode_status"] == "decoded_with_replacement"
+    assert quality["truncated"] is True
+    assert quality["reliable_for_reasoning"] is False
+    evidence = result.metadata["change_evidence"]
+    assert evidence["effect_detection"] == "git"
+    assert evidence["effect_detection_confidence"] == "medium"
+    assert "generated.txt" in evidence["affected_paths"]
+
+
+def test_external_tool_without_metadata_defaults_to_medium_risk_approval() -> None:
+    from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry
+
+    async def execute(*_args):
+        return AgentToolResult()
+
+    registry = ToolRegistry()
+    registry.register(
+        AgentTool(
+            name="extension_sync_remote",
+            label="External",
+            description="external tool",
+            parameters={},
+            execute=execute,
+        )
+    )
+
+    metadata = registry.metadata_for("extension_sync_remote")
+    assert metadata is not None
+    assert metadata.risk_level == "medium"
+    assert metadata.requires_approval is True
+    assert metadata.read_only is False
+    assert metadata.exclusive is True
+
+
 def test_shell_failure_preserves_workspace_side_effects(tmp_path: Path) -> None:
     asyncio.run(_shell_side_effect_case(tmp_path))
 

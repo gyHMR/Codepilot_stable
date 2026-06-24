@@ -41,6 +41,20 @@ def infer_tool_metadata(tool: AgentTool) -> ToolMetadata:
     mutating = name in {"write", "edit", "bash"}
     category = _infer_category(name)
     external = category in {"extension", "mcp"}
+    if external:
+        return ToolMetadata(
+            name=name,
+            category=category,
+            read_only=False,
+            concurrency_safe=False,
+            exclusive=True,
+            requires_approval=True,
+            risk_level=_infer_risk(name, mutating=False),
+            resource_scope=(category,),
+            network_access=True,
+            credential_required=False,
+            extra={"metadata_inferred": True},
+        )
     return ToolMetadata(
         name=name,
         category=category,
