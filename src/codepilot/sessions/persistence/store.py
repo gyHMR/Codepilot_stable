@@ -10,6 +10,7 @@
   - events.jsonl     事件日志
   - runs.jsonl       Run 结果记录
   - memory.json      结构化记忆
+  - task_recovery.json 当前任务恢复投影
 """
 
 import json
@@ -49,6 +50,7 @@ class SessionStore:
         self.events_file = self.root / "events.jsonl"
         self.runs_file = self.root / "runs.jsonl"
         self.memory_file = self.root / "memory.json"
+        self.task_recovery_file = self.root / "task_recovery.json"
         self.event_recorder = EventRecorder(self.events_file)
         self.run_store = RunStore(self.workspace_dir, self.session_id)
 
@@ -478,6 +480,25 @@ class SessionStore:
                 memory_payload["session_id"] = new_session_id
                 target.memory_file.write_text(
                     json.dumps(memory_payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+        if self.task_recovery_file.exists():
+            target.task_recovery_file.write_text(
+                self.task_recovery_file.read_text(encoding="utf-8"),
+                encoding="utf-8",
+                newline="\n",
+            )
+            try:
+                recovery_payload = json.loads(
+                    target.task_recovery_file.read_text(encoding="utf-8")
+                )
+            except json.JSONDecodeError:
+                recovery_payload = None
+            if isinstance(recovery_payload, dict):
+                recovery_payload["session_id"] = new_session_id
+                target.task_recovery_file.write_text(
+                    json.dumps(recovery_payload, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
                     newline="\n",
                 )

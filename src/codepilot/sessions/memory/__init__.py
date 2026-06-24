@@ -6,6 +6,8 @@ from .experience import ExperienceExtractor, MemoryConsolidator
 from .files import load_global_memory, sanitize_memory_text, save_global_memory
 from .records import (
     MEMORY_SCHEMA_VERSION,
+    DURABLE_MEMORY_KINDS,
+    LEGACY_MEMORY_KINDS,
     MemoryKind,
     MemoryQuery,
     MemoryRecord,
@@ -22,6 +24,8 @@ from .writer import MemoryWriter
 
 __all__ = [
     "MEMORY_SCHEMA_VERSION",
+    "DURABLE_MEMORY_KINDS",
+    "LEGACY_MEMORY_KINDS",
     "ExperienceExtractor",
     "MemoryKind",
     "MemoryConsolidator",

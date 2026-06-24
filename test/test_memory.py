@@ -59,7 +59,9 @@ def test_memory_store_persists_session_and_project_records(tmp_path: Path) -> No
     assert '"schema_version": 1' in payload
 
 
-def test_memory_writer_tracks_task_file_versions_and_failures(tmp_path: Path) -> None:
+def test_memory_writer_keeps_transient_task_file_and_failure_out_of_memory(
+    tmp_path: Path,
+) -> None:
     from codepilot.protocols import TextContent, ToolResultMessage
     from codepilot.sessions.memory import MemoryStore, MemoryWriter
     from codepilot.sessions.persistence.store import SessionStore
@@ -74,7 +76,7 @@ def test_memory_writer_tracks_task_file_versions_and_failures(tmp_path: Path) ->
 
     task = writer.remember_task("Fix service.py API_KEY=secret-value", run_id="run_1")
     state_v1 = file_state_for_path(tmp_path, "service.py")
-    first = writer.observe_tool_result(
+    read_records = writer.observe_tool_result(
         ToolResultMessage(
             tool_call_id="read_1",
             tool_name="read",
@@ -82,13 +84,14 @@ def test_memory_writer_tracks_task_file_versions_and_failures(tmp_path: Path) ->
             details={"file_state": state_v1},
         ),
         run_id="run_1",
-    )[0]
+    )
 
-    assert "[REDACTED]" in task.content["goal"]
-    assert first.source_hashes["service.py"] == state_v1["sha256"]
+    assert task is None
+    assert read_records == []
+    assert store.load_session() == []
 
     target.write_text("value = 2\n", encoding="utf-8", newline="\n")
-    writer.observe_tool_result(
+    edit_records = writer.observe_tool_result(
         ToolResultMessage(
             tool_call_id="edit_1",
             tool_name="edit",
@@ -98,10 +101,10 @@ def test_memory_writer_tracks_task_file_versions_and_failures(tmp_path: Path) ->
         ),
         run_id="run_1",
     )
-    assert store.get(first.id).status == "stale"
+    assert edit_records == []
 
     state_v2 = file_state_for_path(tmp_path, "service.py")
-    updated = writer.observe_tool_result(
+    read_again_records = writer.observe_tool_result(
         ToolResultMessage(
             tool_call_id="read_2",
             tool_name="read",
@@ -109,9 +112,8 @@ def test_memory_writer_tracks_task_file_versions_and_failures(tmp_path: Path) ->
             details={"file_state": state_v2},
         ),
         run_id="run_1",
-    )[0]
-    assert updated.status == "active"
-    assert updated.source_hashes["service.py"] == state_v2["sha256"]
+    )
+    assert read_again_records == []
 
     error = ToolResultMessage(
         tool_call_id="edit_error",
@@ -122,9 +124,9 @@ def test_memory_writer_tracks_task_file_versions_and_failures(tmp_path: Path) ->
         error_code="multiple_matches",
         affected_paths=["service.py"],
     )
-    lesson = writer.observe_tool_result(error, run_id="run_1")[0]
-    lesson = writer.observe_tool_result(error, run_id="run_1")[0]
-    assert lesson.content["occurrence_count"] == 2
+    assert writer.observe_tool_result(error, run_id="run_1") == []
+    assert writer.observe_tool_result(error, run_id="run_1") == []
+    assert store.load_session() == []
 
 
 def test_memory_writer_promotes_project_constraint_from_user_correction(
@@ -150,16 +152,15 @@ def test_memory_writer_promotes_project_constraint_from_user_correction(
     )
 
 
-def test_memory_writer_projects_unfinished_task_summary(tmp_path: Path) -> None:
+def test_task_recovery_store_projects_unfinished_task_summary(tmp_path: Path) -> None:
     from codepilot.protocols import AgentRunResult, TaskSummary
-    from codepilot.sessions.memory import MemoryStore, MemoryWriter, render_memory
     from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.sessions.history.task_recovery import TaskRecoveryStore
 
     session_store = SessionStore(tmp_path, "session_task_projection")
     session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
-    store = MemoryStore(session_store)
-    writer = MemoryWriter(store=store, workspace_dir=tmp_path)
-    writer.remember_task("修复失败测试", run_id="run_1")
+    recovery = TaskRecoveryStore(session_store)
+    recovery.begin_task("修复失败测试", run_id="run_1")
 
     result = AgentRunResult(
         run_id="run_1",
@@ -178,12 +179,10 @@ def test_memory_writer_projects_unfinished_task_summary(tmp_path: Path) -> None:
         ),
     )
 
-    [record] = writer.finalize_run(result)
+    projection = recovery.update_from_result(result)
 
-    assert record.content["next_action"] == "报告连续失败并等待用户指示"
-    assert "Completed step: 定位失败" in record.content["confirmed_findings"]
-    assert "Blocked step: 根据最新失败证据调整方案" in record.content["blocked_on"]
-    assert record.content["task_progress"] == {
+    assert projection["next_action"] == "报告连续失败并等待用户指示"
+    assert projection["task_progress"] == {
         "completed_steps": ["定位失败"],
         "pending_steps": ["重新运行相关验证"],
         "blocked_steps": ["根据最新失败证据调整方案"],
@@ -191,23 +190,20 @@ def test_memory_writer_projects_unfinished_task_summary(tmp_path: Path) -> None:
         "completion_reason": "replan_limit_exceeded",
         "step_details": {},
     }
-    rendered = render_memory(record)
-    assert "Next: 报告连续失败并等待用户指示" in rendered
-    assert "Pending: 重新运行相关验证" in rendered
+    assert recovery.load_projection() == projection
 
 
-def test_memory_writer_projects_task_step_details(tmp_path: Path) -> None:
+def test_task_recovery_store_projects_task_step_details(tmp_path: Path) -> None:
     from codepilot.protocols import AgentRunResult, TaskSummary
-    from codepilot.sessions.memory import MemoryStore, MemoryWriter
     from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.sessions.history.task_recovery import TaskRecoveryStore
 
     session_store = SessionStore(tmp_path, "session_task_step_details")
     session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
-    store = MemoryStore(session_store)
-    writer = MemoryWriter(store=store, workspace_dir=tmp_path)
-    writer.remember_task("实现 planner", run_id="run_plan")
+    recovery = TaskRecoveryStore(session_store)
+    recovery.begin_task("实现 planner", run_id="run_plan")
 
-    [record] = writer.finalize_run(
+    projection = recovery.update_from_result(
         AgentRunResult(
             run_id="run_plan",
             session_id="session_task_step_details",
@@ -236,7 +232,7 @@ def test_memory_writer_projects_task_step_details(tmp_path: Path) -> None:
         )
     )
 
-    progress = record.content["task_progress"]
+    progress = projection["task_progress"]
     assert progress["step_details"]["定位任务模块"]["kind"] == "investigate"
     assert progress["step_details"]["修改执行逻辑"]["verification_hint"] == "pytest task"
 
@@ -252,7 +248,6 @@ def test_memory_writer_extracts_verified_experience_from_edit_repair_loop(
     session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
     store = MemoryStore(session_store)
     writer = MemoryWriter(store=store, workspace_dir=tmp_path)
-    writer.remember_task("修复 edit 失败", run_id="run_1")
 
     result = AgentRunResult(
         run_id="run_1",
@@ -336,7 +331,6 @@ def test_memory_writer_does_not_extract_experience_from_out_of_order_evidence(
     session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
     store = MemoryStore(session_store)
     writer = MemoryWriter(store=store, workspace_dir=tmp_path)
-    writer.remember_task("修复 edit 失败", run_id="run_order")
 
     writer.finalize_run(
         AgentRunResult(
@@ -392,7 +386,7 @@ def test_memory_writer_does_not_extract_experience_from_out_of_order_evidence(
     ] == []
 
 
-def test_memory_writer_does_not_resolve_pathless_failure_from_unrelated_success(
+def test_memory_writer_does_not_store_single_tool_failure(
     tmp_path: Path,
 ) -> None:
     from codepilot.protocols import TextContent, ToolResultMessage
@@ -404,7 +398,7 @@ def test_memory_writer_does_not_resolve_pathless_failure_from_unrelated_success(
     store = MemoryStore(session_store)
     writer = MemoryWriter(store=store, workspace_dir=tmp_path)
 
-    failure = writer.observe_tool_result(
+    assert writer.observe_tool_result(
         ToolResultMessage(
             tool_call_id="bash_bad",
             tool_name="bash",
@@ -414,8 +408,8 @@ def test_memory_writer_does_not_resolve_pathless_failure_from_unrelated_success(
             content=[TextContent(text="rm -rf is blocked")],
         ),
         run_id="run_failure",
-    )[0]
-    writer.observe_tool_result(
+    ) == []
+    assert writer.observe_tool_result(
         ToolResultMessage(
             tool_call_id="bash_good",
             tool_name="bash",
@@ -423,9 +417,9 @@ def test_memory_writer_does_not_resolve_pathless_failure_from_unrelated_success(
             content=[TextContent(text="pytest passed")],
         ),
         run_id="run_failure",
-    )
+    ) == []
 
-    assert store.get(failure.id).content["resolution"] is None  # type: ignore[union-attr]
+    assert store.load_session() == []
 
 
 def test_memory_writer_does_not_infer_project_constraint_from_production_request(
@@ -439,7 +433,7 @@ def test_memory_writer_does_not_infer_project_constraint_from_production_request
     store = MemoryStore(session_store)
     writer = MemoryWriter(store=store, workspace_dir=tmp_path)
 
-    writer.remember_task("这个项目现在要按生产级复杂设计推进", run_id="run_prod")
+    assert writer.remember_task("这个项目现在要按生产级复杂设计推进", run_id="run_prod") is None
 
     assert not any(
         record.kind == "project"
@@ -568,20 +562,19 @@ def test_memory_retriever_uses_qa_mode_to_surface_decision_memory(
     assert "mode:qa_decision_memory" in retrieved[0].reasons
 
 
-def test_memory_writer_clears_next_action_only_when_completion_is_satisfied(
+def test_task_recovery_clears_next_action_only_when_completion_is_satisfied(
     tmp_path: Path,
 ) -> None:
     from codepilot.protocols import AgentRunResult, TaskSummary
-    from codepilot.sessions.memory import MemoryStore, MemoryWriter
     from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.sessions.history.task_recovery import TaskRecoveryStore
 
     session_store = SessionStore(tmp_path, "session_task_done")
     session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
-    store = MemoryStore(session_store)
-    writer = MemoryWriter(store=store, workspace_dir=tmp_path)
-    writer.remember_task("完成修复", run_id="run_done")
+    recovery = TaskRecoveryStore(session_store)
+    recovery.begin_task("完成修复", run_id="run_done")
 
-    [record] = writer.finalize_run(
+    projection = recovery.update_from_result(
         AgentRunResult(
             run_id="run_done",
             session_id="session_task_done",
@@ -598,11 +591,11 @@ def test_memory_writer_clears_next_action_only_when_completion_is_satisfied(
         )
     )
 
-    assert record.content["next_action"] is None
-    assert record.content["task_progress"]["completion_satisfied"] is True
+    assert projection["next_action"] is None
+    assert projection["task_progress"]["completion_satisfied"] is True
 
 
-def test_memory_retriever_excludes_stale_and_explains_selection(tmp_path: Path) -> None:
+def test_memory_retriever_excludes_legacy_state_and_explains_selection(tmp_path: Path) -> None:
     from codepilot.sessions.memory import (
         MemoryQuery,
         MemoryRecord,
@@ -637,6 +630,16 @@ def test_memory_retriever_excludes_stale_and_explains_selection(tmp_path: Path) 
             status="stale",
         )
     )
+    store.update(
+        MemoryRecord(
+            id="constraint",
+            kind="project",
+            scope="project",
+            content={"category": "project_constraint", "knowledge": "保持学习项目边界"},
+            source="user",
+            trust="user_given",
+        )
+    )
 
     retrieved = MemoryRetriever(store=store, workspace_dir=tmp_path).retrieve(
         MemoryQuery(
@@ -645,8 +648,8 @@ def test_memory_retriever_excludes_stale_and_explains_selection(tmp_path: Path) 
         )
     )
 
-    assert [item.record.id for item in retrieved] == ["task"]
-    assert "task_memory" in retrieved[0].reasons
+    assert [item.record.id for item in retrieved] == ["constraint"]
+    assert "project_memory" in retrieved[0].reasons
 
 
 def test_context_compiler_reads_pinned_memory_dynamically(tmp_path: Path) -> None:
@@ -691,9 +694,10 @@ async def _dynamic_pinned_memory_case(tmp_path: Path) -> None:
     assert memory_section.selected_items == 1
 
 
-def test_fork_copies_session_memory_then_evolves_independently(tmp_path: Path) -> None:
+def test_fork_copies_task_recovery_then_evolves_independently(tmp_path: Path) -> None:
     from codepilot.sessions.session import AgentSession
     from codepilot.sessions.types import AgentSessionOptions
+    from codepilot.sessions.history.task_recovery import TaskRecoveryStore
 
     original = AgentSession(
         AgentSessionOptions(
@@ -704,21 +708,23 @@ def test_fork_copies_session_memory_then_evolves_independently(tmp_path: Path) -
     )
     forked = None
     try:
-        original_record = original.memory_writer.remember_task("original goal")
+        original_recovery = TaskRecoveryStore(original.store)
+        original_recovery.begin_task("original goal", run_id="run_original")
         forked = original.fork_session()
-        assert forked.memory_store.get(original_record.id) is not None
+        forked_recovery = TaskRecoveryStore(forked.store)
+        assert forked_recovery.load_projection()["goal"] == "original goal"
 
-        forked.memory_writer.remember_task("fork goal")
+        forked_recovery.begin_task("fork goal", run_id="run_fork")
 
-        assert original.memory_store.get(original_record.id).content["goal"] == "original goal"
-        assert forked.memory_store.get(original_record.id).content["goal"] == "fork goal"
+        assert original_recovery.load_projection()["goal"] == "original goal"
+        assert forked_recovery.load_projection()["goal"] == "fork goal"
     finally:
         if forked is not None:
             forked.close()
         original.close()
 
 
-def test_agent_session_writes_task_and_file_memory_from_run(tmp_path: Path) -> None:
+def test_agent_session_keeps_run_context_out_of_durable_memory(tmp_path: Path) -> None:
     asyncio.run(_session_memory_run_case(tmp_path))
 
 
@@ -790,25 +796,16 @@ async def _session_memory_run_case(tmp_path: Path) -> None:
     try:
         await session.run("inspect service.py", run_id="run_memory")
         records = session.memory_store.load_session()
+        assert records == []
         assert any(
-            record.kind == "task"
-            and record.content["goal"] == "inspect service.py"
-            for record in records
-        )
-        assert any(
-            record.kind == "file"
-            and record.related_paths == ["service.py"]
-            for record in records
-        )
-        assert any(
-            event.get("type") == "memory_updated"
+            event.get("type") == "task_recovery_updated"
             for event in session.store.load_events()
         )
     finally:
         session.close()
 
 
-def test_agent_session_restores_task_progress_from_memory(tmp_path: Path) -> None:
+def test_agent_session_restores_task_progress_from_task_recovery(tmp_path: Path) -> None:
     asyncio.run(_session_task_recovery_case(tmp_path))
 
 
@@ -817,6 +814,7 @@ async def _session_task_recovery_case(tmp_path: Path) -> None:
     from codepilot.protocols import AssistantMessage, TextContent
     from codepilot.sessions.session import AgentSession
     from codepilot.sessions.types import AgentSessionOptions
+    from codepilot.sessions.history.task_recovery import TaskRecoveryStore
 
     async def fake_stream(_model, context, _options):
         system_prompt = context.system_prompt or ""
@@ -836,16 +834,21 @@ async def _session_task_recovery_case(tmp_path: Path) -> None:
         )
     )
     try:
-        record = session.memory_writer.remember_task("继续修复失败测试", run_id="old_run")
-        record.content["task_progress"] = {
-            "completed_steps": ["定位失败"],
-            "pending_steps": ["重新运行相关验证"],
-            "blocked_steps": [],
-            "completion_satisfied": False,
-            "completion_reason": "replan_limit_exceeded",
-        }
-        record.content["next_action"] = "报告连续失败并等待用户指示"
-        session.memory_store.update(record)
+        TaskRecoveryStore(session.store).save_projection(
+            {
+                "goal": "继续修复失败测试",
+                "task_progress": {
+                    "completed_steps": ["定位失败"],
+                    "pending_steps": ["重新运行相关验证"],
+                    "blocked_steps": [],
+                    "completion_satisfied": False,
+                    "completion_reason": "replan_limit_exceeded",
+                    "step_details": {},
+                },
+                "next_action": "报告连续失败并等待用户指示",
+            },
+            run_id="old_run",
+        )
 
         result = await session.run("继续修复失败测试", run_id="recovered_run")
 

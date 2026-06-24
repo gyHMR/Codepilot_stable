@@ -10,6 +10,7 @@ from .branching import (
     switch_to_entry,
 )
 from .checkpoint import SessionCheckpoint, record_checkpoint
+from .task_recovery import TaskRecoveryStore
 from .git_rollback import (
     GitRollbackBaseline,
     GitRollbackResult,
@@ -21,6 +22,7 @@ from .git_rollback import (
 
 __all__ = [
     "SessionCheckpoint",
+    "TaskRecoveryStore",
     "GitRollbackBaseline",
     "GitRollbackResult",
     "build_session_options_from_existing",

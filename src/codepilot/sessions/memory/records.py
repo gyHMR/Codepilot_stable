@@ -17,6 +17,8 @@ MemoryTrust = Literal["observed", "verified", "user_given", "model_claim"]
 MemoryStatus = Literal["active", "stale", "superseded", "deleted"]
 
 MEMORY_SCHEMA_VERSION = 1
+DURABLE_MEMORY_KINDS = {"project", "decision", "experience"}
+LEGACY_MEMORY_KINDS = {"task", "file", "failure"}
 
 
 def utc_now_iso() -> str:
@@ -101,6 +103,8 @@ def _memory_status(value: object) -> MemoryStatus:
 
 __all__ = [
     "MEMORY_SCHEMA_VERSION",
+    "DURABLE_MEMORY_KINDS",
+    "LEGACY_MEMORY_KINDS",
     "MemoryKind",
     "MemoryQuery",
     "MemoryRecord",

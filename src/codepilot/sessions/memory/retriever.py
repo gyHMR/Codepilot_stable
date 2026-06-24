@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 from .files import load_global_memory
-from .records import MemoryQuery, MemoryRecord, RetrievedMemory
+from .records import DURABLE_MEMORY_KINDS, MemoryQuery, MemoryRecord, RetrievedMemory
 from .rendering import render_memory
 from .store import MemoryStore
 from .writer import MemoryWriter
@@ -23,7 +23,6 @@ class MemoryRetriever:
         """检索与查询相关的记忆，按评分排序返回。
 
         评分规则（各项累加）：
-        - task 类型: +100（任务记忆最重要）
         - 关联路径匹配: +40（与当前活跃文件相关）
         - 关键词匹配: +10/词，最高 +30
         - 信任度 verified/observed: +20
@@ -32,9 +31,10 @@ class MemoryRetriever:
 
         过滤规则：
         - 跳过 status != "active" 的记录
-        - 跳过只出现 1 次且无 resolution 的 failure 记忆（噪音过滤）
+        - 只检索 durable memory: project / decision / experience
+        - 跳过 legacy state: task / file / failure
 
-        最终按 kind 限制数量（task:1, file:3, failure:2, decision:2, project:3）。
+        最终按 kind 限制数量（experience:2, decision:2, project:3）。
         """
         records = [*self.store.load_session(), *self.store.load_project()]
         query_terms = _terms(query.text)
@@ -43,22 +43,15 @@ class MemoryRetriever:
         for record in records:
             if record.status != "active":
                 continue
+            if record.kind not in DURABLE_MEMORY_KINDS:
+                continue
             if (
                 record.kind == "experience"
                 and record.content.get("maturity") == "candidate"
             ):
                 continue
-            if (
-                record.kind == "failure"
-                and int(record.content.get("occurrence_count", 1)) < 2
-                and not record.content.get("resolution")
-            ):
-                continue
             score = 0
             reasons: list[str] = []
-            if record.kind == "task":
-                score += 100
-                reasons.append("task_memory")
             related = active_paths.intersection(record.related_paths)
             if related:
                 score += 40
@@ -80,9 +73,9 @@ class MemoryRetriever:
             elif query.retrieval_mode == "repair" and record.kind in {"experience", "failure"}:
                 score += 15
                 reasons.append(f"mode:repair_{record.kind}_memory")
-            elif query.retrieval_mode in {"verify", "final"} and record.kind == "task":
+            elif query.retrieval_mode == "verify" and record.kind == "experience":
                 score += 10
-                reasons.append(f"mode:{query.retrieval_mode}_task_memory")
+                reasons.append("mode:verify_experience_memory")
             if record.kind == "experience":
                 applies = {
                     str(item)
@@ -141,9 +134,6 @@ def _apply_kind_limits(
     total_limit: int,
 ) -> list[RetrievedMemory]:
     limits = {
-        "task": 1,
-        "file": 3,
-        "failure": 2,
         "experience": 2,
         "decision": 2,
         "project": 3,

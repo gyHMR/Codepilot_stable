@@ -233,7 +233,7 @@ ToolCall → ToolRuntime.execute()
 | 文件 | 类 | 功能 |
 |------|-----|------|
 | `store.py` | `MemoryStore` | 内存和文件支持的记忆存储 |
-| `writer.py` | `MemoryWriter` | 写入任务记录、工具观察、运行终结 |
+| `writer.py` | `MemoryWriter` | 写入 durable memory、提炼验证闭环经验 |
 | `retriever.py` | `MemoryRetriever` | 检索相关记忆用于上下文注入 |
 | `records.py` | `MemoryRecord`, `RetrievedMemory` | 记忆类型定义 |
 | `files.py` | — | 文件记忆持久化 |
@@ -245,6 +245,7 @@ ToolCall → ToolRuntime.execute()
 |------|------|
 | `branching.py` | `branch_fork_session()`, `branch_switch_to_entry()`, `branch_switch_session()` |
 | `checkpoint.py` | `record_checkpoint()` |
+| `task_recovery.py` | `TaskRecoveryStore` — 保存当前任务恢复投影 |
 
 #### 3.5.5 `persistence/` — 持久化层
 
@@ -401,7 +402,7 @@ ToolCall → ToolRuntime.execute()
 ┌─────────────────────────────────────────────────────────────┐
 │ 3. AgentSession (session.py:run)                            │
 │    ├─ 运行 before_prompt 生命周期钩子                        │
-│    ├─ 写入任务到结构化记忆 (_remember_task)                   │
+│    ├─ 写入任务恢复状态 (TaskRecoveryStore)                    │
 │    ├─ 检查上下文新鲜度 (外部文件变更)                         │
 │    ├─ 检查/压缩上下文 (如果溢出)                             │
 │    ├─ 调用 Agent.run(text)                                   │
@@ -587,7 +588,7 @@ cli.py:main()
     → service.py:RuntimeService.send_message()
       → session.py:AgentSession.run()
         → session.py:_run_hooks("before_prompt")
-        → session.py:_remember_task()
+        → history/task_recovery.py:TaskRecoveryStore.begin_task()
         → session.py:_check_context_freshness()
         → session.py:_check_and_compact_context()
         → agent.py:Agent.run()

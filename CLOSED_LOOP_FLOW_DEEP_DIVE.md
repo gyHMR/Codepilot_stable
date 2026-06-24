@@ -19,7 +19,8 @@ Codepilot 当前不是一个“大一统状态机”，而是几个边界比较�
 | `ToolRuntime` | 工具运行时权限、审批、真正执行 | 根据权限策略返回 `approval_required` 或真正执行工具 |
 | `TaskController` | 轻量任务规划与继续/修复/完成判断 | 记录 attempt/change_set；审批时进入 waiting；修改后要求 fresh verification |
 | `ContextCompiler` | 每次模型调用前的上下文治理 | 召回活跃文件、证据、记忆；动态预算；脱敏；产生 `ContextReport` |
-| `MemoryWriter / ExperienceExtractor` | run 前后写任务记忆、工具观察、失败经验 | 记录 active task；工具结果观察；run 结束后沉淀经验 |
+| `TaskRecoveryStore` | 保存当前任务恢复投影 | 记录 goal、task_progress、next_action，供下一次 run 恢复 |
+| `MemoryWriter / ExperienceExtractor` | 写入 durable memory 与失败经验 | 记录项目约束；run 结束后从验证闭环沉淀经验 |
 
 主要代码入口：
 
@@ -30,6 +31,7 @@ Codepilot 当前不是一个“大一统状态机”，而是几个边界比较�
 - `ToolRuntime.execute()`：`src/codepilot/tools/runtime.py`
 - `TaskController.after_tool_results()`：`src/codepilot/core/task_controller.py`
 - `ContextCompiler.compile()`：`src/codepilot/sessions/context/compiler.py`
+- `TaskRecoveryStore.update_from_result()`：`src/codepilot/sessions/history/task_recovery.py`
 - `MemoryWriter.finalize_run()` / `ExperienceExtractor.extract()`：`src/codepilot/sessions/memory/`
 
 ## 1. 两个容易混淆的“上下文处理”
@@ -125,7 +127,7 @@ _active_runs = {
 
 `_pending_approvals` 此时还是空的。
 
-### 2.2 Session 接管：任务记忆、上下文新鲜度、压缩检查
+### 2.2 Session 接管：任务恢复、上下文新鲜度、压缩检查
 
 进入：
 
@@ -137,13 +139,14 @@ AgentSession.run(text, run_id=...)
 
 1. `capture_git_baseline()`：为可能的回滚元数据准备基线。
 2. 执行 `before_prompt_hooks`。
-3. 如果 memory 启用，调用 `MemoryWriter.remember_task(text, run_id=...)`。
-4. 将 active task projection 塞给 agent：`agent.set_recovered_task(...)`。
-5. `_check_context_freshness()`：如果上次 run 追踪的文件已经被外部改了，会注入 steering message。
-6. `_check_and_compact_before_prompt()`：必要时做 session 级压缩。
-7. 调用 `agent.run(...)`。
+3. 调用 `TaskRecoveryStore.begin_task(text, run_id=...)`，保存当前任务恢复投影。
+4. 如果用户输入表达了稳定项目约束，`MemoryWriter.remember_task(...)` 只写入 durable project memory。
+5. 将未完成的 task recovery projection 塞给 agent：`agent.set_recovered_task(...)`。
+6. `_check_context_freshness()`：如果上次 run 追踪的文件已经被外部改了，会注入 steering message。
+7. `_check_and_compact_before_prompt()`：必要时做 session 级压缩。
+8. 调用 `agent.run(...)`。
 
-此时 memory 里会出现或更新一条 session 级 task 记忆：
+此时 task recovery 里会出现或更新一条 session 级任务投影：
 
 ```json
 {
@@ -200,7 +203,7 @@ AgentContext(
 | repository snapshot | 当前仓库概况、变更摘要 |
 | active files | 之前读过/改过的 `docs/portfolio.md` 摘要 |
 | recent evidence | 最近工具结果、验证状态、文件 hash |
-| memory | active task、project constraint、历史失败经验 |
+| memory | project constraint、已验证经验、手写 pinned memory |
 | history | 最近几轮用户/助手/工具消息 |
 | current request | 当前用户输入，尽量不丢 |
 
@@ -222,7 +225,7 @@ applies_when=phase:repair, intent:edit_file, error:multiple_matches
 - `retrieved_memory_ids`；
 - `sanitization` 结果。
 
-注意：当前代码里 `AgentContext.task_signal` 这个字段已经存在，ContextCompiler 也会读取它来辅助 `task_phase/action_intent/recent_error` 检索；但普通 Runtime 主路径主要传的是 `recovered_task`，`task_signal` 并不是每一轮都一定有值。因此文档或面试讲解时不要说“TaskController 每轮一定把 signal 注入 ContextCompiler”，更准确的说法是“接口已经有，ContextCompiler 支持使用，但主路径当前主要依赖 task memory、工具结果和历史消息”。
+注意：当前代码里 `AgentContext.task_signal` 这个字段已经存在，ContextCompiler 也会读取它来辅助 `task_phase/action_intent/recent_error` 检索。任务恢复来自 `TaskRecoveryStore`，长期记忆只作为 durable memory 候选来源参与召回。
 
 ### 2.4 TaskController 初始化任务计划
 
@@ -307,7 +310,7 @@ ToolResultMessage(
 |---|---|
 | tool | read 成功，输出文件内容和 file_state |
 | context | `SessionContextState.observe_tool_result()` 后续会把该文件标记为 active file/evidence |
-| memory | `MemoryWriter.observe_tool_result()` 看到 read 成功，会记 file memory |
+| memory | 不写 durable memory；read 结果只作为 context evidence / active file 使用 |
 | task | read 成功只算 evidence collected，不等于任务完成 |
 | session | context.jsonl/session.jsonl 追加 ToolResultMessage |
 
@@ -355,8 +358,8 @@ TaskController 在 `after_tool_results()` 里会看到：
 
 memory 方面：
 
-- `MemoryWriter.observe_tool_result()` 会把某些失败错误记录成 failure memory。
-- 但真正的 experience 不是单次失败就写。当前 `ExperienceExtractor` 只在后续“失败后成功，并且验证通过”时提炼经验。
+- 单次失败只保留在 run/context evidence 中，不直接写 durable memory。
+- 当前 `ExperienceExtractor` 只在后续“失败后成功，并且验证通过”时提炼 experience。
 
 ### 2.7 repair 阶段上下文：为什么失败经验可能被召回
 
@@ -625,7 +628,7 @@ ToolResultMessage(
 2. `_write_rollback_metadata(result, baseline)`；
 3. `_finalize_memory(result)`。
 
-`MemoryWriter.finalize_run()` 会更新 active task：
+`TaskRecoveryStore.update_from_result()` 会更新当前任务恢复投影：
 
 ```json
 {
@@ -760,7 +763,7 @@ summary_message, user32, assistant32, tool32, user33, assistant33, tool33, user3
 重要影响：
 
 - 很早的原始消息可能不在上下文里；
-- 但 file memory、experience memory、recent evidence 仍可通过 ContextCompiler 重新注入；
+- 但 verified experience、project memory、recent evidence 仍可通过 ContextCompiler 重新注入；
 - 工具结果和验证证据如果太旧，可能被标记 stale，不能作为当前完成证据。
 
 ### 3.2 ContextCompiler 仍会保护工具消息配对
@@ -984,5 +987,4 @@ Approve once? [y/N]
 
 可以用这段话概括：
 
-> Codepilot 的主流程是一个本地闭环：Runtime 接用户输入并管理 session；Session 在 run 前记录任务记忆、检查上下文新鲜度和压缩历史；AgentLoop 调模型并执行工具；ToolRuntime 负责权限和审批；如果工具需要审批，run 会以 waiting_approval 暂停，Runtime 保存 pending approval。用户批准后，Runtime 校验 session 归属和占位结果，执行已批准工具，替换原 approval_required 工具结果，再 continue_run，让模型基于真实工具结果输出最终答案。TaskController 会防止“文件改了但没验证”就完成，MemoryWriter 会在 run 结束后更新任务记忆并从失败后成功的闭环里提炼经验。
-
+> Codepilot 的主流程是一个本地闭环：Runtime 接用户输入并管理 session；Session 在 run 前记录 task recovery、检查上下文新鲜度和压缩历史；AgentLoop 调模型并执行工具；ToolRuntime 负责权限和审批；如果工具需要审批，run 会以 waiting_approval 暂停，Runtime 保存 pending approval。用户批准后，Runtime 校验 session 归属和占位结果，执行已批准工具，替换原 approval_required 工具结果，再 continue_run，让模型基于真实工具结果输出最终答案。TaskController 会防止“文件改了但没验证”就完成，TaskRecoveryStore 会保存任务恢复投影，MemoryWriter 会从失败后成功的验证闭环里提炼 durable experience。

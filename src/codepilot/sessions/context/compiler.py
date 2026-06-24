@@ -29,6 +29,7 @@ from codepilot.protocols import (
     UserMessage,
 )
 from ..memory import (
+    DURABLE_MEMORY_KINDS,
     MemoryQuery,
     MemoryRetriever,
     RetrievedMemory,
@@ -152,7 +153,7 @@ class ContextCompiler:
                     *self.memory_retriever.store.load_session(),
                     *self.memory_retriever.store.load_project(),
                 ]
-                if record.status == "stale"
+                if record.kind in DURABLE_MEMORY_KINDS and record.status == "stale"
             )
         total_budget = self.policy.input_budget(request)
         context_mode = _resolve_context_mode(context)

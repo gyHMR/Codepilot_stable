@@ -46,6 +46,7 @@ from .history.git_rollback import (
     capture_git_baseline,
     revert_run_changes,
 )
+from .history.task_recovery import TaskRecoveryStore
 from .memory import MemoryRetriever, MemoryStore, MemoryWriter
 from .persistence.store import SessionStore, new_session_id
 from .types import AgentSessionOptions
@@ -92,6 +93,7 @@ class AgentSession:
             store=self.memory_store,
             workspace_dir=self.workspace_dir,
         )
+        self.task_recovery = TaskRecoveryStore(self.store)
         self.memory_enabled = options.memory_enabled
         prepare_context = self._prepare_context_for_session(options.prepare_context)
 
@@ -229,13 +231,14 @@ class AgentSession:
         rollback_baseline = capture_git_baseline(self.workspace_dir)
         await self._run_lifecycle_hooks(text="", is_continue=True, hooks=self.before_prompt_hooks)
         self.agent.set_recovered_task(
-            self._active_task_projection() if self.memory_enabled else None
+            self._active_task_projection()
         )
         self._check_context_freshness()
         await self._check_and_compact_before_prompt()
         result = await self.agent.continue_run(run_id=run_id)
         self.store.append_run_result(result)
         self._write_rollback_metadata(result, rollback_baseline)
+        self._finalize_task_recovery(result)
         if self.memory_enabled:
             self._finalize_memory(result)
         await self._compact_context_if_needed()
@@ -253,8 +256,8 @@ class AgentSession:
 
         完整流程：
         1. 执行 before_prompt 生命周期钩子
-        2. 将任务写入结构化记忆（_remember_task）
-        3. 恢复活跃任务投影（供 Agent 决策参考）
+        2. 将任务写入 task recovery，并按策略提取 durable memory
+        3. 恢复未完成任务投影（供 Agent 决策参考）
         4. 检查上下文新鲜度（文件是否被外部修改）
         5. 检测并压缩溢出的上下文
         6. 调用 Agent.run() 执行 LLM 推理和工具调用
@@ -280,9 +283,8 @@ class AgentSession:
         )
         if self.memory_enabled:
             self._remember_task(text, run_id=run_id)
-            self.agent.set_recovered_task(self._active_task_projection())
-        else:
-            self.agent.set_recovered_task(None)
+        self._begin_task_recovery(text, run_id=run_id)
+        self.agent.set_recovered_task(self._active_task_projection())
         self._check_context_freshness()
         await self._check_and_compact_before_prompt()
         result = await self.agent.run(
@@ -292,6 +294,7 @@ class AgentSession:
         )
         self.store.append_run_result(result)
         self._write_rollback_metadata(result, rollback_baseline)
+        self._finalize_task_recovery(result)
         if self.memory_enabled:
             self._finalize_memory(result)
         await self._compact_context_if_needed()
@@ -384,6 +387,7 @@ class AgentSession:
             store=self.memory_store,
             workspace_dir=self.workspace_dir,
         )
+        self.task_recovery = TaskRecoveryStore(store)
         # 重新编译上下文准备函数（绑定新的 memory_retriever）
         self.prepare_context = self._prepare_context_for_session(self.prepare_context)
         self.agent.set_prepare_context(self.prepare_context)
@@ -557,17 +561,11 @@ class AgentSession:
         return prepare_context
 
     def _remember_task(self, text: str, *, run_id: str | None) -> None:
-        """将用户任务写入结构化记忆（作为活跃任务记录）。
-
-        如果已有活跃任务且目标不同，则创建新任务记录替代旧的。
-        失败时记录 warning 事件，不影响主流程。
-
-        Args:
-            text: 用户输入文本。
-            run_id: 当前 Run ID。
-        """
+        """Admit durable memory from the user prompt when policy allows it."""
         try:
             record = self.memory_writer.remember_task(text, run_id=run_id)
+            if record is None:
+                return
             self.store.append_event(
                 {
                     "type": "memory_updated",
@@ -587,23 +585,33 @@ class AgentSession:
                 }
             )
 
+    def _begin_task_recovery(self, text: str, *, run_id: str | None) -> None:
+        """Persist the current task projection outside durable memory."""
+        try:
+            projection = self.task_recovery.begin_task(text, run_id=run_id)
+            self.store.append_event(
+                {
+                    "type": "task_recovery_updated",
+                    "sessionId": self.session_id,
+                    "runId": run_id,
+                    "goal": projection.get("goal"),
+                }
+            )
+        except Exception as exc:
+            logger.warning("failed to write task recovery: %s", exc)
+            self.store.append_event(
+                {
+                    "type": "memory_warning",
+                    "sessionId": self.session_id,
+                    "operation": "task_recovery_begin",
+                    "message": str(exc),
+                }
+            )
+
     def _active_task_projection(self) -> dict[str, object] | None:
-        """获取当前活跃任务的投影（供 Agent 在推理时参考）。
-
-        从记忆中查找 kind="task" 且 status="active" 的记录，
-        返回其 content 字典（包含 goal、task_progress 等字段）。
-
-        Returns:
-            活跃任务的内容字典；无活跃任务或无 task_progress 时返回 None。
-        """
-        for record in self.memory_store.load_session():
-            if record.kind != "task" or record.status != "active":
-                continue
-            content = dict(record.content)
-            if not isinstance(content.get("task_progress"), dict):
-                return None
-            return content
-        return None
+        """Return unfinished task recovery state for the next Agent run."""
+        projection = self.task_recovery.active_projection()
+        return dict(projection) if projection is not None else None
 
     def _observe_tool_memory(
         self,
@@ -674,6 +682,36 @@ class AgentSession:
                     "type": "memory_warning",
                     "sessionId": self.session_id,
                     "operation": "finalize_run",
+                    "message": str(exc),
+                }
+            )
+
+    def _finalize_task_recovery(self, result: AgentRunResult) -> None:
+        """Update session task recovery from the structured run result."""
+        try:
+            projection = self.task_recovery.update_from_result(result)
+            if projection is None:
+                return
+            self.store.append_event(
+                {
+                    "type": "task_recovery_updated",
+                    "sessionId": self.session_id,
+                    "runId": result.run_id,
+                    "goal": projection.get("goal"),
+                    "completionSatisfied": (
+                        projection.get("task_progress", {}) or {}
+                    ).get("completion_satisfied")
+                    if isinstance(projection.get("task_progress"), dict)
+                    else None,
+                }
+            )
+        except Exception as exc:
+            logger.warning("failed to finalize task recovery: %s", exc)
+            self.store.append_event(
+                {
+                    "type": "memory_warning",
+                    "sessionId": self.session_id,
+                    "operation": "task_recovery_finalize",
                     "message": str(exc),
                 }
             )

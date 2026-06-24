@@ -403,7 +403,7 @@ def _replan_after_failure(self, task, results):
 
 ```python
 def _from_recovered_task(self, prompts, recovered_task) -> TaskState | None:
-    """从恢复的任务记忆中重建 TaskState"""
+    """从恢复的 task recovery projection 中重建 TaskState"""
     progress = recovered_task.get("task_progress")
     if not isinstance(progress, Mapping):
         return None
