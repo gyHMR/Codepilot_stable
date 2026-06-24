@@ -189,10 +189,56 @@ def test_memory_writer_projects_unfinished_task_summary(tmp_path: Path) -> None:
         "blocked_steps": ["根据最新失败证据调整方案"],
         "completion_satisfied": False,
         "completion_reason": "replan_limit_exceeded",
+        "step_details": {},
     }
     rendered = render_memory(record)
     assert "Next: 报告连续失败并等待用户指示" in rendered
     assert "Pending: 重新运行相关验证" in rendered
+
+
+def test_memory_writer_projects_task_step_details(tmp_path: Path) -> None:
+    from codepilot.protocols import AgentRunResult, TaskSummary
+    from codepilot.sessions.memory import MemoryStore, MemoryWriter
+    from codepilot.sessions.persistence.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "session_task_step_details")
+    session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
+    store = MemoryStore(session_store)
+    writer = MemoryWriter(store=store, workspace_dir=tmp_path)
+    writer.remember_task("实现 planner", run_id="run_plan")
+
+    [record] = writer.finalize_run(
+        AgentRunResult(
+            run_id="run_plan",
+            session_id="session_task_step_details",
+            status="completed",
+            stop_reason="final_answer",
+            task=TaskSummary(
+                task_id="task_plan",
+                goal="实现 planner",
+                completed_steps=["定位任务模块"],
+                pending_steps=["修改执行逻辑"],
+                completion_satisfied=False,
+                completion_reason="incomplete_steps",
+                step_details={
+                    "定位任务模块": {
+                        "kind": "investigate",
+                        "acceptance": "找到 TaskController",
+                        "verification_hint": None,
+                    },
+                    "修改执行逻辑": {
+                        "kind": "edit",
+                        "acceptance": "按 step 推进",
+                        "verification_hint": "pytest task",
+                    },
+                },
+            ),
+        )
+    )
+
+    progress = record.content["task_progress"]
+    assert progress["step_details"]["定位任务模块"]["kind"] == "investigate"
+    assert progress["step_details"]["修改执行逻辑"]["verification_hint"] == "pytest task"
 
 
 def test_memory_writer_extracts_verified_experience_from_edit_repair_loop(

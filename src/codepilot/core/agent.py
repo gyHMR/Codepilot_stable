@@ -125,6 +125,7 @@ class AgentOptions:
     stream_fn: StreamFn | None = None
     recovered_task: dict[str, object] | None = None
     task_control_enabled: bool = True
+    task_planner_enabled: bool = True
 
 
 # ── Agent 核心类 ────────────────────────────────────────────────
@@ -351,6 +352,7 @@ class Agent:
             max_model_retries=self._options.max_model_retries,
             retry_base_delay_ms=self._options.retry_base_delay_ms,
             task_control_enabled=self._options.task_control_enabled,
+            task_planner_enabled=self._options.task_planner_enabled,
         )
 
         # 构建上下文快照（使用副本，避免循环过程中被外部修改）

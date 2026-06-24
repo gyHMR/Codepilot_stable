@@ -11,18 +11,30 @@ import asyncio
 import time
 import uuid
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, cast
 
 from codepilot.core import AgentEvent
+from codepilot.core import AgentContext, AgentEventEmitter, AgentLoopConfig
+from codepilot.core import ToolCallCoordinator
 from codepilot.observability import (
     AuditBundle,
     build_run_report,
     load_audit_bundle,
 )
-from codepilot.protocols import AgentRunResult, AssistantMessage
+from codepilot.protocols import (
+    AgentRunResult,
+    AssistantMessage,
+    RunVerification,
+    RunVerificationStatus,
+    TextContent,
+    ToolCall,
+    ToolResultMessage,
+)
 from codepilot.sessions.session import AgentSession
+from codepilot.sessions.history.git_rollback import capture_git_baseline
+from codepilot.tools import AgentTool, AgentToolResult
 
 from .command_registry import (
     RuntimeCommandResult,
@@ -60,6 +72,170 @@ class EmptyInputError(RuntimeServiceError):
     code = "runtime.empty_input"
 
 
+class ApprovalNotFoundError(RuntimeServiceError):
+    """找不到待审批工具调用。"""
+    code = "runtime.approval_not_found"
+
+
+class InvalidApprovalDecisionError(RuntimeServiceError):
+    """审批决策值无效。"""
+    code = "runtime.invalid_approval_decision"
+
+
+@dataclass(frozen=True)
+class PendingApproval:
+    """Runtime 内存中的待审批工具调用。"""
+
+    approval_id: str
+    session_id: str
+    run_id: str
+    assistant_message: AssistantMessage
+    tool_call: ToolCall
+    reason: str = ""
+
+
+def _normalize_approval_decision(decision: str) -> str:
+    value = decision.strip().lower()
+    if value in {"approve", "approved", "allow", "yes", "y"}:
+        return "approve"
+    if value in {"deny", "denied", "reject", "rejected", "no", "n"}:
+        return "deny"
+    raise InvalidApprovalDecisionError(f"Invalid approval decision: {decision}")
+
+
+def _denied_tool_result(approval: PendingApproval) -> ToolResultMessage:
+    return ToolResultMessage(
+        tool_call_id=approval.tool_call.id,
+        tool_name=approval.tool_call.name,
+        content=[TextContent(text="Tool execution denied by user")],
+        details={
+            "status": "denied",
+            "reason": "user_denied",
+            "approval_id": approval.approval_id,
+        },
+        is_error=True,
+        status="denied",
+        approved=False,
+        approval_id=approval.approval_id,
+        error_code="user_denied",
+        timestamp=int(time.time() * 1000),
+        metadata={
+            "approval_resume": {
+                "approval_id": approval.approval_id,
+                "decision": "denied",
+            }
+        },
+    )
+
+
+def _to_tool_result_message(result: AgentToolResult) -> ToolResultMessage:
+    return ToolResultMessage(
+        tool_call_id=result.tool_call_id,
+        tool_name=result.tool_name,
+        content=list(result.content),
+        details=result.details,
+        is_error=result.is_error,
+        status=result.status,
+        approved=result.approved,
+        approval_id=result.approval_id,
+        error_code=result.error_code,
+        exit_code=result.exit_code,
+        affected_paths=list(result.affected_paths),
+        workspace_changed=result.workspace_changed,
+        diff_summary=result.diff_summary,
+        verification=dict(result.verification) if result.verification else None,
+        timestamp=int(time.time() * 1000),
+        metadata=dict(result.metadata),
+    )
+
+
+def _verification_from_tool_result(
+    result: ToolResultMessage,
+) -> RunVerification | None:
+    if not result.verification:
+        return None
+    raw_status = result.verification.get("status")
+    status: RunVerificationStatus = (
+        raw_status
+        if raw_status in {"passed", "failed", "cancelled", "unknown"}
+        else "unknown"
+    )
+    raw_command = result.verification.get("command")
+    raw_exit_code = result.verification.get("exit_code")
+    return RunVerification(
+        tool_call_id=result.tool_call_id,
+        tool_name=result.tool_name,
+        status=status,
+        command=raw_command if isinstance(raw_command, str) else None,
+        exit_code=(
+            raw_exit_code
+            if isinstance(raw_exit_code, int) and not isinstance(raw_exit_code, bool)
+            else None
+        ),
+        summary=str(result.verification.get("summary", "")),
+    )
+
+
+def _merge_approval_tool_result(
+    result: AgentRunResult,
+    approved_tool_result: ToolResultMessage,
+) -> AgentRunResult:
+    """把审批恢复阶段的工具结果并入后续 continue run 的结构化证据。"""
+
+    messages = list(result.messages)
+    already_present = any(
+        isinstance(message, ToolResultMessage)
+        and message.tool_call_id == approved_tool_result.tool_call_id
+        and message.approval_id == approved_tool_result.approval_id
+        for message in messages
+    )
+    if not already_present:
+        messages.insert(0, approved_tool_result)
+
+    counters = replace(
+        result.counters,
+        tool_calls=result.counters.tool_calls + (0 if already_present else 1),
+    )
+    affected_paths = sorted(
+        {
+            *result.affected_paths,
+            *[
+                str(path)
+                for path in approved_tool_result.affected_paths
+                if str(path)
+            ],
+        }
+    )
+    verification = list(result.verification)
+    approved_verification = _verification_from_tool_result(approved_tool_result)
+    if approved_verification is not None:
+        duplicate_verification = any(
+            item.tool_call_id == approved_verification.tool_call_id
+            and item.tool_name == approved_verification.tool_name
+            and item.command == approved_verification.command
+            for item in verification
+        )
+        if not duplicate_verification:
+            verification.append(approved_verification)
+
+    return AgentRunResult(
+        run_id=result.run_id,
+        session_id=result.session_id,
+        status=result.status,
+        stop_reason=result.stop_reason,
+        counters=counters,
+        messages=messages,
+        final_message=result.final_message,
+        error=result.error,
+        affected_paths=affected_paths,
+        workspace_changed=bool(
+            result.workspace_changed or approved_tool_result.workspace_changed is True
+        ),
+        verification=verification,
+        task=result.task,
+    )
+
+
 # ── RuntimeService ────────────────────────────────────────────────
 
 class RuntimeService:
@@ -83,6 +259,8 @@ class RuntimeService:
         self._active_runs: dict[str, ActiveRun] = {}
         # 本 Runtime 实例中由持久化数据恢复的 Session。
         self._restored_sessions: set[str] = set()
+        # 轻量 MVP：同进程内保存等待用户审批的工具调用。
+        self._pending_approvals: dict[str, PendingApproval] = {}
 
     def create_session(self, options: CreateAgentSessionOptions) -> SessionHandle:
         """创建一个新的 Agent 会话。
@@ -339,6 +517,7 @@ class RuntimeService:
                 images=message.images,
                 run_id=active_run.run_id,
             )
+            self._record_pending_approvals(session_id, result)
             active_run.status = "completed"
             return result
         except asyncio.CancelledError:
@@ -383,6 +562,9 @@ class RuntimeService:
             ):
                 yield event
 
+            result = getattr(session, "last_run_result", None)
+            if result is not None:
+                self._record_pending_approvals(session_id, result)
             active_run.status = "completed"
         except asyncio.CancelledError:
             active_run.status = "aborted"
@@ -420,6 +602,9 @@ class RuntimeService:
                 active_run=active_run,
             ):
                 yield event
+            result = getattr(session, "last_run_result", None)
+            if result is not None:
+                self._record_pending_approvals(session_id, result)
             active_run.status = "completed"
         except asyncio.CancelledError:
             active_run.status = "aborted"
@@ -534,6 +719,26 @@ class RuntimeService:
             workspace=session.workspace_dir,
         )
 
+    def list_pending_approvals(self, session_id: str | None = None) -> list[dict[str, Any]]:
+        """列出当前 Runtime 内存中等待用户决策的审批项。"""
+
+        approvals = [
+            approval
+            for approval in self._pending_approvals.values()
+            if session_id is None or approval.session_id == session_id
+        ]
+        return [
+            {
+                "approval_id": approval.approval_id,
+                "session_id": approval.session_id,
+                "run_id": approval.run_id,
+                "tool_call_id": approval.tool_call.id,
+                "tool_name": approval.tool_call.name,
+                "reason": approval.reason,
+            }
+            for approval in sorted(approvals, key=lambda item: item.approval_id)
+        ]
+
     def _validate_request(self, session_id: str, message: UserInput) -> None:
         """校验请求。
 
@@ -631,10 +836,78 @@ class RuntimeService:
                 with suppress(asyncio.CancelledError):
                     await task
 
-    async def approve_tool_call(self, approval_id: str, decision: str) -> None:
-        """审批工具调用（尚未实现）。"""
-        _ = approval_id, decision
-        raise NotImplementedError("Tool approval flow is not implemented yet")
+    async def approve_tool_call(
+        self,
+        approval_id: str,
+        decision: str,
+        *,
+        session_id: str | None = None,
+    ) -> AgentRunResult | None:
+        """审批待恢复的工具调用，并用审批后的结果继续会话。"""
+
+        normalized = _normalize_approval_decision(decision)
+        approval = self._resolve_pending_approval(approval_id, session_id=session_id)
+        resolved_session_id = approval.session_id
+        active = self._active_runs.get(resolved_session_id)
+        if active is not None and active.task is not None and active.task.done():
+            self._active_runs.pop(resolved_session_id, None)
+            active = None
+        if active is not None:
+            raise SessionBusyError(f"Session {resolved_session_id} is already running")
+
+        session = self.get_session(resolved_session_id)
+        if not self._session_has_pending_approval_result(session, approval):
+            raise ApprovalNotFoundError(
+                f"Pending approval result not found in session context: {approval.approval_id}"
+            )
+
+        active_run = self._create_active_run(resolved_session_id)
+        active_run.task = asyncio.current_task()
+        approval_baseline = capture_git_baseline(session.workspace_dir)
+        try:
+            if normalized == "approve":
+                replacement = await self._execute_approved_tool(
+                    approval,
+                    run_id=active_run.run_id,
+                )
+            else:
+                replacement = _denied_tool_result(approval)
+            replaced = session.replace_tool_result_message(
+                replacement,
+                approval_id=approval.approval_id,
+            )
+            if not replaced:
+                raise ApprovalNotFoundError(
+                    f"Pending approval result not found in session context: {approval.approval_id}"
+                )
+            self._pending_approvals.pop(approval.approval_id, None)
+            session.store.append_event(
+                {
+                    "type": "tool_approval_decision",
+                    "sessionId": resolved_session_id,
+                    "runId": active_run.run_id,
+                    "approvalId": approval.approval_id,
+                    "toolCallId": approval.tool_call.id,
+                    "toolName": approval.tool_call.name,
+                    "decision": normalized,
+                }
+            )
+            result = await session.continue_run(run_id=active_run.run_id)
+            result = _merge_approval_tool_result(result, replacement)
+            session.agent._last_run_result = result
+            session.store.append_run_result(result)
+            session._write_rollback_metadata(result, approval_baseline)
+            self._record_pending_approvals(resolved_session_id, result)
+            active_run.status = "completed"
+            return result
+        except asyncio.CancelledError:
+            active_run.status = "aborted"
+            raise
+        except Exception:
+            active_run.status = "failed"
+            raise
+        finally:
+            self._active_runs.pop(resolved_session_id, None)
 
     def close_session(self, session_id: str) -> None:
         """同步关闭空闲会话；运行中的会话应使用 aclose_session。"""
@@ -655,6 +928,11 @@ class RuntimeService:
         session = self._sessions.pop(session_id, None)
         if session is not None:
             session.close()
+        self._pending_approvals = {
+            approval_id: approval
+            for approval_id, approval in self._pending_approvals.items()
+            if approval.session_id != session_id
+        }
 
     async def aclose_session(self, session_id: str) -> None:
         """取消并等待当前运行结束，然后关闭指定会话。"""
@@ -677,6 +955,209 @@ class RuntimeService:
             )
         for session_id in list(self._sessions):
             self.close_session(session_id)
+
+    def _record_pending_approvals(
+        self,
+        session_id: str,
+        result: AgentRunResult,
+    ) -> None:
+        """从 waiting_approval run 中提取可恢复的工具调用。"""
+
+        if result.status != "waiting_approval":
+            return
+        assistant_by_tool_call: dict[str, AssistantMessage] = {}
+        tool_calls: dict[str, ToolCall] = {}
+        for message in result.messages:
+            if not isinstance(message, AssistantMessage):
+                continue
+            for block in message.content:
+                if isinstance(block, ToolCall) and block.id:
+                    assistant_by_tool_call[block.id] = message
+                    tool_calls[block.id] = block
+        for message in result.messages:
+            if (
+                not isinstance(message, ToolResultMessage)
+                or message.status != "approval_required"
+                or not message.approval_id
+            ):
+                continue
+            tool_call = tool_calls.get(message.tool_call_id)
+            assistant = assistant_by_tool_call.get(message.tool_call_id)
+            if tool_call is None or assistant is None:
+                continue
+            reason = ""
+            if isinstance(message.details, dict):
+                raw_reason = message.details.get("reason") or message.details.get("policy_reason")
+                reason = raw_reason if isinstance(raw_reason, str) else ""
+            self._pending_approvals[message.approval_id] = PendingApproval(
+                approval_id=message.approval_id,
+                session_id=session_id,
+                run_id=result.run_id,
+                assistant_message=assistant,
+                tool_call=tool_call,
+                reason=reason,
+            )
+
+    def _resolve_pending_approval(
+        self,
+        approval_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> PendingApproval:
+        approval = self._pending_approvals.get(approval_id)
+        if approval is not None:
+            if session_id is not None and approval.session_id != session_id:
+                raise ApprovalNotFoundError(
+                    f"Approval not found for session {session_id}: {approval_id}"
+                )
+            return approval
+        candidates = [
+            candidate
+            for candidate in self._pending_approvals.values()
+            if candidate.tool_call.id == approval_id
+            and (session_id is None or candidate.session_id == session_id)
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise ApprovalNotFoundError(
+                f"Approval id is ambiguous across sessions: {approval_id}"
+            )
+        raise ApprovalNotFoundError(f"Approval not found: {approval_id}")
+
+    @staticmethod
+    def _session_has_pending_approval_result(
+        session: AgentSession,
+        approval: PendingApproval,
+    ) -> bool:
+        for message in session.messages:
+            if not isinstance(message, ToolResultMessage):
+                continue
+            approval_matches = (
+                bool(approval.approval_id)
+                and message.approval_id == approval.approval_id
+            )
+            call_matches = (
+                message.tool_call_id == approval.tool_call.id
+                and message.status == "approval_required"
+            )
+            if approval_matches or call_matches:
+                return True
+        return False
+
+    async def _execute_approved_tool(
+        self,
+        approval: PendingApproval,
+        *,
+        run_id: str,
+    ) -> ToolResultMessage:
+        registered = next(
+            (
+                item
+                for item in self.get_assembly(approval.session_id).capabilities.tools
+                if item.name == approval.tool_call.name
+            ),
+            None,
+        )
+        if registered is None:
+            result = AgentToolResult(
+                content=[TextContent(text=f"Tool {approval.tool_call.name} not found")],
+                status="error",
+                is_error=True,
+                approved=True,
+                approval_id=approval.approval_id,
+                error_code="tool_not_found",
+            )
+            result.tool_call_id = approval.tool_call.id
+            result.tool_name = approval.tool_call.name
+            result.approved = True
+            result.approval_id = approval.approval_id
+            result.metadata.setdefault(
+                "approval_resume",
+                {
+                    "approval_id": approval.approval_id,
+                    "decision": "approved",
+                },
+            )
+            return _to_tool_result_message(result)
+
+        session = self.get_session(approval.session_id)
+        direct_tool = AgentTool(
+            name=registered.tool.name,
+            label=registered.tool.label,
+            description=registered.tool.description,
+            parameters=registered.tool.parameters,
+            execute=registered.tool.execute,
+            runtime_managed=True,
+            metadata=registered.metadata,
+        )
+        agent_options = session.agent._options
+        emitter = AgentEventEmitter(
+            session.agent._dispatch_event,
+            run_id=run_id,
+            session_id=session.session_id,
+        )
+        coordinator = ToolCallCoordinator(
+            config=AgentLoopConfig(
+                model=session.agent.state.model,
+                convert_to_llm=agent_options.convert_to_llm,
+                transform_context=agent_options.transform_context,
+                prepare_context=agent_options.prepare_context,
+                get_api_key=agent_options.get_api_key,
+                get_steering_messages=None,
+                get_follow_up_messages=None,
+                tool_execution="sequential",
+                before_tool_call=session.before_tool_call,
+                after_tool_call=session.after_tool_call,
+                reasoning=None,
+                session_id=session.session_id,
+                max_tool_iterations=agent_options.max_tool_iterations,
+                max_tool_calls_per_turn=1,
+                allow_unmanaged_tools=True,
+                repeated_tool_call_limit=agent_options.repeated_tool_call_limit,
+                retry_enabled=agent_options.retry_enabled,
+                max_model_retries=agent_options.max_model_retries,
+                retry_base_delay_ms=agent_options.retry_base_delay_ms,
+                task_control_enabled=agent_options.task_control_enabled,
+            ),
+            emitter=emitter,
+        )
+        tool_results = await coordinator.execute_batch(
+            AgentContext(
+                system_prompt=session.agent.state.system_prompt,
+                messages=list(session.messages),
+                tools=[direct_tool],
+            ),
+            AssistantMessage(content=[approval.tool_call]),
+        )
+        if not tool_results:
+            result = AgentToolResult(
+                content=[TextContent(text="Approved tool execution produced no result")],
+                status="error",
+                is_error=True,
+                approved=True,
+                approval_id=approval.approval_id,
+                error_code="tool_no_result",
+            )
+            result.tool_call_id = approval.tool_call.id
+            result.tool_name = approval.tool_call.name
+            return _to_tool_result_message(result)
+        message = tool_results[0]
+        message.approval_id = approval.approval_id
+        message.metadata.setdefault(
+            "approval_resume",
+            {
+                "approval_id": approval.approval_id,
+                "decision": "approved",
+            },
+        )
+        if message.status == "success":
+            message.approved = True
+            message.is_error = False
+        if isinstance(message.details, dict):
+            message.details.setdefault("approval_id", approval.approval_id)
+            message.details.setdefault("approval_decision", "approved")
+        return message
 
     async def aclose_all(self) -> None:
         """取消并等待全部运行任务结束，然后关闭所有会话。"""

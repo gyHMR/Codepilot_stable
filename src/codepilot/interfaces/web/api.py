@@ -123,11 +123,17 @@ class WebConsoleBackend:
 
     async def approve_tool(self, approval: WebToolApproval) -> WebEventEnvelope:
         """审批工具调用：将审批决策传递给 RuntimeService。"""
-        await self.runtime.approve_tool_call(approval.tool_call_id, approval.decision)
+        approval_id = approval.approval_id or approval.tool_call_id
+        await self.runtime.approve_tool_call(
+            approval_id,
+            approval.decision,
+            session_id=approval.session_id,
+        )
         return WebEventEnvelope(
             type="session_state",
             session_id=approval.session_id,
             payload={
+                "approval_id": approval_id,
                 "tool_call_id": approval.tool_call_id,
                 "decision": approval.decision,
                 "reason": approval.reason,

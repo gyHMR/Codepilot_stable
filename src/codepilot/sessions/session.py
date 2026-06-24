@@ -461,6 +461,45 @@ class AgentSession:
             ),
         )
 
+    def replace_tool_result_message(
+        self,
+        replacement: ToolResultMessage,
+        *,
+        approval_id: str | None = None,
+    ) -> bool:
+        """Replace a pending approval ToolResultMessage in live and persisted context."""
+
+        messages = list(self.agent.state.messages)
+        for index, message in enumerate(messages):
+            if not isinstance(message, ToolResultMessage):
+                continue
+            approval_matches = (
+                bool(approval_id)
+                and message.approval_id == approval_id
+            )
+            call_matches = (
+                message.tool_call_id == replacement.tool_call_id
+                and message.status == "approval_required"
+            )
+            if not approval_matches and not call_matches:
+                continue
+            messages[index] = replacement
+            self.agent.set_messages(messages)
+            self.store.rewrite_context_messages(messages)
+            self.store.rewrite_session_messages(messages)
+            self.store.append_event(
+                {
+                    "type": "tool_approval_result_replaced",
+                    "sessionId": self.session_id,
+                    "approvalId": approval_id or replacement.approval_id,
+                    "toolCallId": replacement.tool_call_id,
+                    "toolName": replacement.tool_name,
+                    "status": replacement.status,
+                }
+            )
+            return True
+        return False
+
     async def _on_agent_event(self, event: AgentEvent) -> None:
         """Agent 事件回调：将事件持久化到存储，并在消息结束时保存上下文消息。"""
         self.store.append_event(event)

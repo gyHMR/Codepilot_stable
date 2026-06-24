@@ -5,6 +5,85 @@ from pathlib import Path
 from typing import Any
 
 
+def test_task_planner_parses_json_plan_from_llm_message() -> None:
+    from codepilot.core.task_planner import TaskPlanner
+    from codepilot.protocols import AssistantMessage, TextContent
+
+    message = AssistantMessage(
+        content=[
+            TextContent(
+                text="""
+                {
+                  "goal": "修复任务推进",
+                  "steps": [
+                    {
+                      "title": "定位任务模块",
+                      "kind": "investigate",
+                      "acceptance": "找到 TaskController 调用链",
+                      "verification_hint": null
+                    },
+                    {
+                      "title": "修改 step 推进逻辑",
+                      "kind": "edit",
+                      "acceptance": "验证通过后只推进当前步骤",
+                      "verification_hint": "python -m pytest test/test_task_planning.py -q"
+                    }
+                  ]
+                }
+                """
+            )
+        ]
+    )
+
+    draft = TaskPlanner().parse_plan_message(message, fallback_goal="fallback")
+
+    assert draft.goal == "修复任务推进"
+    assert [step.title for step in draft.steps] == [
+        "定位任务模块",
+        "修改 step 推进逻辑",
+    ]
+    assert draft.steps[0].kind == "investigate"
+    assert draft.steps[0].acceptance == "找到 TaskController 调用链"
+    assert draft.steps[1].verification_hint == "python -m pytest test/test_task_planning.py -q"
+
+
+def test_task_controller_initializes_from_planned_steps_and_exports_details() -> None:
+    from codepilot.core.task_controller import TaskController
+    from codepilot.core.task_planner import PlannedTaskStep
+    from codepilot.protocols import UserMessage
+
+    controller = TaskController()
+    task = controller.initialize(
+        [UserMessage(content="实现 plan and execute")],
+        proposed_steps=[
+            PlannedTaskStep(
+                title="定位任务模块",
+                kind="investigate",
+                acceptance="找到 TaskController 调用链",
+            ),
+            PlannedTaskStep(
+                title="修改 step 推进逻辑",
+                kind="edit",
+                acceptance="验证通过后只推进当前步骤",
+                verification_hint="python -m pytest test/test_task_planning.py -q",
+            ),
+        ],
+    )
+
+    rendered = controller.render_context(task)
+    summary = controller.summarize(task)
+
+    assert task.steps[0].kind == "investigate"
+    assert task.steps[0].acceptance == "找到 TaskController 调用链"
+    assert task.steps[1].verification_hint == "python -m pytest test/test_task_planning.py -q"
+    assert "Acceptance: 找到 TaskController 调用链" in rendered
+    assert "Verification hint: python -m pytest test/test_task_planning.py -q" in rendered
+    assert summary.step_details["定位任务模块"]["kind"] == "investigate"
+    assert summary.step_details["修改 step 推进逻辑"]["verification_hint"] == (
+        "python -m pytest test/test_task_planning.py -q"
+    )
+
+
 def test_task_controller_normalizes_steps_and_updates_from_tool_results() -> None:
     from codepilot.core.run_state import RunState
     from codepilot.core.task_controller import TaskController
@@ -121,6 +200,84 @@ def test_completion_gate_requires_fresh_verification_after_workspace_change() ->
     assert ok.satisfied is True
     assert ok.reason == "all_steps_completed"
     assert all(step.status == "completed" for step in task.steps)
+
+
+def test_passed_verification_completes_current_step_and_advances() -> None:
+    from codepilot.core.run_state import RunState
+    from codepilot.core.task_controller import TaskController
+    from codepilot.protocols import ToolResultMessage, UserMessage
+
+    controller = TaskController()
+    task = controller.initialize(
+        [UserMessage(content="按步骤执行")],
+        proposed_steps=["修改实现", "总结结果"],
+    )
+    run = RunState(run_id="run_1", session_id="session_1")
+    passed = ToolResultMessage(
+        tool_call_id="test_1",
+        tool_name="bash",
+        status="success",
+        verification={
+            "status": "passed",
+            "command": "python -m pytest test/test_task_planning.py -q",
+            "exit_code": 0,
+            "summary": "passed",
+        },
+    )
+
+    run.collect_tool_results([passed])
+    decision = controller.after_tool_results(task, run, [passed])
+
+    assert decision.action == "continue"
+    assert task.steps[0].status == "completed"
+    assert task.steps[0].progress_state == "verified"
+    assert task.steps[1].status == "in_progress"
+    assert task.current_step_id == "step_2"
+    assert task.phase == "acting"
+
+
+def test_passed_verification_keeps_acting_phase_after_fresh_verification() -> None:
+    from codepilot.core.run_state import RunState
+    from codepilot.core.task_controller import TaskController
+    from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
+
+    controller = TaskController()
+    task = controller.initialize(
+        [UserMessage(content="修改实现后总结")],
+        proposed_steps=["修改实现", "总结结果"],
+    )
+    run = RunState(run_id="run_1", session_id="session_1")
+    edit = ToolResultMessage(
+        tool_call_id="edit_1",
+        tool_name="edit",
+        content=[TextContent(text="edited")],
+        affected_paths=["src/app.py"],
+        workspace_changed=True,
+        status="success",
+    )
+    run.collect_tool_results([edit])
+    controller.after_tool_results(task, run, [edit])
+    passed = ToolResultMessage(
+        tool_call_id="test_1",
+        tool_name="bash",
+        status="success",
+        verification={
+            "status": "passed",
+            "command": "python -m pytest test/test_task_planning.py -q",
+            "exit_code": 0,
+            "summary": "passed",
+        },
+    )
+
+    run.collect_tool_results([passed])
+    decision = controller.after_tool_results(task, run, [passed])
+
+    assert decision.action == "continue"
+    assert run.workspace_changed is True
+    assert run.fresh_verification_passed is True
+    assert task.steps[0].status == "completed"
+    assert task.steps[1].status == "in_progress"
+    assert task.phase == "acting"
 
 
 def test_completion_gate_treats_unavailable_tool_as_blocked() -> None:
@@ -333,6 +490,13 @@ def test_task_controller_rebuilds_task_state_from_memory_projection() -> None:
                 "blocked_steps": ["根据最新失败证据调整方案"],
                 "completion_satisfied": False,
                 "completion_reason": "replan_limit_exceeded",
+                "step_details": {
+                    "重新运行相关验证": {
+                        "kind": "verify",
+                        "acceptance": "验证失败已修复",
+                        "verification_hint": "python -m pytest test/test_task.py -q",
+                    }
+                },
             },
             "next_action": "报告连续失败并等待用户指示",
         },
@@ -350,6 +514,9 @@ def test_task_controller_rebuilds_task_state_from_memory_projection() -> None:
         "重新运行相关验证",
     ]
     assert task.current_step_id == "step_3"
+    assert task.steps[2].kind == "verify"
+    assert task.steps[2].acceptance == "验证失败已修复"
+    assert task.steps[2].verification_hint == "python -m pytest test/test_task.py -q"
     assert task.next_action == "报告连续失败并等待用户指示"
     assert task.completion_reason == "replan_limit_exceeded"
 
@@ -358,8 +525,236 @@ def test_agent_loop_emits_task_events_and_result_summary() -> None:
     asyncio.run(_agent_loop_task_summary_case())
 
 
+def test_agent_loop_can_plan_before_react_execution() -> None:
+    asyncio.run(_agent_loop_llm_planner_case())
+
+
+def test_agent_loop_complete_task_step_advances_plan_execution() -> None:
+    asyncio.run(_agent_loop_complete_step_advances_case())
+
+
 def test_agent_loop_uses_recovered_task_projection_in_context() -> None:
     asyncio.run(_agent_loop_recovered_task_context_case())
+
+
+async def _agent_loop_complete_step_advances_case() -> None:
+    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
+    from codepilot.llm.event_stream import AssistantMessageEventStream
+    from codepilot.protocols import AssistantMessage, Model, TextContent, ToolCall, ToolResultMessage, UserMessage
+    from codepilot.tools import AgentTool, AgentToolResult
+
+    execution_contexts: list[str] = []
+
+    async def fake_stream(_model, context, _options):
+        stream = AssistantMessageEventStream()
+        system_prompt = context.system_prompt or ""
+        if "Task Planner" in system_prompt:
+            stream.end(
+                AssistantMessage(
+                    content=[
+                        TextContent(
+                            text=(
+                                '{"goal":"实现 planner","steps":['
+                                '{"title":"定位任务模块","kind":"investigate",'
+                                '"acceptance":"找到 TaskController","verification_hint":null},'
+                                '{"title":"修改执行逻辑","kind":"edit",'
+                                '"acceptance":"按 step 推进","verification_hint":null}'
+                                ']}'
+                            )
+                        )
+                    ]
+                )
+            )
+            return stream
+
+        execution_contexts.append(system_prompt)
+        if not any(isinstance(message, ToolResultMessage) for message in context.messages):
+            stream.end(
+                AssistantMessage(
+                    content=[ToolCall(id="read_1", name="read_test", arguments={})],
+                    stop_reason="toolUse",
+                )
+            )
+            return stream
+        if "Current step: 定位任务模块" in system_prompt:
+            stream.end(
+                AssistantMessage(
+                    content=[
+                        ToolCall(
+                            id="complete_1",
+                            name="complete_task_step",
+                            arguments={
+                                "summary": "已定位 TaskController",
+                                "evidence_refs": ["tool:read_1"],
+                            },
+                        )
+                    ],
+                    stop_reason="toolUse",
+                )
+            )
+            return stream
+        assert "Current step: 修改执行逻辑" in system_prompt
+        if any(
+            isinstance(message, ToolResultMessage) and message.tool_name == "edit_test"
+            for message in context.messages
+        ):
+            stream.end(AssistantMessage(content=[TextContent(text="修改完成，等待验证")]))
+            return stream
+        stream.end(
+            AssistantMessage(
+                content=[ToolCall(id="edit_1", name="edit_test", arguments={})],
+                stop_reason="toolUse",
+            )
+        )
+        return stream
+
+    async def read_tool(*_args):
+        return AgentToolResult(content=[TextContent(text="TaskController source")])
+
+    async def edit_tool(*_args):
+        return AgentToolResult(
+            content=[TextContent(text="edited")],
+            workspace_changed=True,
+            affected_paths=["src/codepilot/core/task_controller.py"],
+        )
+
+    result = await run_agent_loop(
+        prompts=[UserMessage(content="实现 planner")],
+        context=AgentContext(
+            system_prompt="rules",
+            messages=[],
+            tools=[
+                AgentTool(
+                    name="read_test",
+                    label="read",
+                    description="read",
+                    parameters={},
+                    execute=read_tool,
+                ),
+                AgentTool(
+                    name="edit_test",
+                    label="edit",
+                    description="edit",
+                    parameters={},
+                    execute=edit_tool,
+                ),
+            ],
+        ),
+        config=AgentLoopConfig(
+            model=Model(
+                id="task-test",
+                name="Task Test",
+                api="unit-test",
+                provider="unit-test",
+                base_url="",
+                reasoning=False,
+                input=["text"],
+                context_window=4000,
+                max_tokens=500,
+            ),
+            convert_to_llm=lambda items: items,
+            allow_unmanaged_tools=True,
+            task_planner_enabled=True,
+            repeated_tool_call_limit=20,
+        ),
+        emit=lambda _event: None,
+        stream_fn=fake_stream,
+    )
+
+    assert any("Current step: 修改执行逻辑" in item for item in execution_contexts)
+    assert result.task is not None
+    assert "定位任务模块" in result.task.completed_steps
+    assert result.task.pending_steps == ["修改执行逻辑"]
+    assert result.workspace_changed is True
+
+
+async def _agent_loop_llm_planner_case() -> None:
+    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
+    from codepilot.llm.event_stream import AssistantMessageEventStream
+    from codepilot.protocols import AssistantMessage, Model, TextContent, ToolCall, ToolResultMessage, UserMessage
+    from codepilot.tools import AgentTool, AgentToolResult
+
+    calls: list[str] = []
+
+    async def fake_stream(_model, context, _options):
+        stream = AssistantMessageEventStream()
+        system_prompt = context.system_prompt or ""
+        if "Task Planner" in system_prompt:
+            calls.append("plan")
+            stream.end(
+                AssistantMessage(
+                    content=[
+                        TextContent(
+                            text=(
+                                '{"goal":"实现 planner","steps":['
+                                '{"title":"定位任务模块","kind":"investigate",'
+                                '"acceptance":"找到 TaskController","verification_hint":null},'
+                                '{"title":"修改执行逻辑","kind":"edit",'
+                                '"acceptance":"按 step 推进","verification_hint":"pytest task"}'
+                                ']}'
+                            )
+                        )
+                    ]
+                )
+            )
+            return stream
+        calls.append("execute")
+        assert "## Current Task" in system_prompt
+        assert "定位任务模块" in system_prompt
+        assert "Acceptance: 找到 TaskController" in system_prompt
+        if any(isinstance(message, ToolResultMessage) for message in context.messages):
+            stream.end(AssistantMessage(content=[TextContent(text="done")]))
+        else:
+            stream.end(
+                AssistantMessage(
+                    content=[ToolCall(id="read_1", name="read_test", arguments={})],
+                    stop_reason="toolUse",
+                )
+            )
+        return stream
+
+    async def read_tool(*_args):
+        return AgentToolResult(content=[TextContent(text="read result")])
+
+    result = await run_agent_loop(
+        prompts=[UserMessage(content="实现 planner")],
+        context=AgentContext(
+            system_prompt="rules",
+            messages=[],
+            tools=[
+                AgentTool(
+                    name="read_test",
+                    label="read",
+                    description="read",
+                    parameters={},
+                    execute=read_tool,
+                )
+            ],
+        ),
+        config=AgentLoopConfig(
+            model=Model(
+                id="task-test",
+                name="Task Test",
+                api="unit-test",
+                provider="unit-test",
+                base_url="",
+                reasoning=False,
+                input=["text"],
+                context_window=4000,
+                max_tokens=500,
+            ),
+            convert_to_llm=lambda items: items,
+            allow_unmanaged_tools=True,
+            task_planner_enabled=True,
+        ),
+        emit=lambda _event: None,
+        stream_fn=fake_stream,
+    )
+
+    assert calls[:2] == ["plan", "execute"]
+    assert result.task is not None
+    assert result.task.goal == "实现 planner"
+    assert result.task.step_details["定位任务模块"]["acceptance"] == "找到 TaskController"
 
 
 async def _agent_loop_recovered_task_context_case() -> None:

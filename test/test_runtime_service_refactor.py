@@ -8,6 +8,8 @@ import pytest
 from codepilot.protocols import Model
 from codepilot.runtime.assembly import explain_runtime_config
 from codepilot.runtime.service import (
+    ApprovalNotFoundError,
+    PendingApproval,
     RuntimeService,
     SessionBusyError,
     UserInput,
@@ -388,5 +390,349 @@ def test_runtime_injects_active_run_id_into_session() -> None:
 
         assert fake.received_run_id is not None
         assert events[0]["runId"] == fake.received_run_id
+
+    asyncio.run(run_case())
+
+
+def test_runtime_approval_resume_executes_pending_tool_and_continues(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        from codepilot.llm.event_stream import AssistantMessageEventStream
+        from codepilot.protocols import (
+            AssistantMessage,
+            TextContent,
+            ToolCall,
+            ToolResultMessage,
+        )
+        from codepilot.tools import AgentTool, AgentToolResult
+
+        executed: list[dict[str, object]] = []
+
+        async def fake_stream(_model, context, _options):
+            stream = AssistantMessageEventStream()
+            if any(
+                isinstance(message, ToolResultMessage)
+                and message.tool_name == "custom_mutate"
+                and message.status == "success"
+                for message in context.messages
+            ):
+                stream.end(AssistantMessage(content=[TextContent(text="approved done")]))
+            else:
+                stream.end(
+                    AssistantMessage(
+                        content=[
+                            ToolCall(
+                                id="custom_1",
+                                name="custom_mutate",
+                                arguments={"value": "ok"},
+                            )
+                        ],
+                        stop_reason="toolUse",
+                    )
+                )
+            return stream
+
+        async def custom_mutate(tool_call_id, params, signal=None, on_update=None):
+            _ = tool_call_id, signal, on_update
+            executed.append(dict(params))
+            (tmp_path / "approved.txt").write_text("approved", encoding="utf-8")
+            return AgentToolResult(
+                content=[TextContent(text="mutated")],
+                affected_paths=["approved.txt"],
+                workspace_changed=True,
+                verification={
+                    "status": "passed",
+                    "command": "custom verify",
+                    "exit_code": 0,
+                    "summary": "approved mutation verified",
+                },
+            )
+
+        runtime = RuntimeService()
+        handle = runtime.create_session(
+            _options(
+                tmp_path,
+                tools=[
+                    AgentTool(
+                        name="custom_mutate",
+                        label="Custom mutate",
+                        description="Mutates something in the workspace",
+                        parameters={"type": "object", "properties": {}},
+                        execute=custom_mutate,
+                    )
+                ],
+                stream_fn=fake_stream,
+                memory_enabled=False,
+                task_control_enabled=False,
+                context_governance_enabled=False,
+            )
+        )
+        try:
+            waiting = await runtime.run_message(
+                handle.session_id,
+                UserInput(text="run the custom tool"),
+            )
+            approval_result = next(
+                message
+                for message in waiting.messages
+                if isinstance(message, ToolResultMessage)
+                and message.status == "approval_required"
+            )
+            approval_id = approval_result.approval_id
+
+            assert waiting.status == "waiting_approval"
+            assert approval_id
+            assert executed == []
+            assert runtime.list_pending_approvals(handle.session_id)[0]["approval_id"] == approval_id
+
+            resumed = await runtime.approve_tool_call(approval_id, "approve")
+
+            assert resumed is not None
+            assert resumed.status == "completed"
+            assert resumed.workspace_changed is True
+            assert "approved.txt" in resumed.affected_paths
+            assert any(
+                item.tool_name == "custom_mutate" and item.status == "passed"
+                for item in resumed.verification
+            )
+            assert any(
+                isinstance(message, ToolResultMessage)
+                and message.tool_call_id == "custom_1"
+                and message.status == "success"
+                for message in resumed.messages
+            )
+            persisted = runtime.get_run_result(handle.session_id, resumed.run_id)
+            assert persisted["workspace_changed"] is True
+            assert "approved.txt" in persisted["affected_paths"]
+            assert executed == [{"value": "ok"}]
+            assert runtime.list_pending_approvals(handle.session_id) == []
+            tool_results = [
+                message
+                for message in handle.session.messages
+                if isinstance(message, ToolResultMessage)
+                and message.tool_call_id == "custom_1"
+            ]
+            assert len(tool_results) == 1
+            assert tool_results[0].status == "success"
+            final = runtime.get_latest_assistant_message(handle.session_id)
+            assert final is not None
+            assert any(
+                isinstance(block, TextContent) and block.text == "approved done"
+                for block in final.content
+            )
+        finally:
+            runtime.close_all()
+
+    asyncio.run(run_case())
+
+
+def test_runtime_continue_session_records_new_pending_approval() -> None:
+    async def run_case() -> None:
+        from codepilot.protocols import (
+            AgentRunResult,
+            AssistantMessage,
+            TextContent,
+            ToolCall,
+            ToolResultMessage,
+        )
+
+        class FakeSession:
+            session_id = "s1"
+
+            def __init__(self) -> None:
+                self.listeners = []
+                self._last_run_result = None
+
+            @property
+            def last_run_result(self):
+                return self._last_run_result
+
+            def subscribe(self, listener):
+                self.listeners.append(listener)
+
+                def unsubscribe():
+                    self.listeners.remove(listener)
+
+                return unsubscribe
+
+            async def continue_run(self, *, run_id=None):
+                assistant = AssistantMessage(
+                    content=[
+                        ToolCall(
+                            id="continued_call",
+                            name="custom_mutate",
+                            arguments={"value": "ok"},
+                        )
+                    ]
+                )
+                approval = ToolResultMessage(
+                    tool_call_id="continued_call",
+                    tool_name="custom_mutate",
+                    content=[TextContent(text="approval needed")],
+                    status="approval_required",
+                    is_error=True,
+                    approved=False,
+                    approval_id="approval_from_continue",
+                )
+                result = AgentRunResult(
+                    run_id=run_id or "run_continue",
+                    session_id=self.session_id,
+                    status="waiting_approval",
+                    stop_reason="approval_required",
+                    messages=[assistant, approval],
+                )
+                self._last_run_result = result
+                return result
+
+        runtime = RuntimeService()
+        fake = FakeSession()
+        runtime._sessions[fake.session_id] = fake  # type: ignore[assignment]
+
+        events = [event async for event in runtime.continue_session(fake.session_id)]
+
+        assert events == []
+        assert runtime.list_pending_approvals(fake.session_id) == [
+            {
+                "approval_id": "approval_from_continue",
+                "session_id": fake.session_id,
+                "run_id": fake.last_run_result.run_id,
+                "tool_call_id": "continued_call",
+                "tool_name": "custom_mutate",
+                "reason": "",
+            }
+        ]
+
+    asyncio.run(run_case())
+
+
+def test_runtime_approval_resume_records_follow_up_approval_under_same_session(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        from codepilot.llm.event_stream import AssistantMessageEventStream
+        from codepilot.protocols import (
+            AssistantMessage,
+            TextContent,
+            ToolCall,
+            ToolResultMessage,
+        )
+        from codepilot.tools import AgentTool, AgentToolResult
+
+        async def fake_stream(_model, context, _options):
+            stream = AssistantMessageEventStream()
+            approved_results = [
+                message
+                for message in context.messages
+                if isinstance(message, ToolResultMessage)
+                and message.tool_name == "custom_mutate"
+                and message.status == "success"
+            ]
+            next_call_id = "custom_2" if approved_results else "custom_1"
+            stream.end(
+                AssistantMessage(
+                    content=[
+                        ToolCall(
+                            id=next_call_id,
+                            name="custom_mutate",
+                            arguments={"value": next_call_id},
+                        )
+                    ],
+                    stop_reason="toolUse",
+                )
+            )
+            return stream
+
+        async def custom_mutate(tool_call_id, params, signal=None, on_update=None):
+            _ = tool_call_id, params, signal, on_update
+            return AgentToolResult(content=[TextContent(text="mutated")])
+
+        runtime = RuntimeService()
+        handle = runtime.create_session(
+            _options(
+                tmp_path,
+                tools=[
+                    AgentTool(
+                        name="custom_mutate",
+                        label="Custom mutate",
+                        description="Mutates something in the workspace",
+                        parameters={"type": "object", "properties": {}},
+                        execute=custom_mutate,
+                    )
+                ],
+                stream_fn=fake_stream,
+                memory_enabled=False,
+                task_control_enabled=False,
+                context_governance_enabled=False,
+            )
+        )
+        try:
+            waiting = await runtime.run_message(
+                handle.session_id,
+                UserInput(text="run two approved steps"),
+            )
+            first_approval = next(
+                message.approval_id
+                for message in waiting.messages
+                if isinstance(message, ToolResultMessage)
+                and message.status == "approval_required"
+            )
+            assert first_approval
+
+            resumed = await runtime.approve_tool_call(first_approval, "approve")
+
+            assert resumed is not None
+            assert resumed.status == "waiting_approval"
+            pending = runtime.list_pending_approvals(handle.session_id)
+            assert len(pending) == 1
+            assert pending[0]["session_id"] == handle.session_id
+            assert pending[0]["tool_call_id"] == "custom_2"
+        finally:
+            runtime.close_all()
+
+    asyncio.run(run_case())
+
+
+def test_runtime_approval_resolution_is_bound_to_session() -> None:
+    async def run_case() -> None:
+        from codepilot.protocols import AssistantMessage, ToolCall
+
+        runtime = RuntimeService()
+        shared_call = ToolCall(id="shared_tool_call", name="custom_mutate", arguments={})
+        runtime._pending_approvals["approval_s1"] = PendingApproval(
+            approval_id="approval_s1",
+            session_id="s1",
+            run_id="run_s1",
+            assistant_message=AssistantMessage(content=[shared_call]),
+            tool_call=shared_call,
+        )
+        runtime._pending_approvals["approval_s2"] = PendingApproval(
+            approval_id="approval_s2",
+            session_id="s2",
+            run_id="run_s2",
+            assistant_message=AssistantMessage(
+                content=[
+                    ToolCall(
+                        id="shared_tool_call",
+                        name="custom_mutate",
+                        arguments={},
+                    )
+                ]
+            ),
+            tool_call=ToolCall(
+                id="shared_tool_call",
+                name="custom_mutate",
+                arguments={},
+            ),
+        )
+
+        with pytest.raises(ApprovalNotFoundError):
+            await runtime.approve_tool_call(
+                "approval_s1",
+                "approve",
+                session_id="s2",
+            )
+
+        assert sorted(runtime._pending_approvals) == ["approval_s1", "approval_s2"]
 
     asyncio.run(run_case())

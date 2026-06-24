@@ -126,6 +126,7 @@ class AgentLoopConfig:
     max_model_retries: int = 2
     retry_base_delay_ms: int = 1200
     task_control_enabled: bool = True
+    task_planner_enabled: bool = False
 
 
 @dataclass

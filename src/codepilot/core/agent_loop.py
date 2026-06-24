@@ -48,7 +48,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from codepilot.protocols import AssistantMessage, ToolCall, ToolResultMessage
+from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage, UserMessage
 from codepilot.protocols import (
     AgentEventSink,
     AgentRunResult,
@@ -61,6 +61,8 @@ from .events import AgentEventEmitter, maybe_await
 from .llm_runner import LLMStreamRunner, StreamFn
 from .run_state import RunState, new_run_id
 from .task_controller import TaskController
+from .task_planner import TaskPlanner, TaskPlanDraft
+from .task_tools import complete_task_step_tool, has_complete_task_step_tool
 from .tool_coordinator import ToolCallCoordinator
 from .types import AgentContext, AgentLoopConfig, AgentMessage
 
@@ -429,11 +431,34 @@ async def _run_loop(
 
     # 任务控制器（可选）：负责任务规划和完成度检查
     task_controller = TaskController() if config.task_control_enabled else None
+    planned_task: TaskPlanDraft | None = None
+    if (
+        task_controller is not None
+        and config.task_planner_enabled
+        and current_context.recovered_task is None
+        and current_context.messages
+    ):
+        api_key = (
+            await maybe_await(config.get_api_key(config.model.provider))
+            if config.get_api_key is not None
+            else None
+        )
+        planned_task = await TaskPlanner().generate(
+            model=config.model,
+            messages=current_context.messages,
+            convert_to_llm=config.convert_to_llm,
+            fallback_goal=_latest_user_goal(current_context.messages),
+            stream_fn=stream_fn,
+            api_key=api_key,
+            session_id=config.session_id,
+        )
 
     # 初始化任务（如果启用了任务控制）
     task = (
         task_controller.initialize(
             current_context.messages,
+            goal=planned_task.goal if planned_task is not None else None,
+            proposed_steps=planned_task.steps if planned_task is not None else None,
             recovered_task=current_context.recovered_task,  # 恢复之前中断的任务
         )
         if task_controller is not None
@@ -442,6 +467,8 @@ async def _run_loop(
 
     # 发射任务计划创建事件
     if task_controller is not None and task is not None:
+        if not has_complete_task_step_tool(current_context.tools):
+            current_context.tools.append(complete_task_step_tool())
         await emitter.emit(
             {
                 "type": "task_plan_created",
@@ -990,3 +1017,16 @@ def _last_assistant(messages: list[AgentMessage]) -> AssistantMessage | None:
         (message for message in reversed(messages) if isinstance(message, AssistantMessage)),
         None,
     )
+
+
+def _latest_user_goal(messages: list[AgentMessage]) -> str:
+    for message in reversed(messages):
+        if not isinstance(message, UserMessage):
+            continue
+        if isinstance(message.content, str):
+            return message.content.strip() or "完成当前请求"
+        text = "".join(
+            block.text for block in message.content if isinstance(block, TextContent)
+        ).strip()
+        return text or "完成当前请求"
+    return "继续当前任务"

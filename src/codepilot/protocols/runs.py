@@ -101,6 +101,7 @@ class TaskSummary:
     change_sets: list[dict[str, Any]] = field(default_factory=list)
     replans: list[dict[str, Any]] = field(default_factory=list)
     control_signal: dict[str, Any] = field(default_factory=dict)
+    step_details: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass

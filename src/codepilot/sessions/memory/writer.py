@@ -206,6 +206,7 @@ class MemoryWriter:
             "blocked_steps": list(summary.blocked_steps),
             "completion_satisfied": summary.completion_satisfied,
             "completion_reason": summary.completion_reason,
+            "step_details": dict(summary.step_details),
         }
         task.content["next_action"] = (
             None if summary.completion_satisfied else summary.next_action

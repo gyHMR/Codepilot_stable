@@ -114,6 +114,35 @@ def test_runtime_service_exposes_run_result_events_and_report(tmp_path: Path) ->
     assert report["summary"]["status"] == "completed"
 
 
+def test_web_backend_submits_tool_approval_by_approval_id() -> None:
+    from codepilot.interfaces.web.api import WebConsoleBackend
+    from codepilot.interfaces.web.schemas import WebToolApproval
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.received = None
+
+        async def approve_tool_call(self, approval_id, decision, *, session_id=None):
+            self.received = (approval_id, decision, session_id)
+
+    runtime = FakeRuntime()
+    backend = WebConsoleBackend(runtime=runtime)  # type: ignore[arg-type]
+
+    event = asyncio.run(
+        backend.approve_tool(
+            WebToolApproval(
+                session_id="s1",
+                tool_call_id="tool_1",
+                approval_id="approval_1",
+                decision="approve",
+            )
+        )
+    )
+
+    assert runtime.received == ("approval_1", "approve", "s1")
+    assert event.payload["approval_id"] == "approval_1"
+
+
 async def _run_runtime_service_send_message_streaming_case() -> None:
     from codepilot.runtime.service import RuntimeService, UserInput
 

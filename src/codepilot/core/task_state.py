@@ -35,6 +35,10 @@ class TaskStep:
     id: str                          # 步骤唯一标识
     title: str                       # 步骤标题/描述
     status: TaskStepStatus = "pending"  # 当前状态
+    kind: str = "other"              # 步骤类型：investigate/edit/verify/summarize/other
+    acceptance: str | None = None    # 当前步骤的完成标准
+    verification_hint: str | None = None  # 建议验证方式
+    summary: str | None = None       # 步骤完成摘要
     evidence_refs: list[str] = field(default_factory=list)  # 证据引用（工具调用ID、文件路径等）
     failure_count: int = 0           # 失败次数
     note: str | None = None          # 备注信息

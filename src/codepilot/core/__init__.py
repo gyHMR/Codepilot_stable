@@ -20,6 +20,8 @@ from .llm_runner import LLMStreamRunner, StreamFn
 from .message_conversion import convert_to_llm
 from .run_state import RunState, new_run_id
 from .task_controller import TaskController
+from .task_planner import PlannedTaskStep, TaskPlanDraft, TaskPlanner
+from .task_tools import COMPLETE_TASK_STEP_TOOL
 from .task_state import CompletionCheck, ExecutionDecision, TaskState, TaskStep
 from .tool_coordinator import ToolCallCoordinator
 from codepilot.protocols import (
@@ -70,6 +72,10 @@ __all__ = [
     "new_run_id",
     "ToolCallCoordinator",
     "TaskController",
+    "PlannedTaskStep",
+    "TaskPlanDraft",
+    "TaskPlanner",
+    "COMPLETE_TASK_STEP_TOOL",
     "CompletionCheck",
     "ExecutionDecision",
     "TaskState",

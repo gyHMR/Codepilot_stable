@@ -13,6 +13,8 @@ from typing import Iterable, Mapping
 from codepilot.protocols import TaskSummary, TextContent, ToolResultMessage, UserMessage
 
 from .run_state import RunState
+from .task_planner import PlannedTaskStep
+from .task_tools import COMPLETE_TASK_STEP_TOOL
 from .task_state import (
     AttemptRecord,
     ChangeSet,
@@ -38,7 +40,8 @@ class TaskController:
         self,
         prompts: Iterable[AgentMessage],
         *,
-        proposed_steps: Iterable[str] | None = None,
+        proposed_steps: Iterable[object] | None = None,
+        goal: str | None = None,
         acceptance_criteria: Iterable[str] | None = None,
         constraints: Iterable[str] | None = None,
         recovered_task: Mapping[str, object] | None = None,
@@ -48,7 +51,7 @@ class TaskController:
             recovered = self._from_recovered_task(prompts, recovered_task)
             if recovered is not None:
                 return recovered
-        goal = _goal_from_prompts(prompts)
+        goal = (goal or _goal_from_prompts(prompts)).strip() or "完成当前请求"
         steps = self._normalize_steps(proposed_steps or ["完成当前请求"])
         task = TaskState(
             task_id=f"task_{uuid.uuid4().hex[:12]}",
@@ -80,6 +83,8 @@ class TaskController:
             goal = _goal_from_prompts(prompts)
         steps: list[TaskStep] = []
         seen: set[str] = set()
+        details = progress.get("step_details")
+        step_details = details if isinstance(details, Mapping) else {}
 
         def add_steps(raw: object, status: str) -> None:
             if not isinstance(raw, list):
@@ -89,11 +94,24 @@ class TaskController:
                 if not title or title in seen:
                     continue
                 seen.add(title)
+                raw_detail = step_details.get(title)
+                detail = raw_detail if isinstance(raw_detail, Mapping) else {}
                 steps.append(
                     TaskStep(
                         id=f"step_{len(steps) + 1}",
                         title=title[:_MAX_STEP_TITLE_CHARS],
                         status=status,  # type: ignore[arg-type]
+                        kind=str(detail.get("kind") or "other"),
+                        acceptance=(
+                            str(detail.get("acceptance"))
+                            if detail.get("acceptance") is not None
+                            else None
+                        ),
+                        verification_hint=(
+                            str(detail.get("verification_hint"))
+                            if detail.get("verification_hint") is not None
+                            else None
+                        ),
                     )
                 )
                 if len(steps) >= _MAX_STEPS:
@@ -231,6 +249,8 @@ class TaskController:
         if self._has_passed_verification(results):
             self._complete_verified_steps(task, results)
             self._mark_latest_changes_verified(task, results)
+        elif self._has_complete_step_signal(results):
+            self._complete_current_step_from_signal(task, results)
         else:
             for result in results:
                 self._update_progress_from_result(task, result)
@@ -239,7 +259,11 @@ class TaskController:
             task.phase = "finished"
             return self._decision(task, "finish", "all_steps_completed")
 
-        task.phase = "verifying" if run.workspace_changed else "acting"
+        task.phase = (
+            "verifying"
+            if run.workspace_changed and not run.fresh_verification_passed
+            else "acting"
+        )
         return self._decision(task, "continue", "next_step")
 
     def check_completion(self, task: TaskState, run: RunState) -> CompletionCheck:
@@ -338,10 +362,27 @@ class TaskController:
             )
             note = f" note={step.note}" if step.note else ""
             lines.append(f"- [{step.status}] {step.title}{progress}{evidence}{note}")
+            detail_parts = [f"Kind: {step.kind}"]
+            if step.acceptance:
+                detail_parts.append(f"Acceptance: {step.acceptance}")
+            if step.verification_hint:
+                detail_parts.append(f"Verification hint: {step.verification_hint}")
+            if step.summary:
+                detail_parts.append(f"Summary: {step.summary}")
+            if detail_parts != ["Kind: other"]:
+                lines.append("  - " + "; ".join(detail_parts))
         current = self._current_step(task)
         if current is not None:
             lines.append("")
             lines.append(f"Current step: {current.title}")
+            if current.acceptance:
+                lines.append(f"Acceptance: {current.acceptance}")
+            if current.verification_hint:
+                lines.append(f"Verification hint: {current.verification_hint}")
+            lines.append(
+                "When this step's acceptance criteria are satisfied, call "
+                f"`{COMPLETE_TASK_STEP_TOOL}` with a short evidence-backed summary."
+            )
         if task.next_action:
             lines.append(f"Next action: {task.next_action}")
         if task.action_intent:
@@ -378,6 +419,15 @@ class TaskController:
             change_sets=[asdict(item) for item in task.change_sets],
             replans=[asdict(item) for item in task.replans],
             control_signal=self.control_signal(task),
+            step_details={
+                step.title: {
+                    "kind": step.kind,
+                    "acceptance": step.acceptance,
+                    "verification_hint": step.verification_hint,
+                    "summary": step.summary,
+                }
+                for step in task.steps
+            },
         )
 
     def event_payload(self, task: TaskState) -> dict[str, object]:
@@ -392,6 +442,10 @@ class TaskController:
             "phase": task.phase,
             "current_step_id": current.id if current else None,
             "current_step_title": current.title if current else None,
+            "current_step_acceptance": current.acceptance if current else None,
+            "current_step_verification_hint": (
+                current.verification_hint if current else None
+            ),
             "next_action": task.next_action,
             "action_intent": task.action_intent,
             "current_attempt_id": (
@@ -404,12 +458,12 @@ class TaskController:
             "last_decision": task.last_decision,
         }
 
-    def _normalize_steps(self, raw_steps: Iterable[str]) -> list[TaskStep]:
+    def _normalize_steps(self, raw_steps: Iterable[object]) -> list[TaskStep]:
         """规范化步骤列表：去重、截断标题、限制最大步骤数。"""
         seen: set[str] = set()
         steps: list[TaskStep] = []
         for raw in raw_steps:
-            title = " ".join(str(raw).strip().split())
+            title, kind, acceptance, verification_hint = _step_fields(raw)
             if not title or title in seen:
                 continue
             seen.add(title)
@@ -417,6 +471,9 @@ class TaskController:
                 TaskStep(
                     id=f"step_{len(steps) + 1}",
                     title=title[:_MAX_STEP_TITLE_CHARS],
+                    kind=kind,
+                    acceptance=acceptance,
+                    verification_hint=verification_hint,
                 )
             )
             if len(steps) >= _MAX_STEPS:
@@ -512,6 +569,9 @@ class TaskController:
             and result.verification.get("status") == "passed"
             for result in results
         )
+
+    def _has_complete_step_signal(self, results: list[ToolResultMessage]) -> bool:
+        return any(_complete_step_payload(result) is not None for result in results)
 
     def _record_attempt(
         self,
@@ -609,21 +669,73 @@ class TaskController:
         results: list[ToolResultMessage],
     ) -> None:
         refs = _evidence_refs(results)
-        for step in task.steps:
-            if step.status == "blocked":
-                continue
-            step.status = "completed"
-            step.progress_state = "verified"
-            step.note = None
+        step = self._current_step(task)
+        if step is None:
+            step = next(
+                (item for item in task.steps if item.status in {"pending", "in_progress"}),
+                None,
+            )
+        if step is None:
+            task.current_step_id = None
+            task.next_action = None
+            task.phase = "finished"
+            return
+        step.status = "completed"
+        step.progress_state = "verified"
+        step.note = None
+        step.summary = "验证通过"
+        for ref in refs:
+            if ref not in step.evidence_refs:
+                step.evidence_refs.append(ref)
+        next_step = self._next_incomplete_step_after(task, step)
+        if next_step is not None and _is_verification_step(next_step):
+            next_step.status = "completed"
+            next_step.progress_state = "verified"
+            next_step.note = None
+            next_step.summary = "验证通过"
             for ref in refs:
-                if ref not in step.evidence_refs:
-                    step.evidence_refs.append(ref)
-        task.current_step_id = None
-        task.next_action = None
-        task.phase = "finished"
+                if ref not in next_step.evidence_refs:
+                    next_step.evidence_refs.append(ref)
         task.action_intent = "run_verification"
         task.recent_error_code = None
         task.recent_failure_type = None
+        self._advance(task)
+        task.phase = "finished" if task.current_step_id is None else "acting"
+
+    def _complete_current_step_from_signal(
+        self,
+        task: TaskState,
+        results: list[ToolResultMessage],
+    ) -> None:
+        step = self._current_step(task)
+        if step is None:
+            return
+        refs = _evidence_refs(results)
+        summaries: list[str] = []
+        for result in results:
+            payload = _complete_step_payload(result)
+            if payload is None:
+                continue
+            summary = payload.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                summaries.append(summary.strip())
+            raw_refs = payload.get("evidence_refs")
+            if isinstance(raw_refs, list):
+                refs.extend(
+                    str(item)
+                    for item in raw_refs
+                    if isinstance(item, str) and item.strip()
+                )
+        step.status = "completed"
+        step.note = None
+        step.summary = summaries[-1] if summaries else "步骤已完成"
+        for ref in refs:
+            if ref not in step.evidence_refs:
+                step.evidence_refs.append(ref)
+        task.recent_error_code = None
+        task.recent_failure_type = None
+        self._advance(task)
+        task.phase = "finished" if task.current_step_id is None else "acting"
 
     def _mark_latest_changes_failed(
         self,
@@ -709,6 +821,24 @@ class TaskController:
         task.completion_satisfied = check.satisfied
         task.completion_reason = check.reason
 
+    def _next_incomplete_step_after(
+        self,
+        task: TaskState,
+        step: TaskStep,
+    ) -> TaskStep | None:
+        try:
+            start = task.steps.index(step) + 1
+        except ValueError:
+            return None
+        return next(
+            (
+                item
+                for item in task.steps[start:]
+                if item.status in {"pending", "in_progress"}
+            ),
+            None,
+        )
+
 
 def _goal_from_prompts(prompts: Iterable[AgentMessage]) -> str:
     """从用户消息中提取任务目标（取最后一条用户消息的文本内容）。"""
@@ -721,6 +851,58 @@ def _goal_from_prompts(prompts: Iterable[AgentMessage]) -> str:
             ).strip()
             return text or "完成当前请求"
     return "继续当前任务"
+
+
+def _step_fields(raw: object) -> tuple[str, str, str | None, str | None]:
+    """Extract normalized step fields from string/dict/PlannedTaskStep-like input."""
+
+    if isinstance(raw, PlannedTaskStep):
+        return (
+            _compact(raw.title, limit=_MAX_STEP_TITLE_CHARS),
+            _compact(raw.kind, limit=40) or "other",
+            _optional_text(raw.acceptance),
+            _optional_text(raw.verification_hint),
+        )
+    if isinstance(raw, Mapping):
+        return (
+            _compact(raw.get("title"), limit=_MAX_STEP_TITLE_CHARS),
+            _compact(raw.get("kind"), limit=40) or "other",
+            _optional_text(raw.get("acceptance")),
+            _optional_text(raw.get("verification_hint")),
+        )
+    return _compact(raw, limit=_MAX_STEP_TITLE_CHARS), "other", None, None
+
+
+def _is_verification_step(step: TaskStep) -> bool:
+    if step.kind == "verify":
+        return True
+    text = f"{step.title} {step.verification_hint or ''}".lower()
+    markers = ("验证", "测试", "检查", "verify", "test", "pytest")
+    return any(marker in text for marker in markers)
+
+
+def _complete_step_payload(result: ToolResultMessage) -> Mapping[str, object] | None:
+    if result.tool_name != COMPLETE_TASK_STEP_TOOL:
+        return None
+    payload = result.metadata.get("task_control")
+    if not isinstance(payload, Mapping):
+        return None
+    if payload.get("action") != "complete_step":
+        return None
+    if payload.get("valid") is False:
+        return None
+    return payload
+
+
+def _optional_text(value: object) -> str | None:
+    text = _compact(value, limit=240)
+    return text or None
+
+
+def _compact(value: object, *, limit: int) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).strip().split())[:limit]
 
 
 def _evidence_refs(results: list[ToolResultMessage]) -> list[str]:
@@ -763,6 +945,8 @@ def _first_error_code(results: list[ToolResultMessage]) -> str | None:
 
 
 def _infer_action_intent(results: list[ToolResultMessage]) -> str:
+    if any(_complete_step_payload(result) is not None for result in results):
+        return "complete_step"
     if any(
         isinstance(result.verification, dict)
         and result.verification.get("status") == "failed"

@@ -52,11 +52,12 @@ class WebPromptRequest:
 
 @dataclass(frozen=True)
 class WebToolApproval:
-    """工具审批请求：包含会话 ID、工具调用 ID、决策和原因。"""
+    """工具审批请求：包含会话 ID、审批 ID、工具调用 ID、决策和原因。"""
     session_id: str
     tool_call_id: str
     decision: ApprovalDecision
     reason: str = ""
+    approval_id: str | None = None
 
 
 @dataclass(frozen=True)
