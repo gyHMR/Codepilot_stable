@@ -23,6 +23,22 @@ from .types import (
 )
 
 
+def filter_definitions_by_tags(
+    definitions: list[EvalDefinition],
+    include_tags: list[str],
+) -> list[EvalDefinition]:
+    """返回同时包含所有 include_tags 的评估定义；未指定标签时保持原列表。"""
+
+    requested = {tag.strip() for tag in include_tags if tag.strip()}
+    if not requested:
+        return list(definitions)
+    return [
+        definition
+        for definition in definitions
+        if requested.issubset(set(definition.tags))
+    ]
+
+
 class EvaluationService:
     """评估服务：协调加载、执行、产物管理和报告生成。"""
 
@@ -79,6 +95,7 @@ class EvaluationService:
             self._write_report(artifacts, [result])
             return self._suite_result(artifacts, [result])
 
+        definitions = filter_definitions_by_tags(definitions, options.include_tags)
         self._initialize_manifest(artifacts, options, definitions)
         results = []
         for definition in definitions:

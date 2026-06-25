@@ -166,6 +166,7 @@ class EvalRunOptions:
     benchmark_name: str = ""                        # 基准名称
     keep_workspace: bool = True                     # 是否保留工作区
     runtime_overrides: dict[str, bool] = field(default_factory=dict)
+    include_tags: list[str] = field(default_factory=list)  # 仅运行包含这些标签的用例
 
 
 @dataclass(frozen=True)

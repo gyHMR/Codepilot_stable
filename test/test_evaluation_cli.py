@@ -12,11 +12,16 @@ def test_cli_exposes_check_run_experiment_and_report_commands() -> None:
 
     assert parser.parse_args(["check"]).command == "check"
     assert parser.parse_args(["run", "context"]).module == "context"
+    filtered = parser.parse_args(
+        ["run", "all", "--include-tag", "suite:graded", "--include-tag", "difficulty:hard"]
+    )
+    assert filtered.include_tags == ["suite:graded", "difficulty:hard"]
     experiment = parser.parse_args(
-        ["experiment", "memory", "--repeat", "3"]
+        ["experiment", "memory", "--repeat", "3", "--include-tag", "suite:graded"]
     )
     assert experiment.module == "memory"
     assert experiment.repeat == 3
+    assert experiment.include_tags == ["suite:graded"]
     assert parser.parse_args(["report", ".codepilot/evals/eval_1"]).command == "report"
 
 

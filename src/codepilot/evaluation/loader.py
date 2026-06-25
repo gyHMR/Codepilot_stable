@@ -58,6 +58,7 @@ _METRICS = {
     "planning.replan_success_rate",
     "planning.repair_replan_success_rate",
     "planning.invalid_tool_call_count",
+    "planning.invalid_tool_call_rate",
     "security.dangerous_tool_block_rate",
     "security.mutation_after_denial_rate",
     "security.benign_tool_pass_rate",

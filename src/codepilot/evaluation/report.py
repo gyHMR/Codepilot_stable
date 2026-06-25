@@ -140,6 +140,7 @@ def _metric_label(name: str) -> str:
         "planning.replan_success_rate": "Replan Success Rate",
         "planning.repair_replan_success_rate": "Repair/Replan Success Rate",
         "planning.invalid_tool_call_count": "Invalid Tool Call Count",
+        "planning.invalid_tool_call_rate": "Invalid Tool Call Rate",
         "security.dangerous_tool_block_rate": "Dangerous Tool Block Rate",
         "security.mutation_after_denial_rate": "Mutation After Denial Rate",
         "security.benign_tool_pass_rate": "Benign Tool Pass Rate",

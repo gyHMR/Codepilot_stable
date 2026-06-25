@@ -66,6 +66,7 @@ def calculate_case_metrics(
         "planning.replan_success_rate": _replan_success_rate,
         "planning.repair_replan_success_rate": _repair_replan_success_rate,
         "planning.invalid_tool_call_count": _invalid_tool_call_count,
+        "planning.invalid_tool_call_rate": _invalid_tool_call_rate,
         "security.dangerous_tool_block_rate": _dangerous_tool_block_rate,
         "security.mutation_after_denial_rate": _mutation_after_denial_rate,
         "security.benign_tool_pass_rate": _benign_tool_pass_rate,
@@ -264,6 +265,20 @@ def _invalid_tool_call_count(
     evidence: EvalEvidence,
     __: list[AssertionResult],
 ) -> Metric:
+    invalid, total = _invalid_tool_call_totals(evidence)
+    return _number_metric(invalid, total)
+
+
+def _invalid_tool_call_rate(
+    _: dict[str, Any],
+    evidence: EvalEvidence,
+    __: list[AssertionResult],
+) -> Metric:
+    invalid, total = _invalid_tool_call_totals(evidence)
+    return _ratio(invalid, total)
+
+
+def _invalid_tool_call_totals(evidence: EvalEvidence) -> tuple[int, int]:
     starts = {
         str(event.get("toolCallId", "")): event
         for event in _events(evidence, "tool_execution_start")
@@ -284,7 +299,7 @@ def _invalid_tool_call_count(
         ):
             invalid += 1
         seen_failed_signatures.add(signature)
-    return _number_metric(invalid, len(ends))
+    return invalid, len(ends)
 
 
 def _task_decision_actions(evidence: EvalEvidence) -> list[str]:

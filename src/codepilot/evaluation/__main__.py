@@ -70,6 +70,13 @@ def _add_run_arguments(
         default=Path(".codepilot/evals"),
     )
     parser.add_argument("--eval-id")
+    parser.add_argument(
+        "--include-tag",
+        action="append",
+        dest="include_tags",
+        default=[],
+        help="Only run benchmarks containing this tag; may be repeated.",
+    )
     parser.add_argument("--remove-workspaces", action="store_true")
 
 
@@ -82,6 +89,7 @@ async def _run_command(args: argparse.Namespace) -> int:
         eval_id=args.eval_id,
         benchmark_name=args.module,
         keep_workspace=not args.remove_workspaces,
+        include_tags=list(args.include_tags),
         session_options=_session_options(args),
     )
     if args.command == "experiment":

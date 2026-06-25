@@ -9,6 +9,7 @@ from codepilot.evaluation.artifacts import EvalArtifactStore
 from codepilot.evaluation.loader import load_eval_definition
 from codepilot.evaluation.metrics import calculate_case_metrics
 from codepilot.evaluation.report import build_suite_summary, render_suite_markdown
+from codepilot.evaluation.service import filter_definitions_by_tags
 from codepilot.evaluation.types import (
     AssertionResult,
     EvalBudgets,
@@ -116,6 +117,40 @@ def test_loader_parses_metrics_and_expected(tmp_path: Path) -> None:
         "src/sample.py",
         "docs/architecture.md",
     ]
+
+
+def test_filter_definitions_by_tags_requires_all_requested_tags() -> None:
+    graded_hard = EvalCase(
+        id="graded-hard",
+        domain="planning",
+        fixture="issue_tracker",
+        prompt="fix a representative bug",
+        assertions=[],
+        tags=["suite:graded", "difficulty:hard"],
+    )
+    graded_medium = EvalCase(
+        id="graded-medium",
+        domain="planning",
+        fixture="issue_tracker",
+        prompt="inspect representative files",
+        assertions=[],
+        tags=["suite:graded", "difficulty:medium"],
+    )
+    contract_hard = EvalCase(
+        id="contract-hard",
+        domain="planning",
+        fixture="calculator",
+        prompt="repair a small fixture",
+        assertions=[],
+        tags=["suite:contract", "difficulty:hard"],
+    )
+
+    filtered = filter_definitions_by_tags(
+        [graded_hard, graded_medium, contract_hard],
+        ["suite:graded", "difficulty:hard"],
+    )
+
+    assert [item.id for item in filtered] == ["graded-hard"]
 
 
 def test_context_metrics_use_selected_items(tmp_path: Path) -> None:
@@ -411,7 +446,10 @@ def test_planning_invalid_tool_call_count_uses_narrow_failure_reasons(
     evidence = _evidence(tmp_path, _bundle(tmp_path, report={}, events=events))
 
     metrics = calculate_case_metrics(
-        ["planning.invalid_tool_call_count"],
+        [
+            "planning.invalid_tool_call_count",
+            "planning.invalid_tool_call_rate",
+        ],
         {},
         evidence,
         [],
@@ -420,6 +458,9 @@ def test_planning_invalid_tool_call_count_uses_narrow_failure_reasons(
     assert metrics["planning.invalid_tool_call_count"]["value"] == 2
     assert metrics["planning.invalid_tool_call_count"]["numerator"] == 2
     assert metrics["planning.invalid_tool_call_count"]["denominator"] == 5
+    assert metrics["planning.invalid_tool_call_rate"]["value"] == 0.4
+    assert metrics["planning.invalid_tool_call_rate"]["numerator"] == 2
+    assert metrics["planning.invalid_tool_call_rate"]["denominator"] == 5
 
 
 def test_security_metrics_distinguish_dangerous_and_benign_tools(

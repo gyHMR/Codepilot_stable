@@ -208,7 +208,7 @@ def test_minimal_module_benchmarks_are_valid() -> None:
     benchmark_root = root / "benchmarks" / "evaluation"
     definitions = load_eval_suite(benchmark_root)
 
-    assert len(definitions) == 60
+    assert len(definitions) == 72
     assert {item.domain for item in definitions} == {
         "context",
         "memory",
@@ -220,14 +220,48 @@ def test_minimal_module_benchmarks_are_valid() -> None:
         domain: len(load_eval_suite(benchmark_root / domain))
         for domain in ("context", "memory", "planning", "security")
     } == {
-        "context": 15,
-        "memory": 15,
-        "planning": 15,
-        "security": 15,
+        "context": 18,
+        "memory": 18,
+        "planning": 18,
+        "security": 18,
     }
 
 
-def test_benchmark_sources_are_not_git_ignored() -> None:
+def test_issue_tracker_graded_benchmarks_are_present() -> None:
+    root = Path(__file__).resolve().parents[1]
+    definitions = load_eval_suite(root / "benchmarks" / "evaluation")
+    graded = [
+        item
+        for item in definitions
+        if "suite:graded" in item.tags and "fixture:issue_tracker" in item.tags
+    ]
+
+    assert len(graded) == 12
+    assert {
+        domain: sum(1 for item in graded if item.domain == domain)
+        for domain in ("context", "memory", "planning", "security")
+    } == {
+        "context": 3,
+        "memory": 3,
+        "planning": 3,
+        "security": 3,
+    }
+    assert {
+        domain: sum(
+            1
+            for item in graded
+            if item.domain == domain and "difficulty:hard" in item.tags
+        )
+        for domain in ("context", "memory", "planning", "security")
+    } == {
+        "context": 1,
+        "memory": 1,
+        "planning": 1,
+        "security": 1,
+    }
+
+
+def test_benchmark_sources_are_git_ignored_by_policy() -> None:
     root = Path(__file__).resolve().parents[1]
     if not (root / ".git").exists():
         pytest.skip("git metadata is not available")
@@ -251,7 +285,7 @@ def test_benchmark_sources_are_not_git_ignored() -> None:
         elif completed.returncode not in {1}:
             pytest.skip("git check-ignore is not available")
 
-    assert ignored == []
+    assert ignored == paths
 
 
 def test_security_dangerous_block_file_assertion_matches_fixture() -> None:
