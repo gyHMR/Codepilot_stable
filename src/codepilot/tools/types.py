@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+"""
+工具层类型定义模块。
+
+定义了工具层拥有的核心类型，与 protocols/tools.py 的区别：
+- protocols/tools.py: 定义跨层共享的稳定协议（Tool、ToolResult 等）
+- tools/types.py: 定义工具层内部的可执行类型（AgentTool、ToolRuntimeRequest 等）
+
+主要类型：
+    - AgentTool: 可执行的工具定义（包含 execute 函数）
+    - AgentToolResult: 工具执行结果（复用 ToolResult）
+    - ToolRuntimeRequest: 工具运行时请求
+    - ToolRuntimeResult: 工具运行时结果（包含权限审批状态）
+"""
+
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Protocol

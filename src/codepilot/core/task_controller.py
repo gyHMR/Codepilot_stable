@@ -1,9 +1,26 @@
 from __future__ import annotations
 
-"""AgentLoop 使用的确定性任务反馈控制器。
+"""
+Agent 循环使用的确定性任务反馈控制器。
 
-本模块的第一版刻意保持精简：模型仍负责决定语义层面的动作，
-而此模块将任务进度绑定到运行时证据上（工具结果、文件变更、验证结果、审批状态等）。
+本模块实现了 Agent 的任务控制系统，负责跟踪任务进度并做出执行决策。
+第一版刻意保持精简：模型仍负责决定语义层面的动作，而此模块将任务进度
+绑定到运行时证据上（工具结果、文件变更、验证结果、审批状态等）。
+
+核心类：
+    TaskController: 任务控制器，维护轻量级的、与证据绑定的任务状态
+
+主要职责：
+    1. initialize(): 从用户消息和规划器输出初始化任务状态
+    2. after_tool_results(): 工具执行后更新任务状态并返回执行决策
+    3. check_completion(): 检查任务是否满足完成条件
+    4. render_context(): 将任务状态渲染为 Markdown 格式（注入系统提示词）
+    5. summarize(): 生成任务摘要（用于事件上报和结果返回）
+
+设计原则：
+    - 确定性：相同输入产生相同输出，不依赖 LLM 判断
+    - 证据驱动：所有状态变更都基于工具执行结果
+    - 防御性：限制步骤数、截断标题、防止无限重新规划
 """
 
 import uuid
@@ -36,7 +53,15 @@ _WRITE_TOOL_MARKERS = ("write", "edit", "patch", "apply")  # 写入工具名称�
 
 
 class TaskController:
-    """任务控制器：为一次运行维护轻量级的、与证据绑定的任务状态。"""
+    """任务控制器：为一次运行维护轻量级的、与证据绑定的任务状态。
+
+    使用方式：
+        controller = TaskController()
+        task = controller.initialize(messages, goal="修复 bug")
+        decision = controller.after_tool_results(task, run_state, tool_results)
+        completion = controller.check_completion(task, run_state)
+        context_text = controller.render_context(task)
+    """
 
     def initialize(
         self,
@@ -48,7 +73,25 @@ class TaskController:
         constraints: Iterable[str] | None = None,
         task_recovery_projection: Mapping[str, object] | None = None,
     ) -> TaskState:
-        """初始化任务状态：从用户消息中提取目标，生成初始步骤。"""
+        """初始化任务状态：从用户消息中提取目标，生成初始步骤。
+
+        初始化流程：
+        1. 如果有恢复投影，尝试从投影重建任务状态
+        2. 否则从用户消息中提取目标
+        3. 规范化步骤列表（去重、截断、限制数量）
+        4. 创建 TaskState 并标记第一个步骤为 in_progress
+
+        Args:
+            prompts: 用户消息列表。
+            proposed_steps: 规划器提议的步骤列表（可选）。
+            goal: 任务目标（可选，不提供则从消息中提取）。
+            acceptance_criteria: 验收标准列表（可选）。
+            constraints: 约束条件列表（可选）。
+            task_recovery_projection: 会话恢复投影（可选）。
+
+        Returns:
+            TaskState: 初始化后的任务状态。
+        """
         if task_recovery_projection is not None:
             recovered = build_task_state_from_recovery_projection(
                 prompts,
@@ -80,7 +123,29 @@ class TaskController:
         run: RunState,
         results: list[ToolResultMessage],
     ) -> ExecutionDecision:
-        """工具执行后更新任务状态并返回执行决策（继续/修复/重新规划/停止等）。"""
+        """工具执行后更新任务状态并返回执行决策。
+
+        这是任务控制器的核心方法，根据工具执行结果做出决策：
+
+        决策优先级（从高到低）：
+        1. 工具被取消 → 停止
+        2. 工具需要审批 → 等待审批
+        3. 工具权限被拒绝 → 重新规划
+        4. 工具不可用 → 停止
+        5. 工具执行出错 → 修复
+        6. 验证失败 → 修复或重新规划
+        7. 验证通过 → 完成当前步骤，推进到下一步
+        8. 收到完成步骤信号 → 完成当前步骤
+        9. 其他 → 更新进展状态
+
+        Args:
+            task: 当前任务状态（会被修改）。
+            run: 运行状态（只读）。
+            results: 工具执行结果列表。
+
+        Returns:
+            ExecutionDecision: 执行决策（continue/repair/replan/stop 等）。
+        """
         if not results:
             return self._decision(task, "continue", "no_tool_results")
 
@@ -198,7 +263,21 @@ class TaskController:
         return self._decision(task, "continue", "next_step")
 
     def check_completion(self, task: TaskState, run: RunState) -> CompletionCheck:
-        """检查任务是否完成：验证阻塞步骤、工作区变更、未完成步骤等条件。"""
+        """检查任务是否满足完成条件。
+
+        检查顺序（从高到低）：
+        1. 存在阻塞步骤 → 未完成，无法继续
+        2. 工作区已修改但未通过最新验证 → 未完成，可继续（提示运行验证）
+        3. 存在未完成步骤 → 未完成，无法继续
+        4. 所有步骤已完成 → 已完成
+
+        Args:
+            task: 当前任务状态。
+            run: 运行状态（包含工作区变更和验证信息）。
+
+        Returns:
+            CompletionCheck: 完成检查结果。
+        """
         if task.blocked_step_titles():
             check = CompletionCheck(
                 satisfied=False,
@@ -246,7 +325,16 @@ class TaskController:
         return check
 
     def completion_steering(self, check: CompletionCheck) -> UserMessage:
-        """生成完成引导消息：当工作区已修改但未通过验证时，提示 Agent 运行验证。"""
+        """生成完成引导消息：当工作区已修改但未通过验证时，提示 Agent 运行验证。
+
+        引导消息会被注入到 Agent 循环中，提醒 LLM 运行相关测试或检查。
+
+        Args:
+            check: 完成检查结果。
+
+        Returns:
+            UserMessage: 引导消息。
+        """
         text = (
             "工作区已经发生修改，但当前没有与最新工作区状态一致的成功验证。\n"
             "请运行最相关的测试或检查；如果环境无法验证，请明确记录原因和剩余风险。"
@@ -262,7 +350,17 @@ class TaskController:
         )
 
     def render_context(self, task: TaskState) -> str:
-        """将任务状态渲染为 Markdown 格式的上下文文本（注入系统提示词）。"""
+        """将任务状态渲染为 Markdown 格式的上下文文本。
+
+        渲染结果会被注入到系统提示词中，让 LLM 了解当前任务进度。
+        包含：目标、阶段、步骤列表、当前步骤、下一步动作、约束条件等。
+
+        Args:
+            task: 当前任务状态。
+
+        Returns:
+            str: Markdown 格式的上下文文本。
+        """
         lines = [
             "## Current Task",
             f"Goal: {task.goal}",
@@ -320,7 +418,16 @@ class TaskController:
         return "\n".join(lines)
 
     def summarize(self, task: TaskState) -> TaskSummary:
-        """生成任务摘要：包含已完成、待处理、阻塞步骤和完成状态。"""
+        """生成任务摘要：包含已完成、待处理、阻塞步骤和完成状态。
+
+        摘要用于事件上报和 AgentRunResult.task 字段，提供任务的完整快照。
+
+        Args:
+            task: 当前任务状态。
+
+        Returns:
+            TaskSummary: 任务摘要。
+        """
         return TaskSummary(
             task_id=task.task_id,
             goal=task.goal,
@@ -346,11 +453,28 @@ class TaskController:
         )
 
     def event_payload(self, task: TaskState) -> dict[str, object]:
-        """将任务状态转换为字典格式，用于事件上报。"""
+        """将任务状态转换为字典格式，用于事件上报。
+
+        Args:
+            task: 当前任务状态。
+
+        Returns:
+            dict: 任务状态的字典表示。
+        """
         return asdict(task)
 
     def control_signal(self, task: TaskState) -> dict[str, object]:
-        """输出给上下文与记忆模块的轻量任务控制信号。"""
+        """输出给上下文与记忆模块的轻量任务控制信号。
+
+        控制信号包含当前步骤、阶段、下一步动作等关键信息，
+        供上下文准备和记忆模块使用，无需访问完整的 TaskState。
+
+        Args:
+            task: 当前任务状态。
+
+        Returns:
+            dict: 轻量级控制信号。
+        """
         current = task.current_step()
         return {
             "task_id": task.task_id,

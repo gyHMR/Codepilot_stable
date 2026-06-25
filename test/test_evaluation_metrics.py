@@ -302,6 +302,126 @@ def test_planning_metrics_use_task_events_and_outcome(tmp_path: Path) -> None:
     assert metrics["planning.repair_replan_success_rate"]["value"] == 0.0
 
 
+def test_planning_step_completion_and_replan_metrics(tmp_path: Path) -> None:
+    task = {
+        "steps": [
+            {"id": "step_1", "status": "completed", "evidence_refs": ["tool:1"]},
+            {"id": "step_2", "status": "completed", "evidence_refs": ["tool:2"]},
+            {"id": "step_3", "status": "pending", "evidence_refs": []},
+        ],
+        "completion_satisfied": True,
+    }
+    evidence = _evidence(
+        tmp_path,
+        _bundle(
+            tmp_path,
+            report={"task": {"completion_satisfied": True}},
+            events=[
+                {"type": "task_step_updated", "task": task},
+                {"type": "task_decision", "decision": {"action": "replan"}},
+            ],
+        ),
+    )
+
+    metrics = calculate_case_metrics(
+        [
+            "planning.step_completion_rate",
+            "planning.replan_success_rate",
+        ],
+        {},
+        evidence,
+        [],
+    )
+
+    assert metrics["planning.step_completion_rate"]["value"] == 2 / 3
+    assert metrics["planning.step_completion_rate"]["numerator"] == 2
+    assert metrics["planning.step_completion_rate"]["denominator"] == 3
+    assert metrics["planning.replan_success_rate"]["value"] == 1.0
+
+
+def test_planning_invalid_tool_call_count_uses_narrow_failure_reasons(
+    tmp_path: Path,
+) -> None:
+    events = [
+        {
+            "type": "tool_execution_start",
+            "toolCallId": "read_1",
+            "toolName": "read",
+            "args": {"path": "calculator.py"},
+        },
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "read_1",
+            "toolName": "read",
+            "status": "success",
+        },
+        {
+            "type": "tool_execution_start",
+            "toolCallId": "shell_1",
+            "toolName": "shell",
+            "args": {"command": "python -m"},
+        },
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "shell_1",
+            "toolName": "shell",
+            "status": "error",
+            "errorReason": "command_parse_error",
+        },
+        {
+            "type": "tool_execution_start",
+            "toolCallId": "edit_1",
+            "toolName": "edit",
+            "args": {"path": "calculator.py", "old_text": "return x"},
+        },
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "edit_1",
+            "toolName": "edit",
+            "status": "error",
+            "errorReason": "old_text_not_found",
+        },
+        {
+            "type": "tool_execution_start",
+            "toolCallId": "edit_2",
+            "toolName": "edit",
+            "args": {"path": "calculator.py", "old_text": "return x"},
+        },
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "edit_2",
+            "toolName": "edit",
+            "status": "error",
+            "errorReason": "old_text_not_found",
+        },
+        {
+            "type": "tool_execution_start",
+            "toolCallId": "write_1",
+            "toolName": "write",
+            "args": {"path": "state.txt"},
+        },
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "write_1",
+            "toolName": "write",
+            "status": "denied",
+            "errorReason": "user_denied",
+        },
+    ]
+    evidence = _evidence(tmp_path, _bundle(tmp_path, report={}, events=events))
+
+    metrics = calculate_case_metrics(
+        ["planning.invalid_tool_call_count"],
+        {},
+        evidence,
+        [],
+    )
+
+    assert metrics["planning.invalid_tool_call_count"]["value"] == 2
+    assert metrics["planning.invalid_tool_call_count"]["numerator"] == 2
+    assert metrics["planning.invalid_tool_call_count"]["denominator"] == 5
+
+
 def test_security_metrics_distinguish_dangerous_and_benign_tools(
     tmp_path: Path,
 ) -> None:

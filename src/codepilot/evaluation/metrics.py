@@ -15,6 +15,35 @@ MetricCalculator = Callable[
     Metric,
 ]
 
+_INTRINSICALLY_INVALID_TOOL_REASONS = frozenset(
+    {
+        "argument_parse_error",
+        "command_parse_error",
+        "invalid_argument",
+        "invalid_arguments",
+        "invalid_cwd",
+        "invalid_json",
+        "invalid_parameters",
+        "invalid_params",
+        "invalid_path",
+        "invalid_timeout",
+        "invalid_tool_args",
+        "missing_command",
+        "missing_required_argument",
+        "outside_workspace",
+        "path_escape",
+        "path_outside_workspace",
+        "schema_validation_failed",
+        "shell_parse_error",
+        "tool.invalid_name",
+        "tool.invalid_parameters",
+        "tool_not_found",
+        "unknown_shell_command",
+        "unknown_tool",
+        "workspace_boundary_violation",
+    }
+)
+
 
 def calculate_case_metrics(
     metric_names: list[str],
@@ -31,9 +60,12 @@ def calculate_case_metrics(
         "memory.memory_retrieval_hit_rate": _memory_retrieval_hit_rate,
         "memory.redundant_read_count": _redundant_read_count,
         "memory.failed_attempt_recurrence_rate": _failed_attempt_recurrence_rate,
+        "planning.step_completion_rate": _step_completion_rate,
         "planning.evidence_coverage_rate": _evidence_coverage_rate,
         "planning.false_completion_rate": _false_completion_rate,
+        "planning.replan_success_rate": _replan_success_rate,
         "planning.repair_replan_success_rate": _repair_replan_success_rate,
+        "planning.invalid_tool_call_count": _invalid_tool_call_count,
         "security.dangerous_tool_block_rate": _dangerous_tool_block_rate,
         "security.mutation_after_denial_rate": _mutation_after_denial_rate,
         "security.benign_tool_pass_rate": _benign_tool_pass_rate,
@@ -161,6 +193,23 @@ def _evidence_coverage_rate(
     return _ratio(covered, len(completed))
 
 
+def _step_completion_rate(
+    _: dict[str, Any],
+    evidence: EvalEvidence,
+    __: list[AssertionResult],
+) -> Metric:
+    steps = _list_of_dicts(_latest_task(evidence).get("steps"))
+    if steps:
+        completed = sum(step.get("status") == "completed" for step in steps)
+        return _ratio(completed, len(steps))
+
+    report = _latest_task_report(evidence)
+    completed = _integer(report.get("completed_steps"))
+    pending = _integer(report.get("pending_steps"))
+    blocked = _integer(report.get("blocked_steps"))
+    return _ratio(completed, completed + pending + blocked)
+
+
 def _false_completion_rate(
     _: dict[str, Any],
     evidence: EvalEvidence,
@@ -181,18 +230,74 @@ def _false_completion_rate(
     return _ratio(int(outcome_failed), 1)
 
 
+def _replan_success_rate(
+    _: dict[str, Any],
+    evidence: EvalEvidence,
+    assertion_results: list[AssertionResult],
+) -> Metric:
+    actions = _task_decision_actions(evidence)
+    replan_actions = sum(action == "replan" for action in actions)
+    if not replan_actions:
+        replan_actions = _integer(_latest_task(evidence).get("replan_count"))
+    if not replan_actions:
+        report = _latest_task_report(evidence)
+        replan_actions = len(_list(_dict(report.get("summary")).get("replans")))
+    if not replan_actions:
+        return _ratio(0, 0)
+    return _ratio(int(_task_succeeded(evidence, assertion_results)), 1)
+
+
 def _repair_replan_success_rate(
     _: dict[str, Any],
     evidence: EvalEvidence,
     assertion_results: list[AssertionResult],
 ) -> Metric:
-    actions = [
-        str(_dict(event.get("decision")).get("action") or event.get("action") or "")
-        for event in _events(evidence, "task_decision")
-    ]
+    actions = _task_decision_actions(evidence)
     recovery_actions = sum(action in {"repair", "replan"} for action in actions)
     if not recovery_actions:
         return _ratio(0, 0)
+    return _ratio(int(_task_succeeded(evidence, assertion_results)), 1)
+
+
+def _invalid_tool_call_count(
+    _: dict[str, Any],
+    evidence: EvalEvidence,
+    __: list[AssertionResult],
+) -> Metric:
+    starts = {
+        str(event.get("toolCallId", "")): event
+        for event in _events(evidence, "tool_execution_start")
+    }
+    seen_failed_signatures: set[str] = set()
+    invalid = 0
+    ends = _events(evidence, "tool_execution_end")
+    for event in ends:
+        if not _is_tool_failure_for_invalid_metric(event):
+            continue
+        call_id = str(event.get("toolCallId", ""))
+        start = starts.get(call_id, {})
+        signature = _tool_failure_signature(event, start)
+        reason = _tool_error_reason(event)
+        if (
+            reason in _INTRINSICALLY_INVALID_TOOL_REASONS
+            or signature in seen_failed_signatures
+        ):
+            invalid += 1
+        seen_failed_signatures.add(signature)
+    return _number_metric(invalid, len(ends))
+
+
+def _task_decision_actions(evidence: EvalEvidence) -> list[str]:
+    return [
+        str(_dict(event.get("decision")).get("action") or event.get("action") or "")
+        for event in _events(evidence, "task_decision")
+    ]
+
+
+def _task_succeeded(
+    evidence: EvalEvidence,
+    assertion_results: list[AssertionResult],
+) -> bool:
     task = _latest_task(evidence)
     succeeded = task.get("completion_satisfied")
     if succeeded is None:
@@ -203,7 +308,48 @@ def _repair_replan_success_rate(
         and result.status in {"failed", "error"}
         for result in assertion_results
     )
-    return _ratio(int(succeeded is True and not outcome_failed), 1)
+    return succeeded is True and not outcome_failed
+
+
+def _is_tool_failure_for_invalid_metric(event: dict[str, Any]) -> bool:
+    status = str(event.get("status", "")).lower()
+    if status in {"success", "denied", "approval_required", "cancelled"}:
+        return False
+    return status == "error" or event.get("isError") is True
+
+
+def _tool_failure_signature(
+    event: dict[str, Any],
+    start: dict[str, Any],
+) -> str:
+    return "|".join(
+        (
+            str(event.get("toolName") or start.get("toolName") or "").lower(),
+            _tool_path(start),
+            _tool_command(start),
+            _tool_error_reason(event),
+        )
+    )
+
+
+def _tool_error_reason(event: dict[str, Any]) -> str:
+    result = _dict(event.get("result"))
+    details = _dict(result.get("details"))
+    for value in (
+        event.get("errorReason"),
+        event.get("error_code"),
+        event.get("errorCode"),
+        result.get("error_code"),
+        result.get("error_reason"),
+        details.get("reason"),
+        details.get("error_code"),
+    ):
+        if isinstance(value, str) and value:
+            return value.lower()
+    result_text = _tool_result_text(result).lower()
+    if "tool" in result_text and "not found" in result_text:
+        return "tool_not_found"
+    return ""
 
 
 def _dangerous_tool_block_rate(
@@ -405,6 +551,26 @@ def _tool_path(event: dict[str, Any]) -> str:
         if isinstance(value, str):
             return _normalize_path(value)
     return ""
+
+
+def _tool_command(event: dict[str, Any]) -> str:
+    args = _dict(event.get("args"))
+    for key in ("command", "cmd"):
+        value = args.get(key)
+        if isinstance(value, str):
+            return value.strip()
+    return ""
+
+
+def _tool_result_text(result: dict[str, Any]) -> str:
+    content = result.get("content")
+    if isinstance(content, str):
+        return content
+    return " ".join(
+        str(item.get("text", ""))
+        for item in _list_of_dicts(content)
+        if isinstance(item.get("text"), str)
+    )
 
 
 def _ratio(numerator: int | float, denominator: int | float) -> Metric:

@@ -80,3 +80,38 @@ def test_experiment_comparison_reports_on_off_averages_and_change() -> None:
         "on": 1.0,
         "change": 0.5,
     }
+
+
+def test_planning_experiment_reports_invalid_tool_call_reduction() -> None:
+    comparison = build_experiment_comparison(
+        "planning",
+        {
+            "off": [
+                {
+                    "metric_averages": {
+                        "planning.invalid_tool_call_count": 3.0,
+                    },
+                    "pass_rate": 0.5,
+                }
+            ],
+            "on": [
+                {
+                    "metric_averages": {
+                        "planning.invalid_tool_call_count": 1.0,
+                    },
+                    "pass_rate": 1.0,
+                }
+            ],
+        },
+    )
+
+    assert comparison["metrics"]["planning.invalid_tool_call_count"] == {
+        "off": 3.0,
+        "on": 1.0,
+        "change": -2.0,
+    }
+    assert comparison["metrics"]["planning.invalid_tool_call_reduction_count"] == {
+        "off": 0.0,
+        "on": 2.0,
+        "change": 2.0,
+    }

@@ -1,6 +1,38 @@
 from __future__ import annotations
 
-"""工具调用的准备、执行与事件上报。"""
+"""
+工具调用协调器模块。
+
+本模块负责一批工具调用的完整生命周期管理：准备、执行和事件上报。
+
+核心类：
+    ToolCallCoordinator: 工具调用协调器，处理一批工具调用的编排
+
+执行流程：
+    1. 准备阶段（_prepare）：
+       - 检查工具是否在当前上下文中可见
+       - 检查非托管工具是否被允许
+       - 执行 before_tool_call 钩子（可拦截）
+    2. 执行阶段（_execute_prepared）：
+       - 调用工具的 execute 方法
+       - 处理工具执行过程中的更新事件
+    3. 完成阶段（_finalize）：
+       - 执行 after_tool_call 钩子（可修改结果）
+       - 绑定工具调用身份信息
+       - 发射工具执行结束事件
+       - 构建 ToolResultMessage
+
+执行模式：
+    - 串行模式（sequential）：逐个执行工具调用
+    - 并行模式（parallel）：安全的工具放入批次并行执行，不安全的串行执行
+
+辅助函数：
+    - error_tool_result: 创建错误状态的工具结果
+    - denied_tool_result: 创建策略拒绝状态的工具结果
+    - hook_error_tool_result: 将钩子异常转换为结构化工具错误
+    - bind_tool_result: 将工具调用身份信息绑定到结果上
+    - can_schedule_tool_in_parallel: 判断工具是否可以并行执行
+"""
 
 import asyncio
 from dataclasses import dataclass
@@ -20,7 +52,17 @@ from .types import (
 
 
 def error_tool_result(message: str, *, approved: bool = True) -> AgentToolResult:
-    """创建一个错误状态的工具执行结果。"""
+    """创建一个错误状态的工具执行结果。
+
+    用于工具未找到、参数错误等场景，工具实际上并未执行。
+
+    Args:
+        message: 错误描述信息。
+        approved: 是否已审批（默认 True，因为这是系统生成的错误）。
+
+    Returns:
+        AgentToolResult: 错误状态的工具结果。
+    """
     return AgentToolResult(
         content=[TextContent(text=message)],
         details={},
@@ -37,10 +79,16 @@ def denied_tool_result(
 ) -> AgentToolResult:
     """创建策略拒绝状态的工具结果。
 
-    ``denied`` 表示工具没有执行，因为 core/runtime 策略不允许；
-    它不同于工具已经执行但失败的 ``error``。
-    """
+    denied 表示工具没有执行，因为 core/runtime 策略不允许；
+    它不同于工具已经执行但失败的 error。
 
+    Args:
+        message: 拒绝描述信息。
+        reason: 拒绝原因代码（如 "before_tool_call_blocked"）。
+
+    Returns:
+        AgentToolResult: 拒绝状态的工具结果。
+    """
     return AgentToolResult(
         content=[TextContent(text=message)],
         details={
@@ -61,7 +109,19 @@ def hook_error_tool_result(
     *,
     approved: bool = True,
 ) -> AgentToolResult:
-    """将工具钩子异常转换为结构化工具错误，避免事件流悬挂。"""
+    """将工具钩子异常转换为结构化工具错误，避免事件流悬挂。
+
+    当 before_tool_call 或 after_tool_call 钩子抛出异常时，
+    使用此函数将异常转换为结构化的工具错误结果。
+
+    Args:
+        phase: 钩子阶段（"before" 或 "after"）。
+        exc: 捕获的异常。
+        approved: 是否已审批。
+
+    Returns:
+        AgentToolResult: 错误状态的工具结果。
+    """
     error_code = f"{phase}_tool_hook_error"
     return AgentToolResult(
         content=[TextContent(text=f"{phase}_tool_call hook failed: {exc}")],
@@ -78,7 +138,19 @@ def hook_error_tool_result(
 
 
 def mark_hook_error_result(result: AgentToolResult, phase: str, exc: Exception) -> AgentToolResult:
-    """在保留原工具副作用证据的前提下，将 after hook 异常标记为工具错误。"""
+    """在保留原工具副作用证据的前提下，将 after hook 异常标记为工具错误。
+
+    与 hook_error_tool_result 不同，此函数修改已有的工具结果，
+    保留原始的 details 信息（作为 original_details），便于调试。
+
+    Args:
+        result: 原始工具执行结果。
+        phase: 钩子阶段（通常是 "after"）。
+        exc: 捕获的异常。
+
+    Returns:
+        AgentToolResult: 修改后的工具结果。
+    """
     error_code = f"{phase}_tool_hook_error"
     original_details = result.details
     result.content = [TextContent(text=f"{phase}_tool_call hook failed: {exc}")]
@@ -95,7 +167,15 @@ def mark_hook_error_result(result: AgentToolResult, phase: str, exc: Exception) 
 
 
 def tool_error_reason(result: AgentToolResult, is_error: bool) -> str | None:
-    """从工具结果的 details 中提取错误原因字符串。"""
+    """从工具结果的 details 中提取错误原因字符串。
+
+    Args:
+        result: 工具执行结果。
+        is_error: 是否出错。
+
+    Returns:
+        str | None: 错误原因字符串，无错误时返回 None。
+    """
     if not is_error:
         return None
     if isinstance(result.details, dict):
@@ -111,12 +191,25 @@ def bind_tool_result(
     *,
     is_error: bool,
 ) -> AgentToolResult:
-    """将工具调用身份信息绑定到结果上，并保持 status/error 字段一致性。"""
+    """将工具调用身份信息绑定到结果上，并保持 status/error 字段一致性。
 
+    此函数确保工具结果包含正确的 tool_call_id 和 tool_name，
+    并根据 is_error 标志调整 status 和 is_error 字段。
+
+    Args:
+        tool_call: 工具调用信息。
+        result: 工具执行结果。
+        is_error: 是否出错。
+
+    Returns:
+        AgentToolResult: 绑定后的工具结果。
+    """
     result.tool_call_id = tool_call.id
     result.tool_name = tool_call.name
+    # 如果标记为错误但 status 仍为 success，修正为 error
     if is_error and result.status == "success":
         result.status = "error"
+    # 确保 is_error 与 status 一致
     result.is_error = is_error or result.status != "success"
     return result
 
@@ -124,36 +217,67 @@ def bind_tool_result(
 def can_schedule_tool_in_parallel(tool: AgentTool) -> bool:
     """判断工具是否可以进入 core 的并行调度批次。
 
-    这里采用保守规则：只有工具元数据显式声明 ``concurrency_safe``，
-    且不要求 ``exclusive`` 独占执行时，才允许和同批次工具并行。
+    采用保守规则：只有工具元数据显式声明 concurrency_safe，
+    且不要求 exclusive 独占执行时，才允许和同批次工具并行。
     没有元数据的工具一律串行，避免把未知副作用误判为安全。
-    """
 
+    Args:
+        tool: 工具实例。
+
+    Returns:
+        bool: 如果工具可以并行执行则返回 True。
+    """
     metadata = tool.metadata
     return bool(metadata and metadata.concurrency_safe and not metadata.exclusive)
 
 
 @dataclass
 class PreparedToolCall:
-    """已准备的工具调用：包含原始调用信息、匹配到的工具实例和解析后的参数。"""
-    tool_call: ToolCall
-    tool: AgentTool
-    args: dict[str, Any]
+    """已准备的工具调用：包含原始调用信息、匹配到的工具实例和解析后的参数。
+
+    在准备阶段创建，包含执行所需的所有信息。
+
+    Attributes:
+        tool_call: 原始的工具调用信息（来自 LLM 响应）。
+        tool: 匹配到的 AgentTool 实例（包含 execute 函数）。
+        args: 解析后的参数字典。
+    """
+    tool_call: ToolCall                   # 原始工具调用信息
+    tool: AgentTool                       # 匹配到的工具实例
+    args: dict[str, Any]                  # 解析后的参数
 
 
 @dataclass
 class ExecutedToolCall:
-    """已执行的工具调用：包含执行结果和是否出错标志。"""
-    result: AgentToolResult
-    is_error: bool
+    """已执行的工具调用：包含执行结果和是否出错标志。
+
+    在执行阶段创建，传递给完成阶段进行后处理。
+
+    Attributes:
+        result: 工具执行结果。
+        is_error: 执行是否出错。
+    """
+    result: AgentToolResult               # 执行结果
+    is_error: bool                        # 是否出错
 
 
 class ToolCallCoordinator:
     """工具调用协调器：负责一批工具调用的准备、执行和事件上报。
 
-    这一层只处理 agent loop 视角的编排边界：当前上下文中是否存在该工具、
-    unmanaged 工具是否允许进入流程，以及 before/after hook 的短路或后处理。
+    这一层只处理 agent loop 视角的编排边界：
+    - 当前上下文中是否存在该工具
+    - unmanaged 工具是否允许进入流程
+    - before/after hook 的短路或后处理
+
     真正的权限策略、审批、参数语义和路径安全分别由 ToolRuntime 与具体工具负责。
+
+    执行模式：
+        - 串行模式（sequential）：逐个准备、执行、完成
+        - 并行模式（parallel）：安全的工具放入批次并行执行，不安全的串行执行
+
+    使用方式：
+        coordinator = ToolCallCoordinator(config=config, emitter=emitter)
+        results = await coordinator.execute_batch(context, assistant_message)
     """
 
     def __init__(self, *, config: AgentLoopConfig, emitter: AgentEventEmitter) -> None:

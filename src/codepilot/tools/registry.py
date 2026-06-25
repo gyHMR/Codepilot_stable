@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+"""
+工具注册表模块。
+
+ToolRegistry 是工具的中心化存储，由 runtime 装配和插件加载使用。
+它维护工具名称到 AgentTool 实例和 ToolMetadata 的映射。
+
+使用方式：
+    registry = ToolRegistry()
+    registry.register(my_tool, metadata=my_metadata)
+    tool = registry.get("my_tool")
+    tools = registry.list()
+"""
+
 from dataclasses import dataclass, field
 
 from .types import AgentTool, ToolMetadata

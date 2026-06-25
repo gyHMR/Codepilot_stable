@@ -163,21 +163,40 @@ class RunVerification:
 
 @dataclass
 class TaskSummary:
-    """Lightweight summary of the active task plan for one run."""
+    """任务摘要：一次运行中活跃任务计划的轻量级快照。
 
-    task_id: str
-    goal: str
-    completed_steps: list[str] = field(default_factory=list)
-    pending_steps: list[str] = field(default_factory=list)
-    blocked_steps: list[str] = field(default_factory=list)
-    next_action: str | None = None
-    completion_satisfied: bool = False
-    completion_reason: str = ""
-    attempts: list[dict[str, Any]] = field(default_factory=list)
-    change_sets: list[dict[str, Any]] = field(default_factory=list)
-    replans: list[dict[str, Any]] = field(default_factory=list)
-    control_signal: dict[str, Any] = field(default_factory=dict)
-    step_details: dict[str, dict[str, Any]] = field(default_factory=dict)
+    由 TaskController.summarize() 生成，包含任务的完整状态信息。
+    用于事件上报（task_plan_created 等）和 AgentRunResult.task 字段。
+
+    Attributes:
+        task_id: 任务唯一标识。
+        goal: 任务目标描述。
+        completed_steps: 已完成步骤的标题列表。
+        pending_steps: 待处理步骤的标题列表。
+        blocked_steps: 被阻塞步骤的标题列表。
+        next_action: 下一步动作描述。
+        completion_satisfied: 任务是否满足完成条件。
+        completion_reason: 完成/未完成原因。
+        attempts: 工具执行尝试记录列表（字典格式）。
+        change_sets: 文件变更证据集合列表（字典格式）。
+        replans: 重新规划记录列表（字典格式）。
+        control_signal: 轻量级任务控制信号。
+        step_details: 步骤详情字典（步骤标题 → 详情）。
+    """
+
+    task_id: str                                                                 # 任务唯一标识
+    goal: str                                                                    # 任务目标
+    completed_steps: list[str] = field(default_factory=list)                     # 已完成步骤
+    pending_steps: list[str] = field(default_factory=list)                       # 待处理步骤
+    blocked_steps: list[str] = field(default_factory=list)                       # 阻塞步骤
+    next_action: str | None = None                                               # 下一步动作
+    completion_satisfied: bool = False                                           # 是否满足完成条件
+    completion_reason: str = ""                                                  # 完成原因
+    attempts: list[dict[str, Any]] = field(default_factory=list)                 # 尝试记录
+    change_sets: list[dict[str, Any]] = field(default_factory=list)              # 变更集合
+    replans: list[dict[str, Any]] = field(default_factory=list)                  # 重新规划记录
+    control_signal: dict[str, Any] = field(default_factory=dict)                 # 控制信号
+    step_details: dict[str, dict[str, Any]] = field(default_factory=dict)        # 步骤详情
 
     def __post_init__(self) -> None:
         object.__setattr__(

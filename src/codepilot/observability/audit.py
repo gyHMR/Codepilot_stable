@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-"""Unified, read-only audit projections for one Agent Run."""
+"""
+一次 Agent Run 的统一只读审计投影模块。
+
+本模块从 Run 的不可变产物（events.jsonl、state.json、result.json）中
+加载审计数据，构建结构化的审计报告，供评估和调试使用。
+
+核心功能：
+    - load_audit_bundle: 从磁盘加载一次 Run 的完整审计数据
+    - build_audit_report: 构建包含上下文、记忆、安全、任务等维度的审计报告
+    - redact_artifact: 递归脱敏敏感信息（API Key、密码等）
+"""
 
 import json
 import os
@@ -33,8 +43,21 @@ _SENSITIVE_ENV_KEYS = tuple(
 
 @dataclass(frozen=True)
 class AuditBundle:
-    """Evidence loaded from the immutable artifacts of one Run."""
+    """审计包：从一次 Run 的不可变产物中加载的证据集合。
 
+    包含运行的事件流、状态快照、执行结果、审计报告等完整信息，
+    用于评估、调试和问题排查。
+
+    Attributes:
+        run_id: 运行 ID。
+        session_id: 会话 ID（可选）。
+        events: 事件列表（从 events.jsonl 加载）。
+        state: 状态快照（从 state.json 加载）。
+        result: 执行结果（从 result.json 加载）。
+        report: 审计报告（从 report.json 加载或自动构建）。
+        workspace: 工作区路径。
+        workspace_changes: 工作区变更列表。
+    """
     run_id: str
     session_id: str | None
     events: list[dict[str, Any]]
@@ -46,7 +69,7 @@ class AuditBundle:
 
 
 def redact_artifact(value: Any) -> Any:
-    """Recursively redact common credential fields and known secret values."""
+    """递归脱敏：将常见的凭据字段和已知的密钥值替换为 <redacted>。"""
 
     secret_values = {
         secret_value
@@ -63,7 +86,16 @@ def build_audit_report(
     events: list[dict[str, Any]],
     state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the stable module-level report consumed by Evaluation."""
+    """构建稳定的模块级审计报告，供评估系统使用。
+
+    报告包含以下维度：
+    - run: 运行摘要（计数器、状态、停止原因等）
+    - context: 上下文治理报告（压缩比、丢弃原因等）
+    - memory: 记忆报告（检索次数、事件计数等）
+    - security: 安全报告（工具状态、拒绝计数等）
+    - task: 任务报告（步骤完成度、决策计数等）
+    - recovery: 恢复报告（新鲜度历史等）
+    """
 
     run_report = build_run_report(result, events=events)
     return redact_artifact(
@@ -86,7 +118,7 @@ def load_audit_bundle(
     workspace: str | Path | None = None,
     workspace_changes: Iterable[dict[str, str]] = (),
 ) -> AuditBundle:
-    """Load one Run's events/state/result/report from disk."""
+    """从磁盘加载一次 Run 的事件/状态/结果/报告。"""
 
     root = Path(run_dir)
     events = _read_jsonl(root / "events.jsonl")

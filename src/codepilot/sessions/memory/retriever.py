@@ -11,6 +11,8 @@ from .rendering import render_memory
 from .store import MemoryStore
 from .writer import MemoryWriter
 
+PROJECT_ALWAYS_RECALL_CATEGORIES = frozenset({"project_constraint", "user_preference"})
+
 
 class MemoryRetriever:
     """记忆检索器：根据查询文本和活跃文件路径检索相关记忆并评分排序。"""
@@ -86,6 +88,12 @@ def score_memory_record(
         score += min(30, len(keyword_matches) * 10)
         reasons.append(f"keyword:{keyword_matches[0]}")
 
+    if record.kind == "project":
+        gate_reason = _project_retrieval_gate(record, query, related, keyword_matches)
+        if gate_reason is None:
+            return None
+        reasons.append(gate_reason)
+
     if record.trust in {"verified", "observed"}:
         score += 20
         reasons.append(f"trust:{record.trust}")
@@ -153,6 +161,28 @@ def _keyword_matches(query_terms: set[str], record_terms: set[str]) -> set[str]:
             if query_term in record_term or record_term in query_term:
                 matches.add(record_term)
     return matches
+
+
+def _project_retrieval_gate(
+    record: MemoryRecord,
+    query: MemoryQuery,
+    related_paths: set[str],
+    keyword_matches: list[str],
+) -> str | None:
+    """Require an explicit reason before project memory may enter context."""
+
+    category = str(record.content.get("category", ""))
+    if record.content.get("always_recall") is True:
+        return "project_gate:always_recall"
+    if category in PROJECT_ALWAYS_RECALL_CATEGORIES:
+        return f"project_gate:{category}"
+    if related_paths:
+        return "project_gate:related_path"
+    if keyword_matches:
+        return "project_gate:keyword"
+    if query.retrieval_mode == "qa" and category in PROJECT_ALWAYS_RECALL_CATEGORIES:
+        return f"project_gate:qa_{category}"
+    return None
 
 
 def _apply_kind_limits(

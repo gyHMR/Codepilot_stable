@@ -22,16 +22,30 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("codepilot.sessions.memory")
 
+DEFAULT_MAX_SESSION_MEMORY_RECORDS = 80
+DEFAULT_MAX_PROJECT_MEMORY_RECORDS = 200
+DEFAULT_PROJECT_COMPACT_AFTER_LINES = 400
+
 
 class MemoryStore:
     """记忆持久化存储：负责读写结构化记忆，不决定应记住什么。"""
 
-    def __init__(self, session_store: "SessionStore") -> None:
+    def __init__(
+        self,
+        session_store: "SessionStore",
+        *,
+        max_session_records: int = DEFAULT_MAX_SESSION_MEMORY_RECORDS,
+        max_project_records: int = DEFAULT_MAX_PROJECT_MEMORY_RECORDS,
+        project_compact_after_lines: int = DEFAULT_PROJECT_COMPACT_AFTER_LINES,
+    ) -> None:
         self.session_store = session_store
         self.workspace_dir = session_store.workspace_dir
         self.session_id = session_store.session_id
         self.session_file = session_store.memory_file
         self.project_file = self.workspace_dir / ".codepilot" / "memory" / "project.jsonl"
+        self.max_session_records = max_session_records
+        self.max_project_records = max_project_records
+        self.project_compact_after_lines = project_compact_after_lines
 
     def load_session(self) -> list[MemoryRecord]:
         if not self.session_file.exists():
@@ -50,6 +64,7 @@ class MemoryStore:
 
     def save_session(self, records: list[MemoryRecord]) -> None:
         self.session_file.parent.mkdir(parents=True, exist_ok=True)
+        records = _prune_records(records, self.max_session_records)
         payload = {
             "schema_version": MEMORY_SCHEMA_VERSION,
             "session_id": self.session_id,
@@ -78,6 +93,18 @@ class MemoryStore:
         self.project_file.parent.mkdir(parents=True, exist_ok=True)
         with self.project_file.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
+        if _line_count(self.project_file) >= self.project_compact_after_lines:
+            self.compact_project()
+
+    def compact_project(self) -> list[MemoryRecord]:
+        """Rewrite project memory as the latest unique records within capacity."""
+
+        records = _prune_records(self.load_project(), self.max_project_records)
+        self.project_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.project_file.open("w", encoding="utf-8", newline="\n") as handle:
+            for record in records:
+                handle.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
+        return records
 
     def upsert_session(self, record: MemoryRecord) -> MemoryRecord:
         records = self.load_session()
@@ -130,6 +157,34 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     finally:
         if os.path.exists(temp_name):
             os.unlink(temp_name)
+
+
+def _prune_records(records: list[MemoryRecord], limit: int) -> list[MemoryRecord]:
+    if limit <= 0 or len(records) <= limit:
+        return list(records)
+    indexed = list(enumerate(records))
+    indexed.sort(key=lambda item: _record_rank(item[0], item[1]), reverse=True)
+    kept = sorted(indexed[:limit], key=lambda item: _record_rank(item[0], item[1]), reverse=True)
+    return [record for _index, record in kept]
+
+
+def _record_rank(index: int, record: MemoryRecord) -> tuple[int, int, int, str, int]:
+    category = str(record.content.get("category", ""))
+    return (
+        1 if record.status == "active" else 0,
+        1 if category == "project_constraint" else 0,
+        1 if record.content.get("always_recall") is True else 0,
+        record.updated_at,
+        index,
+    )
+
+
+def _line_count(path: Path) -> int:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return sum(1 for _line in handle)
+    except OSError:
+        return 0
 
 
 __all__ = ["MemoryStore"]

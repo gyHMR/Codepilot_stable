@@ -80,6 +80,21 @@ def build_experiment_comparison(
             "on": reduction,
             "change": reduction,
         }
+    if module == "planning":
+        invalid_counts = metrics.get("planning.invalid_tool_call_count", {})
+        off_invalid = invalid_counts.get("off")
+        on_invalid = invalid_counts.get("on")
+        reduction = (
+            off_invalid - on_invalid
+            if isinstance(off_invalid, (int, float))
+            and isinstance(on_invalid, (int, float))
+            else None
+        )
+        metrics["planning.invalid_tool_call_reduction_count"] = {
+            "off": 0.0 if reduction is not None else None,
+            "on": reduction,
+            "change": reduction,
+        }
     off_pass = variant_metrics.get("off", {}).get("pass_rate")
     on_pass = variant_metrics.get("on", {}).get("pass_rate")
     return {

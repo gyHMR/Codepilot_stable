@@ -1,9 +1,20 @@
 from __future__ import annotations
 
-"""Built-in model catalog."""
+"""
+内置模型目录模块。
+
+定义了 Codepilot 内置支持的 LLM 模型配置，按 provider 分组。
+每个模型包含完整的配置信息：ID、名称、API 协议、能力声明等。
+
+使用方式：
+    model = get_model("anthropic", "claude-sonnet-4-5")
+    models = get_models("anthropic")
+    providers = get_providers()
+"""
 
 from codepilot.protocols import Model, ModelCapabilities
 
+# 内置模型注册表：provider -> model_id -> Model
 _MODELS: dict[str, dict[str, Model]] = {
     "anthropic": {
         "claude-sonnet-4-5": Model(

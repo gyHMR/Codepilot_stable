@@ -72,6 +72,20 @@ _CONTEXT_TRUST_VALUES: set[str] = {
     "user_given",
     "model_claim",
 }
+DEFAULT_MAX_ACTIVE_FILES = 40
+_ACTIVE_FILE_ROLE_PRIORITY = {
+    "target": 5,
+    "test": 4,
+    "dependency": 3,
+    "config": 2,
+    "reference": 1,
+}
+_ACTIVE_FILE_FRESHNESS_PRIORITY = {
+    "fresh": 3,
+    "unknown": 2,
+    "stale": 1,
+    "missing": 0,
+}
 
 
 @dataclass
@@ -297,6 +311,9 @@ class SessionContextState:
     # 活跃文件字典：路径 → ActiveFile
     active_files: dict[str, ActiveFile] = field(default_factory=dict)
 
+    # 活跃文件最多保留数量，避免长 session 中无限增长
+    max_active_files: int = DEFAULT_MAX_ACTIVE_FILES
+
     # 文件摘要字典：路径 → FileSummary
     file_summaries: dict[str, FileSummary] = field(default_factory=dict)
 
@@ -457,6 +474,7 @@ class SessionContextState:
                 source_hash=source_hash,
                 freshness="fresh" if source_hash else "unknown",
             )
+            self._prune_active_files()
             return
 
         # 已有文件：更新记录
@@ -472,6 +490,23 @@ class SessionContextState:
         if source_hash:
             current.source_hash = source_hash
             current.freshness = "fresh"
+
+        self._prune_active_files()
+
+    def _prune_active_files(self) -> None:
+        """Keep the active file set bounded by role, freshness, access and recency."""
+
+        if self.max_active_files <= 0:
+            self.active_files.clear()
+            return
+        if len(self.active_files) <= self.max_active_files:
+            return
+        ranked = sorted(
+            self.active_files.items(),
+            key=lambda item: _active_file_rank(item[0], item[1]),
+            reverse=True,
+        )
+        self.active_files = dict(ranked[: self.max_active_files])
 
     def invalidate_paths(self, paths: list[str]) -> None:
         """
@@ -626,6 +661,16 @@ def _ensure_context_trust(value: str) -> ContextTrust:
     if value not in _CONTEXT_TRUST_VALUES:
         raise ValueError(f"Unknown context trust: {value}")
     return cast(ContextTrust, value)
+
+
+def _active_file_rank(path: str, active: ActiveFile) -> tuple[int, int, int, float, str]:
+    return (
+        _ACTIVE_FILE_ROLE_PRIORITY.get(active.role, 0),
+        _ACTIVE_FILE_FRESHNESS_PRIORITY.get(active.freshness, 0),
+        active.access_count,
+        active.last_accessed_at,
+        path,
+    )
 
 
 __all__ = [

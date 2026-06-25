@@ -59,6 +59,78 @@ def test_memory_store_persists_session_and_project_records(tmp_path: Path) -> No
     assert '"schema_version": 1' in payload
 
 
+def test_memory_store_prunes_session_records_to_capacity(tmp_path: Path) -> None:
+    from codepilot.sessions.memory import MemoryRecord, MemoryStore
+    from codepilot.sessions.persistence.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "session_memory_capacity")
+    session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
+    store = MemoryStore(session_store, max_session_records=2)
+
+    store.save_session(
+        [
+            MemoryRecord(
+                id="old_decision",
+                kind="decision",
+                scope="session",
+                content={"decision": "old"},
+                source="test",
+                updated_at="2024-01-01T00:00:00+00:00",
+            ),
+            MemoryRecord(
+                id="new_decision",
+                kind="decision",
+                scope="session",
+                content={"decision": "new"},
+                source="test",
+                updated_at="2024-01-03T00:00:00+00:00",
+            ),
+            MemoryRecord(
+                id="project_constraint",
+                kind="project",
+                scope="session",
+                content={"category": "project_constraint", "knowledge": "keep it clear"},
+                source="test",
+                updated_at="2024-01-02T00:00:00+00:00",
+            ),
+        ]
+    )
+
+    assert [record.id for record in store.load_session()] == [
+        "project_constraint",
+        "new_decision",
+    ]
+
+
+def test_memory_store_compacts_project_log_to_capacity(tmp_path: Path) -> None:
+    from codepilot.sessions.memory import MemoryRecord, MemoryStore
+    from codepilot.sessions.persistence.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "project_memory_capacity")
+    session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
+    store = MemoryStore(
+        session_store,
+        max_project_records=2,
+        project_compact_after_lines=3,
+    )
+
+    for index in range(4):
+        store.update(
+            MemoryRecord(
+                id=f"project_{index}",
+                kind="project",
+                scope="project",
+                content={"knowledge": f"knowledge {index}"},
+                source="test",
+                updated_at=f"2024-01-0{index + 1}T00:00:00+00:00",
+            )
+        )
+
+    assert [record.id for record in store.load_project()] == ["project_3", "project_2"]
+    lines = store.project_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+
+
 def test_memory_record_declares_retrieval_eligibility() -> None:
     from codepilot.sessions.memory import MemoryRecord
 
@@ -759,6 +831,52 @@ def test_memory_retriever_uses_qa_mode_to_surface_decision_memory(
 
     assert [item.record.id for item in retrieved] == ["decision_context"]
     assert "mode:qa_decision_memory" in retrieved[0].reasons
+
+
+def test_memory_retriever_requires_project_memory_relevance(tmp_path: Path) -> None:
+    from codepilot.sessions.memory import (
+        MemoryQuery,
+        MemoryRecord,
+        MemoryRetriever,
+        MemoryStore,
+    )
+    from codepilot.sessions.persistence.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "session_project_relevance")
+    session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
+    store = MemoryStore(session_store)
+    store.update(
+        MemoryRecord(
+            id="generic_project_note",
+            kind="project",
+            scope="project",
+            content={"knowledge": "Use calm UI copy in onboarding screens."},
+            source="user",
+            trust="user_given",
+        )
+    )
+    store.update(
+        MemoryRecord(
+            id="project_constraint",
+            kind="project",
+            scope="project",
+            content={"category": "project_constraint", "knowledge": "Keep Codepilot explainable."},
+            source="user",
+            trust="user_given",
+        )
+    )
+    retriever = MemoryRetriever(store=store, workspace_dir=tmp_path)
+
+    unrelated = retriever.retrieve(MemoryQuery(text="修复 pytest 失败", active_paths=[]))
+    assert [item.record.id for item in unrelated] == ["project_constraint"]
+    assert "project_gate:project_constraint" in unrelated[0].reasons
+
+    matched = retriever.retrieve(MemoryQuery(text="onboarding UI copy", active_paths=[]))
+    assert [item.record.id for item in matched] == [
+        "generic_project_note",
+        "project_constraint",
+    ]
+    assert "keyword:copy" in matched[0].reasons
 
 
 def test_task_recovery_clears_next_action_only_when_completion_is_satisfied(

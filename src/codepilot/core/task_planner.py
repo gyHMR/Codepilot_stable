@@ -1,9 +1,27 @@
 from __future__ import annotations
 
-"""Lightweight LLM planner for plan-and-execute task control.
+"""
+轻量级 LLM 任务规划器模块。
 
-The planner is intentionally small: it asks the model for a bounded JSON plan,
-validates the result, and falls back to a single-step plan when planning fails.
+本模块实现了 plan-and-execute 任务控制模式中的规划器。
+规划器在 Agent 循环开始前调用 LLM，生成一个结构化的执行计划。
+
+设计原则：
+    - 规划器刻意保持小巧：只做一件事——生成计划
+    - 使用 LLM 生成 JSON 格式的计划，然后验证和规范化
+    - 规划失败时安全降级为单步计划（"完成当前请求"）
+    - 最多生成 6 个步骤，保持计划简洁可执行
+
+核心类：
+    - PlannedTaskStep: 单个规范化步骤（由规划器生成）
+    - TaskPlanDraft: 经过验证的规划器输出（用于初始化 TaskState）
+    - TaskPlanner: 规划器主类，负责生成和解析计划
+
+工作流程：
+    1. TaskPlanner.generate() 调用 LLM 生成 JSON 计划
+    2. parse_plan_message() 解析 LLM 响应中的 JSON
+    3. 验证和规范化每个步骤（标题、类型、验收标准等）
+    4. 返回 TaskPlanDraft，供 TaskController.initialize() 使用
 """
 
 import json
@@ -35,14 +53,24 @@ _TASK_PLAN_SOURCES = frozenset({"llm", "fallback"})
 
 @dataclass(frozen=True)
 class PlannedTaskStep:
-    """A single normalized step proposed by the task planner."""
+    """任务规划器生成的单个规范化步骤。
 
-    title: str
-    kind: TaskStepKind = "other"
-    acceptance: str | None = None
-    verification_hint: str | None = None
+    由 TaskPlanner 从 LLM 响应中解析并规范化后创建。
+    作为 TaskPlanDraft 的组成部分，最终传递给 TaskController.initialize()。
+
+    Attributes:
+        title: 步骤标题（最多 80 字符）。
+        kind: 步骤类型（investigate/edit/verify/summarize/other）。
+        acceptance: 完成标准（最多 240 字符，可选）。
+        verification_hint: 验证方式提示（最多 240 字符，可选）。
+    """
+    title: str                           # 步骤标题
+    kind: TaskStepKind = "other"         # 步骤类型
+    acceptance: str | None = None        # 完成标准
+    verification_hint: str | None = None # 验证方式提示
 
     def __post_init__(self) -> None:
+        """初始化后校验和规范化：清理文本、截断超长字段。"""
         title = _clean_text(self.title, limit=80)
         if not title:
             raise ValueError("Task plan step title cannot be empty")
@@ -67,18 +95,23 @@ class PlannedTaskStep:
 
 @dataclass(frozen=True)
 class TaskPlanDraft:
-    """Validated planner output used to initialize TaskState.
+    """经过验证的规划器输出，用于初始化 TaskState。
 
-    A draft is the boundary between model planning and deterministic task
-    control.  It stores only normalized, non-empty steps so downstream code can
-    initialize ``TaskState`` without re-validating planner-specific fields.
+    TaskPlanDraft 是模型规划与确定性任务控制之间的边界。
+    它只存储经过规范化、非空的步骤，使下游代码可以直接初始化 TaskState，
+    而无需重新验证规划器特定的字段。
+
+    Attributes:
+        goal: 任务目标（最多 1200 字符）。
+        steps: 规范化后的步骤元组（至少 1 个步骤）。
+        source: 计划来源（"llm" 表示由 LLM 生成，"fallback" 表示降级计划）。
     """
-
-    goal: str
-    steps: tuple[PlannedTaskStep, ...] = field(default_factory=tuple)
-    source: str = "fallback"
+    goal: str                                                              # 任务目标
+    steps: tuple[PlannedTaskStep, ...] = field(default_factory=tuple)       # 步骤元组
+    source: str = "fallback"                                               # 计划来源
 
     def __post_init__(self) -> None:
+        """初始化后校验：确保目标非空、步骤至少一个、来源合法。"""
         goal = _clean_text(self.goal, limit=1200)
         if not goal:
             raise ValueError("Task plan goal cannot be empty")
@@ -106,7 +139,18 @@ StreamFn = Callable[
 
 
 class TaskPlanner:
-    """Generate and parse a lightweight task plan."""
+    """轻量级 LLM 任务规划器：生成和解析任务执行计划。
+
+    使用方式：
+        planner = TaskPlanner()
+        draft = await planner.generate(
+            model=model,
+            messages=messages,
+            convert_to_llm=convert_to_llm,
+            fallback_goal="完成当前请求",
+        )
+        # draft.steps 包含规范化后的步骤列表
+    """
 
     async def generate(
         self,
@@ -119,8 +163,27 @@ class TaskPlanner:
         api_key: str | None = None,
         session_id: str | None = None,
     ) -> TaskPlanDraft:
-        """Ask the model for an initial plan, returning a safe fallback on failure."""
+        """向 LLM 请求生成初始执行计划，失败时返回安全的降级计划。
 
+        流程：
+        1. 将消息转换为 LLM 格式
+        2. 构建规划专用的系统提示词
+        3. 调用 LLM 生成 JSON 格式的计划
+        4. 解析和验证计划
+        5. 失败时返回单步降级计划
+
+        Args:
+            model: LLM 模型信息。
+            messages: 当前消息列表。
+            convert_to_llm: 消息转换函数。
+            fallback_goal: 降级计划的目标描述。
+            stream_fn: 可选的流式调用函数。
+            api_key: 可选的 API Key。
+            session_id: 可选的会话 ID。
+
+        Returns:
+            TaskPlanDraft: 经过验证的执行计划。
+        """
         try:
             llm_messages = await maybe_await(convert_to_llm(list(messages)))
             context = Context(
@@ -152,7 +215,22 @@ class TaskPlanner:
         *,
         fallback_goal: str,
     ) -> TaskPlanDraft:
-        """Parse a JSON plan from an assistant message."""
+        """从助手消息中解析 JSON 格式的执行计划。
+
+        解析流程：
+        1. 提取消息中的文本内容
+        2. 尝试解析为 JSON 对象
+        3. 提取 goal 和 steps 字段
+        4. 验证和规范化每个步骤
+        5. 解析失败时返回降级计划
+
+        Args:
+            message: LLM 返回的助手消息。
+            fallback_goal: 降级计划的目标描述。
+
+        Returns:
+            TaskPlanDraft: 经过验证的执行计划。
+        """
 
         text = _assistant_text(message)
         data = _loads_json_object(text)
@@ -193,8 +271,17 @@ class TaskPlanner:
         return TaskPlanDraft(goal=goal, steps=steps, source="llm")
 
     def fallback(self, goal: str) -> TaskPlanDraft:
-        """Return a safe single-step plan."""
+        """返回安全的单步降级计划。
 
+        当 LLM 规划失败（解析错误、网络异常等）时，返回一个最简单的
+        单步计划，确保任务控制系统仍能正常工作。
+
+        Args:
+            goal: 任务目标描述。
+
+        Returns:
+            TaskPlanDraft: 单步降级计划。
+        """
         clean_goal = _clean_text(goal, limit=1200) or "完成当前请求"
         return TaskPlanDraft(
             goal=clean_goal,
@@ -204,6 +291,7 @@ class TaskPlanner:
 
 
 def _planner_system_prompt() -> str:
+    """返回规划器的系统提示词：指示 LLM 输出 JSON 格式的执行计划。"""
     return (
         "You are Codepilot Task Planner.\n"
         "Create a short plan for a local coding agent. Output JSON only.\n"
@@ -216,6 +304,7 @@ def _planner_system_prompt() -> str:
 
 
 def _assistant_text(message: AssistantMessage) -> str:
+    """从助手消息中提取纯文本内容（过滤掉非文本块）。"""
     return "".join(
         block.text
         for block in message.content
@@ -224,11 +313,17 @@ def _assistant_text(message: AssistantMessage) -> str:
 
 
 def _loads_json_object(text: str) -> object:
+    """从文本中加载 JSON 对象：先尝试直接解析，失败则尝试提取花括号内的内容。
+
+    LLM 有时会在 JSON 前后添加额外文本（如 "```json\n...\n```"），
+    此函数会尝试从文本中提取有效的 JSON。
+    """
     if not text:
         return None
     try:
         return json.loads(text)
     except json.JSONDecodeError:
+        # 尝试从文本中提取 JSON 对象（匹配最外层的花括号）
         match = re.search(r"\{.*\}", text, flags=re.DOTALL)
         if match is None:
             return None
@@ -239,6 +334,7 @@ def _loads_json_object(text: str) -> object:
 
 
 def _clean_text(value: object, *, limit: int) -> str:
+    """清理文本：去除多余空白、截断到指定长度。"""
     if value is None:
         return ""
     return " ".join(str(value).strip().split())[:limit]

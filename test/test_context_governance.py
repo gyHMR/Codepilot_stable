@@ -594,6 +594,34 @@ def test_session_context_state_caps_verification_only_evidence(
     assert len(state.evidence) == 80
 
 
+def test_session_context_state_caps_active_files_by_relevance(tmp_path: Path) -> None:
+    from codepilot.sessions.context.state import SessionContextState
+
+    state = SessionContextState(workspace_dir=tmp_path, max_active_files=3)
+    state.touch_file("docs/old.md", role="reference", reason="read")
+    state.touch_file("src/service.py", role="target", reason="edit", source_hash="abc")
+    state.touch_file("test/test_service.py", role="test", reason="verify", source_hash="def")
+    state.touch_file("src/dependency.py", role="dependency", reason="read")
+
+    assert list(state.active_files) == [
+        "src/service.py",
+        "test/test_service.py",
+        "src/dependency.py",
+    ]
+
+
+def test_session_context_state_never_prunes_recent_target_file(tmp_path: Path) -> None:
+    from codepilot.sessions.context.state import SessionContextState
+
+    state = SessionContextState(workspace_dir=tmp_path, max_active_files=2)
+    state.touch_file("docs/reference.md", role="reference", reason="read")
+    state.touch_file("src/current.py", role="target", reason="edit")
+    state.touch_file("docs/other.md", role="reference", reason="read")
+
+    assert "src/current.py" in state.active_files
+    assert len(state.active_files) == 2
+
+
 def test_context_compiler_refreshes_deleted_top_level_directory(tmp_path: Path) -> None:
     asyncio.run(_deleted_top_level_directory_case(tmp_path))
 
