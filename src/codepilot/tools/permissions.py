@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from .shell_policy import classify_shell_command
 from .types import ToolMetadata
@@ -16,6 +16,8 @@ MUTATING_TOOL_NAMES = {"write", "edit", "bash"}
 ToolDecisionKind = Literal["allow", "deny", "approval_required"]
 # 工具权限模式：只读/工作区写入/询问
 ToolPermissionMode = Literal["read-only", "workspace-write", "ask"]
+_TOOL_DECISION_KINDS = frozenset({"allow", "deny", "approval_required"})
+_TOOL_PERMISSION_MODES = frozenset({"read-only", "workspace-write", "ask"})
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,21 @@ class ToolRequest:
     source: str = "agent"
     metadata: ToolMetadata | None = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "name",
+            _require_policy_text(self.name, field_name="tool name"),
+        )
+        if not isinstance(self.params, dict):
+            raise TypeError("ToolRequest params must be a dict")
+        object.__setattr__(self, "params", dict(self.params))
+        object.__setattr__(
+            self,
+            "source",
+            _require_policy_text(self.source, field_name="source"),
+        )
+
 
 @dataclass(frozen=True)
 class ToolDecision:
@@ -33,6 +50,13 @@ class ToolDecision:
     kind: ToolDecisionKind
     reason: str = ""
     details: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", _ensure_decision_kind(self.kind))
+        object.__setattr__(self, "reason", _clean_policy_text(self.reason))
+        if not isinstance(self.details, dict):
+            raise TypeError("ToolDecision details must be a dict")
+        object.__setattr__(self, "details", dict(self.details))
 
     @property
     def allowed(self) -> bool:
@@ -73,6 +97,7 @@ class PermissionPolicy:
     require_approval_for_high_risk: bool = True
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "mode", _ensure_permission_mode(self.mode))
         validate_patterns(self.bash_allow_patterns)
         validate_patterns(self.bash_block_patterns)
         if self.read_only and self.mode != "read-only":
@@ -173,6 +198,31 @@ def _decision_details(
         "policy_mode": mode,
         "capabilities": list(capabilities) if isinstance(capabilities, (list, tuple)) else [],
     }
+
+
+def _clean_policy_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _require_policy_text(value: object, *, field_name: str) -> str:
+    text = _clean_policy_text(value)
+    if not text:
+        raise ValueError(f"Tool policy {field_name} cannot be empty")
+    return text
+
+
+def _ensure_decision_kind(value: object) -> ToolDecisionKind:
+    text = _clean_policy_text(value)
+    if text not in _TOOL_DECISION_KINDS:
+        raise ValueError(f"Unknown tool decision kind: {value}")
+    return cast(ToolDecisionKind, text)
+
+
+def _ensure_permission_mode(value: object) -> ToolPermissionMode:
+    text = _clean_policy_text(value)
+    if text not in _TOOL_PERMISSION_MODES:
+        raise ValueError(f"Unknown tool permission mode: {value}")
+    return cast(ToolPermissionMode, text)
 
 
 __all__ = [

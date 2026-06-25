@@ -23,7 +23,6 @@ from .context import (
     ContextFreshness,
     ContextItem,
     ContextReport,
-    ContextSection,
     ContextSectionReport,
     ContextTrust,
     DroppedContextItem,
@@ -40,6 +39,7 @@ from .events import (
     AgentStartEvent,
     ErrorEvent,
     EventEnvelope,
+    ensure_runtime_event_type,
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
@@ -139,6 +139,7 @@ __all__ = [
     "AgentEvent",
     "AgentEventSink",
     "EventEnvelope",
+    "ensure_runtime_event_type",
     "RuntimeEvent",
     "RuntimeEventType",
     # ── LLM 流式事件 ──

@@ -59,6 +59,12 @@ from codepilot.protocols import (
 
 from .events import AgentEventEmitter, maybe_await
 from .llm_runner import LLMStreamRunner, StreamFn
+from .run_decisions import (
+    decide_completion_run,
+    decide_model_retry,
+    decide_post_tool_run,
+    decide_tool_execution_gate,
+)
 from .run_state import RunState, new_run_id
 from .task_controller import TaskController
 from .task_planner import TaskPlanner, TaskPlanDraft
@@ -98,7 +104,7 @@ async def run_agent_loop(
             - messages: 历史消息列表
             - tools: 可用工具列表
             - current_task: 当前任务上下文（可选）
-            - recovered_task: 恢复的任务状态（可选）
+            - task_recovery_projection: 会话持久化的任务恢复投影（可选）
             - task_signal: 任务控制信号（可选）
         config: Agent 循环配置，包含重试策略、工具执行模式等
             - session_id: 会话标识符
@@ -164,7 +170,7 @@ async def run_agent_loop(
         messages=[*context.messages, *prompts],  # 历史消息 + 本次提示
         tools=context.tools,
         current_task=context.current_task,
-        recovered_task=context.recovered_task,
+        task_recovery_projection=context.task_recovery_projection,
         task_signal=context.task_signal,
     )
 
@@ -257,7 +263,7 @@ async def run_agent_loop_continue(
         messages=list(context.messages),  # 包含工具结果的完整消息历史
         tools=context.tools,
         current_task=context.current_task,
-        recovered_task=context.recovered_task,
+        task_recovery_projection=context.task_recovery_projection,
         task_signal=context.task_signal,
     )
 
@@ -435,7 +441,7 @@ async def _run_loop(
     if (
         task_controller is not None
         and config.task_planner_enabled
-        and current_context.recovered_task is None
+        and current_context.task_recovery_projection is None
         and current_context.messages
     ):
         api_key = (
@@ -459,7 +465,7 @@ async def _run_loop(
             current_context.messages,
             goal=planned_task.goal if planned_task is not None else None,
             proposed_steps=planned_task.steps if planned_task is not None else None,
-            recovered_task=current_context.recovered_task,  # 恢复之前中断的任务
+            task_recovery_projection=current_context.task_recovery_projection,
         )
         if task_controller is not None
         else None
@@ -547,24 +553,20 @@ async def _run_loop(
                     source="llm",
                 )
 
-                # 检查是否可以重试
-                if (
-                    config.retry_enabled
-                    and error.retryable
-                    and model_retries < config.max_model_retries
-                ):
-                    # 执行重试逻辑
-                    model_retries += 1
-                    # 指数退避：delay = base * 2^(retry-1)
-                    delay_ms = int(config.retry_base_delay_ms * (2 ** (model_retries - 1)))
-
+                retry = decide_model_retry(
+                    error,
+                    retries_so_far=model_retries,
+                    config=config,
+                )
+                if retry.should_retry:
+                    model_retries = retry.next_retry_count
                     # 发射重试开始事件
                     await emitter.emit(
                         {
                             "type": "model_retry_start",
                             "attempt": model_retries,
                             "maxAttempts": config.max_model_retries + 1,
-                            "delayMs": delay_ms,
+                            "delayMs": retry.delay_ms,
                             "error": error,
                         }
                     )
@@ -577,7 +579,7 @@ async def _run_loop(
                         current_context.messages.pop()
 
                     # 等待延迟时间后重试
-                    await asyncio.sleep(delay_ms / 1000.0)
+                    await asyncio.sleep(retry.delay_ms / 1000.0)
                     continue  # 重试当前轮次
 
                 # 不可重试或达到最大重试次数 → 返回失败
@@ -602,35 +604,18 @@ async def _run_loop(
 
             # ── 执行工具调用 ──────────────────────────────────
             if has_more_tool_calls:
-                # 检查是否出现重复的工具调用（可能是模型陷入循环）
-                if state.has_repeated_call(
-                    tool_calls,
-                    limit=config.repeated_tool_call_limit,
-                ):
+                gate = decide_tool_execution_gate(tool_calls, state, config)
+                if not gate.should_execute:
+                    if gate.assistant_stop_reason is not None:
+                        assistant.stop_reason = gate.assistant_stop_reason
                     return await _stop_with_error(
                         emitter,
                         state,
                         new_messages,
                         assistant,
-                        code="run.repeated_tool_call",
-                        message="Stopped after repeated identical tool calls",
-                        stop_reason="repeated_tool_call",
-                    )
-
-                # 检查是否达到最大工具迭代次数
-                if state.counters.tool_iterations >= config.max_tool_iterations:
-                    assistant.stop_reason = "max_iterations"
-                    return await _stop_with_error(
-                        emitter,
-                        state,
-                        new_messages,
-                        assistant,
-                        code="run.max_iterations",
-                        message=(
-                            "Stopped after reaching "
-                            f"max_tool_iterations={config.max_tool_iterations}"
-                        ),
-                        stop_reason="max_iterations",
+                        code=gate.error_code or "run.tool_execution_blocked",
+                        message=gate.message or gate.reason,
+                        stop_reason=gate.stop_reason or "internal_error",
                     )
 
                 # 记录工具迭代次数
@@ -684,86 +669,32 @@ async def _run_loop(
 
             # ── 检查特殊状态 ──────────────────────────────────
 
-            # 如果有工具需要用户审批 → 暂停运行，等待审批
-            if any(result.status == "approval_required" for result in tool_results):
-                return await _finish_run(
-                    emitter,
-                    state.result(
-                        status="waiting_approval",
-                        stop_reason="approval_required",
-                        messages=new_messages,
-                        final_message=assistant,
-                        task=(
-                            task_controller.summarize(task)
-                            if task_controller is not None and task is not None
-                            else None
-                        ),
-                    ),
+            post_tool = decide_post_tool_run(tool_results, task_decision=decision)
+            if post_tool.should_stop:
+                task_summary = (
+                    task_controller.summarize(task)
+                    if task_controller is not None and task is not None
+                    else None
                 )
-
-            # 如果有工具被取消 → 终止运行
-            if any(result.status == "cancelled" for result in tool_results):
-                return await _finish_run(
-                    emitter,
-                    state.result(
-                        status="aborted",
-                        stop_reason="aborted",
-                        messages=new_messages,
-                        final_message=assistant,
-                        task=(
-                            task_controller.summarize(task)
-                            if task_controller is not None and task is not None
-                            else None
-                        ),
-                    ),
-                )
-
-            # 如果任务控制器建议受控回退 → 暂停，等待用户确认
-            if decision is not None and decision.action == "propose_revert":
-                return await _finish_run(
-                    emitter,
-                    state.result(
-                        status="waiting_user",
-                        stop_reason="task_blocked",
-                        messages=new_messages,
-                        final_message=assistant,
-                        task=(
-                            task_controller.summarize(task)
-                            if task_controller is not None and task is not None
-                            else None
-                        ),
-                    ),
-                )
-
-            # 如果任务控制器决定停止，按具体原因返回，不把所有 stop 都归为 replan_limit
-            if decision is not None and decision.action == "stop":
-                if decision.reason == "replan_limit_exceeded":
+                if post_tool.error_code is not None:
                     return await _stop_with_error(
                         emitter,
                         state,
                         new_messages,
                         assistant,
-                        code="run.replan_limit",
-                        message=decision.reason,
-                        stop_reason="replan_limit",
-                        task=(
-                            task_controller.summarize(task)
-                            if task_controller is not None and task is not None
-                            else None
-                        ),
+                        code=post_tool.error_code,
+                        message=post_tool.message or post_tool.reason,
+                        stop_reason=post_tool.stop_reason or "internal_error",
+                        task=task_summary,
                     )
                 return await _finish_run(
                     emitter,
                     state.result(
-                        status="waiting_user",
-                        stop_reason="task_blocked",
+                        status=post_tool.status or "waiting_user",
+                        stop_reason=post_tool.stop_reason or "task_blocked",
                         messages=new_messages,
                         final_message=assistant,
-                        task=(
-                            task_controller.summarize(task)
-                            if task_controller is not None and task is not None
-                            else None
-                        ),
+                        task=task_summary,
                     ),
                 )
 
@@ -791,20 +722,16 @@ async def _run_loop(
                 }
             )
 
-            # 如果任务未完成但可以继续 → 生成引导消息，继续循环
-            if not completion.satisfied and completion.can_continue:
+            completion_decision = decide_completion_run(completion)
+            if completion_decision.action == "continue_with_steering":
                 pending_messages = [task_controller.completion_steering(completion)]
                 continue
-            if not completion.satisfied:
+            if completion_decision.should_stop:
                 return await _finish_run(
                     emitter,
                     state.result(
-                        status="waiting_user",
-                        stop_reason=(
-                            "task_blocked"
-                            if completion.reason == "blocked_steps"
-                            else "task_incomplete"
-                        ),
+                        status=completion_decision.status or "waiting_user",
+                        stop_reason=completion_decision.stop_reason or "task_incomplete",
                         messages=new_messages,
                         final_message=_last_assistant(new_messages),
                         task=task_controller.summarize(task),

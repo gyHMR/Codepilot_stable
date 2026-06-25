@@ -7,13 +7,22 @@ from typing import Any
 
 from codepilot.protocols.events import AgentEvent
 
-from .schemas import WebEventEnvelope
+from .schemas import WebErrorPayload, WebEventEnvelope, WebEventKind
 
 
 def agent_event_to_web(event: AgentEvent) -> WebEventEnvelope:
-    """将 Agent 事件转换为 Web 事件信封。"""
+    """将 Agent 事件转换为 Web 事件信封。
+
+    Web Console 需要区分“普通运行事件”和“需要用户操作的事件”。
+    这里保留原始事件载荷，避免接口层重新解释工具参数或模型输出。
+    """
+
+    event_kind: WebEventKind = "agent_event"
+    if event.get("type") == "tool_approval_required":
+        event_kind = "tool_approval_required"
+
     return WebEventEnvelope(
-        type="agent_event",
+        type=event_kind,
         session_id=event.get("sessionId"),
         payload=_jsonable(event),
     )
@@ -21,10 +30,11 @@ def agent_event_to_web(event: AgentEvent) -> WebEventEnvelope:
 
 def error_to_web(message: str, *, session_id: str | None = None, code: str = "error") -> WebEventEnvelope:
     """将错误信息转换为 Web 错误事件信封。"""
+    error = WebErrorPayload(code=code, message=message)
     return WebEventEnvelope(
         type="error",
         session_id=session_id,
-        payload={"code": code, "message": message},
+        payload=asdict(error),
     )
 
 

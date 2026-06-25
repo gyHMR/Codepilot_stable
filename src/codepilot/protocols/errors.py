@@ -12,7 +12,7 @@ from __future__ import annotations
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 
 # 错误来源：标识错误发生在系统的哪个层面
@@ -29,6 +29,19 @@ LLMErrorKind = Literal[
     "unsupported_capability",  # 模型不支持的能力
     "unknown",                 # 未知错误
 ]
+_ERROR_SOURCES = frozenset({"llm", "tool", "runtime", "session", "interface"})
+_LLM_ERROR_KINDS = frozenset(
+    {
+        "auth",
+        "rate_limit",
+        "timeout",
+        "network",
+        "context_length",
+        "provider_response",
+        "unsupported_capability",
+        "unknown",
+    }
+)
 
 
 @dataclass
@@ -51,6 +64,25 @@ class ErrorInfo:
     source: ErrorSource = "runtime"
     details: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "code",
+            _require_error_text(self.code, field_name="error code"),
+        )
+        object.__setattr__(
+            self,
+            "message",
+            _require_error_text(self.message, field_name="error message"),
+        )
+        object.__setattr__(
+            self,
+            "source",
+            _ensure_error_source(self.source),
+        )
+        if not isinstance(self.details, dict):
+            raise TypeError("Error details must be a dict")
+
 
 @dataclass
 class LLMErrorInfo(ErrorInfo):
@@ -71,6 +103,44 @@ class LLMErrorInfo(ErrorInfo):
     provider: str = ""
     model: str = ""
     status_code: int | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.source != "llm":
+            raise ValueError("LLM error source must be llm")
+        object.__setattr__(self, "kind", _ensure_llm_error_kind(self.kind))
+        object.__setattr__(self, "provider", _clean_error_text(self.provider))
+        object.__setattr__(self, "model", _clean_error_text(self.model))
+        if (
+            self.status_code is not None
+            and (isinstance(self.status_code, bool) or not isinstance(self.status_code, int))
+        ):
+            raise TypeError("LLM status_code must be int or None")
+
+
+def _clean_error_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _require_error_text(value: object, *, field_name: str) -> str:
+    text = _clean_error_text(value)
+    if not text:
+        raise ValueError(f"Structured {field_name} cannot be empty")
+    return text
+
+
+def _ensure_error_source(value: object) -> ErrorSource:
+    text = _clean_error_text(value)
+    if text not in _ERROR_SOURCES:
+        raise ValueError(f"Unknown error source: {value}")
+    return cast(ErrorSource, text)
+
+
+def _ensure_llm_error_kind(value: object) -> LLMErrorKind:
+    text = _clean_error_text(value)
+    if text not in _LLM_ERROR_KINDS:
+        raise ValueError(f"Unknown LLM error kind: {value}")
+    return cast(LLMErrorKind, text)
 
 
 __all__ = [

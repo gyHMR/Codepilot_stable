@@ -12,7 +12,7 @@ LLM 相关类型定义。
 """
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from .errors import LLMErrorInfo
 
@@ -34,6 +34,10 @@ StopReason = Literal["stop", "length", "toolUse", "error", "aborted", "max_itera
 
 # 思考级别：控制模型推理的深度
 ThinkingLevel = Literal["minimal", "low", "medium", "high", "xhigh"]
+
+# 模型输入类型：provider 能接收的内容模态。
+ModelInput = Literal["text", "image"]
+_MODEL_INPUT_TYPES = frozenset({"text", "image"})
 
 # LLM 流式事件类型：流式响应过程中可能产生的各类事件
 LLMStreamEventType = Literal[
@@ -72,6 +76,21 @@ class Cost:
     cache_write: float = 0.0
     total: float = 0.0
 
+    def __post_init__(self) -> None:
+        self.input = _non_negative_float(self.input, field_name="cost input")
+        self.output = _non_negative_float(self.output, field_name="cost output")
+        self.cache_read = _non_negative_float(
+            self.cache_read,
+            field_name="cost cache_read",
+        )
+        self.cache_write = _non_negative_float(
+            self.cache_write,
+            field_name="cost cache_write",
+        )
+        self.total = _non_negative_float(self.total, field_name="cost total")
+        if self.total <= 0:
+            self.total = self.input + self.output + self.cache_read + self.cache_write
+
 
 @dataclass
 class Usage:
@@ -94,6 +113,28 @@ class Usage:
     cache_write: int = 0
     total_tokens: int = 0
     cost: Cost = field(default_factory=Cost)
+
+    def __post_init__(self) -> None:
+        self.input = _non_negative_int(self.input, field_name="input")
+        self.output = _non_negative_int(self.output, field_name="output")
+        self.cache_read = _non_negative_int(
+            self.cache_read,
+            field_name="cache_read",
+        )
+        self.cache_write = _non_negative_int(
+            self.cache_write,
+            field_name="cache_write",
+        )
+        self.total_tokens = _non_negative_int(
+            self.total_tokens,
+            field_name="total_tokens",
+        )
+        if not isinstance(self.cost, Cost):
+            raise TypeError("Usage cost must be Cost")
+        if self.total_tokens <= 0:
+            self.total_tokens = (
+                self.input + self.output + self.cache_read + self.cache_write
+            )
 
 
 @dataclass
@@ -121,6 +162,21 @@ class ModelCapabilities:
     system_prompt: bool = True
     tool_choice: bool = False
     parallel_tool_calls: bool = False
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "tools",
+            "vision",
+            "json_schema",
+            "streaming",
+            "reasoning",
+            "system_prompt",
+            "tool_choice",
+            "parallel_tool_calls",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, bool):
+                raise TypeError(f"Model capabilities {field_name} must be bool")
 
 
 @dataclass
@@ -150,7 +206,7 @@ class Model:
     provider: Provider
     base_url: str
     reasoning: bool
-    input: list[Literal["text", "image"]]
+    input: list[ModelInput]
     context_window: int
     max_tokens: int
     cost: Cost = field(default_factory=Cost)
@@ -159,11 +215,94 @@ class Model:
 
     def __post_init__(self) -> None:
         """初始化后处理：如果未显式设置 capabilities，则根据 input 和 reasoning 自动推导。"""
+        self.id = _require_model_text(self.id, field_name="model id")
+        self.name = _require_model_text(self.name, field_name="model name")
+        self.api = _require_model_text(self.api, field_name="model api")
+        self.provider = _require_model_text(self.provider, field_name="provider")
+        self.base_url = _clean_model_text(self.base_url)
+        if not isinstance(self.reasoning, bool):
+            raise TypeError("Model reasoning must be bool")
+        self.input = _clean_model_inputs(self.input)
+        self.context_window = _require_positive_int(
+            self.context_window,
+            field_name="context_window",
+        )
+        self.max_tokens = _require_positive_int(
+            self.max_tokens,
+            field_name="max_tokens",
+        )
+        if not isinstance(self.cost, Cost):
+            raise TypeError("Model cost must be Cost")
+        if self.headers is not None:
+            if not isinstance(self.headers, dict):
+                raise TypeError("Model headers must be a dict or None")
+            self.headers = {
+                _require_model_text(key, field_name="header name"): _require_model_text(
+                    value,
+                    field_name="header value",
+                )
+                for key, value in self.headers.items()
+            }
         if self.capabilities is None:
             self.capabilities = ModelCapabilities(
                 vision="image" in self.input,
                 reasoning=self.reasoning,
             )
+        elif not isinstance(self.capabilities, ModelCapabilities):
+            raise TypeError("Model capabilities must be ModelCapabilities or None")
+
+
+def _clean_model_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _require_model_text(value: object, *, field_name: str) -> str:
+    text = _clean_model_text(value)
+    if not text:
+        raise ValueError(f"Model {field_name} cannot be empty")
+    return text
+
+
+def _clean_model_inputs(values: list[ModelInput]) -> list[ModelInput]:
+    if not isinstance(values, list):
+        raise TypeError("Model input must be a list")
+    cleaned: list[ModelInput] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _clean_model_text(value)
+        if text not in _MODEL_INPUT_TYPES:
+            raise ValueError(f"Unknown model input type: {value}")
+        if text not in seen:
+            cleaned.append(cast(ModelInput, text))
+            seen.add(text)
+    if not cleaned:
+        raise ValueError("Model input cannot be empty")
+    return cleaned
+
+
+def _require_positive_int(value: object, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"Model {field_name} must be int")
+    if value <= 0:
+        raise ValueError(f"Model {field_name} must be positive")
+    return value
+
+
+def _non_negative_int(value: object, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"Usage {field_name} must be int")
+    if value < 0:
+        raise ValueError(f"Usage {field_name} cannot be negative")
+    return value
+
+
+def _non_negative_float(value: object, *, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"Cost {field_name} must be numeric")
+    amount = float(value)
+    if amount < 0:
+        raise ValueError(f"Cost {field_name} cannot be negative")
+    return amount
 
 
 @dataclass

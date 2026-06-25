@@ -6,7 +6,7 @@ import asyncio
 import time
 from typing import Any, cast
 
-from codepilot.protocols import AgentEvent, AgentEventSink
+from codepilot.protocols import AgentEvent, AgentEventSink, ensure_runtime_event_type
 
 
 def now_ms() -> int:
@@ -32,20 +32,23 @@ class AgentEventEmitter:
         session_id: str | None = None,
     ) -> None:
         self._sink = sink          # 事件接收端回调
-        self._session_id = session_id
-        self.run_id = run_id
+        self._session_id = _optional_event_text(session_id)
+        self.run_id = _require_event_text(run_id, field_name="run_id")
         self.turn_id = 0           # 当前轮次计数
         self._event_seq = 0        # 事件序列号（自增）
 
     async def emit(self, event: dict[str, Any]) -> None:
         """发射一个事件：注入 runId、turnId、eventId、timestamp 后转发给 sink。"""
-        event_type = event.get("type")
+        if not isinstance(event, dict):
+            raise TypeError("event must be a dict")
+        event_type = ensure_runtime_event_type(event.get("type"))
         if event_type == "turn_start":
             self.turn_id += 1
 
         self._event_seq += 1
         enriched = {
             **event,
+            "type": event_type,
             "runId": self.run_id,
             "turnId": self.turn_id,
             "eventId": f"{self.run_id}:{self._event_seq}",
@@ -53,3 +56,19 @@ class AgentEventEmitter:
             "sessionId": self._session_id,
         }
         await maybe_await(self._sink(cast(AgentEvent, enriched)))
+
+
+def _clean_event_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _optional_event_text(value: object) -> str | None:
+    text = _clean_event_text(value)
+    return text or None
+
+
+def _require_event_text(value: object, *, field_name: str) -> str:
+    text = _clean_event_text(value)
+    if not text:
+        raise ValueError(f"event {field_name} cannot be empty")
+    return text

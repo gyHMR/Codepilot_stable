@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Protocol
 
@@ -9,6 +10,7 @@ from codepilot.protocols.tools import (
     ToolResult,
     ToolResultStatus,
     ToolRiskLevel,
+    ensure_tool_result_status,
 )
 
 
@@ -41,6 +43,21 @@ class AgentTool:
     runtime_managed: bool = False    # 是否由 ToolRuntime 管理
     metadata: ToolMetadata | None = None  # 工具元数据
 
+    def __post_init__(self) -> None:
+        self.name = _require_tool_definition_text(self.name, field_name="tool name")
+        self.label = _require_tool_definition_text(self.label, field_name="label")
+        self.description = _require_tool_definition_text(
+            self.description,
+            field_name="description",
+        )
+        if not isinstance(self.parameters, dict):
+            raise TypeError("AgentTool parameters must be a dict")
+        self.parameters = deepcopy(self.parameters)
+        if not callable(self.execute):
+            raise TypeError("AgentTool execute must be callable")
+        if not isinstance(self.runtime_managed, bool):
+            raise TypeError("AgentTool runtime_managed must be bool")
+
     def to_spec(self) -> Tool:
         """返回面向 LLM provider 的工具描述（不含执行器）。"""
 
@@ -59,6 +76,26 @@ class ToolRuntimeRequest:
     params: dict[str, Any]           # 调用参数
     source: str = "agent"            # 调用来源
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "tool_call_id",
+            _require_tool_runtime_text(self.tool_call_id, field_name="tool_call_id"),
+        )
+        object.__setattr__(
+            self,
+            "name",
+            _require_tool_runtime_text(self.name, field_name="tool name"),
+        )
+        if not isinstance(self.params, dict):
+            raise TypeError("ToolRuntimeRequest params must be a dict")
+        object.__setattr__(self, "params", dict(self.params))
+        object.__setattr__(
+            self,
+            "source",
+            _require_tool_runtime_text(self.source, field_name="source"),
+        )
+
 
 @dataclass(frozen=True)
 class ToolRuntimeResult:
@@ -68,6 +105,44 @@ class ToolRuntimeResult:
     is_error: bool = False
     approved: bool = True
     approval_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.result, ToolResult):
+            raise TypeError("ToolRuntimeResult result must be AgentToolResult")
+        status = ensure_tool_result_status(self.status)
+        is_error = bool(self.is_error)
+        if is_error and status == "success":
+            status = "error"
+        elif status != "success":
+            is_error = True
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "is_error", is_error)
+        if not isinstance(self.approved, bool):
+            raise TypeError("ToolRuntimeResult approved must be bool")
+        if self.approval_id is not None:
+            object.__setattr__(
+                self,
+                "approval_id",
+                _require_tool_runtime_text(self.approval_id, field_name="approval_id"),
+            )
+
+
+def _clean_tool_runtime_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _require_tool_definition_text(value: object, *, field_name: str) -> str:
+    text = _clean_tool_runtime_text(value)
+    if not text:
+        raise ValueError(f"AgentTool {field_name} cannot be empty")
+    return text
+
+
+def _require_tool_runtime_text(value: object, *, field_name: str) -> str:
+    text = _clean_tool_runtime_text(value)
+    if not text:
+        raise ValueError(f"Tool runtime {field_name} cannot be empty")
+    return text
 
 
 __all__ = [

@@ -11,11 +11,8 @@ from pathlib import Path
 from typing import Callable
 
 from codepilot.observability import AuditBundle, build_audit_report
-from codepilot.runtime import (
-    CreateAgentSessionOptions,
-    RuntimeService,
-    UserInput,
-)
+from codepilot.runtime import RuntimeService
+from codepilot.runtime.types import CreateAgentSessionOptions, UserInput
 
 from .artifacts import EvalArtifactStore
 from .assertions import (

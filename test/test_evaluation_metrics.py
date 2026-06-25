@@ -25,11 +25,8 @@ from codepilot.protocols import (
     Model,
     TextContent,
 )
-from codepilot.runtime import (
-    CreateAgentSessionOptions,
-    RuntimeService,
-    UserInput,
-)
+from codepilot.runtime import RuntimeService
+from codepilot.runtime.types import CreateAgentSessionOptions, UserInput
 
 
 def _bundle(

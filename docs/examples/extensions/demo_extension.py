@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from codepilot.core import AfterToolCallResult
+from codepilot.extensions import AfterToolCallResult
 from codepilot.protocols import TextContent
 from codepilot.tools import AgentTool, AgentToolResult
 

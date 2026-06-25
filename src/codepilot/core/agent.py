@@ -13,16 +13,21 @@ from codepilot.protocols import (
     AgentEvent,
     AgentEventSink,
     AgentRunResult,
+    AssistantMessage,
     ImageContent,
     Message,
     Model,
     TextContent,
     ThinkingLevel,
+    ToolCall,
+    ToolResultMessage,
     UserMessage,
 )
 
 from .agent_loop import run_agent_loop, run_agent_loop_continue
+from .events import AgentEventEmitter
 from .llm_runner import StreamFn
+from .tool_coordinator import ToolCallCoordinator
 from .types import (
     AfterToolCallContext,
     AfterToolCallResult,
@@ -35,6 +40,17 @@ from .types import (
     BeforeToolCallResult,
     PrepareContextFn,
     ToolExecutionMode,
+    _copy_messages,
+    _copy_optional_dict,
+    _copy_tools,
+    _ensure_agent_thinking_level,
+    _ensure_bool,
+    _ensure_non_negative_int,
+    _ensure_optional_callable,
+    _ensure_optional_positive_int,
+    _ensure_positive_int,
+    _ensure_tool_execution_mode,
+    _optional_core_text,
 )
 
 
@@ -123,9 +139,64 @@ class AgentOptions:
     retry_base_delay_ms: int = 1200
     session_id: Optional[str] = None
     stream_fn: StreamFn | None = None
-    recovered_task: dict[str, object] | None = None
+    task_recovery_projection: dict[str, object] | None = None
     task_control_enabled: bool = True
     task_planner_enabled: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.model, Model):
+            raise TypeError("AgentOptions model must be Model")
+        self.system_prompt = str(self.system_prompt) if self.system_prompt is not None else ""
+        self.tools = _copy_tools(self.tools, field_name="tools")
+        self.messages = _copy_messages(self.messages, field_name="messages")
+        self.thinking_level = _ensure_agent_thinking_level(self.thinking_level)
+        self.tool_execution = _ensure_tool_execution_mode(self.tool_execution)
+        if not callable(self.convert_to_llm):
+            raise TypeError("AgentOptions convert_to_llm must be callable")
+        _ensure_optional_callable(self.transform_context, "transform_context")
+        _ensure_optional_callable(self.prepare_context, "prepare_context")
+        _ensure_optional_callable(self.get_api_key, "get_api_key")
+        _ensure_optional_callable(self.before_tool_call, "before_tool_call")
+        _ensure_optional_callable(self.after_tool_call, "after_tool_call")
+        self.max_tool_iterations = _ensure_positive_int(
+            self.max_tool_iterations,
+            field_name="max_tool_iterations",
+        )
+        self.max_tool_calls_per_turn = _ensure_optional_positive_int(
+            self.max_tool_calls_per_turn,
+            field_name="max_tool_calls_per_turn",
+        )
+        self.allow_unmanaged_tools = _ensure_bool(
+            self.allow_unmanaged_tools,
+            field_name="allow_unmanaged_tools",
+        )
+        self.repeated_tool_call_limit = _ensure_non_negative_int(
+            self.repeated_tool_call_limit,
+            field_name="repeated_tool_call_limit",
+        )
+        self.retry_enabled = _ensure_bool(self.retry_enabled, field_name="retry_enabled")
+        self.max_model_retries = _ensure_non_negative_int(
+            self.max_model_retries,
+            field_name="max_model_retries",
+        )
+        self.retry_base_delay_ms = _ensure_non_negative_int(
+            self.retry_base_delay_ms,
+            field_name="retry_base_delay_ms",
+        )
+        self.session_id = _optional_core_text(self.session_id)
+        _ensure_optional_callable(self.stream_fn, "stream_fn")
+        self.task_recovery_projection = _copy_optional_dict(
+            self.task_recovery_projection,
+            field_name="task_recovery_projection",
+        )
+        self.task_control_enabled = _ensure_bool(
+            self.task_control_enabled,
+            field_name="task_control_enabled",
+        )
+        self.task_planner_enabled = _ensure_bool(
+            self.task_planner_enabled,
+            field_name="task_planner_enabled",
+        )
 
 
 # ── Agent 核心类 ────────────────────────────────────────────────
@@ -178,6 +249,17 @@ class Agent:
 
     # ── 状态修改方法 ────────────────────────────────────────────
 
+    def replace_last_run_result(self, result: AgentRunResult) -> None:
+        """Replace the cached result after session-owned evidence reconciliation.
+
+        The core run loop creates the initial ``AgentRunResult``.  A session may
+        enrich that result with application-level evidence, such as an approved
+        tool execution that happened while resuming from a pending approval.
+        Keeping this as a named method avoids external layers mutating Agent
+        internals directly.
+        """
+        self._last_run_result = result
+
     def set_system_prompt(self, system_prompt: str) -> None:
         """更新系统提示词。"""
         self._state.system_prompt = system_prompt
@@ -198,9 +280,12 @@ class Agent:
         """Update the session identity used by events and model requests."""
         self._options.session_id = session_id
 
-    def set_recovered_task(self, recovered_task: dict[str, object] | None) -> None:
-        """Set the task-memory projection used to initialize the next run."""
-        self._options.recovered_task = recovered_task
+    def set_task_recovery_projection(
+        self,
+        projection: dict[str, object] | None,
+    ) -> None:
+        """Set the persisted task recovery projection for the next run."""
+        self._options.task_recovery_projection = projection
 
     def add_steering_message(self, message: AgentMessage) -> None:
         """向引导消息队列中添加一条消息。
@@ -291,6 +376,63 @@ class Agent:
             run_id=run_id,
         )
 
+    async def execute_tool_call_once(
+        self,
+        *,
+        tool: AgentTool,
+        tool_call: ToolCall,
+        run_id: str,
+        signal: Any | None = None,
+    ) -> list[ToolResultMessage]:
+        """Execute one explicit tool call with the Agent's normal hook/event machinery.
+
+        This entry point is for application workflows that already have a
+        concrete tool call, such as resuming a user-approved tool execution.  It
+        deliberately does not append messages or create an ``AgentRunResult``;
+        callers decide how the returned tool result participates in their
+        higher-level transaction.
+        """
+
+        coordinator = ToolCallCoordinator(
+            config=AgentLoopConfig(
+                model=self._state.model,
+                convert_to_llm=self._options.convert_to_llm,
+                transform_context=self._options.transform_context,
+                prepare_context=self._options.prepare_context,
+                get_api_key=self._options.get_api_key,
+                get_steering_messages=None,
+                get_follow_up_messages=None,
+                tool_execution="sequential",
+                before_tool_call=self._options.before_tool_call,
+                after_tool_call=self._options.after_tool_call,
+                reasoning=None,
+                session_id=self._options.session_id,
+                max_tool_iterations=self._options.max_tool_iterations,
+                max_tool_calls_per_turn=1,
+                allow_unmanaged_tools=True,
+                repeated_tool_call_limit=self._options.repeated_tool_call_limit,
+                retry_enabled=self._options.retry_enabled,
+                max_model_retries=self._options.max_model_retries,
+                retry_base_delay_ms=self._options.retry_base_delay_ms,
+                task_control_enabled=self._options.task_control_enabled,
+                task_planner_enabled=self._options.task_planner_enabled,
+            ),
+            emitter=AgentEventEmitter(
+                self._dispatch_event,
+                run_id=run_id,
+                session_id=self._options.session_id,
+            ),
+        )
+        return await coordinator.execute_batch(
+            AgentContext(
+                system_prompt=self._state.system_prompt,
+                messages=list(self._state.messages),
+                tools=[tool],
+            ),
+            AssistantMessage(content=[tool_call]),
+            signal=signal,
+        )
+
     async def wait_for_idle(self) -> None:
         """等待当前流式任务完成，使 Agent 进入空闲状态。"""
         if self._stream_task is not None:
@@ -360,7 +502,7 @@ class Agent:
             system_prompt=self._state.system_prompt,
             messages=list(self._state.messages),
             tools=list(self._state.tools),
-            recovered_task=self._options.recovered_task,
+            task_recovery_projection=self._options.task_recovery_projection,
         )
 
         # 根据模式选择对应的循环入口

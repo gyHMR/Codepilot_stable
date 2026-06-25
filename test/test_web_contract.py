@@ -34,6 +34,222 @@ def test_web_create_session_defaults_leave_runtime_config_unspecified() -> None:
     assert request.read_only_mode is None
 
 
+def test_web_create_session_request_normalizes_public_config_snapshot() -> None:
+    from codepilot.interfaces.web import WebCreateSessionRequest
+
+    request = WebCreateSessionRequest(
+        workspace_dir="  E:/workspace  ",
+        provider=" openai ",
+        model_id=" gpt-4o-mini ",
+        system_prompt="  Be concise.  ",
+        session_id=" session_1 ",
+        read_only_mode=True,
+        load_workspace_resources=False,
+    )
+    blank_optional = WebCreateSessionRequest(
+        workspace_dir=".",
+        provider=" ",
+        model_id=" ",
+        system_prompt=" ",
+        session_id=" ",
+    )
+
+    assert request.workspace_dir == "E:/workspace"
+    assert request.provider == "openai"
+    assert request.model_id == "gpt-4o-mini"
+    assert request.system_prompt == "Be concise."
+    assert request.session_id == "session_1"
+    assert request.read_only_mode is True
+    assert request.load_workspace_resources is False
+    assert blank_optional.provider is None
+    assert blank_optional.model_id is None
+    assert blank_optional.system_prompt is None
+    assert blank_optional.session_id is None
+
+    with pytest.raises(ValueError, match="workspace"):
+        WebCreateSessionRequest(workspace_dir=" ")
+
+    with pytest.raises(TypeError, match="read_only_mode"):
+        WebCreateSessionRequest(workspace_dir=".", read_only_mode="yes")  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="load_workspace_resources"):
+        WebCreateSessionRequest(workspace_dir=".", load_workspace_resources=None)  # type: ignore[arg-type]
+
+
+def test_web_session_ref_normalizes_workspace_and_optional_session() -> None:
+    from codepilot.interfaces.web import WebSessionRef
+
+    ref = WebSessionRef(
+        workspace_dir="  E:/workspace  ",
+        session_id=" session_1 ",
+    )
+    anonymous = WebSessionRef(workspace_dir=".", session_id=" ")
+
+    assert ref.workspace_dir == "E:/workspace"
+    assert ref.session_id == "session_1"
+    assert anonymous.session_id is None
+
+    with pytest.raises(ValueError, match="workspace"):
+        WebSessionRef(workspace_dir=" ")
+
+    with pytest.raises(TypeError, match="session_id"):
+        WebSessionRef(workspace_dir=".", session_id=123)  # type: ignore[arg-type]
+
+
+def test_web_schema_rejects_unknown_event_and_approval_types() -> None:
+    from codepilot.interfaces.web import WebEventEnvelope, WebToolApproval
+
+    with pytest.raises(ValueError, match="Unknown web event type"):
+        WebEventEnvelope(type="progress")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="Unknown web approval decision"):
+        WebToolApproval(
+            session_id="session_1",
+            tool_call_id="tool_1",
+            decision="maybe",  # type: ignore[arg-type]
+        )
+
+
+def test_web_event_envelope_normalizes_transport_snapshot() -> None:
+    from codepilot.interfaces.web import WebEventEnvelope
+
+    payload = {"message": "hello"}
+    event = WebEventEnvelope(
+        type="agent_event",
+        session_id=" session_1 ",
+        payload=payload,
+    )
+    anonymous = WebEventEnvelope(
+        type="session_state",
+        session_id=" ",
+    )
+    payload["message"] = "changed"
+
+    assert event.session_id == "session_1"
+    assert event.payload == {"message": "hello"}
+    assert anonymous.session_id is None
+
+    with pytest.raises(TypeError, match="payload"):
+        WebEventEnvelope(type="agent_event", payload=[])  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="session_id"):
+        WebEventEnvelope(type="agent_event", session_id=123)  # type: ignore[arg-type]
+
+
+def test_web_readonly_descriptors_normalize_identity_and_routes() -> None:
+    from codepilot.interfaces.web import WebRouteSpec, WebSessionSummary
+
+    summary = WebSessionSummary(session_id=" session_1 ")
+    route = WebRouteSpec(
+        method=" get ",
+        path=" /api/sessions ",
+        description=" List sessions ",
+    )
+
+    assert summary.session_id == "session_1"
+    assert route.method == "GET"
+    assert route.path == "/api/sessions"
+    assert route.description == "List sessions"
+
+    with pytest.raises(ValueError, match="session_id"):
+        WebSessionSummary(session_id=" ")
+
+    with pytest.raises(ValueError, match="method"):
+        WebRouteSpec(method="PATCH", path="/api/sessions", description="Patch")
+
+    with pytest.raises(ValueError, match="path"):
+        WebRouteSpec(method="GET", path="sessions", description="List")
+
+    with pytest.raises(ValueError, match="description"):
+        WebRouteSpec(method="GET", path="/api/sessions", description=" ")
+
+
+def test_web_route_spec_serializes_public_contract_explicitly() -> None:
+    from codepilot.interfaces.web import WebRouteSpec, describe_web_contract
+
+    route = WebRouteSpec(
+        method=" get ",
+        path=" /api/sessions ",
+        description=" List sessions ",
+    )
+
+    assert route.to_dict() == {
+        "method": "GET",
+        "path": "/api/sessions",
+        "description": "List sessions",
+    }
+    assert all(
+        set(item) == {"method", "path", "description"}
+        for item in describe_web_contract()["routes"]
+    )
+
+
+def test_web_tool_approval_normalizes_recovery_identity() -> None:
+    from codepilot.interfaces.web import WebToolApproval
+
+    approval = WebToolApproval(
+        session_id=" session_1 ",
+        tool_call_id=" tool_1 ",
+        approval_id=" approval_1 ",
+        decision="approve",
+        reason=" user confirmed ",
+    )
+    fallback = WebToolApproval(
+        session_id="session_1",
+        tool_call_id="tool_1",
+        approval_id=" ",
+        decision="deny",
+    )
+
+    assert approval.session_id == "session_1"
+    assert approval.tool_call_id == "tool_1"
+    assert approval.approval_id == "approval_1"
+    assert approval.reason == "user confirmed"
+    assert fallback.approval_id is None
+
+    with pytest.raises(ValueError, match="session_id"):
+        WebToolApproval(session_id=" ", tool_call_id="tool_1", decision="approve")
+
+    with pytest.raises(ValueError, match="tool_call_id"):
+        WebToolApproval(session_id="session_1", tool_call_id=" ", decision="approve")
+
+    with pytest.raises(TypeError, match="approval_id"):
+        WebToolApproval(
+            session_id="session_1",
+            tool_call_id="tool_1",
+            approval_id=123,  # type: ignore[arg-type]
+            decision="approve",
+        )
+
+
+def test_web_prompt_request_normalizes_public_input_snapshot() -> None:
+    from codepilot.interfaces.web import WebPromptRequest, WebSessionRef
+
+    images = [" screen.png "]
+    request = WebPromptRequest(
+        session=WebSessionRef(workspace_dir="."),
+        text="  hello  ",
+        images=images,
+    )
+    images.append("late.png")
+
+    assert request.text == "hello"
+    assert request.images == ("screen.png",)
+
+    with pytest.raises(ValueError, match="text"):
+        WebPromptRequest(session=WebSessionRef(workspace_dir="."), text=" ")
+
+    with pytest.raises(ValueError, match="image"):
+        WebPromptRequest(
+            session=WebSessionRef(workspace_dir="."),
+            text="hello",
+            images=["ok.png", " "],
+        )
+
+    with pytest.raises(TypeError, match="session"):
+        WebPromptRequest(session="session_1", text="hello")  # type: ignore[arg-type]
+
+
 def test_web_backend_can_list_created_sessions_without_server(tmp_path) -> None:
     from codepilot.interfaces.web import WebCreateSessionRequest, create_web_app
 
@@ -143,8 +359,73 @@ def test_web_backend_submits_tool_approval_by_approval_id() -> None:
     assert event.payload["approval_id"] == "approval_1"
 
 
+def test_web_event_adapter_exposes_tool_approval_as_dedicated_event() -> None:
+    from codepilot.interfaces.web.event_adapter import agent_event_to_web
+
+    envelope = agent_event_to_web(
+        {
+            "type": "tool_approval_required",
+            "sessionId": "s1",
+            "approvalId": "approval_1",
+            "toolCallId": "tool_1",
+            "toolName": "write",
+            "riskLevel": "high",
+        }
+    )
+
+    assert envelope.type == "tool_approval_required"
+    assert envelope.session_id == "s1"
+    assert envelope.payload["approvalId"] == "approval_1"
+
+
+def test_web_error_event_requires_non_empty_code_and_message() -> None:
+    from codepilot.interfaces.web.event_adapter import error_to_web
+
+    event = error_to_web(
+        "  Session missing  ",
+        session_id="s1",
+        code=" runtime.session_not_found ",
+    )
+
+    assert event.type == "error"
+    assert event.session_id == "s1"
+    assert event.payload == {
+        "code": "runtime.session_not_found",
+        "message": "Session missing",
+    }
+
+    with pytest.raises(ValueError, match="error code"):
+        error_to_web("Session missing", code=" ")
+
+    with pytest.raises(ValueError, match="error message"):
+        error_to_web("")
+
+
+def test_websocket_stream_normalizes_session_identity() -> None:
+    from codepilot.interfaces.web import WebSocketSessionStream
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.received_session_id = None
+
+        async def continue_session(self, session_id):
+            self.received_session_id = session_id
+            yield {"type": "turn_start", "sessionId": session_id}
+
+    runtime = FakeRuntime()
+    stream = WebSocketSessionStream(runtime=runtime, session_id=" session_1 ")  # type: ignore[arg-type]
+    events = asyncio.run(_collect_async(stream.continue_events()))
+
+    assert runtime.received_session_id == "session_1"
+    assert events[0].session_id == "session_1"
+
+    with pytest.raises(ValueError, match="session_id"):
+        WebSocketSessionStream(runtime=runtime, session_id=" ")  # type: ignore[arg-type]
+
+
 async def _run_runtime_service_send_message_streaming_case() -> None:
-    from codepilot.runtime.service import RuntimeService, UserInput
+    from codepilot.runtime.service import RuntimeService
+    from codepilot.runtime.types import UserInput
 
     class FakeSession:
         session_id = "s1"
@@ -189,6 +470,10 @@ async def _run_runtime_service_send_message_streaming_case() -> None:
     fake.run_can_finish.set()
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(anext(stream), timeout=1)
+
+
+async def _collect_async(iterator):
+    return [item async for item in iterator]
 
 
 async def _run_runtime_service_continue_session_streaming_case() -> None:

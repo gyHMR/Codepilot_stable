@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import inspect
-from typing import Literal
+from typing import Literal, cast
 
 from codepilot.extensions.types import ExtensionCommandContext, RegisteredCommand
 from codepilot.sessions.history.branching import create_fresh_session
@@ -27,6 +27,7 @@ from codepilot.sessions.memory import render_memory
 
 # 命令来源类型
 CommandSource = Literal["builtin", "extension", "skill", "prompt"]
+_COMMAND_SOURCES = frozenset({"builtin", "extension", "skill", "prompt"})
 
 
 @dataclass
@@ -42,6 +43,48 @@ class RuntimeCommand:
     name: str
     description: str
     source: CommandSource
+
+    def __post_init__(self) -> None:
+        self.name = _normalize_command_name(self.name)
+        self.description = _require_command_text(
+            self.description,
+            field_name="description",
+        )
+        self.source = _normalize_command_source(self.source)
+
+    def to_dict(self) -> dict[str, str]:
+        """返回 CLI/Web/RPC 可直接展示的命令元数据。"""
+
+        return {
+            "name": self.name,
+            "description": self.description,
+            "source": self.source,
+        }
+
+
+def _normalize_command_name(value: object) -> str:
+    text = _require_command_text(value, field_name="name").lstrip("/")
+    if not text:
+        raise ValueError("RuntimeCommand.name cannot be empty")
+    if any(char.isspace() for char in text):
+        raise ValueError("RuntimeCommand.name cannot contain whitespace")
+    return text
+
+
+def _require_command_text(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"RuntimeCommand.{field_name} must be a string")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"RuntimeCommand.{field_name} cannot be empty")
+    return text
+
+
+def _normalize_command_source(value: object) -> CommandSource:
+    source = _require_command_text(value, field_name="source")
+    if source not in _COMMAND_SOURCES:
+        raise ValueError(f"Unknown RuntimeCommand.source: {value}")
+    return cast(CommandSource, source)
 
 
 @dataclass
@@ -93,11 +136,12 @@ def list_runtime_commands(session: AgentSession) -> list[RuntimeCommand]:
     """
     items: dict[str, RuntimeCommand] = {cmd.name: cmd for cmd in builtin_commands()}
     for cmd in session.extension_commands.values():
-        items[cmd.name] = RuntimeCommand(
+        command = RuntimeCommand(
             name=cmd.name,
             description=cmd.description or "扩展命令",
             source=cmd.source,
         )
+        items[command.name] = command
     return sorted(items.values(), key=lambda x: (x.source, x.name))
 
 

@@ -17,7 +17,7 @@ from typing import Optional, Union
 from .content import ImageContent, TextContent, ThinkingContent
 from .errors import LLMErrorInfo
 from .llm import Api, Provider, StopReason, Usage
-from .tools import Tool, ToolCall, ToolResultStatus
+from .tools import Tool, ToolCall, ToolResultStatus, ensure_tool_result_status
 
 
 # ── 内容块联合类型 ──────────────────────────────────────────────
@@ -127,6 +127,13 @@ class ToolResultMessage:
     details: object = None
     timestamp: int = 0
     metadata: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        ensure_tool_result_status(self.status)
+        if self.is_error and self.status == "success":
+            self.status = "error"
+        elif self.status != "success":
+            self.is_error = True
 
 
 # 消息联合类型：对话中的任意一条消息

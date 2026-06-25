@@ -37,7 +37,7 @@ from codepilot.observability import (
     redact_artifact,
 )
 from codepilot.protocols import AssistantMessage, Model, TextContent
-from codepilot.runtime import CreateAgentSessionOptions
+from codepilot.runtime.types import CreateAgentSessionOptions
 
 
 def _model() -> Model:

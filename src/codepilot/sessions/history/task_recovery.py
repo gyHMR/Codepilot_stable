@@ -85,26 +85,44 @@ class TaskRecoveryStore:
         return item
 
     def update_from_result(self, result: AgentRunResult) -> dict[str, Any] | None:
-        summary = result.task
-        if summary is None:
+        projection = build_task_recovery_projection(
+            result,
+            current_projection=self.load_projection() or {},
+        )
+        if projection is None:
             return self.load_projection()
-        current = self.load_projection() or {}
-        projection = {
-            "goal": sanitize_memory_text(summary.goal, limit=1200),
-            "task_progress": {
-                "completed_steps": list(summary.completed_steps),
-                "pending_steps": list(summary.pending_steps),
-                "blocked_steps": list(summary.blocked_steps),
-                "completion_satisfied": summary.completion_satisfied,
-                "completion_reason": summary.completion_reason,
-                "step_details": dict(summary.step_details),
-            },
-            "next_action": None if summary.completion_satisfied else summary.next_action,
-            "source_run_id": result.run_id,
-            "created_at": current.get("created_at", utc_now_iso()),
-            "updated_at": utc_now_iso(),
-        }
         return self.save_projection(projection, run_id=result.run_id)
+
+
+def build_task_recovery_projection(
+    result: AgentRunResult,
+    *,
+    current_projection: dict[str, Any],
+) -> dict[str, Any] | None:
+    """将结构化 Run 结果映射为会话恢复投影。
+
+    这是任务状态跨 run 恢复的唯一写入映射：TaskController 输出
+    TaskSummary，Session 保存该投影，下一次 run 再由 TaskController 恢复。
+    """
+
+    summary = result.task
+    if summary is None:
+        return None
+    return {
+        "goal": sanitize_memory_text(summary.goal, limit=1200),
+        "task_progress": {
+            "completed_steps": list(summary.completed_steps),
+            "pending_steps": list(summary.pending_steps),
+            "blocked_steps": list(summary.blocked_steps),
+            "completion_satisfied": summary.completion_satisfied,
+            "completion_reason": summary.completion_reason,
+            "step_details": dict(summary.step_details),
+        },
+        "next_action": None if summary.completion_satisfied else summary.next_action,
+        "source_run_id": result.run_id,
+        "created_at": current_projection.get("created_at", utc_now_iso()),
+        "updated_at": utc_now_iso(),
+    }
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -123,4 +141,4 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             os.unlink(temp_name)
 
 
-__all__ = ["TaskRecoveryStore"]
+__all__ = ["TaskRecoveryStore", "build_task_recovery_projection"]

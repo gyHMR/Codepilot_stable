@@ -21,6 +21,7 @@ from codepilot.protocols import (
     ContextItem,
     ContextReport,
     ContextSectionReport,
+    ContextTrust,
     DroppedContextItem,
     RepositoryDelta,
     TextContent,
@@ -32,6 +33,7 @@ from ..memory import (
     DURABLE_MEMORY_KINDS,
     MemoryQuery,
     MemoryRetriever,
+    MemoryTrust,
     RetrievedMemory,
     render_memory,
 )
@@ -61,6 +63,20 @@ _SECRET_PATTERNS = [
 
 
 @dataclass(frozen=True)
+class ContextBudgetAllocation:
+    """一次上下文编译的命名 token 预算。"""
+
+    total_tokens: int
+    profile: dict[str, float]
+    repository: int
+    active_files: int
+    recent_evidence: int
+    memory: int
+    history: int
+    task: int
+
+
+@dataclass(frozen=True)
 class ContextPolicy:
     """上下文预算策略：控制各段落的 token 分配比例。"""
     safety_margin_tokens: int = 1024      # 安全余量 token 数
@@ -85,6 +101,141 @@ class ContextPolicy:
         )
         return min(max(self.minimum_input_budget, available), hard_cap)
 
+    def profile_for_mode(self, mode: str) -> dict[str, float]:
+        """返回指定上下文模式的预算比例。"""
+
+        defaults = {
+            "repository": self.repository_ratio,
+            "active_files": self.active_files_ratio,
+            "recent_evidence": self.recent_evidence_ratio,
+            "memory": self.memory_ratio,
+            "history": self.history_ratio,
+            "task": self.task_ratio,
+        }
+        profiles: dict[str, dict[str, float]] = {
+            "plan": {
+                "repository": 0.15,
+                "active_files": 0.15,
+                "recent_evidence": 0.12,
+                "memory": 0.18,
+                "history": 0.20,
+                "task": 0.20,
+            },
+            "act": defaults,
+            "repair": {
+                "repository": 0.08,
+                "active_files": 0.22,
+                "recent_evidence": 0.24,
+                "memory": 0.20,
+                "history": 0.12,
+                "task": 0.14,
+            },
+            "verify": {
+                "repository": 0.05,
+                "active_files": 0.12,
+                "recent_evidence": 0.30,
+                "memory": 0.12,
+                "history": 0.16,
+                "task": 0.25,
+            },
+            "final": {
+                "repository": 0.05,
+                "active_files": 0.08,
+                "recent_evidence": 0.22,
+                "memory": 0.10,
+                "history": 0.25,
+                "task": 0.30,
+            },
+            "qa": {
+                "repository": 0.10,
+                "active_files": 0.12,
+                "recent_evidence": 0.10,
+                "memory": 0.20,
+                "history": 0.30,
+                "task": 0.18,
+            },
+        }
+        return dict(profiles.get(mode, defaults))
+
+    def allocate(
+        self,
+        request: ContextPreparationRequest,
+        *,
+        mode: str,
+    ) -> ContextBudgetAllocation:
+        """按上下文模式分配一次编译的 token 预算。"""
+
+        total = self.input_budget(request)
+        profile = self.profile_for_mode(mode)
+        return ContextBudgetAllocation(
+            total_tokens=total,
+            profile=profile,
+            repository=int(total * profile["repository"]),
+            active_files=int(total * profile["active_files"]),
+            recent_evidence=int(total * profile["recent_evidence"]),
+            memory=int(total * profile["memory"]),
+            history=int(total * profile["history"]),
+            task=int(total * profile["task"]),
+        )
+
+
+@dataclass(frozen=True)
+class ContextItemSection:
+    """一个可预算、可清洗、可报告的上下文条目分区。
+
+    ContextCompiler 负责收集不同来源的候选项；本类负责回答同一个问题：
+    在给定预算下，这一段最终放入模型上下文的内容是什么、丢弃了什么、
+    以及清洗后对报告有什么影响。
+    """
+
+    name: str
+    budget_tokens: int
+    candidates: list[ContextItem]
+    selected: list[ContextItem]
+    dropped: list[DroppedContextItem]
+    sanitization: dict[str, int]
+    reduction_policy: str
+
+    @classmethod
+    def compile(
+        cls,
+        *,
+        name: str,
+        budget_tokens: int,
+        candidates: list[ContextItem],
+        reduction_policy: str,
+    ) -> "ContextItemSection":
+        """选择并清洗一个条目分区，保留报告所需的原始候选信息。"""
+
+        selected, dropped = _select_items(name, candidates, budget_tokens)
+        sanitized, sanitization = _sanitize_items(selected)
+        return cls(
+            name=name,
+            budget_tokens=budget_tokens,
+            candidates=candidates,
+            selected=sanitized,
+            dropped=dropped,
+            sanitization=sanitization,
+            reduction_policy=reduction_policy,
+        )
+
+    def report(self) -> ContextSectionReport:
+        """生成该分区的预算裁剪报告。"""
+
+        return ContextSectionReport(
+            name=self.name,
+            budget_tokens=self.budget_tokens,
+            candidate_items=len(self.candidates),
+            selected_items=len(self.selected),
+            estimated_tokens_before=sum(
+                item.estimated_tokens for item in self.candidates
+            ),
+            estimated_tokens_after=sum(
+                item.estimated_tokens for item in self.selected
+            ),
+            reduction_policy=self.reduction_policy,
+        )
+
 
 class ContextCompiler:
     """上下文编译器：在每次 LLM 调用前将仓库、文件、证据、记忆编译为带预算的上下文。"""
@@ -106,8 +257,12 @@ class ContextCompiler:
         """绑定记忆检索器（Session 初始化后调用）。"""
         self.memory_retriever = retriever
 
-    def clone(self) -> "ContextCompiler":
-        """克隆编译器（用于 Session 分支时创建独立副本）。"""
+    def fork_for_session(self) -> "ContextCompiler":
+        """为新会话创建编译器副本，但不共享短期上下文状态。
+
+        ContextCompiler 的策略可以复用；SessionContextState 记录的是当前
+        会话的 active files、evidence 和仓库快照，跨会话共享会污染上下文。
+        """
         return ContextCompiler(
             workspace=str(self.repository.workspace),
             state=SessionContextState(workspace_dir=self.state.workspace_dir),
@@ -155,50 +310,46 @@ class ContextCompiler:
                 ]
                 if record.kind in DURABLE_MEMORY_KINDS and record.status == "stale"
             )
-        total_budget = self.policy.input_budget(request)
         context_mode = _resolve_context_mode(context)
-        budget_profile = _budget_profile(context_mode, self.policy)
-        repository_budget = int(total_budget * budget_profile["repository"])
-        active_budget = int(total_budget * budget_profile["active_files"])
-        evidence_budget = int(total_budget * budget_profile["recent_evidence"])
-        memory_budget = int(total_budget * budget_profile["memory"])
-        history_budget = int(total_budget * budget_profile["history"])
+        budget = self.policy.allocate(request, mode=context_mode)
+        total_budget = budget.total_tokens
+        budget_profile = budget.profile
 
         repository_text = _truncate_to_tokens(
             render_repository_snapshot(snapshot, delta),
-            repository_budget,
+            budget.repository,
         )
         active_items = self._active_file_items()
-        selected_active, dropped_active = _select_items(
-            "active_files",
-            active_items,
-            active_budget,
+        active_section = ContextItemSection.compile(
+            name="active_files",
+            budget_tokens=budget.active_files,
+            candidates=active_items,
+            reduction_policy="drop_low_relevance",
         )
         evidence_items = self._evidence_items()
-        selected_evidence, dropped_evidence = _select_items(
-            "recent_evidence",
-            evidence_items,
-            evidence_budget,
+        evidence_section = ContextItemSection.compile(
+            name="recent_evidence",
+            budget_tokens=budget.recent_evidence,
+            candidates=evidence_items,
+            reduction_policy="drop_stale_then_oldest",
         )
         memory_items, retrieved_memories = self._memory_items(context)
-        selected_memory, dropped_memory = _select_items(
-            "memory",
-            memory_items,
-            memory_budget,
+        memory_section = ContextItemSection.compile(
+            name="memory",
+            budget_tokens=budget.memory,
+            candidates=memory_items,
+            reduction_policy="retrieve_then_drop_low_score",
         )
-        selected_active, active_sanitization = _sanitize_items(selected_active)
-        selected_evidence, evidence_sanitization = _sanitize_items(selected_evidence)
-        selected_memory, memory_sanitization = _sanitize_items(selected_memory)
         sanitization = _merge_sanitization(
-            active_sanitization,
-            evidence_sanitization,
-            memory_sanitization,
+            active_section.sanitization,
+            evidence_section.sanitization,
+            memory_section.sanitization,
         )
 
         governance_text = _render_governance_context(
-            selected_active,
-            selected_evidence,
-            selected_memory,
+            active_section.selected,
+            evidence_section.selected,
+            memory_section.selected,
             stale_items,
         )
         system_prompt = _replace_repository_context(
@@ -212,7 +363,7 @@ class ContextCompiler:
 
         selected_messages, dropped_history = _select_message_suffix(
             context.messages,
-            history_budget,
+            budget.history,
         )
         selected_messages = _repair_tool_message_pairs(
             selected_messages,
@@ -224,7 +375,7 @@ class ContextCompiler:
         section_reports = [
             ContextSectionReport(
                 name="repository_state",
-                budget_tokens=repository_budget,
+                budget_tokens=budget.repository,
                 candidate_items=1,
                 selected_items=1,
                 estimated_tokens_before=_estimate_text_tokens(
@@ -233,30 +384,12 @@ class ContextCompiler:
                 estimated_tokens_after=_estimate_text_tokens(repository_text),
                 reduction_policy="regenerate_short_snapshot",
             ),
-            _item_section_report(
-                "active_files",
-                active_budget,
-                active_items,
-                selected_active,
-                "drop_low_relevance",
-            ),
-            _item_section_report(
-                "recent_evidence",
-                evidence_budget,
-                evidence_items,
-                selected_evidence,
-                "drop_stale_then_oldest",
-            ),
-            _item_section_report(
-                "memory",
-                memory_budget,
-                memory_items,
-                selected_memory,
-                "retrieve_then_drop_low_score",
-            ),
+            active_section.report(),
+            evidence_section.report(),
+            memory_section.report(),
             ContextSectionReport(
                 name="history",
-                budget_tokens=history_budget,
+                budget_tokens=budget.history,
                 candidate_items=len(context.messages),
                 selected_items=len(selected_messages),
                 estimated_tokens_before=estimate_context_tokens(context.messages, ""),
@@ -265,7 +398,7 @@ class ContextCompiler:
             ),
             ContextSectionReport(
                 name="current_request",
-                budget_tokens=int(total_budget * budget_profile["task"]),
+                budget_tokens=budget.task,
                 candidate_items=1 if _latest_user_message(context.messages) else 0,
                 selected_items=1 if _latest_user_message(selected_messages) else 0,
                 estimated_tokens_before=_latest_user_tokens(context.messages),
@@ -283,16 +416,16 @@ class ContextCompiler:
             selected_items=[
                 _context_item_summary(item)
                 for item in [
-                    *selected_active,
-                    *selected_evidence,
-                    *selected_memory,
+                    *active_section.selected,
+                    *evidence_section.selected,
+                    *memory_section.selected,
                 ]
             ],
             stale_items=stale_items,
             dropped_items=[
-                *dropped_active,
-                *dropped_evidence,
-                *dropped_memory,
+                *active_section.dropped,
+                *evidence_section.dropped,
+                *memory_section.dropped,
                 *dropped_history,
             ],
             repository_delta=delta,
@@ -306,9 +439,9 @@ class ContextCompiler:
             relevance_reasons={
                 item.id: _relevance_reasons(item, context, context_mode)
                 for item in [
-                    *selected_active,
-                    *selected_evidence,
-                    *selected_memory,
+                    *active_section.selected,
+                    *evidence_section.selected,
+                    *memory_section.selected,
                 ]
             },
             sanitization=sanitization,
@@ -389,12 +522,12 @@ class ContextCompiler:
                     kind=evidence.kind,
                     content=content,
                     source=evidence.source,
-                    trust=evidence.trust,  # type: ignore[arg-type]
+                    trust=evidence.trust,
                     priority=trust_score.get(evidence.trust, 10) + index,
                     estimated_tokens=_estimate_text_tokens(content),
                     path=evidence.path,
                     source_hash=evidence.source_hash,
-                    freshness=evidence.freshness,  # type: ignore[arg-type]
+                    freshness=evidence.freshness,
                 )
             )
         return items
@@ -413,16 +546,10 @@ class ContextCompiler:
         """
         if self.memory_retriever is None:
             return [], []
-        latest = _latest_user_message(context.messages)
-        query_text = _user_message_text(latest) if latest is not None else ""
         retrieved = self.memory_retriever.retrieve(
-            MemoryQuery(
-                text=query_text,
+            build_memory_query(
+                context,
                 active_paths=list(self.state.active_files),
-                task_phase=_optional_signal(context, "phase"),
-                action_intent=_optional_signal(context, "action_intent"),
-                recent_error=_optional_signal(context, "recent_error_code"),
-                retrieval_mode=_resolve_context_mode(context),
             )
         )
         items: list[ContextItem] = []
@@ -444,7 +571,7 @@ class ContextCompiler:
             record = item.record
             path = record.related_paths[0] if record.related_paths else None
             source_hash = record.source_hashes.get(path) if path else None
-            trust = "observed" if record.trust == "verified" else record.trust
+            trust = _context_trust_from_memory_trust(record.trust)
             content = (
                 f"{render_memory(record)} "
                 f"[score={item.score}; reasons={', '.join(item.reasons)}]"
@@ -455,7 +582,7 @@ class ContextCompiler:
                     kind=f"memory.{record.kind}",
                     content=content,
                     source=record.source,
-                    trust=trust,  # type: ignore[arg-type]
+                    trust=trust,
                     priority=item.score,
                     estimated_tokens=_estimate_text_tokens(content),
                     path=path,
@@ -464,6 +591,37 @@ class ContextCompiler:
                 )
             )
         return items, retrieved
+
+
+def _context_trust_from_memory_trust(trust: MemoryTrust) -> ContextTrust:
+    """Translate memory trust into the narrower context-item trust vocabulary."""
+
+    if trust == "verified":
+        return "observed"
+    return trust
+
+
+def build_memory_query(
+    context: AgentContext,
+    *,
+    active_paths: list[str],
+) -> MemoryQuery:
+    """从当前 Agent 上下文构造记忆检索查询。
+
+    记忆检索只关心“当前意图”和“当前工作面”：最新用户消息提供查询文本，
+    活跃文件路径提供路径相关性，任务信号提供阶段、动作意图和最近错误。
+    具体评分仍由 MemoryRetriever 负责。
+    """
+
+    latest = _latest_user_message(context.messages)
+    return MemoryQuery(
+        text=_user_message_text(latest) if latest is not None else "",
+        active_paths=list(active_paths),
+        task_phase=_optional_signal(context, "phase"),
+        action_intent=_optional_signal(context, "action_intent"),
+        recent_error=_optional_signal(context, "recent_error_code"),
+        retrieval_mode=_resolve_context_mode(context),
+    )
 
 
 def _context_item_summary(item: ContextItem) -> dict[str, object]:
@@ -714,61 +872,6 @@ def _resolve_context_mode(context: AgentContext) -> str:
     return "act"
 
 
-def _budget_profile(mode: str, policy: ContextPolicy) -> dict[str, float]:
-    defaults = {
-        "repository": policy.repository_ratio,
-        "active_files": policy.active_files_ratio,
-        "recent_evidence": policy.recent_evidence_ratio,
-        "memory": policy.memory_ratio,
-        "history": policy.history_ratio,
-        "task": policy.task_ratio,
-    }
-    profiles: dict[str, dict[str, float]] = {
-        "plan": {
-            "repository": 0.15,
-            "active_files": 0.15,
-            "recent_evidence": 0.12,
-            "memory": 0.18,
-            "history": 0.20,
-            "task": 0.20,
-        },
-        "act": defaults,
-        "repair": {
-            "repository": 0.08,
-            "active_files": 0.22,
-            "recent_evidence": 0.24,
-            "memory": 0.20,
-            "history": 0.12,
-            "task": 0.14,
-        },
-        "verify": {
-            "repository": 0.05,
-            "active_files": 0.12,
-            "recent_evidence": 0.30,
-            "memory": 0.12,
-            "history": 0.16,
-            "task": 0.25,
-        },
-        "final": {
-            "repository": 0.05,
-            "active_files": 0.08,
-            "recent_evidence": 0.22,
-            "memory": 0.10,
-            "history": 0.25,
-            "task": 0.30,
-        },
-        "qa": {
-            "repository": 0.10,
-            "active_files": 0.12,
-            "recent_evidence": 0.10,
-            "memory": 0.20,
-            "history": 0.30,
-            "task": 0.18,
-        },
-    }
-    return dict(profiles.get(mode, defaults))
-
-
 def _sanitize_items(items: list[ContextItem]) -> tuple[list[ContextItem], dict[str, int]]:
     selected: list[ContextItem] = []
     redacted_count = 0
@@ -820,24 +923,6 @@ def _merge_sanitization(*items: dict[str, int]) -> dict[str, int]:
     return result
 
 
-def _item_section_report(
-    name: str,
-    budget: int,
-    candidates: list[ContextItem],
-    selected: list[ContextItem],
-    policy: str,
-) -> ContextSectionReport:
-    return ContextSectionReport(
-        name=name,
-        budget_tokens=budget,
-        candidate_items=len(candidates),
-        selected_items=len(selected),
-        estimated_tokens_before=sum(item.estimated_tokens for item in candidates),
-        estimated_tokens_after=sum(item.estimated_tokens for item in selected),
-        reduction_policy=policy,
-    )
-
-
 def _latest_user_message(messages: list) -> UserMessage | None:
     for message in reversed(messages):
         if isinstance(message, UserMessage):
@@ -871,4 +956,9 @@ def _truncate_to_tokens(text: str, budget: int) -> str:
     return text[:max_chars].rstrip() + "\n...<context section truncated>..."
 
 
-__all__ = ["ContextCompiler", "ContextPolicy"]
+__all__ = [
+    "ContextCompiler",
+    "ContextItemSection",
+    "ContextPolicy",
+    "build_memory_query",
+]

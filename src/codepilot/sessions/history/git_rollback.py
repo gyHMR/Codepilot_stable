@@ -11,12 +11,13 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from codepilot.tools.sandbox import file_state_for_path
 
 
 RollbackStatus = Literal["reverted", "not_eligible", "conflict", "noop"]
+_ROLLBACK_STATUSES = frozenset({"reverted", "not_eligible", "conflict", "noop"})
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,9 @@ class GitRollbackResult:
     restored_paths: list[str] = field(default_factory=list)
     removed_paths: list[str] = field(default_factory=list)
     conflicted_paths: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        _ensure_rollback_status(self.status)
 
 
 def capture_git_baseline(workspace_dir: str | Path) -> GitRollbackBaseline:
@@ -314,6 +318,12 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _ensure_rollback_status(value: object) -> RollbackStatus:
+    if value not in _ROLLBACK_STATUSES:
+        raise ValueError(f"Unknown rollback status: {value}")
+    return cast(RollbackStatus, value)
 
 
 __all__ = [

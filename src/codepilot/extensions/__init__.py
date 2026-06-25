@@ -9,7 +9,11 @@ from .api import ExtensionAPI
 from .loader import discover_extension_paths, load_extensions
 from .skills import discover_skill_paths, load_skills
 from .types import (
+    AfterToolCallContext,
+    AfterToolCallResult,
     AfterHook,
+    BeforeToolCallContext,
+    BeforeToolCallResult,
     BeforeHook,
     CommandHandler,
     ExtensionCommandContext,
@@ -23,6 +27,10 @@ from .types import (
 __all__ = [
     "BeforeHook",
     "AfterHook",
+    "BeforeToolCallContext",
+    "BeforeToolCallResult",
+    "AfterToolCallContext",
+    "AfterToolCallResult",
     "CommandHandler",
     "RegisteredCommand",
     "ExtensionCommandContext",

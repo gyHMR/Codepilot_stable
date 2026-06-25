@@ -15,28 +15,28 @@ from __future__ import annotations
 """
 
 from dataclasses import dataclass, field
-from dataclasses import asdict, is_dataclass
 import json
 import sys
 from typing import Any
 
-from codepilot.runtime.service import RuntimeService, UserInput
-from codepilot.runtime.types import InputFn, OutputFn, RunMode
+from codepilot.runtime.service import RuntimeService
+from codepilot.runtime.types import UserInput
 
-from .renderer import (
-    CliStartupState,
-    SimpleRenderer,
-    TerminalRenderer,
-    build_startup_state,
+from .renderer import SimpleRenderer, TerminalRenderer
+from .rpc_protocol import (
+    RpcEmit,
+    emit_rpc_ready,
+    emit_rpc_error,
+    emit_rpc_ok,
+    rpc_error_from_exception,
+    rpc_json_default,
 )
+from .startup import build_startup_state
+from .types import InputFn, OutputFn, RunMode
 
 
 __all__ = [
-    "CliStartupState",
     "RunOptions",
-    "SimpleRenderer",
-    "TerminalRenderer",
-    "build_startup_state",
     "run",
     "run_interactive",
     "run_print",
@@ -59,6 +59,61 @@ class RunOptions:
     no_color: bool = False
     exit_commands: tuple[str, ...] = field(default_factory=lambda: ("exit", "quit", ":q"))
 
+    def __post_init__(self) -> None:
+        self.mode = _ensure_run_mode(self.mode)
+        self.session_id = _require_cli_text(
+            self.session_id,
+            field_name="session_id",
+        )
+        if not callable(self.output):
+            raise TypeError("RunOptions.output must be callable")
+        if not callable(self.input_fn):
+            raise TypeError("RunOptions.input_fn must be callable")
+        self.exit_commands = _normalize_exit_commands(self.exit_commands)
+
+
+def _ensure_run_mode(value: object) -> RunMode:
+    if isinstance(value, str):
+        value = value.strip()
+    if value not in {"print", "interactive", "rpc"}:
+        raise ValueError(f"Unknown CLI run mode: {value}")
+    return value  # type: ignore[return-value]
+
+
+def _require_cli_text(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"RunOptions.{field_name} must be a string")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"RunOptions.{field_name} is required")
+    return text
+
+
+def _normalize_exit_commands(value: object) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)):
+        raise TypeError("RunOptions.exit_commands must be a sequence of strings")
+    commands: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise TypeError("RunOptions.exit_commands must contain strings")
+        command = item.strip().lstrip("/")
+        if command:
+            commands.append(command)
+    return tuple(commands)
+
+
+async def _render_prompt_run(
+    runtime: RuntimeService,
+    session_id: str,
+    prompt: str,
+    renderer: Any,
+) -> None:
+    """发送普通用户输入，并把运行事件渲染到 CLI renderer。"""
+
+    async for event in runtime.send_message(session_id, UserInput(text=prompt)):
+        renderer.handle_event(event)
+    renderer.render_final(runtime.get_latest_assistant_message(session_id))
+
 
 async def run_print(
     runtime: RuntimeService,
@@ -80,12 +135,7 @@ async def run_print(
     # print 模式使用简单渲染器，不依赖 rich
     renderer = SimpleRenderer(output=output)
 
-    # 通过 RuntimeService 发送消息并消费事件
-    async for event in runtime.send_message(session_id, UserInput(text=prompt)):
-        renderer.handle_event(event)
-
-    # 获取最终的 AssistantMessage
-    renderer.render_final(runtime.get_latest_assistant_message(session_id))
+    await _render_prompt_run(runtime, session_id, prompt, renderer)
 
 
 async def run_interactive(
@@ -198,17 +248,7 @@ async def run_interactive(
         # 普通文本 → 通过 RuntimeService 发送消息
         try:
             renderer.reset()
-            # 通过 RuntimeService 发送消息并消费事件流
-            async for event in runtime.send_message(
-                current_session_id,
-                UserInput(text=text),
-            ):
-                renderer.handle_event(event)
-
-            # 获取最终的 AssistantMessage
-            renderer.render_final(
-                runtime.get_latest_assistant_message(current_session_id)
-            )
+            await _render_prompt_run(runtime, current_session_id, text, renderer)
         except KeyboardInterrupt:
             # Ctrl+C 取消当前运行，不退出 CLI
             renderer.render_status("Cancelled", kind="cancelled")
@@ -256,6 +296,164 @@ async def run(options: RunOptions) -> None:
     )
 
 
+async def _handle_rpc_request(
+    runtime: RuntimeService,
+    session_id: str,
+    req: Any,
+    emit: RpcEmit,
+) -> bool:
+    """Handle one JSONL RPC request.
+
+    Returns True when the caller should stop reading stdin.
+    """
+
+    if not isinstance(req, dict):
+        emit_rpc_error(
+            emit,
+            req_id=None,
+            command=None,
+            code="invalid_request",
+            message="Request must be object",
+        )
+        return False
+
+    cmd = req.get("type")
+    req_id = req.get("id")
+
+    try:
+        if cmd == "prompt":
+            text = str(req.get("text", ""))
+            async for event in runtime.send_message(
+                session_id,
+                UserInput(text=text),
+            ):
+                emit({"type": "event", "event": event})
+            emit_rpc_ok(emit, req_id=req_id, command="prompt")
+
+        elif cmd == "continue":
+            async for event in runtime.continue_session(session_id):
+                emit({"type": "event", "event": event})
+            emit_rpc_ok(emit, req_id=req_id, command="continue")
+
+        elif cmd == "state":
+            state = runtime.get_session_state(session_id)
+            emit_rpc_ok(
+                emit,
+                req_id=req_id,
+                command="state",
+                data=state,
+            )
+
+        elif cmd == "list_entries":
+            state = runtime.get_session_state(session_id)
+            emit_rpc_ok(
+                emit,
+                req_id=req_id,
+                command="list_entries",
+                data={
+                    "session_id": session_id,
+                    "entry_ids": state["entry_ids"],
+                    "entries": runtime.list_session_entries(session_id),
+                    "leaf_id": state["leaf_id"],
+                },
+            )
+
+        elif cmd == "show_tree":
+            state = runtime.get_session_state(session_id)
+            emit_rpc_ok(
+                emit,
+                req_id=req_id,
+                command="show_tree",
+                data={
+                    "session_id": session_id,
+                    "tree": runtime.get_session_tree(session_id),
+                    "leaf_id": state["leaf_id"],
+                },
+            )
+
+        elif cmd == "entry_path":
+            entry_id = str(req.get("entry_id", ""))
+            if not entry_id:
+                raise ValueError("entry_path requires entry_id")
+            emit_rpc_ok(
+                emit,
+                req_id=req_id,
+                command="entry_path",
+                data={
+                    "session_id": session_id,
+                    "entry_id": entry_id,
+                    "path": runtime.get_entry_path(session_id, entry_id),
+                },
+            )
+
+        elif cmd == "fork_entry":
+            entry_id = str(req.get("entry_id", ""))
+            if not entry_id:
+                raise ValueError("fork_entry requires entry_id")
+            new_session_id = runtime.fork_session(session_id, entry_id)
+            emit_rpc_ok(
+                emit,
+                req_id=req_id,
+                command="fork_entry",
+                data={
+                    "from_session_id": session_id,
+                    "from_entry_id": entry_id,
+                    "new_session_id": new_session_id,
+                },
+            )
+
+        elif cmd == "switch_entry":
+            entry_id = str(req.get("entry_id", ""))
+            if not entry_id:
+                raise ValueError("switch_entry requires entry_id")
+            runtime.switch_entry(session_id, entry_id)
+            emit_rpc_ok(
+                emit,
+                req_id=req_id,
+                command="switch_entry",
+                data={
+                    "session_id": session_id,
+                    "entry_id": entry_id,
+                    "path": runtime.get_entry_path(session_id, entry_id),
+                },
+            )
+
+        elif cmd == "get_commands":
+            emit_rpc_ok(
+                emit,
+                req_id=req_id,
+                command="get_commands",
+                data={
+                    "session_id": session_id,
+                    "commands": runtime.list_commands(session_id),
+                },
+            )
+
+        elif cmd == "shutdown":
+            emit_rpc_ok(emit, req_id=req_id, command="shutdown")
+            return True
+
+        else:
+            emit_rpc_error(
+                emit,
+                req_id=req_id,
+                command=cmd,
+                code="unknown_command",
+                message="Unknown command",
+            )
+
+    except Exception as exc:
+        error = rpc_error_from_exception(exc)
+        emit_rpc_error(
+            emit,
+            req_id=req_id,
+            command=cmd,
+            code=error.code,
+            message=error.message,
+        )
+    return False
+
+
 async def run_rpc(
     runtime: RuntimeService,
     session_id: str,
@@ -268,165 +466,28 @@ async def run_rpc(
     不输出任何人类界面内容，只输出严格 JSONL。
     """
 
-    def _json_default(value: Any) -> Any:
-        if is_dataclass(value):
-            return asdict(value)
-        if isinstance(value, set):
-            return list(value)
-        return str(value)
+    def emit(obj: dict[str, Any]) -> None:
+        output(json.dumps(obj, ensure_ascii=False, default=rpc_json_default))
 
-    def _emit(obj: dict[str, Any]) -> None:
-        output(json.dumps(obj, ensure_ascii=False, default=_json_default))
-
-    def _emit_error(*, req_id: Any, command: Any, code: str, message: str) -> None:
-        _emit({
-            "type": "response",
-            "id": req_id,
-            "command": command,
-            "status": "error",
-            "error": {"code": code, "message": message},
-        })
-
-    def _emit_ok(*, req_id: Any, command: str, data: dict[str, Any] | None = None) -> None:
-        payload: dict[str, Any] = {
-            "type": "response",
-            "id": req_id,
-            "command": command,
-            "status": "ok",
-        }
-        if data is not None:
-            payload["data"] = data
-        _emit(payload)
-
-    # 发送就绪信号
-    _emit({"type": "rpc_ready", "session_id": session_id, "protocol_version": "1.2"})
+    emit_rpc_ready(emit, session_id=session_id)
 
     for raw in sys.stdin:
-            line = raw.strip()
-            if not line:
-                continue
+        line = raw.strip()
+        if not line:
+            continue
 
-            try:
-                req = json.loads(line)
-            except Exception as exc:
-                _emit_error(req_id=None, command=None, code="invalid_json", message=f"Invalid JSON: {exc}")
-                continue
+        try:
+            req = json.loads(line)
+        except Exception as exc:
+            emit_rpc_error(
+                emit,
+                req_id=None,
+                command=None,
+                code="invalid_json",
+                message=f"Invalid JSON: {exc}",
+            )
+            continue
 
-            if not isinstance(req, dict):
-                _emit_error(req_id=None, command=None, code="invalid_request", message="Request must be object")
-                continue
-
-            cmd = req.get("type")
-            req_id = req.get("id")
-
-            try:
-                if cmd == "prompt":
-                    text = str(req.get("text", ""))
-                    async for event in runtime.send_message(
-                        session_id,
-                        UserInput(text=text),
-                    ):
-                        _emit({"type": "event", "event": event})
-                    _emit_ok(req_id=req_id, command="prompt")
-
-                elif cmd == "continue":
-                    async for event in runtime.continue_session(session_id):
-                        _emit({"type": "event", "event": event})
-                    _emit_ok(req_id=req_id, command="continue")
-
-                elif cmd == "state":
-                    state = runtime.get_session_state(session_id)
-                    _emit_ok(
-                        req_id=req_id,
-                        command="state",
-                        data=state,
-                    )
-
-                elif cmd == "list_entries":
-                    state = runtime.get_session_state(session_id)
-                    _emit_ok(
-                        req_id=req_id,
-                        command="list_entries",
-                        data={
-                            "session_id": session_id,
-                            "entry_ids": state["entry_ids"],
-                            "entries": runtime.list_session_entries(session_id),
-                            "leaf_id": state["leaf_id"],
-                        },
-                    )
-
-                elif cmd == "show_tree":
-                    state = runtime.get_session_state(session_id)
-                    _emit_ok(
-                        req_id=req_id,
-                        command="show_tree",
-                        data={
-                            "session_id": session_id,
-                            "tree": runtime.get_session_tree(session_id),
-                            "leaf_id": state["leaf_id"],
-                        },
-                    )
-
-                elif cmd == "entry_path":
-                    entry_id = str(req.get("entry_id", ""))
-                    if not entry_id:
-                        raise ValueError("entry_path requires entry_id")
-                    _emit_ok(
-                        req_id=req_id,
-                        command="entry_path",
-                        data={
-                            "session_id": session_id,
-                            "entry_id": entry_id,
-                            "path": runtime.get_entry_path(session_id, entry_id),
-                        },
-                    )
-
-                elif cmd == "fork_entry":
-                    entry_id = str(req.get("entry_id", ""))
-                    if not entry_id:
-                        raise ValueError("fork_entry requires entry_id")
-                    new_session_id = runtime.fork_session(session_id, entry_id)
-                    _emit_ok(
-                        req_id=req_id,
-                        command="fork_entry",
-                        data={
-                            "from_session_id": session_id,
-                            "from_entry_id": entry_id,
-                            "new_session_id": new_session_id,
-                        },
-                    )
-
-                elif cmd == "switch_entry":
-                    entry_id = str(req.get("entry_id", ""))
-                    if not entry_id:
-                        raise ValueError("switch_entry requires entry_id")
-                    runtime.switch_entry(session_id, entry_id)
-                    _emit_ok(
-                        req_id=req_id,
-                        command="switch_entry",
-                        data={
-                            "session_id": session_id,
-                            "entry_id": entry_id,
-                            "path": runtime.get_entry_path(session_id, entry_id),
-                        },
-                    )
-
-                elif cmd == "get_commands":
-                    _emit_ok(
-                        req_id=req_id,
-                        command="get_commands",
-                        data={
-                            "session_id": session_id,
-                            "commands": runtime.list_commands(session_id),
-                        },
-                    )
-
-                elif cmd == "shutdown":
-                    _emit_ok(req_id=req_id, command="shutdown")
-                    return
-
-                else:
-                    _emit_error(req_id=req_id, command=cmd, code="unknown_command", message="Unknown command")
-
-            except Exception as exc:
-                _emit_error(req_id=req_id, command=cmd, code="execution_error", message=str(exc))
+        should_shutdown = await _handle_rpc_request(runtime, session_id, req, emit)
+        if should_shutdown:
+            return

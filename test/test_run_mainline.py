@@ -206,6 +206,187 @@ def test_retryable_model_error_remains_inside_one_run() -> None:
     asyncio.run(_run_retry_case())
 
 
+def test_model_retry_decision_explains_retry_and_stop_cases() -> None:
+    from codepilot.core import AgentLoopConfig
+    from codepilot.core.run_decisions import decide_model_retry
+    from codepilot.protocols import ErrorInfo
+
+    retryable = ErrorInfo(
+        code="llm.rate_limit",
+        message="rate limited",
+        retryable=True,
+        source="llm",
+    )
+    permanent = ErrorInfo(
+        code="llm.bad_request",
+        message="bad request",
+        retryable=False,
+        source="llm",
+    )
+    config = AgentLoopConfig(
+        model=_model(),
+        convert_to_llm=lambda items: items,
+        retry_base_delay_ms=100,
+        max_model_retries=2,
+    )
+
+    first = decide_model_retry(retryable, retries_so_far=0, config=config)
+    second = decide_model_retry(retryable, retries_so_far=1, config=config)
+    exhausted = decide_model_retry(retryable, retries_so_far=2, config=config)
+    disabled = decide_model_retry(
+        retryable,
+        retries_so_far=0,
+        config=AgentLoopConfig(
+            model=_model(),
+            convert_to_llm=lambda items: items,
+            retry_enabled=False,
+        ),
+    )
+
+    assert first.should_retry is True
+    assert first.next_retry_count == 1
+    assert first.delay_ms == 100
+    assert second.should_retry is True
+    assert second.next_retry_count == 2
+    assert second.delay_ms == 200
+    assert exhausted.should_retry is False
+    assert exhausted.reason == "retry_limit_exhausted"
+    assert disabled.reason == "retry_disabled"
+    assert decide_model_retry(permanent, retries_so_far=0, config=config).reason == (
+        "error_not_retryable"
+    )
+
+
+def test_tool_execution_gate_explains_loop_stop_cases() -> None:
+    from codepilot.core import AgentLoopConfig, RunState
+    from codepilot.core.run_decisions import decide_tool_execution_gate
+    from codepilot.protocols import ToolCall
+
+    config = AgentLoopConfig(
+        model=_model(),
+        convert_to_llm=lambda items: items,
+        repeated_tool_call_limit=1,
+        max_tool_iterations=2,
+    )
+    first_call = [ToolCall(id="read_1", name="read", arguments={"path": "a.py"})]
+    repeated_call = [ToolCall(id="read_2", name="read", arguments={"path": "a.py"})]
+
+    repeated_state = RunState(run_id="run_1", session_id="session_1")
+    assert decide_tool_execution_gate(first_call, repeated_state, config).should_execute
+    repeated = decide_tool_execution_gate(repeated_call, repeated_state, config)
+
+    maxed_state = RunState(run_id="run_2", session_id="session_1")
+    maxed_state.counters.tool_iterations = 2
+    maxed = decide_tool_execution_gate(first_call, maxed_state, config)
+
+    assert repeated.should_execute is False
+    assert repeated.stop_reason == "repeated_tool_call"
+    assert repeated.error_code == "run.repeated_tool_call"
+    assert maxed.should_execute is False
+    assert maxed.stop_reason == "max_iterations"
+    assert maxed.assistant_stop_reason == "max_iterations"
+    assert maxed.error_code == "run.max_iterations"
+
+
+def test_post_tool_run_decision_explains_pause_and_stop_cases() -> None:
+    from codepilot.core.run_decisions import decide_post_tool_run
+    from codepilot.core.task_state import ExecutionDecision
+    from codepilot.protocols import ToolResultMessage
+
+    approval = decide_post_tool_run(
+        [
+            ToolResultMessage(
+                tool_call_id="tool_1",
+                tool_name="write",
+                status="approval_required",
+            )
+        ],
+        task_decision=ExecutionDecision("wait_approval", "approval_required"),
+    )
+    cancelled = decide_post_tool_run(
+        [
+            ToolResultMessage(
+                tool_call_id="tool_2",
+                tool_name="bash",
+                status="cancelled",
+            )
+        ],
+        task_decision=ExecutionDecision("stop", "cancelled"),
+    )
+    revert = decide_post_tool_run(
+        [],
+        task_decision=ExecutionDecision("propose_revert", "repeated_failure_after_change"),
+    )
+    replan_limit = decide_post_tool_run(
+        [],
+        task_decision=ExecutionDecision("stop", "replan_limit_exceeded"),
+    )
+    task_blocked = decide_post_tool_run(
+        [],
+        task_decision=ExecutionDecision("stop", "tool_unavailable"),
+    )
+    keep_going = decide_post_tool_run(
+        [],
+        task_decision=ExecutionDecision("continue", "next_step"),
+    )
+
+    assert approval.should_stop is True
+    assert approval.status == "waiting_approval"
+    assert approval.stop_reason == "approval_required"
+    assert cancelled.status == "aborted"
+    assert cancelled.stop_reason == "aborted"
+    assert revert.status == "waiting_user"
+    assert revert.stop_reason == "task_blocked"
+    assert replan_limit.status == "failed"
+    assert replan_limit.error_code == "run.replan_limit"
+    assert replan_limit.stop_reason == "replan_limit"
+    assert task_blocked.status == "waiting_user"
+    assert task_blocked.stop_reason == "task_blocked"
+    assert keep_going.should_stop is False
+    assert keep_going.reason == "continue"
+
+
+def test_completion_run_decision_explains_continue_wait_and_done_cases() -> None:
+    from codepilot.core.run_decisions import decide_completion_run
+    from codepilot.core.task_state import CompletionCheck
+
+    needs_more_work = decide_completion_run(
+        CompletionCheck(
+            satisfied=False,
+            reason="modified_without_fresh_verification",
+            missing=["fresh_verification"],
+            can_continue=True,
+        )
+    )
+    blocked = decide_completion_run(
+        CompletionCheck(
+            satisfied=False,
+            reason="blocked_steps",
+            missing=["unblocked_steps"],
+        )
+    )
+    incomplete = decide_completion_run(
+        CompletionCheck(
+            satisfied=False,
+            reason="incomplete_steps",
+            missing=["运行测试"],
+        )
+    )
+    done = decide_completion_run(
+        CompletionCheck(satisfied=True, reason="all_steps_completed")
+    )
+
+    assert needs_more_work.action == "continue_with_steering"
+    assert needs_more_work.should_stop is False
+    assert blocked.action == "stop"
+    assert blocked.status == "waiting_user"
+    assert blocked.stop_reason == "task_blocked"
+    assert incomplete.action == "stop"
+    assert incomplete.stop_reason == "task_incomplete"
+    assert done.action == "satisfied"
+    assert done.should_stop is False
+
+
 async def _run_retry_case() -> None:
     from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
     from codepilot.llm.event_stream import AssistantMessageEventStream

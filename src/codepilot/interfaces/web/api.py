@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from codepilot.runtime.service import RuntimeService, UserInput
-from codepilot.runtime.types import CreateAgentSessionOptions
+from codepilot.runtime.service import RuntimeService
+from codepilot.runtime.types import CreateAgentSessionOptions, UserInput
 
 from .event_adapter import agent_event_to_web
 from .schemas import (
@@ -29,7 +29,7 @@ def describe_web_contract() -> dict[str, Any]:
         "transport": ["http", "websocket"],
         "entrypoint": "codepilot.interfaces.web",
         "delegates_to": ["codepilot.runtime", "codepilot.sessions", "codepilot.tools"],
-        "routes": [route.__dict__ for route in web_route_specs()],
+        "routes": [route.to_dict() for route in web_route_specs()],
         "responsibilities": [
             "display_chat_messages",
             "display_tool_events",

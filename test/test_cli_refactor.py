@@ -8,17 +8,19 @@
 - Session 切换
 """
 
+import io
+import json
 import pytest
+import asyncio
 from unittest.mock import MagicMock, AsyncMock
 from pathlib import Path
 
 from codepilot.interfaces.cli.renderer import (
     TerminalRenderer,
-    CliStartupState,
-    build_startup_state,
     SimpleRenderer,
 )
-from codepilot.runtime.service import SessionStatus
+from codepilot.interfaces.cli.startup import CliStartupState, build_startup_state
+from codepilot.runtime.types import SessionStatus
 from codepilot.protocols import AssistantMessage, LLMErrorInfo, TextContent, Usage, Cost
 
 
@@ -304,6 +306,232 @@ class TestSimpleRenderer:
         output.assert_called_with("Hello")
 
 
+def test_render_prompt_run_forwards_events_and_final_message():
+    from codepilot.interfaces.cli.runner import _render_prompt_run
+
+    class FakeRuntime:
+        def __init__(self):
+            self.sent = None
+            self.final_message = AssistantMessage(content=[TextContent(text="done")])
+
+        async def send_message(self, session_id, message):
+            self.sent = (session_id, message.text)
+            yield {"type": "message_update", "delta": "hello"}
+
+        def get_latest_assistant_message(self, session_id):
+            assert session_id == "session_1"
+            return self.final_message
+
+    class FakeRenderer:
+        def __init__(self):
+            self.events = []
+            self.final = None
+
+        def handle_event(self, event):
+            self.events.append(event)
+
+        def render_final(self, message):
+            self.final = message
+
+    runtime = FakeRuntime()
+    renderer = FakeRenderer()
+
+    asyncio.run(_render_prompt_run(runtime, "session_1", "hello", renderer))
+
+    assert runtime.sent == ("session_1", "hello")
+    assert renderer.events == [{"type": "message_update", "delta": "hello"}]
+    assert renderer.final is runtime.final_message
+
+
+def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monkeypatch):
+    from codepilot.interfaces.cli.runner import run_rpc
+    from codepilot.runtime.service import SessionBusyError
+
+    class FakeRuntime:
+        def __init__(self):
+            self.prompt_calls = 0
+
+        async def send_message(self, session_id, message):
+            assert session_id == "session_1"
+            self.prompt_calls += 1
+            if self.prompt_calls == 1:
+                assert message.text == "hello"
+            else:
+                assert message.text == "busy"
+                raise SessionBusyError("Session is already running")
+            yield {"type": "message_update", "delta": "hi"}
+
+        def get_session_state(self, session_id):
+            assert session_id == "session_1"
+            return {
+                "session_id": session_id,
+                "message_count": 2,
+                "entry_ids": ["entry_1"],
+                "leaf_id": "entry_1",
+            }
+
+    stdin = io.StringIO(
+        "\n".join(
+            [
+                json.dumps({"type": "state", "id": "state_1"}),
+                json.dumps({"type": "prompt", "id": "prompt_1", "text": "hello"}),
+                json.dumps({"type": "prompt", "id": "prompt_2", "text": "busy"}),
+                "{not-json",
+                json.dumps({"type": "shutdown", "id": "shutdown_1"}),
+            ]
+        )
+        + "\n"
+    )
+    output: list[str] = []
+    monkeypatch.setattr("sys.stdin", stdin)
+
+    asyncio.run(run_rpc(FakeRuntime(), "session_1", output=output.append))
+
+    messages = [json.loads(line) for line in output]
+    assert messages[0] == {
+        "type": "rpc_ready",
+        "session_id": "session_1",
+        "protocol_version": "1.2",
+    }
+    assert messages[1] == {
+        "type": "response",
+        "id": "state_1",
+        "command": "state",
+        "status": "ok",
+        "data": {
+            "session_id": "session_1",
+            "message_count": 2,
+            "entry_ids": ["entry_1"],
+            "leaf_id": "entry_1",
+        },
+    }
+    assert messages[2] == {
+        "type": "event",
+        "event": {"type": "message_update", "delta": "hi"},
+    }
+    assert messages[3]["command"] == "prompt"
+    assert messages[3]["status"] == "ok"
+    assert messages[4]["status"] == "error"
+    assert messages[4]["command"] == "prompt"
+    assert messages[4]["error"]["code"] == "runtime.session_busy"
+    assert messages[5]["status"] == "error"
+    assert messages[5]["error"]["code"] == "invalid_json"
+    assert messages[6]["command"] == "shutdown"
+    assert messages[6]["status"] == "ok"
+
+
+def test_rpc_ready_signal_uses_named_protocol_version() -> None:
+    from codepilot.interfaces.cli.rpc_protocol import (
+        RPC_PROTOCOL_VERSION,
+        emit_rpc_ready,
+    )
+
+    emitted: list[dict] = []
+    emit_rpc_ready(emitted.append, session_id=" session_1 ")
+
+    assert RPC_PROTOCOL_VERSION == "1.2"
+    assert emitted == [
+        {
+            "type": "rpc_ready",
+            "session_id": "session_1",
+            "protocol_version": "1.2",
+        }
+    ]
+
+    with pytest.raises(ValueError, match="session_id"):
+        emit_rpc_ready(emitted.append, session_id=" ")
+
+
+def test_rpc_ok_response_requires_command_name() -> None:
+    from codepilot.interfaces.cli.rpc_protocol import emit_rpc_ok
+
+    emitted: list[dict] = []
+    emit_rpc_ok(emitted.append, req_id="request_1", command=" state ")
+
+    assert emitted == [
+        {
+            "type": "response",
+            "id": "request_1",
+            "command": "state",
+            "status": "ok",
+        }
+    ]
+
+    with pytest.raises(ValueError, match="command"):
+        emit_rpc_ok(emitted.append, req_id="request_2", command=" ")
+
+
+def test_rpc_error_mapping_uses_runtime_error_codes() -> None:
+    from codepilot.interfaces.cli.rpc_protocol import rpc_error_from_exception
+    from codepilot.runtime.service import SessionBusyError
+
+    runtime_error = SessionBusyError("Session is already running")
+    generic_error = ValueError("missing field")
+
+    assert rpc_error_from_exception(runtime_error).code == "runtime.session_busy"
+    assert rpc_error_from_exception(runtime_error).message == "Session is already running"
+    assert rpc_error_from_exception(generic_error).code == "execution_error"
+    assert rpc_error_from_exception(generic_error).message == "missing field"
+
+
+def test_rpc_error_requires_non_empty_code_and_message() -> None:
+    from codepilot.interfaces.cli.rpc_protocol import RpcError, rpc_error_from_exception
+
+    with pytest.raises(ValueError, match="code"):
+        RpcError(code="  ", message="Something failed")
+
+    with pytest.raises(ValueError, match="message"):
+        RpcError(code="execution_error", message="")
+
+    mapped = rpc_error_from_exception(ValueError())
+
+    assert mapped.code == "execution_error"
+    assert mapped.message == "ValueError"
+
+
+def test_run_options_normalizes_cli_entry_contract() -> None:
+    from codepilot.interfaces.cli.runner import RunOptions
+
+    runtime = object()
+    output = lambda _text: None
+    input_fn = lambda _prompt: "hello"
+
+    options = RunOptions(
+        mode=" print ",  # type: ignore[arg-type]
+        session_id=" session_1 ",
+        runtime=runtime,  # type: ignore[arg-type]
+        output=output,
+        input_fn=input_fn,
+        exit_commands=[" /exit ", " ", "q"],  # type: ignore[arg-type]
+    )
+
+    assert options.mode == "print"
+    assert options.session_id == "session_1"
+    assert options.exit_commands == ("exit", "q")
+
+    with pytest.raises(ValueError, match="mode"):
+        RunOptions(mode="daemon", session_id="session_1", runtime=runtime)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="session_id"):
+        RunOptions(mode="print", session_id=" ", runtime=runtime)
+
+    with pytest.raises(TypeError, match="output"):
+        RunOptions(
+            mode="print",
+            session_id="session_1",
+            runtime=runtime,  # type: ignore[arg-type]
+            output="stdout",  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(TypeError, match="input_fn"):
+        RunOptions(
+            mode="interactive",
+            session_id="session_1",
+            runtime=runtime,  # type: ignore[arg-type]
+            input_fn="stdin",  # type: ignore[arg-type]
+        )
+
+
 # ── CliStartupState 测试 ─────────────────────────────────────────
 
 class TestCliStartupState:
@@ -327,7 +555,7 @@ class TestCliStartupState:
         assert state.workspace == "/path/to/workspace"
         assert state.session_id == "test_session_123"
         assert state.permission_mode == "read-only"
-        assert state.warnings == ["Test warning"]
+        assert state.warnings == ("Test warning",)
 
     def test_build_startup_state_defaults(self):
         """默认使用 Runtime 状态中的警告。"""
@@ -343,7 +571,7 @@ class TestCliStartupState:
 
         state = build_startup_state(status)
 
-        assert state.warnings == ["Runtime warning"]
+        assert state.warnings == ("Runtime warning",)
 
     def test_build_startup_state_explicit_warnings_override_runtime_status(self):
         status = SessionStatus(
@@ -358,7 +586,52 @@ class TestCliStartupState:
 
         state = build_startup_state(status, warnings=[])
 
-        assert state.warnings == []
+        assert state.warnings == ()
+
+    def test_startup_state_normalizes_cli_display_snapshot(self):
+        warnings = [" Runtime warning ", " "]
+        state = CliStartupState(
+            version=" 0.3 ",
+            model_id=" model ",
+            workspace=" /workspace ",
+            session_id=" session_1 ",
+            permission_mode=" read-only ",
+            warnings=warnings,
+        )
+        warnings.append("late warning")
+
+        assert state.version == "0.3"
+        assert state.model_id == "model"
+        assert state.workspace == "/workspace"
+        assert state.session_id == "session_1"
+        assert state.permission_mode == "read-only"
+        assert state.warnings == ("Runtime warning",)
+
+        with pytest.raises(ValueError, match="model_id"):
+            CliStartupState(
+                version="0.3",
+                model_id=" ",
+                workspace="/workspace",
+                session_id="session_1",
+            )
+
+        with pytest.raises(ValueError, match="permission_mode"):
+            CliStartupState(
+                version="0.3",
+                model_id="model",
+                workspace="/workspace",
+                session_id="session_1",
+                permission_mode="admin",
+            )
+
+        with pytest.raises(TypeError, match="warnings"):
+            CliStartupState(
+                version="0.3",
+                model_id="model",
+                workspace="/workspace",
+                session_id="session_1",
+                warnings="warning",  # type: ignore[arg-type]
+            )
 
 
 # ── SessionStatus 测试 ───────────────────────────────────────────

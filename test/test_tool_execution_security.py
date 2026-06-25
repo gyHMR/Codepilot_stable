@@ -60,6 +60,26 @@ def test_permission_policy_uses_mode_and_shell_classification() -> None:
     ).requires_approval
 
 
+def test_permission_policy_owns_mode_invariants() -> None:
+    from codepilot.tools.permissions import PermissionPolicy, ToolRequest
+
+    policy = PermissionPolicy(mode=" ask ")
+    decision = policy.decide(
+        ToolRequest(name="write", metadata=_metadata("write", read_only=False, exclusive=True))
+    )
+
+    assert policy.mode == "ask"
+    assert decision.requires_approval
+    assert decision.reason == "ask_mode"
+
+    read_only_policy = PermissionPolicy(mode="workspace-write", read_only=True)
+
+    assert read_only_policy.mode == "read-only"
+
+    with pytest.raises(ValueError, match="permission mode"):
+        PermissionPolicy(mode="unsafe")  # type: ignore[arg-type]
+
+
 def test_shell_verification_classification_requires_token_boundary() -> None:
     from codepilot.tools.permissions import PermissionPolicy, ToolRequest
 
@@ -83,6 +103,46 @@ def test_shell_verification_classification_requires_token_boundary() -> None:
 
         assert decision.requires_approval
         assert decision.reason == "unknown_shell_command"
+
+
+def test_tool_permission_request_and_decision_own_policy_boundary_invariants() -> None:
+    from codepilot.tools.permissions import ToolDecision, ToolRequest
+
+    params = {"path": "a.txt"}
+    request = ToolRequest(
+        name=" write ",
+        params=params,
+        source=" agent ",
+        metadata=_metadata("write", read_only=False, exclusive=True),
+    )
+    params["path"] = "mutated.txt"
+
+    assert request.name == "write"
+    assert request.source == "agent"
+    assert request.params == {"path": "a.txt"}
+
+    decision = ToolDecision(
+        kind=" approval_required ",
+        reason=" ask_mode ",
+        details={"risk_level": "medium"},
+    )
+
+    assert decision.kind == "approval_required"
+    assert decision.reason == "ask_mode"
+    assert decision.details == {"risk_level": "medium"}
+    assert decision.requires_approval is True
+
+    with pytest.raises(ValueError, match="tool name"):
+        ToolRequest(name="", params={})
+
+    with pytest.raises(TypeError, match="params"):
+        ToolRequest(name="write", params=[])  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="decision kind"):
+        ToolDecision(kind="retry", reason="bad")  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="details"):
+        ToolDecision(kind="allow", details=[])  # type: ignore[arg-type]
 
 
 def test_model_cannot_authorize_dangerous_shell() -> None:
@@ -112,6 +172,238 @@ def test_invalid_permission_regex_is_reported() -> None:
 
 def test_approval_executes_original_request_once() -> None:
     asyncio.run(_approval_case())
+
+
+def test_default_approval_provider_defers_execution_with_approval_id() -> None:
+    asyncio.run(_deferred_approval_provider_case())
+
+
+def test_approval_contracts_normalize_identity_and_preview_fields() -> None:
+    from codepilot.tools.approval import ApprovalDecision, ApprovalRequest
+
+    decision = ApprovalDecision(
+        approved=True,
+        reason=" user_approved ",
+        approval_id=" approval_1 ",
+    )
+
+    assert decision.approved is True
+    assert decision.reason == "user_approved"
+    assert decision.approval_id == "approval_1"
+
+    request = ApprovalRequest(
+        approval_id=" approval_1 ",
+        tool_call_id=" call_1 ",
+        tool_name=" write ",
+        params_preview={"path": "a.txt"},
+        reason=" workspace_write ",
+        risk_level=" high ",
+        capabilities=(" filesystem.write ", "", "filesystem.write"),
+    )
+
+    assert request.approval_id == "approval_1"
+    assert request.tool_call_id == "call_1"
+    assert request.tool_name == "write"
+    assert request.reason == "workspace_write"
+    assert request.risk_level == "high"
+    assert request.capabilities == ("filesystem.write",)
+
+    with pytest.raises(TypeError, match="approved"):
+        ApprovalDecision(approved="yes")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="approval_id"):
+        ApprovalDecision(approved=False, approval_id=" ")
+
+    with pytest.raises(ValueError, match="approval_id"):
+        ApprovalRequest(
+            approval_id="",
+            tool_call_id="call_1",
+            tool_name="write",
+            params_preview={},
+            reason="workspace_write",
+            risk_level="high",
+            capabilities=(),
+        )
+
+    with pytest.raises(ValueError, match="tool_call_id"):
+        ApprovalRequest(
+            approval_id="approval_1",
+            tool_call_id="",
+            tool_name="write",
+            params_preview={},
+            reason="workspace_write",
+            risk_level="high",
+            capabilities=(),
+        )
+
+    with pytest.raises(ValueError, match="tool_name"):
+        ApprovalRequest(
+            approval_id="approval_1",
+            tool_call_id="call_1",
+            tool_name="",
+            params_preview={},
+            reason="workspace_write",
+            risk_level="high",
+            capabilities=(),
+        )
+
+    with pytest.raises(ValueError, match="risk_level"):
+        ApprovalRequest(
+            approval_id="approval_1",
+            tool_call_id="call_1",
+            tool_name="write",
+            params_preview={},
+            reason="workspace_write",
+            risk_level="",
+            capabilities=(),
+        )
+
+
+def test_tool_runtime_request_and_result_own_execution_boundary_invariants() -> None:
+    from codepilot.tools import AgentToolResult, ToolRuntimeRequest, ToolRuntimeResult
+
+    params = {"path": "a.txt"}
+    request = ToolRuntimeRequest(
+        tool_call_id=" call_1 ",
+        name=" write ",
+        params=params,
+        source=" agent ",
+    )
+    params["path"] = "mutated.txt"
+
+    assert request.tool_call_id == "call_1"
+    assert request.name == "write"
+    assert request.source == "agent"
+    assert request.params == {"path": "a.txt"}
+
+    with pytest.raises(ValueError, match="tool_call_id"):
+        ToolRuntimeRequest(tool_call_id="", name="write", params={})
+
+    with pytest.raises(ValueError, match="tool name"):
+        ToolRuntimeRequest(tool_call_id="call_1", name="", params={})
+
+    with pytest.raises(TypeError, match="params"):
+        ToolRuntimeRequest(tool_call_id="call_1", name="write", params=[])  # type: ignore[arg-type]
+
+    result = ToolRuntimeResult(
+        result=AgentToolResult(status="success"),
+        status="denied",
+        is_error=False,
+        approved=False,
+        approval_id=" approval_1 ",
+    )
+
+    assert result.status == "denied"
+    assert result.is_error is True
+    assert result.approval_id == "approval_1"
+
+    with pytest.raises(ValueError, match="Unknown tool result status"):
+        ToolRuntimeResult(result=AgentToolResult(), status="partial")
+
+    with pytest.raises(TypeError, match="AgentToolResult"):
+        ToolRuntimeResult(result="not a result")  # type: ignore[arg-type]
+
+
+def test_agent_tool_owns_executable_definition_invariants() -> None:
+    from codepilot.tools import AgentTool, AgentToolResult
+
+    async def execute(tool_call_id, params, signal=None, on_update=None):
+        _ = tool_call_id, params, signal, on_update
+        return AgentToolResult()
+
+    parameters = {"type": "object", "properties": {"path": {"type": "string"}}}
+    tool = AgentTool(
+        name=" read ",
+        label=" Read file ",
+        description=" Read a workspace file. ",
+        parameters=parameters,
+        execute=execute,
+    )
+    parameters["properties"] = {}
+
+    assert tool.name == "read"
+    assert tool.label == "Read file"
+    assert tool.description == "Read a workspace file."
+    assert tool.parameters == {"type": "object", "properties": {"path": {"type": "string"}}}
+
+    spec = tool.to_spec()
+
+    assert spec.name == "read"
+    assert spec.description == "Read a workspace file."
+    assert spec.parameters == tool.parameters
+
+    with pytest.raises(ValueError, match="tool name"):
+        AgentTool(name="", label="Read", description="Read", parameters={}, execute=execute)
+
+    with pytest.raises(ValueError, match="label"):
+        AgentTool(name="read", label="", description="Read", parameters={}, execute=execute)
+
+    with pytest.raises(ValueError, match="description"):
+        AgentTool(name="read", label="Read", description="", parameters={}, execute=execute)
+
+    with pytest.raises(TypeError, match="parameters"):
+        AgentTool(name="read", label="Read", description="Read", parameters=[], execute=execute)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="execute"):
+        AgentTool(name="read", label="Read", description="Read", parameters={}, execute=None)  # type: ignore[arg-type]
+
+
+def test_tool_registry_owns_tool_metadata_identity_invariants() -> None:
+    from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry
+
+    async def execute(tool_call_id, params, signal=None, on_update=None):
+        _ = tool_call_id, params, signal, on_update
+        return AgentToolResult()
+
+    tool = AgentTool(
+        name="read",
+        label="Read",
+        description="Read a file.",
+        parameters={},
+        execute=execute,
+    )
+    metadata = _metadata("read", read_only=True, exclusive=False)
+
+    registry = ToolRegistry()
+    registry.register(tool, metadata=metadata)
+
+    assert registry.get("read") is tool
+    assert registry.metadata_for("read") is metadata
+    assert registry.list() == [tool]
+    assert registry.list_metadata() == [metadata]
+
+    with pytest.raises(ValueError, match="metadata name"):
+        registry.register(tool, metadata=_metadata("write", read_only=False, exclusive=True))
+
+    with pytest.raises(TypeError, match="AgentTool"):
+        registry.register("not a tool")  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="ToolMetadata"):
+        registry.register(tool, metadata="not metadata")  # type: ignore[arg-type]
+
+
+async def _deferred_approval_provider_case() -> None:
+    from codepilot.tools.approval import DeferredApprovalProvider
+    from codepilot.tools.permissions import ToolDecision
+    from codepilot.tools.types import ToolRuntimeRequest
+
+    provider = DeferredApprovalProvider()
+    decision = ToolDecision(kind="approval_required", reason="workspace_write")
+
+    approval = await provider.request_approval(
+        ToolRuntimeRequest(
+            tool_call_id="call_1",
+            name="write",
+            params={"path": "a.txt", "content": "hello"},
+        ),
+        metadata=None,
+        decision=decision,
+    )
+
+    assert approval.approved is False
+    assert approval.reason == "workspace_write"
+    assert approval.approval_id
+    assert approval.approval_id.startswith("approval_")
 
 
 async def _approval_case() -> None:
@@ -735,6 +1027,16 @@ async def _shell_side_effect_case(tmp_path: Path) -> None:
 
 def test_cli_approval_provider_supports_allow_and_deny() -> None:
     asyncio.run(_cli_approval_case())
+
+
+def test_cli_approval_provider_requires_callable_io() -> None:
+    from codepilot.interfaces.cli.approval import CliApprovalProvider
+
+    with pytest.raises(TypeError, match="input_fn"):
+        CliApprovalProvider(input_fn="stdin")  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="output_fn"):
+        CliApprovalProvider(output_fn="stdout")  # type: ignore[arg-type]
 
 
 async def _cli_approval_case() -> None:

@@ -15,26 +15,26 @@ import logging
 from typing import Callable
 
 from codepilot.llm.overflow import estimate_context_tokens, is_context_overflow
-from codepilot.llm.api_registry import complete_simple
 from codepilot.protocols import (
+    AgentEvent,
     AgentRunResult,
     AssistantMessage,
     Context,
     Message,
-    SimpleStreamOptions,
-    TextContent,
+    ToolCall,
     ToolResultMessage,
-    UserMessage,
 )
-from codepilot.core import Agent, AgentEvent, AgentMessage, AgentOptions, new_run_id
+from codepilot.core import Agent, AgentMessage, AgentOptions, new_run_id
 
 from codepilot.extensions.types import ExtensionLifecycleContext
+from codepilot.tools import AgentTool
 from .context.compaction import (
-    COMPACTION_SYSTEM_PROMPT,
     build_compacted_context,
+    build_llm_compaction_summary,
+    decide_context_compaction,
     fallback_summary,
-    format_messages_for_summary,
 )
+from .context.freshness import build_context_freshness_notice
 from .history.branching import fork_session as branch_fork_session
 from .history.branching import switch_session as branch_switch_session
 from .history.branching import switch_to_entry as branch_switch_to_entry
@@ -49,6 +49,10 @@ from .history.git_rollback import (
 from .history.task_recovery import TaskRecoveryStore
 from .memory import MemoryRetriever, MemoryStore, MemoryWriter
 from .persistence.store import SessionStore, new_session_id
+from .run_reconciliation import (
+    merge_approved_tool_result,
+    replace_pending_tool_result,
+)
 from .types import AgentSessionOptions
 
 logger = logging.getLogger("codepilot.sessions.session")
@@ -228,22 +232,71 @@ class AgentSession:
             继续运行产生的结构化 Run 结果。
         """
         run_id = run_id or new_run_id()
-        rollback_baseline = capture_git_baseline(self.workspace_dir)
-        await self._run_lifecycle_hooks(text="", is_continue=True, hooks=self.before_prompt_hooks)
-        self.agent.set_recovered_task(
-            self._active_task_projection()
+        rollback_baseline = await self._start_run_lifecycle(
+            text="",
+            run_id=run_id,
+            is_continue=True,
         )
-        self._check_context_freshness()
-        await self._check_and_compact_before_prompt()
         result = await self.agent.continue_run(run_id=run_id)
-        self.store.append_run_result(result)
-        self._write_rollback_metadata(result, rollback_baseline)
-        self._finalize_task_recovery(result)
-        if self.memory_enabled:
-            self._finalize_memory(result)
-        await self._compact_context_if_needed()
-        await self._run_lifecycle_hooks(text="", is_continue=True, hooks=self.after_prompt_hooks)
-        return result
+        return await self._complete_run_lifecycle(
+            result,
+            rollback_baseline=rollback_baseline,
+            hook_text="",
+            is_continue=True,
+        )
+
+    async def continue_after_tool_approval(
+        self,
+        *,
+        run_id: str,
+        approved_tool_result: ToolResultMessage,
+        rollback_baseline: GitRollbackBaseline,
+    ) -> AgentRunResult:
+        """Continue a run after Runtime has resolved a pending tool approval.
+
+        Runtime owns the user-facing approval transaction and executes (or
+        denies) the pending tool call.  Session owns the durable run record, so
+        it also owns reconciling that approval tool result into the follow-up
+        ``AgentRunResult`` before the result is persisted and exposed as
+        ``last_run_result``.
+        """
+
+        await self._start_run_lifecycle(
+            text="",
+            run_id=run_id,
+            is_continue=True,
+            rollback_baseline=rollback_baseline,
+        )
+        result = await self.agent.continue_run(run_id=run_id)
+        result = merge_approved_tool_result(result, approved_tool_result)
+        self.agent.replace_last_run_result(result)
+        return await self._complete_run_lifecycle(
+            result,
+            rollback_baseline=rollback_baseline,
+            hook_text="",
+            is_continue=True,
+        )
+
+    async def execute_approved_tool_call(
+        self,
+        *,
+        tool: AgentTool,
+        tool_call: ToolCall,
+        run_id: str,
+    ) -> ToolResultMessage | None:
+        """Execute a previously deferred tool call during approval recovery.
+
+        Runtime decides that a pending approval has been accepted and selects
+        the concrete tool implementation.  Session delegates execution to Agent
+        so the normal before/after tool hooks and tool events still apply.
+        """
+
+        results = await self.agent.execute_tool_call_once(
+            tool=tool,
+            tool_call=tool_call,
+            run_id=run_id,
+        )
+        return results[0] if results else None
 
     async def run(
         self,
@@ -275,35 +328,22 @@ class AgentSession:
             结构化的 Run 结果。
         """
         run_id = run_id or new_run_id()
-        rollback_baseline = capture_git_baseline(self.workspace_dir)
-        await self._run_lifecycle_hooks(
+        rollback_baseline = await self._start_run_lifecycle(
             text=text,
+            run_id=run_id,
             is_continue=False,
-            hooks=self.before_prompt_hooks,
         )
-        if self.memory_enabled:
-            self._remember_task(text, run_id=run_id)
-        self._begin_task_recovery(text, run_id=run_id)
-        self.agent.set_recovered_task(self._active_task_projection())
-        self._check_context_freshness()
-        await self._check_and_compact_before_prompt()
         result = await self.agent.run(
             text,
             images=images,
             run_id=run_id,
         )
-        self.store.append_run_result(result)
-        self._write_rollback_metadata(result, rollback_baseline)
-        self._finalize_task_recovery(result)
-        if self.memory_enabled:
-            self._finalize_memory(result)
-        await self._compact_context_if_needed()
-        await self._run_lifecycle_hooks(
-            text=text,
+        return await self._complete_run_lifecycle(
+            result,
+            rollback_baseline=rollback_baseline,
+            hook_text=text,
             is_continue=False,
-            hooks=self.after_prompt_hooks,
         )
-        return result
 
     def subscribe(self, listener: Callable[[AgentEvent], None]) -> Callable[[], None]:
         """订阅 Agent 事件流。
@@ -404,6 +444,11 @@ class AgentSession:
         """
         return record_checkpoint(self.store, session_id=self.session_id, label=label, details=details)
 
+    def capture_run_rollback_baseline(self) -> GitRollbackBaseline:
+        """Capture the workspace rollback baseline for a run-owned transaction."""
+
+        return capture_git_baseline(self.workspace_dir)
+
     def revert_last_run(self) -> GitRollbackResult:
         """撤销当前会话最近一次支持 Git clean-worktree 回退的 Run。"""
 
@@ -465,6 +510,64 @@ class AgentSession:
             ),
         )
 
+    async def _start_run_lifecycle(
+        self,
+        *,
+        text: str,
+        run_id: str,
+        is_continue: bool,
+        rollback_baseline: GitRollbackBaseline | None = None,
+    ) -> GitRollbackBaseline:
+        """Prepare session-owned state before delegating to the core Agent.
+
+        This is the boundary between application session concerns and the core
+        run loop: hooks, durable memory admission, task recovery projection,
+        context freshness, and context compaction all happen before the Agent
+        asks the model for the next response.
+        """
+
+        rollback_baseline = rollback_baseline or capture_git_baseline(self.workspace_dir)
+        await self._run_lifecycle_hooks(
+            text=text,
+            is_continue=is_continue,
+            hooks=self.before_prompt_hooks,
+        )
+        if not is_continue:
+            if self.memory_enabled:
+                self._admit_prompt_memory(text, run_id=run_id)
+            self._begin_task_recovery(text, run_id=run_id)
+        self.agent.set_task_recovery_projection(self._active_task_recovery_projection())
+        self._check_context_freshness()
+        await self._check_and_compact_before_prompt()
+        return rollback_baseline
+
+    async def _complete_run_lifecycle(
+        self,
+        result: AgentRunResult,
+        *,
+        rollback_baseline: GitRollbackBaseline,
+        hook_text: str,
+        is_continue: bool,
+    ) -> AgentRunResult:
+        """完成一次 run 的会话侧收尾。
+
+        Agent 负责推理和工具执行；Session 负责把结果落盘、更新恢复状态、
+        写入可检索记忆，并在 after hooks 之前保证这些状态已经可观察。
+        """
+
+        self.store.append_run_result(result)
+        self._write_rollback_metadata(result, rollback_baseline)
+        self._finalize_task_recovery(result)
+        if self.memory_enabled:
+            self._finalize_memory(result)
+        await self._compact_context_if_needed()
+        await self._run_lifecycle_hooks(
+            text=hook_text,
+            is_continue=is_continue,
+            hooks=self.after_prompt_hooks,
+        )
+        return result
+
     def replace_tool_result_message(
         self,
         replacement: ToolResultMessage,
@@ -473,36 +576,27 @@ class AgentSession:
     ) -> bool:
         """Replace a pending approval ToolResultMessage in live and persisted context."""
 
-        messages = list(self.agent.state.messages)
-        for index, message in enumerate(messages):
-            if not isinstance(message, ToolResultMessage):
-                continue
-            approval_matches = (
-                bool(approval_id)
-                and message.approval_id == approval_id
-            )
-            call_matches = (
-                message.tool_call_id == replacement.tool_call_id
-                and message.status == "approval_required"
-            )
-            if not approval_matches and not call_matches:
-                continue
-            messages[index] = replacement
-            self.agent.set_messages(messages)
-            self.store.rewrite_context_messages(messages)
-            self.store.rewrite_session_messages(messages)
-            self.store.append_event(
-                {
-                    "type": "tool_approval_result_replaced",
-                    "sessionId": self.session_id,
-                    "approvalId": approval_id or replacement.approval_id,
-                    "toolCallId": replacement.tool_call_id,
-                    "toolName": replacement.tool_name,
-                    "status": replacement.status,
-                }
-            )
-            return True
-        return False
+        messages, replaced = replace_pending_tool_result(
+            list(self.agent.state.messages),
+            replacement,
+            approval_id=approval_id,
+        )
+        if not replaced:
+            return False
+        self.agent.set_messages(messages)
+        self.store.rewrite_context_messages(messages)
+        self.store.rewrite_session_messages(messages)
+        self.store.append_event(
+            {
+                "type": "tool_approval_result_replaced",
+                "sessionId": self.session_id,
+                "approvalId": approval_id or replacement.approval_id,
+                "toolCallId": replacement.tool_call_id,
+                "toolName": replacement.tool_name,
+                "status": replacement.status,
+            }
+        )
+        return True
 
     async def _on_agent_event(self, event: AgentEvent) -> None:
         """Agent 事件回调：将事件持久化到存储，并在消息结束时保存上下文消息。"""
@@ -535,7 +629,7 @@ class AgentSession:
         """为当前会话准备上下文编译函数。
 
         如果 prepare_context 是一个绑定方法（如 ContextCompiler.compile），
-        则克隆其所属实例以实现会话间隔离，并绑定当前会话的 memory_retriever。
+        则为当前会话派生独立编译器，并绑定当前会话的 memory_retriever。
 
         Args:
             prepare_context: 原始的上下文准备函数（可为 None）。
@@ -547,9 +641,9 @@ class AgentSession:
             return None
         # 检测是否为绑定方法（有 __self__ 属性）
         owner = getattr(prepare_context, "__self__", None)
-        if owner is not None and hasattr(owner, "clone"):
-            # 克隆编译器实例，避免多会话共享同一状态
-            owner = owner.clone()
+        if owner is not None and hasattr(owner, "fork_for_session"):
+            # 派生编译器实例，避免多会话共享 active files / evidence。
+            owner = owner.fork_for_session()
             prepare_context = owner.compile
         if (
             self.memory_enabled
@@ -560,10 +654,10 @@ class AgentSession:
             owner.bind_memory_retriever(self.memory_retriever)
         return prepare_context
 
-    def _remember_task(self, text: str, *, run_id: str | None) -> None:
-        """Admit durable memory from the user prompt when policy allows it."""
+    def _admit_prompt_memory(self, text: str, *, run_id: str | None) -> None:
+        """Admit durable project memory from the user prompt when policy allows it."""
         try:
-            record = self.memory_writer.remember_task(text, run_id=run_id)
+            record = self.memory_writer.admit_prompt_memory(text, run_id=run_id)
             if record is None:
                 return
             self.store.append_event(
@@ -575,12 +669,12 @@ class AgentSession:
                 }
             )
         except Exception as exc:
-            logger.warning("failed to remember task: %s", exc)
+            logger.warning("failed to admit prompt memory: %s", exc)
             self.store.append_event(
                 {
                     "type": "memory_warning",
                     "sessionId": self.session_id,
-                    "operation": "remember_task",
+                    "operation": "prompt_memory_admission",
                     "message": str(exc),
                 }
             )
@@ -601,14 +695,14 @@ class AgentSession:
             logger.warning("failed to write task recovery: %s", exc)
             self.store.append_event(
                 {
-                    "type": "memory_warning",
+                    "type": "task_recovery_warning",
                     "sessionId": self.session_id,
                     "operation": "task_recovery_begin",
                     "message": str(exc),
                 }
             )
 
-    def _active_task_projection(self) -> dict[str, object] | None:
+    def _active_task_recovery_projection(self) -> dict[str, object] | None:
         """Return unfinished task recovery state for the next Agent run."""
         projection = self.task_recovery.active_projection()
         return dict(projection) if projection is not None else None
@@ -619,12 +713,11 @@ class AgentSession:
         *,
         run_id: str | None,
     ) -> None:
-        """观察工具结果并更新记忆。
+        """观察工具结果，并让记忆写入器处理持久记忆副作用。
 
-        当工具执行完成时调用，MemoryWriter 会根据工具类型：
-        - read 工具：记录文件摘要
-        - 失败的工具：记录失败教训
-        - 成功的工具：解析之前的失败记录
+        临时文件摘要、工具输出和验证证据属于上下文状态；未完成任务进度
+        属于 TaskRecoveryStore。MemoryWriter 在这里只处理与 durable memory
+        相关的副作用，例如工作区修改后使旧的路径绑定记忆失效。
 
         Args:
             message: 工具结果消息。
@@ -653,13 +746,11 @@ class AgentSession:
             )
 
     def _finalize_memory(self, result: AgentRunResult) -> None:
-        """Run 结束后将结果写入记忆。
+        """Run 结束后提取可复用的 durable memory。
 
-        MemoryWriter.finalize_run() 会更新活跃任务的：
-        - task_progress（completed_steps、pending_steps、blocked_steps）
-        - next_action（下一步建议）
-        - confirmed_findings（已确认的发现）
-        - blocked_on（阻塞原因）
+        Task progress 不写入 durable memory；它由 TaskRecoveryStore 维护。
+        MemoryWriter.finalize_run() 只从已验证的失败-修复-验证闭环中提取
+        可复用经验，避免把一次性的过程状态污染后续检索。
 
         Args:
             result: Agent Run 结果。
@@ -709,7 +800,7 @@ class AgentSession:
             logger.warning("failed to finalize task recovery: %s", exc)
             self.store.append_event(
                 {
-                    "type": "memory_warning",
+                    "type": "task_recovery_warning",
                     "sessionId": self.session_id,
                     "operation": "task_recovery_finalize",
                     "message": str(exc),
@@ -723,7 +814,7 @@ class AgentSession:
         steering message 提醒 Agent 重新读取相关文件，避免基于过时信息推理。
         """
         freshness = self.store.run_store.evaluate_freshness()
-        if not freshness.checked_paths and freshness.status == "valid":
+        if not freshness.should_record_event():
             return
         payload = freshness.to_event_payload()
         self.store.append_event(
@@ -733,23 +824,11 @@ class AgentSession:
                 "freshness": payload,
             }
         )
-        if freshness.status == "valid":
+        if not freshness.requires_steering():
             return
-        lines = [
-            "[Context Freshness]",
-            f"status={freshness.status}",
-        ]
-        if freshness.changed_paths:
-            lines.append("changed_files=" + ", ".join(freshness.changed_paths))
-        if freshness.missing_paths:
-            lines.append("missing_files=" + ", ".join(freshness.missing_paths))
-        lines.append("旧工具结果可能已过期；依赖这些文件前请重新读取。")
-        self.agent.add_steering_message(
-            UserMessage(
-                content=[TextContent(text="\n".join(lines))],
-                metadata={"context_freshness": payload},
-            )
-        )
+        notice = build_context_freshness_notice(freshness)
+        if notice is not None:
+            self.agent.add_steering_message(notice)
 
     async def _run_lifecycle_hooks(
         self,
@@ -816,24 +895,21 @@ class AgentSession:
         Args:
             force: 是否强制执行压缩（忽略阈值判断）。
         """
-        max_messages = self.max_context_messages
-        max_tokens = self.max_context_tokens
-        over_message_limit = bool(max_messages and max_messages > 0 and len(self.agent.state.messages) > max_messages)
-        estimated_tokens = estimate_context_tokens(self.agent.state.messages, self.agent.state.system_prompt)
-        over_token_limit = bool(max_tokens and max_tokens > 0 and estimated_tokens > max_tokens)
-
-        # 未触发任何压缩条件，直接返回
-        if not force and not over_message_limit and not over_token_limit:
-            return
-
         messages = list(self.agent.state.messages)
-        # 至少保留 2 条消息，最多保留 retain_recent_messages 条
-        retain = max(2, min(self.retain_recent_messages, len(messages) - 1))
-        if len(messages) <= retain:
+        estimated_tokens = estimate_context_tokens(messages, self.agent.state.system_prompt)
+        decision = decide_context_compaction(
+            message_count=len(messages),
+            estimated_tokens=estimated_tokens,
+            max_context_messages=self.max_context_messages,
+            max_context_tokens=self.max_context_tokens,
+            retain_recent_messages=self.retain_recent_messages,
+            force=force,
+        )
+        if not decision.should_compact:
             return
 
         # 分割：旧消息（待压缩）和近期消息（保留原样）
-        older = messages[:-retain]
+        older = messages[:-decision.retain_recent_messages]
 
         # 生成摘要：优先使用自定义构建器，否则调用 LLM
         if self.summary_builder:
@@ -843,14 +919,13 @@ class AgentSession:
 
         # LLM 摘要失败时，使用基于规则的降级摘要
         if not summary_text:
-            summary_text = self._fallback_summary(older)
+            summary_text = fallback_summary(older)
 
-        reason = "overflow" if force else ("token_threshold" if over_token_limit else "message_threshold")
         compacted_context = build_compacted_context(
             messages=messages,
             summary_text=summary_text,
-            retain_recent_messages=self.retain_recent_messages,
-            reason=reason,
+            retain_recent_messages=decision.retain_recent_messages,
+            reason=decision.reason,
             system_prompt=self.agent.state.system_prompt,
         )
 
@@ -864,9 +939,9 @@ class AgentSession:
                 "sessionId": self.session_id,
                 "before_count": len(messages),
                 "after_count": len(compacted_context.messages),
-                "retained_recent": retain,
-                "estimated_tokens_before": estimated_tokens,
-                "reason": reason,
+                "retained_recent": decision.retain_recent_messages,
+                "estimated_tokens_before": decision.estimated_tokens,
+                "reason": decision.reason,
                 "report": compacted_context.report,
             }
         )
@@ -884,41 +959,8 @@ class AgentSession:
         Returns:
             生成的摘要文本；失败时返回空字符串。
         """
-        formatted = self._format_messages_for_summary(messages)
-        if not formatted.strip():
-            return ""
-
-        try:
-            summary_context = Context(
-                messages=[UserMessage(content=f"请压缩以下对话历史为简明摘要：\n\n{formatted}")],
-                system_prompt=COMPACTION_SYSTEM_PROMPT,
-            )
-            model = self.agent.state.model
-            api_key = None
-            if self.get_api_key is not None:
-                value = self.get_api_key(model.provider)
-                api_key = await value if inspect.isawaitable(value) else value
-            result = await complete_simple(
-                model,
-                summary_context,
-                SimpleStreamOptions(max_tokens=2000, api_key=api_key),
-            )
-            text_parts = [b.text for b in result.content if isinstance(b, TextContent)]
-            summary = "\n".join(text_parts).strip()
-            if summary:
-                logger.info("LLM compaction summary generated chars=%d", len(summary))
-                return summary
-        except Exception as exc:
-            logger.warning("LLM compaction failed, using fallback: %s", exc)
-
-        return ""
-
-    @staticmethod
-    def _format_messages_for_summary(messages: list[Message]) -> str:
-        """将消息列表格式化为供摘要使用的文本格式。"""
-        return format_messages_for_summary(messages)
-
-    @staticmethod
-    def _fallback_summary(messages: list[Message]) -> str:
-        """当 LLM 摘要不可用时，使用基于规则的方式生成降级摘要。"""
-        return fallback_summary(messages)
+        return await build_llm_compaction_summary(
+            messages,
+            model=self.agent.state.model,
+            get_api_key=self.get_api_key,
+        )

@@ -8,8 +8,11 @@ from .api import WebConsoleBackend, describe_web_contract, web_route_specs
 from .app import create_web_app
 from .event_adapter import agent_event_to_web, error_to_web
 from .schemas import (
+    ApprovalDecision,
     WebCreateSessionRequest,
+    WebErrorPayload,
     WebEventEnvelope,
+    WebEventKind,
     WebPromptRequest,
     WebRouteSpec,
     WebSessionRef,
@@ -20,8 +23,11 @@ from .websocket import WebSocketSessionStream
 
 __all__ = [
     "WebConsoleBackend",
+    "ApprovalDecision",
     "WebCreateSessionRequest",
+    "WebErrorPayload",
     "WebEventEnvelope",
+    "WebEventKind",
     "WebPromptRequest",
     "WebRouteSpec",
     "WebSessionRef",

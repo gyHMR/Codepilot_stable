@@ -3,6 +3,7 @@ from __future__ import annotations
 """从用户提示、工具结果和 Run 结果中写入结构化记忆。"""
 
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from codepilot.protocols import AgentRunResult, ToolResultMessage
@@ -12,6 +13,54 @@ from .experience import ExperienceExtractor, MemoryConsolidator
 from .files import sanitize_memory_text
 from .records import MemoryRecord, MemoryStatus
 from .store import MemoryStore
+
+
+PROJECT_CONSTRAINT_KNOWLEDGE = (
+    "Codepilot 是学生学习与求职展示项目；后续设计应优先保持清晰、"
+    "可解释、可演示，避免生产级复杂平台化。"
+)
+
+
+@dataclass(frozen=True)
+class MemoryAdmissionDecision:
+    """Decision about whether a user prompt should become durable memory."""
+
+    should_store: bool
+    reason: str
+    scope: str | None = None
+    category: str | None = None
+    knowledge: str | None = None
+
+
+def decide_prompt_memory_admission(text: str) -> MemoryAdmissionDecision:
+    """Decide whether prompt text contains durable project knowledge.
+
+    The writer intentionally rejects ordinary task prompts. The only prompt-time
+    durable memory currently admitted is a user-stated project constraint that
+    changes how future design decisions should be made.
+    """
+
+    safe_text = sanitize_memory_text(text, limit=1200)
+    if not safe_text:
+        return MemoryAdmissionDecision(False, "empty_after_sanitization")
+    markers = ("学生", "求职", "学习", "生产级", "过度设计", "复杂设计")
+    if not any(marker in safe_text for marker in markers):
+        return MemoryAdmissionDecision(False, "ordinary_task_prompt")
+    if (
+        "生产级" not in safe_text
+        and "过度设计" not in safe_text
+        and "复杂设计" not in safe_text
+    ):
+        return MemoryAdmissionDecision(False, "mentions_project_without_design_constraint")
+    if not _expresses_non_production_constraint(safe_text):
+        return MemoryAdmissionDecision(False, "mentions_production_without_constraint")
+    return MemoryAdmissionDecision(
+        should_store=True,
+        reason="durable_project_constraint",
+        scope="project",
+        category="project_constraint",
+        knowledge=PROJECT_CONSTRAINT_KNOWLEDGE,
+    )
 
 
 class MemoryWriter:
@@ -26,14 +75,23 @@ class MemoryWriter:
         self.store = store
         self.workspace_dir = Path(workspace_dir)
 
-    def remember_task(self, text: str, *, run_id: str | None = None) -> MemoryRecord | None:
+    def admit_prompt_memory(
+        self,
+        text: str,
+        *,
+        run_id: str | None = None,
+    ) -> MemoryRecord | None:
         """Admit durable user-provided project knowledge from a prompt.
 
         Ordinary task progress is intentionally not stored as durable memory.
         Session task recovery is handled by ``TaskRecoveryStore``.
         """
-        safe_text = sanitize_memory_text(text, limit=1200)
-        return self._maybe_remember_project_constraint(safe_text, run_id=run_id)
+        decision = decide_prompt_memory_admission(text)
+        if not decision.should_store:
+            return None
+        if decision.category == "project_constraint" and decision.knowledge is not None:
+            return self._upsert_prompt_project_constraint(decision, run_id=run_id)
+        return None
 
     def observe_tool_result(
         self,
@@ -79,23 +137,17 @@ class MemoryWriter:
         )
         return self.store.update(record)
 
-    def _maybe_remember_project_constraint(
+    def _upsert_prompt_project_constraint(
         self,
-        text: str,
+        decision: MemoryAdmissionDecision,
         *,
         run_id: str | None,
     ) -> MemoryRecord | None:
-        markers = ("学生", "求职", "学习", "生产级", "过度设计", "复杂设计")
-        if not any(marker in text for marker in markers):
+        """Upsert the currently supported prompt-time project constraint."""
+
+        if decision.category != "project_constraint" or decision.knowledge is None:
             return None
-        if "生产级" not in text and "过度设计" not in text and "复杂设计" not in text:
-            return None
-        if not _expresses_non_production_constraint(text):
-            return None
-        knowledge = (
-            "Codepilot 是学生学习与求职展示项目；后续设计应优先保持清晰、"
-            "可解释、可演示，避免生产级复杂平台化。"
-        )
+        knowledge = decision.knowledge
         for record in self.store.load_project():
             if (
                 record.kind == "project"
@@ -197,4 +249,8 @@ def _expresses_non_production_constraint(text: str) -> bool:
     return any(marker in text for marker in negative_markers)
 
 
-__all__ = ["MemoryWriter"]
+__all__ = [
+    "MemoryAdmissionDecision",
+    "MemoryWriter",
+    "decide_prompt_memory_admission",
+]

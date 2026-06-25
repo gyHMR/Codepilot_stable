@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -11,9 +13,9 @@ if str(SRC) not in sys.path:
 
 
 def test_session_store_persists_messages_forks_and_summarizes_events(tmp_path: Path) -> None:
-    from codepilot.core import AgentToolResult
     from codepilot.protocols import AssistantMessage, Cost, TextContent, Usage, UserMessage
     from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.tools import AgentToolResult
 
     store = SessionStore(tmp_path, "session_test")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
@@ -198,6 +200,61 @@ def test_session_store_persists_run_results(tmp_path: Path) -> None:
     freshness = run_store.evaluate_freshness()
     assert freshness.status == "stale"
     assert freshness.changed_paths == ["a.py"]
+
+
+def test_freshness_result_names_event_and_steering_policy() -> None:
+    from codepilot.sessions.persistence import FreshnessResult
+
+    no_tracked_files = FreshnessResult(status="valid")
+    checked_and_valid = FreshnessResult(status="valid", checked_paths=["src/a.py"])
+    stale = FreshnessResult(status="stale", changed_paths=["src/a.py"])
+
+    assert no_tracked_files.should_record_event() is False
+    assert no_tracked_files.requires_steering() is False
+    assert checked_and_valid.should_record_event() is True
+    assert checked_and_valid.requires_steering() is False
+    assert stale.should_record_event() is True
+    assert stale.requires_steering() is True
+
+
+def test_freshness_result_rejects_unknown_status() -> None:
+    from codepilot.sessions.persistence import FreshnessResult
+
+    with pytest.raises(ValueError, match="Unknown freshness status"):
+        FreshnessResult(status="unknown")
+
+
+def test_tool_result_message_rejects_unknown_status_but_serde_coerces_legacy() -> None:
+    from codepilot.protocols import ToolResultMessage
+    from codepilot.sessions.persistence.serde import message_from_dict
+
+    with pytest.raises(ValueError, match="Unknown tool result status"):
+        ToolResultMessage(status="interrupted")
+
+    restored = message_from_dict(
+        {
+            "role": "toolResult",
+            "tool_call_id": "tool_1",
+            "tool_name": "legacy",
+            "content": [],
+            "status": "interrupted",
+            "is_error": True,
+        }
+    )
+
+    assert isinstance(restored, ToolResultMessage)
+    assert restored.status == "error"
+    assert restored.is_error is True
+
+
+def test_tool_result_message_keeps_status_and_error_flag_consistent() -> None:
+    from codepilot.protocols import ToolResultMessage
+
+    denied = ToolResultMessage(status="denied")
+    failed = ToolResultMessage(is_error=True)
+
+    assert denied.is_error is True
+    assert failed.status == "error"
 
 
 def test_observability_builds_run_summary_and_report_from_run_result() -> None:

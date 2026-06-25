@@ -296,4 +296,10 @@ def _build_config_sources(raw_sources: dict[str, str]) -> dict[str, ConfigValueS
         "workspace": ConfigValueSource(kind="project", location=".codepilot/settings.json"),
         "default": ConfigValueSource(kind="default"),
     }
-    return {key: source_map.get(value, ConfigValueSource(kind=value)) for key, value in raw_sources.items()}
+    sources: dict[str, ConfigValueSource] = {}
+    for key, value in raw_sources.items():
+        try:
+            sources[key] = source_map[value]
+        except KeyError as exc:
+            raise ValueError(f"Unknown runtime config source: {value}") from exc
+    return sources

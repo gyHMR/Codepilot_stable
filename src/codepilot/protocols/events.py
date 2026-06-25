@@ -14,7 +14,7 @@ from __future__ import annotations
 - 各具体事件类型继承自 AgentEventBase，通过 type 字段区分
 """
 
-from typing import Any, Awaitable, Callable, Literal, TypedDict
+from typing import Any, Awaitable, Callable, Literal, TypedDict, cast
 
 from .errors import ErrorInfo
 from .llm import LLMStreamEvent
@@ -37,14 +37,78 @@ RuntimeEventType = Literal[
     "tool_execution_update",     # 工具执行增量更新
     "tool_approval_required",    # 工具调用需要审批
     "tool_approval_resolved",    # 工具调用审批已解决
+    "tool_approval_decision",    # 用户提交了工具审批决策
+    "tool_approval_result_replaced",  # 审批恢复替换了 pending 工具结果
     "tool_execution_end",        # 工具执行结束
+    "context_prepared",          # 模型调用前上下文已编译
+    "context_freshness_checked", # 上下文新鲜度已检查
+    "context_compacted",         # 会话上下文已压缩
+    "memory_retrieved",          # 长期记忆已检索
+    "memory_created",            # 用户命令创建了记忆
+    "memory_promoted",           # 用户命令提升了记忆
+    "memory_invalidated",        # 用户命令废弃了记忆
+    "memory_updated",            # 运行收尾写入了记忆
+    "memory_warning",            # 记忆流程产生警告
     "task_plan_created",         # 任务计划已创建
     "task_step_updated",         # 任务步骤状态已更新
     "task_decision",             # 任务控制器做出执行决策
+    "task_recovery_updated",     # 会话任务恢复投影已更新
+    "task_recovery_warning",     # 任务恢复流程产生警告
     "completion_checked",        # 完成门槛检查结果
     "file_diff",                 # 文件变更差异
     "error",                     # 错误事件
 ]
+_RUNTIME_EVENT_TYPES = frozenset(
+    {
+        "agent_start",
+        "agent_end",
+        "turn_start",
+        "turn_end",
+        "message_start",
+        "message_update",
+        "message_end",
+        "model_retry_start",
+        "tool_execution_start",
+        "tool_execution_update",
+        "tool_approval_required",
+        "tool_approval_resolved",
+        "tool_approval_decision",
+        "tool_approval_result_replaced",
+        "tool_execution_end",
+        "context_prepared",
+        "context_freshness_checked",
+        "context_compacted",
+        "memory_retrieved",
+        "memory_created",
+        "memory_promoted",
+        "memory_invalidated",
+        "memory_updated",
+        "memory_warning",
+        "task_plan_created",
+        "task_step_updated",
+        "task_decision",
+        "task_recovery_updated",
+        "task_recovery_warning",
+        "completion_checked",
+        "file_diff",
+        "error",
+    }
+)
+
+
+def ensure_runtime_event_type(value: object) -> RuntimeEventType:
+    """校验并清洗运行时事件类型。
+
+    事件对象仍然使用 TypedDict 表达开放载荷；这里保护的是最基础的
+    分发字段，确保 core/runtime/interface 都能按同一份事件词表处理。
+    """
+
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        raise ValueError("runtime event type cannot be empty")
+    if text not in _RUNTIME_EVENT_TYPES:
+        raise ValueError(f"Unknown runtime event type: {value}")
+    return cast(RuntimeEventType, text)
 
 
 class AgentEventBase(TypedDict):
@@ -291,6 +355,7 @@ __all__ = [
     "AgentStartEvent",
     "ErrorEvent",
     "EventEnvelope",
+    "ensure_runtime_event_type",
     "MessageEndEvent",
     "MessageStartEvent",
     "MessageUpdateEvent",

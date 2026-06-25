@@ -12,6 +12,15 @@ class ToolRegistry:
     _metadata: dict[str, ToolMetadata] = field(default_factory=dict) # 名称 -> 元数据
 
     def register(self, tool: AgentTool, *, metadata: ToolMetadata | None = None, replace: bool = True) -> None:
+        if not isinstance(tool, AgentTool):
+            raise TypeError("ToolRegistry.register expects an AgentTool")
+        if metadata is not None:
+            if not isinstance(metadata, ToolMetadata):
+                raise TypeError("ToolRegistry metadata must be ToolMetadata")
+            if metadata.name != tool.name:
+                raise ValueError(
+                    f"Tool metadata name must match tool name: {metadata.name} != {tool.name}"
+                )
         if not replace and tool.name in self._tools:
             raise ValueError(f"Tool already registered: {tool.name}")
         self._tools[tool.name] = tool

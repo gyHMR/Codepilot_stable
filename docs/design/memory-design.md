@@ -43,7 +43,7 @@ Memory V2 默认只召回 durable memory：
 
 ### 3.1 用户输入
 
-普通用户任务不会创建 `task` memory。`MemoryWriter.remember_task()` 只保留兼容名称，实际只在用户明确表达项目约束时写入 project memory。
+普通用户任务不会创建 `task` memory。`MemoryWriter.admit_prompt_memory()` 只在用户明确表达项目约束时写入 project memory，任务进展交给 `TaskRecoveryStore`。
 
 例如：
 

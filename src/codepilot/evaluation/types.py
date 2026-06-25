@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from codepilot.observability import AuditBundle
-from codepilot.runtime import CreateAgentSessionOptions
+from codepilot.runtime.types import CreateAgentSessionOptions
 
 
 # 评估领域

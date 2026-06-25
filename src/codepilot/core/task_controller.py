@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, cast
 
 from codepilot.protocols import TaskSummary, TextContent, ToolResultMessage, UserMessage
 
@@ -21,8 +21,10 @@ from .task_state import (
     CompletionCheck,
     ExecutionDecision,
     ReplanRecord,
+    TASK_STEP_KINDS,
     TaskState,
     TaskStep,
+    TaskStepKind,
 )
 from .types import AgentMessage
 
@@ -44,11 +46,14 @@ class TaskController:
         goal: str | None = None,
         acceptance_criteria: Iterable[str] | None = None,
         constraints: Iterable[str] | None = None,
-        recovered_task: Mapping[str, object] | None = None,
+        task_recovery_projection: Mapping[str, object] | None = None,
     ) -> TaskState:
         """初始化任务状态：从用户消息中提取目标，生成初始步骤。"""
-        if recovered_task is not None:
-            recovered = self._from_recovered_task(prompts, recovered_task)
+        if task_recovery_projection is not None:
+            recovered = build_task_state_from_recovery_projection(
+                prompts,
+                task_recovery_projection,
+            )
             if recovered is not None:
                 return recovered
         goal = (goal or _goal_from_prompts(prompts)).strip() or "完成当前请求"
@@ -66,81 +71,7 @@ class TaskController:
             next_action=steps[0].title if steps else None,
         )
         if steps:
-            steps[0].status = "in_progress"
-        return task
-
-    def _from_recovered_task(
-        self,
-        prompts: Iterable[AgentMessage],
-        recovered_task: Mapping[str, object],
-    ) -> TaskState | None:
-        """从恢复的任务记忆中重建 TaskState（用于会话恢复场景）。"""
-        progress = recovered_task.get("task_progress")
-        if not isinstance(progress, Mapping):
-            return None
-        goal = str(recovered_task.get("goal") or _goal_from_prompts(prompts)).strip()
-        if not goal:
-            goal = _goal_from_prompts(prompts)
-        steps: list[TaskStep] = []
-        seen: set[str] = set()
-        details = progress.get("step_details")
-        step_details = details if isinstance(details, Mapping) else {}
-
-        def add_steps(raw: object, status: str) -> None:
-            if not isinstance(raw, list):
-                return
-            for value in raw:
-                title = " ".join(str(value).strip().split())
-                if not title or title in seen:
-                    continue
-                seen.add(title)
-                raw_detail = step_details.get(title)
-                detail = raw_detail if isinstance(raw_detail, Mapping) else {}
-                steps.append(
-                    TaskStep(
-                        id=f"step_{len(steps) + 1}",
-                        title=title[:_MAX_STEP_TITLE_CHARS],
-                        status=status,  # type: ignore[arg-type]
-                        kind=str(detail.get("kind") or "other"),
-                        acceptance=(
-                            str(detail.get("acceptance"))
-                            if detail.get("acceptance") is not None
-                            else None
-                        ),
-                        verification_hint=(
-                            str(detail.get("verification_hint"))
-                            if detail.get("verification_hint") is not None
-                            else None
-                        ),
-                    )
-                )
-                if len(steps) >= _MAX_STEPS:
-                    return
-
-        add_steps(progress.get("completed_steps"), "completed")
-        add_steps(progress.get("blocked_steps"), "blocked")
-        add_steps(progress.get("pending_steps"), "pending")
-        if not steps:
-            return None
-        current = next(
-            (step for step in steps if step.status == "pending"),
-            None,
-        )
-        if current is not None:
-            current.status = "in_progress"
-        next_action = recovered_task.get("next_action")
-        task = TaskState(
-            task_id=f"task_{uuid.uuid4().hex[:12]}",
-            goal=goal,
-            steps=steps,
-            current_step_id=current.id if current else None,
-            phase="acting" if current else "waiting",
-            next_action=str(next_action) if isinstance(next_action, str) and next_action else (
-                current.title if current else None
-            ),
-            completion_satisfied=bool(progress.get("completion_satisfied", False)),
-            completion_reason=str(progress.get("completion_reason", "")),
-        )
+            steps[0].mark_in_progress()
         return task
 
     def after_tool_results(
@@ -186,11 +117,12 @@ class TaskController:
             result for result in results if _is_tool_unavailable(result)
         ]
         if unavailable:
-            step = self._current_step(task)
+            step = task.current_step()
             if step is not None:
-                step.status = "blocked"
-                step.note = "工具不可用"
-                step.evidence_refs.extend(_evidence_refs(unavailable))
+                step.block(
+                    "工具不可用",
+                    evidence_refs=_evidence_refs(unavailable),
+                )
             task.phase = "waiting"
             task.next_action = "报告工具不可用并等待用户指示"
             task.recent_error_code = "tool_not_found"
@@ -198,28 +130,28 @@ class TaskController:
             return self._decision(task, "stop", "tool_unavailable")
 
         if self._has_non_verification_error(results):
-            step = self._current_step(task)
+            step = task.current_step()
             task.action_intent = "debug_failure"
             task.recent_error_code = _first_error_code(results) or "tool_error"
             task.recent_failure_type = "tool_error"
             if step is not None:
-                step.failure_count += 1
-                step.status = "in_progress"
-                step.note = "工具执行失败，需要修复或调整方案"
-                step.evidence_refs.extend(_evidence_refs(results))
+                step.record_failure(
+                    "工具执行失败，需要修复或调整方案",
+                    evidence_refs=_evidence_refs(results),
+                )
             return self._decision(task, "repair", "tool_error")
 
         if self._has_failed_verification(results):
-            step = self._current_step(task)
+            step = task.current_step()
             task.action_intent = "debug_failure"
             task.recent_error_code = "verification_failed"
             task.recent_failure_type = "verification_failed"
             self._mark_latest_changes_failed(task, results)
             if step is not None:
-                step.failure_count += 1
-                step.status = "in_progress"
-                step.note = "验证失败，需要修复"
-                step.evidence_refs.extend(_evidence_refs(results))
+                step.record_failure(
+                    "验证失败，需要修复",
+                    evidence_refs=_evidence_refs(results),
+                )
                 if step.failure_count >= 2:
                     if task.change_sets:
                         self._mark_rollback_required(task)
@@ -237,8 +169,7 @@ class TaskController:
                             "repeated_failure_after_change",
                         )
                     if task.replan_count >= task.max_replans_per_run:
-                        step.status = "blocked"
-                        step.note = "连续失败且已达到重新规划上限"
+                        step.block("连续失败且已达到重新规划上限")
                         task.phase = "waiting"
                         task.next_action = "报告连续失败并等待用户指示"
                         return self._decision(task, "stop", "replan_limit_exceeded")
@@ -268,7 +199,7 @@ class TaskController:
 
     def check_completion(self, task: TaskState, run: RunState) -> CompletionCheck:
         """检查任务是否完成：验证阻塞步骤、工作区变更、未完成步骤等条件。"""
-        if any(step.status == "blocked" for step in task.steps):
+        if task.blocked_step_titles():
             check = CompletionCheck(
                 satisfied=False,
                 reason="blocked_steps",
@@ -292,22 +223,12 @@ class TaskController:
             self._record_completion(task, check)
             return check
 
-        incomplete = [
-            step.title
-            for step in task.steps
-            if step.status not in {"completed", "blocked"}
-        ]
+        incomplete = task.pending_step_titles()
         if incomplete and not run.workspace_changed and task.recent_error_code is None:
             for step in task.steps:
                 if step.status == "in_progress":
-                    step.status = "completed"
-                    if not step.evidence_refs:
-                        step.evidence_refs.append("model:final_answer")
-            incomplete = [
-                step.title
-                for step in task.steps
-                if step.status not in {"completed", "blocked"}
-            ]
+                    step.complete(evidence_refs=["model:final_answer"])
+            incomplete = task.pending_step_titles()
 
         if incomplete:
             check = CompletionCheck(
@@ -371,7 +292,7 @@ class TaskController:
                 detail_parts.append(f"Summary: {step.summary}")
             if detail_parts != ["Kind: other"]:
                 lines.append("  - " + "; ".join(detail_parts))
-        current = self._current_step(task)
+        current = task.current_step()
         if current is not None:
             lines.append("")
             lines.append(f"Current step: {current.title}")
@@ -403,15 +324,9 @@ class TaskController:
         return TaskSummary(
             task_id=task.task_id,
             goal=task.goal,
-            completed_steps=[
-                step.title for step in task.steps if step.status == "completed"
-            ],
-            pending_steps=[
-                step.title for step in task.steps if step.status in {"pending", "in_progress"}
-            ],
-            blocked_steps=[
-                step.title for step in task.steps if step.status == "blocked"
-            ],
+            completed_steps=task.completed_step_titles(),
+            pending_steps=task.pending_step_titles(),
+            blocked_steps=task.blocked_step_titles(),
             next_action=task.next_action,
             completion_satisfied=task.completion_satisfied,
             completion_reason=task.completion_reason,
@@ -436,7 +351,7 @@ class TaskController:
 
     def control_signal(self, task: TaskState) -> dict[str, object]:
         """输出给上下文与记忆模块的轻量任务控制信号。"""
-        current = self._current_step(task)
+        current = task.current_step()
         return {
             "task_id": task.task_id,
             "phase": task.phase,
@@ -482,26 +397,6 @@ class TaskController:
             steps.append(TaskStep(id="step_1", title="完成当前请求"))
         return steps
 
-    def _current_step(self, task: TaskState) -> TaskStep | None:
-        """获取当前正在执行的步骤。"""
-        if task.current_step_id is None:
-            return None
-        return next(
-            (step for step in task.steps if step.id == task.current_step_id),
-            None,
-        )
-
-    def _advance(self, task: TaskState) -> None:
-        """推进到下一个待处理步骤。"""
-        for step in task.steps:
-            if step.status in {"pending", "in_progress"}:
-                step.status = "in_progress"
-                task.current_step_id = step.id
-                task.next_action = step.title
-                return
-        task.current_step_id = None
-        task.next_action = None
-
     def _block_current_step(
         self,
         task: TaskState,
@@ -510,13 +405,9 @@ class TaskController:
         evidence_refs: list[str] | None = None,
     ) -> None:
         """将当前步骤标记为阻塞状态。"""
-        step = self._current_step(task)
+        step = task.current_step()
         if step is not None:
-            step.status = "blocked"
-            step.note = note
-            for ref in evidence_refs or []:
-                if ref not in step.evidence_refs:
-                    step.evidence_refs.append(ref)
+            step.block(note, evidence_refs=evidence_refs)
 
     def _replan_after_failure(
         self,
@@ -525,7 +416,7 @@ class TaskController:
     ) -> None:
         """失败后重新规划：保留已完成步骤，替换当前和后续步骤。"""
         task.replan_count += 1
-        current = self._current_step(task)
+        current = task.current_step()
         if current is None:
             return
         self._record_replan(
@@ -535,10 +426,10 @@ class TaskController:
             requires_revert=False,
         )
         current.title = "根据最新失败证据调整方案"
-        current.status = "in_progress"
+        current.mark_in_progress()
         current.failure_count = 0
         current.note = "保留已完成步骤，局部替换当前和待办步骤"
-        current.evidence_refs.extend(_evidence_refs(results))
+        current.add_evidence_refs(_evidence_refs(results))
         current_index = task.steps.index(current)
         task.steps = [
             *task.steps[: current_index + 1],
@@ -579,7 +470,7 @@ class TaskController:
         results: list[ToolResultMessage],
     ) -> AttemptRecord:
         intent = _infer_action_intent(results)
-        current = self._current_step(task)
+        current = task.current_step()
         attempt = AttemptRecord(
             attempt_id=f"attempt_{uuid.uuid4().hex[:12]}",
             step_id=current.id if current else None,
@@ -642,12 +533,12 @@ class TaskController:
     ) -> None:
         if result.status != "success":
             return
-        step = self._current_step(task)
+        step = task.current_step()
         if step is None:
             return
-        step.evidence_refs.extend(_evidence_refs([result]))
+        step.add_evidence_refs(_evidence_refs([result]))
         if result.workspace_changed is True:
-            step.status = "in_progress"
+            step.mark_in_progress()
             step.progress_state = "changed"
             step.note = "已产生文件变更，等待验证"
             task.phase = "verifying"
@@ -657,7 +548,7 @@ class TaskController:
             return
         name = result.tool_name.lower()
         if any(marker in name for marker in _READ_TOOL_MARKERS):
-            step.status = "in_progress"
+            step.mark_in_progress()
             step.progress_state = "evidence_collected"
             task.action_intent = "read_context"
             task.recent_error_code = None
@@ -669,37 +560,30 @@ class TaskController:
         results: list[ToolResultMessage],
     ) -> None:
         refs = _evidence_refs(results)
-        step = self._current_step(task)
+        step = task.current_step()
         if step is None:
-            step = next(
-                (item for item in task.steps if item.status in {"pending", "in_progress"}),
-                None,
-            )
+            step = task.first_open_step()
         if step is None:
             task.current_step_id = None
             task.next_action = None
             task.phase = "finished"
             return
-        step.status = "completed"
-        step.progress_state = "verified"
-        step.note = None
-        step.summary = "验证通过"
-        for ref in refs:
-            if ref not in step.evidence_refs:
-                step.evidence_refs.append(ref)
+        step.complete(
+            summary="验证通过",
+            evidence_refs=refs,
+            progress_state="verified",
+        )
         next_step = self._next_incomplete_step_after(task, step)
         if next_step is not None and _is_verification_step(next_step):
-            next_step.status = "completed"
-            next_step.progress_state = "verified"
-            next_step.note = None
-            next_step.summary = "验证通过"
-            for ref in refs:
-                if ref not in next_step.evidence_refs:
-                    next_step.evidence_refs.append(ref)
+            next_step.complete(
+                summary="验证通过",
+                evidence_refs=refs,
+                progress_state="verified",
+            )
         task.action_intent = "run_verification"
         task.recent_error_code = None
         task.recent_failure_type = None
-        self._advance(task)
+        task.advance_to_next_open_step()
         task.phase = "finished" if task.current_step_id is None else "acting"
 
     def _complete_current_step_from_signal(
@@ -707,7 +591,7 @@ class TaskController:
         task: TaskState,
         results: list[ToolResultMessage],
     ) -> None:
-        step = self._current_step(task)
+        step = task.current_step()
         if step is None:
             return
         refs = _evidence_refs(results)
@@ -726,15 +610,13 @@ class TaskController:
                     for item in raw_refs
                     if isinstance(item, str) and item.strip()
                 )
-        step.status = "completed"
-        step.note = None
-        step.summary = summaries[-1] if summaries else "步骤已完成"
-        for ref in refs:
-            if ref not in step.evidence_refs:
-                step.evidence_refs.append(ref)
+        step.complete(
+            summary=summaries[-1] if summaries else "步骤已完成",
+            evidence_refs=refs,
+        )
         task.recent_error_code = None
         task.recent_failure_type = None
-        self._advance(task)
+        task.advance_to_next_open_step()
         task.phase = "finished" if task.current_step_id is None else "acting"
 
     def _mark_latest_changes_failed(
@@ -776,7 +658,7 @@ class TaskController:
         evidence_refs: list[str],
         requires_revert: bool,
     ) -> None:
-        current = self._current_step(task)
+        current = task.current_step()
         task.replans.append(
             ReplanRecord(
                 replan_id=f"replan_{uuid.uuid4().hex[:12]}",
@@ -853,20 +735,20 @@ def _goal_from_prompts(prompts: Iterable[AgentMessage]) -> str:
     return "继续当前任务"
 
 
-def _step_fields(raw: object) -> tuple[str, str, str | None, str | None]:
+def _step_fields(raw: object) -> tuple[str, TaskStepKind, str | None, str | None]:
     """Extract normalized step fields from string/dict/PlannedTaskStep-like input."""
 
     if isinstance(raw, PlannedTaskStep):
         return (
             _compact(raw.title, limit=_MAX_STEP_TITLE_CHARS),
-            _compact(raw.kind, limit=40) or "other",
+            _coerce_task_step_kind(raw.kind),
             _optional_text(raw.acceptance),
             _optional_text(raw.verification_hint),
         )
     if isinstance(raw, Mapping):
         return (
             _compact(raw.get("title"), limit=_MAX_STEP_TITLE_CHARS),
-            _compact(raw.get("kind"), limit=40) or "other",
+            _coerce_task_step_kind(raw.get("kind")),
             _optional_text(raw.get("acceptance")),
             _optional_text(raw.get("verification_hint")),
         )
@@ -899,10 +781,101 @@ def _optional_text(value: object) -> str | None:
     return text or None
 
 
+def build_task_state_from_recovery_projection(
+    prompts: Iterable[AgentMessage],
+    recovery_projection: Mapping[str, object],
+) -> TaskState | None:
+    """将会话恢复投影重建为本次 run 的 TaskState。
+
+    这是任务状态跨 run 恢复的唯一读取映射；写入侧由
+    ``build_task_recovery_projection`` 生成相同结构。
+    """
+
+    progress = recovery_projection.get("task_progress")
+    if not isinstance(progress, Mapping):
+        return None
+
+    goal = str(recovery_projection.get("goal") or _goal_from_prompts(prompts)).strip()
+    if not goal:
+        goal = _goal_from_prompts(prompts)
+
+    steps: list[TaskStep] = []
+    seen: set[str] = set()
+    details = progress.get("step_details")
+    step_details = details if isinstance(details, Mapping) else {}
+
+    def add_steps(raw: object, status: str) -> None:
+        if not isinstance(raw, list):
+            return
+        for value in raw:
+            title = " ".join(str(value).strip().split())
+            if not title or title in seen:
+                continue
+            seen.add(title)
+            raw_detail = step_details.get(title)
+            detail = raw_detail if isinstance(raw_detail, Mapping) else {}
+            steps.append(
+                TaskStep(
+                    id=f"step_{len(steps) + 1}",
+                    title=title[:_MAX_STEP_TITLE_CHARS],
+                    status=status,  # type: ignore[arg-type]
+                    kind=_coerce_task_step_kind(detail.get("kind")),
+                    acceptance=(
+                        str(detail.get("acceptance"))
+                        if detail.get("acceptance") is not None
+                        else None
+                    ),
+                    verification_hint=(
+                        str(detail.get("verification_hint"))
+                        if detail.get("verification_hint") is not None
+                        else None
+                    ),
+                )
+            )
+            if len(steps) >= _MAX_STEPS:
+                return
+
+    add_steps(progress.get("completed_steps"), "completed")
+    add_steps(progress.get("blocked_steps"), "blocked")
+    add_steps(progress.get("pending_steps"), "pending")
+    if not steps:
+        return None
+
+    current = next(
+        (step for step in steps if step.status == "pending"),
+        None,
+    )
+    if current is not None:
+        current.mark_in_progress()
+
+    next_action = recovery_projection.get("next_action")
+    return TaskState(
+        task_id=f"task_{uuid.uuid4().hex[:12]}",
+        goal=goal,
+        steps=steps,
+        current_step_id=current.id if current else None,
+        phase="acting" if current else "waiting",
+        next_action=(
+            str(next_action)
+            if isinstance(next_action, str) and next_action
+            else (current.title if current else None)
+        ),
+        completion_satisfied=bool(progress.get("completion_satisfied", False)),
+        completion_reason=str(progress.get("completion_reason", "")),
+    )
+
+
 def _compact(value: object, *, limit: int) -> str:
     if value is None:
         return ""
     return " ".join(str(value).strip().split())[:limit]
+
+
+def _coerce_task_step_kind(value: object) -> TaskStepKind:
+    text = _compact(value, limit=40)
+    if text in TASK_STEP_KINDS:
+        return cast(TaskStepKind, text)
+    return "other"
 
 
 def _evidence_refs(results: list[ToolResultMessage]) -> list[str]:
@@ -965,4 +938,4 @@ def _infer_action_intent(results: list[ToolResultMessage]) -> str:
     return "tool_action"
 
 
-__all__ = ["TaskController"]
+__all__ = ["TaskController", "build_task_state_from_recovery_projection"]

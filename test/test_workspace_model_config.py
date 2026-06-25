@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from codepilot.interfaces.cli.cli import _init_model_config, build_parser
+from codepilot.interfaces.cli.main import _init_model_config, build_parser
 from codepilot.runtime.assembly import create_agent_session
 from codepilot.runtime.model_resolver import resolve_model
 from codepilot.runtime.resources import WorkspaceResourceLoader

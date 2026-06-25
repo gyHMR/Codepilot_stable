@@ -28,6 +28,267 @@ def test_repository_tracker_detects_external_dirty_file_changes(tmp_path: Path) 
     assert "app.py" in second_delta.modified_paths
 
 
+def test_context_policy_allocates_named_budgets_by_mode() -> None:
+    from codepilot.core import ContextPreparationRequest
+    from codepilot.sessions.context.compiler import ContextPolicy
+
+    policy = ContextPolicy(minimum_input_budget=400, safety_margin_tokens=0)
+    allocation = policy.allocate(
+        ContextPreparationRequest(
+            session_id="session_1",
+            model_context_window=1000,
+            model_max_output_tokens=100,
+        ),
+        mode="repair",
+    )
+
+    assert allocation.total_tokens == 900
+    assert allocation.profile["recent_evidence"] == 0.24
+    assert allocation.repository == 72
+    assert allocation.active_files == 198
+    assert allocation.recent_evidence == 216
+    assert allocation.memory == 180
+    assert allocation.history == 108
+    assert allocation.task == 126
+
+
+def test_context_compiler_fork_for_session_does_not_share_short_term_state(
+    tmp_path: Path,
+) -> None:
+    from codepilot.sessions.context.compiler import ContextCompiler, ContextPolicy
+    from codepilot.sessions.context.state import ActiveFile, SessionContextState
+
+    state = SessionContextState(workspace_dir=tmp_path)
+    state.active_files["src/app.py"] = ActiveFile(
+        path="src/app.py",
+        role="target",
+        reason="read tool result",
+        freshness="fresh",
+    )
+    policy = ContextPolicy(minimum_input_budget=400)
+    compiler = ContextCompiler(workspace=str(tmp_path), state=state, policy=policy)
+
+    forked = compiler.fork_for_session()
+
+    assert forked is not compiler
+    assert forked.policy is policy
+    assert forked.repository.workspace == compiler.repository.workspace
+    assert forked.state is not state
+    assert forked.state.active_files == {}
+    assert forked.memory_retriever is None
+
+
+def test_context_state_records_reject_unknown_enum_values() -> None:
+    import pytest
+    from codepilot.sessions.context.state import ActiveFile, ContextEvidence, FileSummary
+
+    with pytest.raises(ValueError, match="Unknown active file role"):
+        ActiveFile(path="src/app.py", role="scratch", reason="bad role")
+
+    with pytest.raises(ValueError, match="Unknown context freshness"):
+        FileSummary(
+            path="src/app.py",
+            summary="summary",
+            source_hash="hash",
+            freshness="expired",
+        )
+
+    with pytest.raises(ValueError, match="Unknown context trust"):
+        ContextEvidence(
+            kind="tool_result",
+            content="content",
+            trust="maybe",
+            source="read",
+        )
+
+    with pytest.raises(ValueError, match="Unknown context evidence kind"):
+        ContextEvidence(
+            kind="mystery",
+            content="content",
+            trust="observed",
+            source="read",
+        )
+
+    with pytest.raises(ValueError, match="Unknown context freshness"):
+        ContextEvidence(
+            kind="tool_result",
+            content="content",
+            trust="observed",
+            source="read",
+            freshness="expired",
+        )
+
+
+def test_context_item_section_selects_sanitizes_and_reports_budget() -> None:
+    from codepilot.protocols import ContextItem
+    from codepilot.sessions.context.compiler import ContextItemSection
+
+    section = ContextItemSection.compile(
+        name="memory",
+        budget_tokens=20,
+        candidates=[
+            ContextItem(
+                id="low",
+                kind="memory.project_constraint",
+                content="low priority",
+                source="memory",
+                trust="observed",
+                priority=10,
+                estimated_tokens=3,
+                freshness="fresh",
+            ),
+            ContextItem(
+                id="secret",
+                kind="memory.project_constraint",
+                content="token=sk-testsecret123456",
+                source="memory",
+                trust="observed",
+                priority=100,
+                estimated_tokens=6,
+                freshness="fresh",
+            ),
+            ContextItem(
+                id="stale",
+                kind="memory.project_constraint",
+                content="stale fact",
+                source="memory",
+                trust="observed",
+                priority=200,
+                estimated_tokens=3,
+                freshness="stale",
+            ),
+        ],
+        reduction_policy="retrieve_then_drop_low_score",
+    )
+
+    assert [item.id for item in section.selected] == ["secret", "low"]
+    assert section.selected[0].content.startswith("[data-not-instruction]")
+    assert "sk-testsecret123456" not in section.selected[0].content
+    assert section.sanitization["redacted_count"] == 1
+    assert [item.item_id for item in section.dropped] == ["stale"]
+
+    report = section.report()
+    assert report.name == "memory"
+    assert report.candidate_items == 3
+    assert report.selected_items == 2
+    assert report.reduction_policy == "retrieve_then_drop_low_score"
+
+
+def test_context_protocol_records_reject_unknown_enum_values() -> None:
+    import pytest
+    from codepilot.protocols import ContextItem, DroppedContextItem
+
+    with pytest.raises(ValueError, match="Unknown context trust"):
+        ContextItem(
+            id="bad-trust",
+            kind="active_file",
+            content="content",
+            source="test",
+            trust="certain",
+            priority=1,
+            estimated_tokens=1,
+        )
+
+    with pytest.raises(ValueError, match="Unknown context freshness"):
+        ContextItem(
+            id="bad-freshness",
+            kind="active_file",
+            content="content",
+            source="test",
+            trust="observed",
+            priority=1,
+            estimated_tokens=1,
+            freshness="expired",
+        )
+
+    with pytest.raises(ValueError, match="Unknown dropped context reason"):
+        DroppedContextItem(
+            item_id="item-1",
+            section="memory",
+            reason="too_old",
+            source="test",
+        )
+
+
+def test_context_compiler_builds_memory_query_from_task_signal() -> None:
+    from codepilot.core import AgentContext
+    from codepilot.protocols import AssistantMessage, TextContent, UserMessage
+    from codepilot.sessions.context.compiler import build_memory_query
+
+    query = build_memory_query(
+        AgentContext(
+            system_prompt="rules",
+            messages=[
+                UserMessage(content="先解释旧问题"),
+                AssistantMessage(content=[TextContent(text="好的")]),
+                UserMessage(content="修复配置加载失败并验证"),
+            ],
+            task_signal={
+                "phase": "acting",
+                "action_intent": "debug_failure",
+                "recent_error_code": "verification_failed",
+            },
+        ),
+        active_paths=["src/codepilot/config.py", "test/test_config.py"],
+    )
+
+    assert query.text == "修复配置加载失败并验证"
+    assert query.active_paths == ["src/codepilot/config.py", "test/test_config.py"]
+    assert query.task_phase == "acting"
+    assert query.action_intent == "debug_failure"
+    assert query.recent_error == "verification_failed"
+    assert query.retrieval_mode == "repair"
+
+
+def test_memory_trust_maps_to_context_trust_explicitly() -> None:
+    from codepilot.sessions.context.compiler import _context_trust_from_memory_trust
+
+    assert _context_trust_from_memory_trust("verified") == "observed"
+    assert _context_trust_from_memory_trust("observed") == "observed"
+    assert _context_trust_from_memory_trust("user_given") == "user_given"
+    assert _context_trust_from_memory_trust("model_claim") == "model_claim"
+
+
+def test_context_freshness_notice_summarizes_stale_run_files(
+    tmp_path: Path,
+) -> None:
+    from codepilot.protocols import TextContent, UserMessage
+    from codepilot.sessions.context.freshness import build_context_freshness_notice
+    from codepilot.sessions.persistence import FreshnessResult
+
+    result = FreshnessResult(
+        status="stale",
+        checked_paths=["src/app.py", "src/missing.py"],
+        changed_paths=["src/app.py"],
+        missing_paths=["src/missing.py"],
+        workspace_path=str(tmp_path),
+    )
+
+    notice = build_context_freshness_notice(result)
+
+    assert isinstance(notice, UserMessage)
+    assert notice.metadata == {"context_freshness": result.to_event_payload()}
+    assert len(notice.content) == 1
+    block = notice.content[0]
+    assert isinstance(block, TextContent)
+    assert "[Context Freshness]" in block.text
+    assert "status=stale" in block.text
+    assert "changed_files=src/app.py" in block.text
+    assert "missing_files=src/missing.py" in block.text
+    assert "旧工具结果可能已过期" in block.text
+
+
+def test_context_freshness_notice_is_absent_for_valid_state(
+    tmp_path: Path,
+) -> None:
+    from codepilot.sessions.context.freshness import build_context_freshness_notice
+    from codepilot.sessions.persistence import FreshnessResult
+
+    result = FreshnessResult(status="valid", workspace_path=str(tmp_path))
+
+    assert build_context_freshness_notice(result) is None
+
+
 def test_context_compiler_preserves_current_request_and_reports_budget(tmp_path: Path) -> None:
     asyncio.run(_compile_context_case(tmp_path))
 

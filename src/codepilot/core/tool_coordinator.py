@@ -30,6 +30,31 @@ def error_tool_result(message: str, *, approved: bool = True) -> AgentToolResult
     )
 
 
+def denied_tool_result(
+    message: str,
+    *,
+    reason: str,
+) -> AgentToolResult:
+    """创建策略拒绝状态的工具结果。
+
+    ``denied`` 表示工具没有执行，因为 core/runtime 策略不允许；
+    它不同于工具已经执行但失败的 ``error``。
+    """
+
+    return AgentToolResult(
+        content=[TextContent(text=message)],
+        details={
+            "reason": reason,
+            "status": "denied",
+            "message": message,
+        },
+        is_error=True,
+        status="denied",
+        approved=False,
+        error_code=reason,
+    )
+
+
 def hook_error_tool_result(
     phase: str,
     exc: Exception,
@@ -94,6 +119,18 @@ def bind_tool_result(
         result.status = "error"
     result.is_error = is_error or result.status != "success"
     return result
+
+
+def can_schedule_tool_in_parallel(tool: AgentTool) -> bool:
+    """判断工具是否可以进入 core 的并行调度批次。
+
+    这里采用保守规则：只有工具元数据显式声明 ``concurrency_safe``，
+    且不要求 ``exclusive`` 独占执行时，才允许和同批次工具并行。
+    没有元数据的工具一律串行，避免把未知副作用误判为安全。
+    """
+
+    metadata = tool.metadata
+    return bool(metadata and metadata.concurrency_safe and not metadata.exclusive)
 
 
 @dataclass
@@ -212,9 +249,9 @@ class ToolCallCoordinator:
                     approved=False,
                 ), True
             if before and before.block:
-                return None, error_tool_result(
+                return None, denied_tool_result(
                     before.reason or "Tool execution was blocked",
-                    approved=False,
+                    reason="before_tool_call_blocked",
                 ), True
 
         return PreparedToolCall(tool_call=tool_call, tool=tool, args=args), AgentToolResult(content=[]), False
@@ -387,13 +424,7 @@ class ToolCallCoordinator:
                     immediate_is_error,
                 )
                 continue
-            metadata = prepared.tool.metadata
-            parallel_safe = bool(
-                metadata
-                and metadata.concurrency_safe
-                and not metadata.exclusive
-            )
-            if parallel_safe:
+            if can_schedule_tool_in_parallel(prepared.tool):
                 parallel_batch.append((index, prepared))
                 continue
             await flush_parallel_batch()

@@ -9,7 +9,7 @@ validates the result, and falls back to a single-step plan when planning fails.
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, cast
 
 from codepilot.llm.api_registry import complete_simple
 from codepilot.llm.event_stream import AssistantMessageEventStream
@@ -24,31 +24,79 @@ from codepilot.protocols import (
 )
 
 from .events import maybe_await
+from .task_state import TASK_STEP_KINDS, TaskStepKind
 from .types import AgentMessage
 
 
 _MAX_PLANNED_STEPS = 6
 _MAX_FIELD_CHARS = 240
-_VALID_STEP_KINDS = {"investigate", "edit", "verify", "summarize", "other"}
+_TASK_PLAN_SOURCES = frozenset({"llm", "fallback"})
 
 
 @dataclass(frozen=True)
 class PlannedTaskStep:
-    """A model-proposed task step."""
+    """A single normalized step proposed by the task planner."""
 
     title: str
-    kind: str = "other"
+    kind: TaskStepKind = "other"
     acceptance: str | None = None
     verification_hint: str | None = None
+
+    def __post_init__(self) -> None:
+        title = _clean_text(self.title, limit=80)
+        if not title:
+            raise ValueError("Task plan step title cannot be empty")
+
+        kind = _clean_text(self.kind, limit=40) or "other"
+        if kind not in TASK_STEP_KINDS:
+            raise ValueError(f"Unknown task step kind: {kind}")
+
+        object.__setattr__(self, "title", title)
+        object.__setattr__(self, "kind", cast(TaskStepKind, kind))
+        object.__setattr__(
+            self,
+            "acceptance",
+            _clean_text(self.acceptance, limit=_MAX_FIELD_CHARS) or None,
+        )
+        object.__setattr__(
+            self,
+            "verification_hint",
+            _clean_text(self.verification_hint, limit=_MAX_FIELD_CHARS) or None,
+        )
 
 
 @dataclass(frozen=True)
 class TaskPlanDraft:
-    """Validated planner output used to initialize TaskState."""
+    """Validated planner output used to initialize TaskState.
+
+    A draft is the boundary between model planning and deterministic task
+    control.  It stores only normalized, non-empty steps so downstream code can
+    initialize ``TaskState`` without re-validating planner-specific fields.
+    """
 
     goal: str
-    steps: list[PlannedTaskStep] = field(default_factory=list)
+    steps: tuple[PlannedTaskStep, ...] = field(default_factory=tuple)
     source: str = "fallback"
+
+    def __post_init__(self) -> None:
+        goal = _clean_text(self.goal, limit=1200)
+        if not goal:
+            raise ValueError("Task plan goal cannot be empty")
+
+        source = _clean_text(self.source, limit=40)
+        if source not in _TASK_PLAN_SOURCES:
+            raise ValueError(f"Unknown task plan source: {source}")
+
+        steps = tuple(self.steps)
+        if not steps:
+            raise ValueError("Task plan draft must contain at least one step")
+        for step in steps:
+            if not isinstance(step, PlannedTaskStep):
+                raise TypeError("Task plan steps must be PlannedTaskStep instances")
+
+        object.__setattr__(self, "goal", goal)
+        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "steps", steps)
 
 
 StreamFn = Callable[
@@ -124,12 +172,13 @@ class TaskPlanner:
                 continue
             seen.add(title)
             kind = _clean_text(raw.get("kind"), limit=40) or "other"
-            if kind not in _VALID_STEP_KINDS:
+            if kind not in TASK_STEP_KINDS:
                 kind = "other"
+            planned_kind = cast(TaskStepKind, kind)
             steps.append(
                 PlannedTaskStep(
                     title=title,
-                    kind=kind,
+                    kind=planned_kind,
                     acceptance=_clean_text(raw.get("acceptance"), limit=_MAX_FIELD_CHARS) or None,
                     verification_hint=(
                         _clean_text(raw.get("verification_hint"), limit=_MAX_FIELD_CHARS)

@@ -83,7 +83,7 @@ if attempted:
 
 ### 3.2 先判断，再执行
 
-未知工具、参数错误、越界路径、危险命令和审批拒绝必须在产生副作用前被拦截。
+未知工具、参数错误、越界路径、危险命令，以及尚未获得用户确认的审批请求，必须在产生副作用前被拦截。
 
 ```python
 # runtime.py 中的执行流程
@@ -147,7 +147,7 @@ flowchart TD
     Policy -->|deny| Denied["返回拒绝结果"]
     Policy -->|ask| Approval["ApprovalProvider"]
     Approval -->|approved| Execute
-    Approval -->|rejected| Rejected["返回审批拒绝"]
+    Approval -->|deferred| Deferred["返回 approval_required"]
     Execute --> Result["ToolResult 结构化结果"]
     Result --> Context["上下文/记忆/观测消费结果"]
 ```
@@ -613,7 +613,7 @@ def assemble_tools(workspace, options, config) -> AssembledTools:
     runtime = ToolRuntime(
         registry=registry,
         permission_policy=PermissionPolicy(...),
-        approval_provider=options.approval_provider or DenyApprovalProvider(),
+        approval_provider=options.approval_provider or DeferredApprovalProvider(),
     )
 ```
 
@@ -649,7 +649,7 @@ def assemble_tools(workspace, options, config) -> AssembledTools:
 
 - 非 Git 仓库时跳过副作用检测，而非报错
 - 输出超限时截断而非丢弃
-- 审批接口缺失时默认拒绝而非放行
+- 审批接口缺失时默认延迟执行，产出可恢复审批项，而非直接放行
 
 ---
 

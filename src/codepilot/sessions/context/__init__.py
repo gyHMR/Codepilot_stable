@@ -59,6 +59,7 @@ from .compaction import (
     COMPACTION_SYSTEM_PROMPT,
     ContextCompactionResult,
     build_compacted_context,
+    build_llm_compaction_summary,
     fallback_summary,
     format_messages_for_summary,
 )
@@ -74,13 +75,22 @@ from .repository_tracker import (
     compare_snapshots,
     render_repository_snapshot,
 )
-from .state import ActiveFile, ContextEvidence, FileSummary, SessionContextState
+from .state import (
+    ActiveFile,
+    ContextEvidence,
+    ContextEvidenceKind,
+    ContextFileRole,
+    FileSummary,
+    SessionContextState,
+)
 
 
 __all__ = [
     # 状态管理
     "ActiveFile",           # 活跃文件信息
     "ContextEvidence",      # 上下文证据
+    "ContextEvidenceKind",  # 上下文证据类型
+    "ContextFileRole",      # 活跃文件角色
     "FileSummary",          # 文件摘要
     "SessionContextState",  # 会话上下文状态
 
@@ -92,6 +102,7 @@ __all__ = [
     "COMPACTION_SYSTEM_PROMPT",  # 压缩用系统提示词
     "ContextCompactionResult",   # 压缩结果
     "build_compacted_context",   # 构建压缩上下文
+    "build_llm_compaction_summary",  # 使用 LLM 生成压缩摘要
     "fallback_summary",          # 降级摘要
     "format_messages_for_summary",  # 格式化消息用于摘要
 

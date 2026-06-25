@@ -5,9 +5,11 @@ import inspect
 from pathlib import Path
 
 import pytest
+from prompt_toolkit.document import Document
 
 from codepilot.interfaces.cli.shell import CODEPILOT_STYLE, InteractiveShell
-from codepilot.runtime.service import SessionStatus
+from codepilot.runtime.command_registry import builtin_commands
+from codepilot.runtime.types import SessionStatus
 
 
 def test_shell_uses_coding_agent_prompt_and_visual_styles() -> None:
@@ -19,6 +21,29 @@ def test_shell_uses_coding_agent_prompt_and_visual_styles() -> None:
     assert "bottom-toolbar" in style_names
     assert "completion-menu.completion" in style_names
     assert "completion-menu.completion.current" in style_names
+
+
+def test_shell_command_completion_uses_runtime_command_registry(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from codepilot.interfaces.cli import shell as shell_module
+
+    captured: dict[str, object] = {}
+
+    class FakePromptSession:
+        def __init__(self, **kwargs):
+            captured["completer"] = kwargs["completer"]
+
+    monkeypatch.setattr(shell_module, "PromptSession", FakePromptSession)
+    InteractiveShell(history_dir=tmp_path)
+
+    completer = captured["completer"]
+    completions = list(completer.get_completions(Document("/mem"), None))
+    runtime_memory = next(command for command in builtin_commands() if command.name == "memory")
+
+    assert [completion.text for completion in completions] == ["memory"]
+    assert completions[0].display_meta_text == runtime_memory.description
 
 
 def test_shell_ctrl_c_exits_prompt_and_keyboard_interrupt_is_not_swallowed(

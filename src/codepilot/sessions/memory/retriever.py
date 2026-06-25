@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 from .files import load_global_memory
-from .records import DURABLE_MEMORY_KINDS, MemoryQuery, MemoryRecord, RetrievedMemory
+from .records import MemoryQuery, MemoryRecord, RetrievedMemory
 from .rendering import render_memory
 from .store import MemoryStore
 from .writer import MemoryWriter
@@ -37,72 +37,11 @@ class MemoryRetriever:
         最终按 kind 限制数量（experience:2, decision:2, project:3）。
         """
         records = [*self.store.load_session(), *self.store.load_project()]
-        query_terms = _terms(query.text)
-        active_paths = {Path(path).as_posix() for path in query.active_paths}
-        ranked: list[RetrievedMemory] = []
-        for record in records:
-            if record.status != "active":
-                continue
-            if record.kind not in DURABLE_MEMORY_KINDS:
-                continue
-            if (
-                record.kind == "experience"
-                and record.content.get("maturity") == "candidate"
-            ):
-                continue
-            score = 0
-            reasons: list[str] = []
-            related = active_paths.intersection(record.related_paths)
-            if related:
-                score += 40
-                reasons.append(f"related_path:{sorted(related)[0]}")
-            record_terms = _terms(render_memory(record))
-            keyword_matches = sorted(query_terms.intersection(record_terms))
-            if keyword_matches:
-                score += min(30, len(keyword_matches) * 10)
-                reasons.append(f"keyword:{keyword_matches[0]}")
-            if record.trust in {"verified", "observed"}:
-                score += 20
-                reasons.append(f"trust:{record.trust}")
-            if record.scope == "project":
-                score += 10
-                reasons.append("project_memory")
-            if query.retrieval_mode == "qa" and record.kind in {"decision", "project"}:
-                score += 20
-                reasons.append(f"mode:qa_{record.kind}_memory")
-            elif query.retrieval_mode == "repair" and record.kind in {"experience", "failure"}:
-                score += 15
-                reasons.append(f"mode:repair_{record.kind}_memory")
-            elif query.retrieval_mode == "verify" and record.kind == "experience":
-                score += 10
-                reasons.append("mode:verify_experience_memory")
-            if record.kind == "experience":
-                applies = {
-                    str(item)
-                    for item in record.content.get("applies_when", [])
-                    if isinstance(item, str)
-                }
-                if query.task_phase and f"phase:{query.task_phase}" in applies:
-                    score += 25
-                    reasons.append(f"phase:{query.task_phase}")
-                if query.action_intent and f"intent:{query.action_intent}" in applies:
-                    score += 20
-                    reasons.append(f"intent:{query.action_intent}")
-                if query.recent_error and f"error:{query.recent_error}" in applies:
-                    score += 30
-                    reasons.append(f"error:{query.recent_error}")
-                maturity = str(record.content.get("maturity", "active"))
-                if maturity == "verified":
-                    score += 20
-                    reasons.append("maturity:verified")
-                elif maturity == "candidate":
-                    score -= 30
-                    reasons.append("maturity:candidate")
-            if record.trust == "model_claim":
-                score -= 20
-                reasons.append("model_claim_penalty")
-            if score > 0:
-                ranked.append(RetrievedMemory(record=record, score=score, reasons=reasons))
+        ranked = [
+            scored
+            for record in records
+            if (scored := score_memory_record(record, query)) is not None
+        ]
 
         ranked.sort(
             key=lambda item: (item.score, item.record.updated_at),
@@ -122,11 +61,98 @@ class MemoryRetriever:
         return load_global_memory(self.workspace_dir)
 
 
+def score_memory_record(
+    record: MemoryRecord,
+    query: MemoryQuery,
+) -> RetrievedMemory | None:
+    """为单条记忆计算与查询的相关性；不相关或不可检索时返回 None。"""
+
+    if record.retrieval_exclusion_reason() is not None:
+        return None
+
+    query_terms = _terms(query.text)
+    active_paths = {Path(path).as_posix() for path in query.active_paths}
+    related_paths = {Path(path).as_posix() for path in record.related_paths}
+    score = 0
+    reasons: list[str] = []
+
+    related = active_paths.intersection(related_paths)
+    if related:
+        score += 40
+        reasons.append(f"related_path:{sorted(related)[0]}")
+
+    keyword_matches = sorted(_keyword_matches(query_terms, _terms(render_memory(record))))
+    if keyword_matches:
+        score += min(30, len(keyword_matches) * 10)
+        reasons.append(f"keyword:{keyword_matches[0]}")
+
+    if record.trust in {"verified", "observed"}:
+        score += 20
+        reasons.append(f"trust:{record.trust}")
+    if record.scope == "project":
+        score += 10
+        reasons.append("project_memory")
+
+    if query.retrieval_mode == "qa" and record.kind in {"decision", "project"}:
+        score += 20
+        reasons.append(f"mode:qa_{record.kind}_memory")
+    elif query.retrieval_mode == "repair" and record.kind in {"experience", "failure"}:
+        score += 15
+        reasons.append(f"mode:repair_{record.kind}_memory")
+    elif query.retrieval_mode == "verify" and record.kind == "experience":
+        score += 10
+        reasons.append("mode:verify_experience_memory")
+
+    if record.kind == "experience":
+        applies = {
+            str(item)
+            for item in record.content.get("applies_when", [])
+            if isinstance(item, str)
+        }
+        if query.task_phase and f"phase:{query.task_phase}" in applies:
+            score += 25
+            reasons.append(f"phase:{query.task_phase}")
+        if query.action_intent and f"intent:{query.action_intent}" in applies:
+            score += 20
+            reasons.append(f"intent:{query.action_intent}")
+        if query.recent_error and f"error:{query.recent_error}" in applies:
+            score += 30
+            reasons.append(f"error:{query.recent_error}")
+        maturity = str(record.content.get("maturity", "active"))
+        if maturity == "verified":
+            score += 20
+            reasons.append("maturity:verified")
+        elif maturity == "candidate":
+            score -= 30
+            reasons.append("maturity:candidate")
+
+    if record.trust == "model_claim":
+        score -= 20
+        reasons.append("model_claim_penalty")
+
+    if score <= 0:
+        return None
+    return RetrievedMemory(record=record, score=score, reasons=reasons)
+
+
 def _terms(text: str) -> set[str]:
     return {
         token.lower()
         for token in re.findall(r"[\w./-]{2,}", text, flags=re.UNICODE)
     }
+
+
+def _keyword_matches(query_terms: set[str], record_terms: set[str]) -> set[str]:
+    """匹配查询词和记录词，兼容中文短语的包含关系。"""
+
+    matches = set(query_terms.intersection(record_terms))
+    for query_term in query_terms:
+        for record_term in record_terms:
+            if query_term == record_term:
+                continue
+            if query_term in record_term or record_term in query_term:
+                matches.add(record_term)
+    return matches
 
 
 def _apply_kind_limits(
@@ -151,4 +177,4 @@ def _apply_kind_limits(
     return selected
 
 
-__all__ = ["MemoryRetriever"]
+__all__ = ["MemoryRetriever", "score_memory_record"]

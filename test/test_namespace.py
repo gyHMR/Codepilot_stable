@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from importlib.util import find_spec
 from importlib import import_module
+import inspect
 from pathlib import Path
 
 
@@ -64,6 +65,26 @@ def test_sessions_memory_api_is_global_only() -> None:
     assert "load_channel_memory" not in sessions.__all__
     assert "load_merged_memory" not in sessions.__all__
     assert "save_channel_memory" not in sessions.__all__
+
+
+def test_session_persistence_exports_freshness_contract() -> None:
+    import codepilot.sessions.persistence as persistence
+    from codepilot.sessions.persistence import __all__ as persistence_exports
+
+    assert hasattr(persistence, "FreshnessResult")
+    assert hasattr(persistence, "FreshnessStatus")
+    assert "FreshnessResult" in persistence_exports
+    assert "FreshnessStatus" in persistence_exports
+
+
+def test_session_context_exports_state_contracts() -> None:
+    import codepilot.sessions.context as context
+    from codepilot.sessions.context import __all__ as context_exports
+
+    assert hasattr(context, "ContextFileRole")
+    assert hasattr(context, "ContextEvidenceKind")
+    assert "ContextFileRole" in context_exports
+    assert "ContextEvidenceKind" in context_exports
 
 
 def test_no_legacy_top_level_imports() -> None:
@@ -208,3 +229,99 @@ def test_removed_run_result_compat_entries_are_gone() -> None:
     assert not hasattr(agent_loop, "run_agent_loop_continue_result")
     assert "run_agent_loop_result" not in core_exports
     assert "run_agent_loop_continue_result" not in core_exports
+
+
+def test_core_namespace_keeps_cross_layer_contracts_out() -> None:
+    import codepilot.core as core
+    from codepilot.core import __all__ as core_exports
+    from codepilot.extensions import AfterToolCallResult
+    from codepilot.protocols import AgentRunResult
+    from codepilot.tools import AgentToolResult
+
+    assert not hasattr(core, "AgentEvent")
+    assert not hasattr(core, "AgentRunResult")
+    assert not hasattr(core, "AgentTool")
+    assert not hasattr(core, "AgentToolResult")
+    assert not hasattr(core, "ToolCallCoordinator")
+    assert "AgentEvent" not in core_exports
+    assert "AgentRunResult" not in core_exports
+    assert "AgentTool" not in core_exports
+    assert "AgentToolResult" not in core_exports
+    assert "ToolCallCoordinator" not in core_exports
+    assert AgentRunResult.__module__.startswith("codepilot.protocols")
+    assert AgentToolResult.__module__.startswith("codepilot.protocols")
+    assert AfterToolCallResult.__module__ == "codepilot.core.types"
+
+
+def test_web_namespace_exports_complete_public_contract_types() -> None:
+    import codepilot.interfaces.web as web
+    from codepilot.interfaces.web import __all__ as web_exports
+
+    assert hasattr(web, "ApprovalDecision")
+    assert hasattr(web, "WebEventKind")
+    assert "ApprovalDecision" in web_exports
+    assert "WebEventKind" in web_exports
+
+
+def test_cli_startup_contract_is_separate_from_renderer_exports() -> None:
+    from codepilot.interfaces.cli.startup import CliStartupState, build_startup_state
+    from codepilot.interfaces.cli.renderer import __all__ as renderer_exports
+
+    assert CliStartupState.__module__ == "codepilot.interfaces.cli.startup"
+    assert build_startup_state.__module__ == "codepilot.interfaces.cli.startup"
+    assert "CliStartupState" not in renderer_exports
+    assert "build_startup_state" not in renderer_exports
+
+
+def test_cli_runner_exports_only_run_mode_entrypoints() -> None:
+    from codepilot.interfaces.cli.runner import __all__ as runner_exports
+
+    assert set(runner_exports) == {
+        "RunOptions",
+        "run",
+        "run_interactive",
+        "run_print",
+        "run_rpc",
+    }
+
+
+def test_cli_run_mode_types_stay_out_of_runtime_contracts() -> None:
+    import codepilot.runtime.types as runtime_types
+    import codepilot.interfaces.cli.runner as runner
+
+    assert hasattr(runner, "RunMode")
+    assert hasattr(runner, "OutputFn")
+    assert hasattr(runner, "InputFn")
+
+    assert not hasattr(runtime_types, "RunMode")
+    assert not hasattr(runtime_types, "OutputFn")
+    assert not hasattr(runtime_types, "InputFn")
+
+
+def test_cli_namespace_exports_public_adapter_contracts() -> None:
+    import codepilot.interfaces.cli as cli
+    from codepilot.interfaces.cli import __all__ as cli_exports
+
+    assert hasattr(cli, "SimpleRenderer")
+    assert hasattr(cli, "TerminalRenderer")
+    assert hasattr(cli, "CliStartupState")
+    assert "SimpleRenderer" in cli_exports
+    assert "TerminalRenderer" in cli_exports
+    assert "CliStartupState" in cli_exports
+
+
+def test_cli_main_module_owns_parser_and_entrypoint() -> None:
+    from codepilot.interfaces.cli.main import build_parser, main
+
+    assert find_spec("codepilot.interfaces.cli.cli") is None
+    assert build_parser.__module__ == "codepilot.interfaces.cli.main"
+    assert main.__module__ == "codepilot.interfaces.cli.main"
+
+
+def test_cli_package_does_not_shadow_main_submodule() -> None:
+    import codepilot.interfaces.cli.main as cli_main_module
+    from codepilot.interfaces.cli import __all__ as cli_exports
+
+    assert inspect.ismodule(cli_main_module)
+    assert cli_main_module.__name__ == "codepilot.interfaces.cli.main"
+    assert "main" not in cli_exports

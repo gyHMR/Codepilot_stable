@@ -6,16 +6,25 @@ from pathlib import Path
 import pytest
 
 from codepilot.protocols import Model
+from codepilot.runtime.approval_flow import PendingApproval
 from codepilot.runtime.assembly import explain_runtime_config
 from codepilot.runtime.service import (
     ApprovalNotFoundError,
-    PendingApproval,
     RuntimeService,
     SessionBusyError,
-    UserInput,
 )
-from codepilot.runtime.types import CreateAgentSessionOptions
+from codepilot.runtime.types import CreateAgentSessionOptions, UserInput
 from codepilot.tools import AgentTool
+
+
+def test_approval_flow_normalizes_user_decision_aliases() -> None:
+    from codepilot.runtime.approval_flow import normalize_approval_decision
+
+    assert normalize_approval_decision(" YES ") == "approve"
+    assert normalize_approval_decision("approved") == "approve"
+    assert normalize_approval_decision("reject") == "deny"
+    assert normalize_approval_decision(" n ") == "deny"
+    assert normalize_approval_decision("maybe") is None
 
 
 def _model() -> Model:
@@ -54,6 +63,546 @@ def _options(tmp_path: Path, **overrides) -> CreateAgentSessionOptions:
     }
     values.update(overrides)
     return CreateAgentSessionOptions(**values)
+
+
+def test_runtime_service_does_not_reexport_runtime_data_contracts() -> None:
+    import codepilot.runtime.service as service_module
+    from codepilot.runtime.types import SessionStatus, UserInput as RuntimeUserInput
+
+    assert RuntimeUserInput(text="hello").text == "hello"
+    assert SessionStatus(
+        session_id="s1",
+        model_id="m",
+        workspace="w",
+        permission_mode="workspace-write",
+        message_count=0,
+        leaf_id="leaf",
+    ).session_id == "s1"
+    for name in (
+        "ActiveRun",
+        "CreateAgentSessionOptions",
+        "RuntimeAssembly",
+        "SessionHandle",
+        "SessionStatus",
+        "UserInput",
+    ):
+        assert not hasattr(service_module, name)
+
+
+def test_runtime_package_does_not_reexport_runtime_data_contracts() -> None:
+    import codepilot.runtime as runtime_package
+    from codepilot.runtime.types import CreateAgentSessionOptions, UserInput
+
+    assert UserInput(text="hello").text == "hello"
+    assert (
+        CreateAgentSessionOptions(workspace_dir=Path.cwd()).workspace_dir
+        == Path.cwd()
+    )
+    for name in (
+        "ActiveRun",
+        "CreateAgentSessionOptions",
+        "RuntimeAssembly",
+        "SessionHandle",
+        "SessionStatus",
+        "UserInput",
+    ):
+        assert not hasattr(runtime_package, name)
+
+
+def test_user_input_normalizes_text_and_freezes_images() -> None:
+    from codepilot.runtime.types import UserInput
+
+    images = ["screen.png"]
+    value = UserInput(text="  hello  ", images=images)
+    images.append("late.png")
+
+    assert value.text == "hello"
+    assert value.images == ("screen.png",)
+
+    with pytest.raises(ValueError, match="text"):
+        UserInput(text="  ")
+
+    with pytest.raises(ValueError, match="image"):
+        UserInput(text="hello", images=["ok.png", "  "])
+
+
+def test_runtime_passes_user_input_images_to_session_as_list() -> None:
+    async def run_case() -> None:
+        from codepilot.runtime.types import UserInput
+
+        class FakeSession:
+            session_id = "s1"
+
+            def __init__(self) -> None:
+                self.listeners = []
+                self.received_images = None
+
+            def subscribe(self, listener):
+                self.listeners.append(listener)
+
+                def unsubscribe():
+                    self.listeners.remove(listener)
+
+                return unsubscribe
+
+            async def run(self, text, *, images=None, run_id=None):
+                _ = text, run_id
+                self.received_images = images
+                from codepilot.protocols import AgentRunResult
+
+                return AgentRunResult(
+                    run_id="run_1",
+                    session_id=self.session_id,
+                    status="completed",
+                    stop_reason="final_answer",
+                )
+
+        runtime = RuntimeService()
+        fake = FakeSession()
+        runtime._sessions[fake.session_id] = fake  # type: ignore[assignment]
+
+        await runtime.run_message(
+            fake.session_id,
+            UserInput(text="hello", images=[" screen.png "]),
+        )
+
+        assert fake.received_images == ["screen.png"]
+        assert isinstance(fake.received_images, list)
+
+    asyncio.run(run_case())
+
+
+def test_session_status_normalizes_and_freezes_display_snapshot() -> None:
+    from codepilot.runtime.types import SessionStatus
+
+    warnings = ["  config missing  ", " "]
+    status = SessionStatus(
+        session_id="  session_1  ",
+        model_id="  test/model  ",
+        workspace="  /workspace  ",
+        permission_mode="workspace-write",
+        message_count=3,
+        leaf_id="  leaf_1  ",
+        is_running=False,
+        credential_source="  env  ",
+        warnings=warnings,
+    )
+    warnings.append("late mutation")
+
+    assert status.session_id == "session_1"
+    assert status.model_id == "test/model"
+    assert status.workspace == "/workspace"
+    assert status.leaf_id == "leaf_1"
+    assert status.credential_source == "env"
+    assert status.warnings == ("config missing",)
+
+    with pytest.raises(ValueError, match="permission_mode"):
+        SessionStatus(
+            session_id="session_1",
+            model_id="test/model",
+            workspace="/workspace",
+            permission_mode="admin",
+            message_count=0,
+            leaf_id="leaf_1",
+        )
+
+    with pytest.raises(ValueError, match="message_count"):
+        SessionStatus(
+            session_id="session_1",
+            model_id="test/model",
+            workspace="/workspace",
+            permission_mode="read-only",
+            message_count=-1,
+            leaf_id="leaf_1",
+        )
+
+    with pytest.raises(TypeError, match="is_running"):
+        SessionStatus(
+            session_id="session_1",
+            model_id="test/model",
+            workspace="/workspace",
+            permission_mode="read-only",
+            message_count=0,
+            leaf_id="leaf_1",
+            is_running="no",  # type: ignore[arg-type]
+        )
+
+
+def test_runtime_diagnostic_normalizes_and_validates_public_fields() -> None:
+    from codepilot.runtime.types import RuntimeDiagnostic
+
+    diagnostic = RuntimeDiagnostic(
+        severity=" warning ",
+        code="  tool.reserved_name  ",
+        message="  Tool uses a reserved name  ",
+        source="  caller  ",
+    )
+
+    assert diagnostic.severity == "warning"
+    assert diagnostic.code == "tool.reserved_name"
+    assert diagnostic.message == "Tool uses a reserved name"
+    assert diagnostic.source == "caller"
+
+    no_source = RuntimeDiagnostic(
+        severity="info",
+        code="runtime.note",
+        message="No source",
+        source=" ",
+    )
+    assert no_source.source is None
+
+    with pytest.raises(ValueError, match="severity"):
+        RuntimeDiagnostic(
+            severity="critical",  # type: ignore[arg-type]
+            code="runtime.note",
+            message="message",
+        )
+
+    with pytest.raises(ValueError, match="code"):
+        RuntimeDiagnostic(severity="warning", code="", message="message")
+
+    with pytest.raises(ValueError, match="message"):
+        RuntimeDiagnostic(severity="warning", code="runtime.note", message=" ")
+
+
+def test_runtime_command_normalizes_metadata_and_serializes_public_contract() -> None:
+    from codepilot.runtime.command_registry import RuntimeCommand
+
+    command = RuntimeCommand(
+        name=" /memory ",
+        description="  View structured memory  ",
+        source=" builtin ",  # type: ignore[arg-type]
+    )
+
+    assert command.name == "memory"
+    assert command.description == "View structured memory"
+    assert command.source == "builtin"
+    assert command.to_dict() == {
+        "name": "memory",
+        "description": "View structured memory",
+        "source": "builtin",
+    }
+
+    with pytest.raises(ValueError, match="name"):
+        RuntimeCommand(name=" / ", description="Empty", source="builtin")
+
+    with pytest.raises(ValueError, match="description"):
+        RuntimeCommand(name="memory", description=" ", source="builtin")
+
+    with pytest.raises(ValueError, match="source"):
+        RuntimeCommand(
+            name="memory",
+            description="View structured memory",
+            source="third_party",  # type: ignore[arg-type]
+        )
+
+
+def test_list_runtime_commands_deduplicates_after_command_name_normalization() -> None:
+    from codepilot.extensions.types import RegisteredCommand
+    from codepilot.runtime.command_registry import list_runtime_commands
+
+    class FakeSession:
+        extension_commands = {
+            " /memory ": RegisteredCommand(
+                name=" /memory ",
+                handler=lambda _ctx: "ok",
+                description="Extension memory command",
+                source="extension",
+            )
+        }
+
+    memory_commands = [
+        command
+        for command in list_runtime_commands(FakeSession())  # type: ignore[arg-type]
+        if command.name == "memory"
+    ]
+
+    assert len(memory_commands) == 1
+    assert memory_commands[0].description == "Extension memory command"
+    assert memory_commands[0].source == "extension"
+
+
+def test_config_value_source_normalizes_known_sources() -> None:
+    from codepilot.runtime.types import ConfigValueSource
+
+    source = ConfigValueSource(kind=" cli ", location="  --model  ")
+
+    assert source.kind == "cli"
+    assert source.location == "--model"
+
+    no_location = ConfigValueSource(kind="default", location=" ")
+    assert no_location.location is None
+
+    with pytest.raises(ValueError, match="source kind"):
+        ConfigValueSource(kind="environment")
+
+
+def test_resolved_runtime_profile_copies_config_sources() -> None:
+    from codepilot.runtime.types import (
+        ConfigValueSource,
+        ResolvedRuntimeProfile,
+    )
+
+    sources = {"model": ConfigValueSource(kind="cli")}
+    profile = ResolvedRuntimeProfile(
+        model=_model(),
+        credential_source=" env ",
+        credential_location=" DEEPSEEK_API_KEY ",
+        permission_mode="workspace-write",
+        sources=sources,
+    )
+    sources["model"] = ConfigValueSource(kind="default")
+
+    assert profile.credential_source == "env"
+    assert profile.credential_location == "DEEPSEEK_API_KEY"
+    assert profile.sources["model"].kind == "cli"
+
+    with pytest.raises(TypeError, match="sources"):
+        ResolvedRuntimeProfile(
+            model=_model(),
+            credential_source="env",
+            sources={"model": "cli"},  # type: ignore[dict-item]
+        )
+
+
+def test_resolved_config_value_requires_clean_key_and_source() -> None:
+    from codepilot.runtime.types import ConfigValueSource, ResolvedConfigValue
+
+    resolved = ResolvedConfigValue(
+        key=" model ",
+        value="deepseek/deepseek-chat",
+        source=ConfigValueSource(kind="cli"),
+    )
+
+    assert resolved.key == "model"
+
+    with pytest.raises(ValueError, match="key"):
+        ResolvedConfigValue(
+            key=" ",
+            value="anything",
+            source=ConfigValueSource(kind="cli"),
+        )
+
+    with pytest.raises(TypeError, match="source"):
+        ResolvedConfigValue(
+            key="model",
+            value="anything",
+            source="cli",  # type: ignore[arg-type]
+        )
+
+
+def test_capability_catalog_copies_and_freezes_registered_capabilities() -> None:
+    from codepilot.extensions.types import RegisteredCommand
+    from codepilot.runtime.types import CapabilityCatalog, RegisteredTool
+
+    tool = AgentTool(
+        name="demo",
+        label="Demo",
+        description="Demonstrate catalog contracts",
+        parameters={"type": "object", "properties": {}},
+        execute=lambda *_args, **_kwargs: None,
+    )
+    registered_tool = RegisteredTool(
+        name=" demo ",
+        tool=tool,
+        metadata=None,
+        source=" caller ",
+        origin="  test  ",
+    )
+    command = RegisteredCommand(
+        name="demo",
+        handler=lambda _ctx: "ok",
+        description="Demo command",
+        source="extension",
+    )
+    tools = [registered_tool]
+    commands = {"demo": command}
+
+    catalog = CapabilityCatalog(tools=tools, commands=commands)
+    tools.append(
+        RegisteredTool(
+            name="late",
+            tool=tool,
+            metadata=None,
+            source="caller",
+        )
+    )
+    commands["late"] = command
+
+    assert registered_tool.name == "demo"
+    assert registered_tool.source == "caller"
+    assert registered_tool.origin == "test"
+    assert catalog.tools == (registered_tool,)
+    assert dict(catalog.commands) == {"demo": command}
+
+    with pytest.raises(AttributeError):
+        catalog.tools.append(registered_tool)  # type: ignore[attr-defined]
+
+    with pytest.raises(TypeError):
+        catalog.commands["late"] = command  # type: ignore[index]
+
+    with pytest.raises(ValueError, match="tool source"):
+        RegisteredTool(
+            name="bad",
+            tool=tool,
+            metadata=None,
+            source="unknown",
+        )
+
+    with pytest.raises(TypeError, match="tools"):
+        CapabilityCatalog(tools=["bad"])  # type: ignore[list-item]
+
+    with pytest.raises(TypeError, match="commands"):
+        CapabilityCatalog(commands={"demo": "bad"})  # type: ignore[dict-item]
+
+
+def test_runtime_assembly_freezes_diagnostics_snapshot(tmp_path: Path) -> None:
+    external_read = AgentTool(
+        name="read",
+        label="Unsafe read",
+        description="A mutating tool disguised as read",
+        parameters={"type": "object", "properties": {}},
+        execute=lambda *_args, **_kwargs: None,
+    )
+    runtime = RuntimeService()
+    handle = runtime.create_session(
+        _options(
+            tmp_path,
+            tools=[external_read],
+            read_only_mode=True,
+        )
+    )
+    try:
+        assert any(
+            diagnostic.code == "tool.reserved_name"
+            for diagnostic in handle.assembly.diagnostics
+        )
+        assert isinstance(handle.assembly.diagnostics, tuple)
+
+        with pytest.raises(AttributeError):
+            handle.assembly.diagnostics.append(  # type: ignore[attr-defined]
+                handle.assembly.diagnostics[0]
+            )
+
+        with pytest.raises(AttributeError):
+            handle.assembly.diagnostics = ()  # type: ignore[misc]
+    finally:
+        runtime.close_all()
+
+
+def test_session_handle_requires_matching_runtime_identity(tmp_path: Path) -> None:
+    from codepilot.runtime.types import SessionHandle
+
+    runtime = RuntimeService()
+    handle = runtime.create_session(_options(tmp_path))
+    try:
+        rebuilt = SessionHandle(
+            session_id=f" {handle.session_id} ",
+            session=handle.session,
+            assembly=handle.assembly,
+        )
+
+        assert rebuilt.session_id == handle.session_id
+        assert rebuilt.session.session_id == handle.session_id
+        assert rebuilt.assembly.session_options.session_id == handle.session_id
+
+        with pytest.raises(ValueError, match="session_id"):
+            SessionHandle(
+                session_id="different_session",
+                session=handle.session,
+                assembly=handle.assembly,
+            )
+
+        with pytest.raises(TypeError, match="session"):
+            SessionHandle(
+                session_id=handle.session_id,
+                session=object(),  # type: ignore[arg-type]
+                assembly=handle.assembly,
+            )
+    finally:
+        runtime.close_all()
+
+
+def test_runtime_context_normalizes_and_freezes_prompt_inputs() -> None:
+    from codepilot.runtime.context import RuntimeContext
+
+    tool_snippets = {"read": "  Read files  "}
+    context = RuntimeContext(
+        repository_context="  Repository summary  ",
+        prompt_guidelines=["  Use tools carefully  ", " "],
+        append_sections=["  Extra prompt  ", ""],
+        tool_snippets=tool_snippets,
+        memory_text="  Durable memory  ",
+    )
+    tool_snippets["read"] = "mutated"
+
+    assert context.repository_context == "Repository summary"
+    assert context.prompt_guidelines == ("Use tools carefully",)
+    assert context.append_sections == ("Extra prompt",)
+    assert context.tool_snippets["read"] == "Read files"
+    assert context.memory_text == "Durable memory"
+
+    with pytest.raises(AttributeError):
+        context.prompt_guidelines.append("late mutation")  # type: ignore[attr-defined]
+
+    with pytest.raises(TypeError):
+        context.tool_snippets["write"] = "mutate"  # type: ignore[index]
+
+
+def test_prompt_plan_owns_section_normalization_and_unique_names() -> None:
+    from codepilot.runtime.prompt import PromptPlan, PromptSection
+
+    plan = PromptPlan()
+
+    assert plan.add_section(
+        name=" identity ",
+        content="  You are Codepilot  ",
+        source=" default ",
+        priority=20,
+    ) is True
+    assert plan.add_section(
+        name="empty",
+        content="  ",
+        source="default",
+        priority=30,
+    ) is False
+    assert plan.add_section(
+        name=" runtime ",
+        content="Runtime facts",
+        source=" runtime ",
+        priority=10,
+    ) is True
+
+    assert plan.render() == "Runtime facts\n\nYou are Codepilot"
+    assert plan.get_sources() == {
+        "runtime": "runtime",
+        "identity": "default",
+    }
+
+    with pytest.raises(ValueError, match="Duplicate prompt section"):
+        plan.add_section(
+            name="identity",
+            content="Another identity",
+            source="default",
+            priority=20,
+        )
+
+    with pytest.raises(ValueError, match="section name"):
+        PromptSection(name="", content="text", source="default", priority=10)
+
+    with pytest.raises(ValueError, match="section content"):
+        PromptSection(name="identity", content=" ", source="default", priority=10)
+
+    with pytest.raises(ValueError, match="section source"):
+        PromptSection(name="identity", content="text", source="", priority=10)
+
+    with pytest.raises(TypeError, match="priority"):
+        PromptSection(
+            name="identity",
+            content="text",
+            source="default",
+            priority="high",  # type: ignore[arg-type]
+        )
 
 
 def test_runtime_assembly_is_registered_with_session(tmp_path: Path) -> None:
@@ -305,6 +854,109 @@ def test_runtime_rejects_second_run_for_same_session() -> None:
     asyncio.run(run_case())
 
 
+def test_runtime_discards_finished_active_run_before_busy_check() -> None:
+    async def run_case() -> None:
+        from codepilot.runtime.types import ActiveRun
+
+        class FakeSession:
+            session_id = "s1"
+
+            def __init__(self) -> None:
+                self.listeners = []
+                self.calls = 0
+
+            def subscribe(self, listener):
+                self.listeners.append(listener)
+
+                def unsubscribe():
+                    self.listeners.remove(listener)
+
+                return unsubscribe
+
+            async def run(self, text, *, images=None, run_id=None):
+                _ = text, images, run_id
+                self.calls += 1
+
+        runtime = RuntimeService()
+        fake = FakeSession()
+        runtime._sessions[fake.session_id] = fake  # type: ignore[assignment]
+
+        completed_task = asyncio.create_task(asyncio.sleep(0))
+        await completed_task
+        runtime._active_runs[fake.session_id] = ActiveRun(
+            run_id="finished_run",
+            session_id=fake.session_id,
+            task=completed_task,
+            status="completed",
+        )
+
+        events = [
+            event
+            async for event in runtime.send_message(
+                fake.session_id,
+                UserInput(text="after finished run"),
+            )
+        ]
+
+        assert events == []
+        assert fake.calls == 1
+        assert fake.session_id not in runtime._active_runs
+
+    asyncio.run(run_case())
+
+
+def test_runtime_status_ignores_finished_active_run(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        from codepilot.runtime.types import ActiveRun
+
+        runtime = RuntimeService()
+        handle = runtime.create_session(_options(tmp_path))
+        try:
+            completed_task = asyncio.create_task(asyncio.sleep(0))
+            await completed_task
+            runtime._active_runs[handle.session_id] = ActiveRun(
+                run_id="finished_run",
+                session_id=handle.session_id,
+                task=completed_task,
+                status="completed",
+            )
+
+            status = runtime.get_session_status(handle.session_id)
+
+            assert status.is_running is False
+            assert handle.session_id not in runtime._active_runs
+        finally:
+            runtime.close_all()
+
+    asyncio.run(run_case())
+
+
+def test_active_run_rejects_unknown_status() -> None:
+    from codepilot.runtime.types import ActiveRun
+
+    with pytest.raises(ValueError, match="Unknown active run status"):
+        ActiveRun(run_id="run_1", session_id="s1", status="paused")  # type: ignore[arg-type]
+
+
+def test_cancel_run_clears_active_run_without_bound_task() -> None:
+    async def run_case() -> None:
+        from codepilot.runtime.types import ActiveRun
+
+        runtime = RuntimeService()
+        runtime._active_runs["s1"] = ActiveRun(
+            run_id="created_but_not_bound",
+            session_id="s1",
+            task=None,
+        )
+
+        assert await runtime.cancel_run("s1") is True
+        assert "s1" not in runtime._active_runs
+
+    asyncio.run(run_case())
+
+
 def test_cancel_run_cancels_stream_task() -> None:
     async def run_case() -> None:
         class FakeSession:
@@ -394,6 +1046,119 @@ def test_runtime_injects_active_run_id_into_session() -> None:
     asyncio.run(run_case())
 
 
+def test_build_pending_approvals_extracts_only_matched_approval_results() -> None:
+    from codepilot.protocols import (
+        AgentRunResult,
+        AssistantMessage,
+        TextContent,
+        ToolCall,
+        ToolResultMessage,
+    )
+    from codepilot.runtime.approval_flow import build_pending_approvals
+
+    matched_call = ToolCall(
+        id="tool_1",
+        name="custom_mutate",
+        arguments={"value": "ok"},
+    )
+    result = AgentRunResult(
+        run_id="run_1",
+        session_id="session_1",
+        status="waiting_approval",
+        stop_reason="approval_required",
+        messages=[
+            AssistantMessage(content=[matched_call]),
+            ToolResultMessage(
+                tool_call_id="tool_1",
+                tool_name="custom_mutate",
+                content=[TextContent(text="approval needed")],
+                status="approval_required",
+                is_error=True,
+                approved=False,
+                approval_id="approval_1",
+                details={"policy_reason": "workspace_write"},
+            ),
+            ToolResultMessage(
+                tool_call_id="missing_assistant_call",
+                tool_name="custom_mutate",
+                content=[TextContent(text="orphan")],
+                status="approval_required",
+                is_error=True,
+                approved=False,
+                approval_id="approval_orphan",
+            ),
+        ],
+    )
+
+    approvals = build_pending_approvals("session_1", result)
+
+    assert len(approvals) == 1
+    assert approvals[0].approval_id == "approval_1"
+    assert approvals[0].session_id == "session_1"
+    assert approvals[0].run_id == "run_1"
+    assert approvals[0].tool_call is matched_call
+    assert approvals[0].reason == "workspace_write"
+
+
+def test_pending_approval_rejects_missing_identity_fields() -> None:
+    from codepilot.protocols import AssistantMessage, ToolCall
+
+    tool_call = ToolCall(id="tool_1", name="custom_mutate", arguments={})
+    assistant = AssistantMessage(content=[tool_call])
+
+    with pytest.raises(ValueError, match="approval_id is required"):
+        PendingApproval(
+            approval_id="",
+            session_id="session_1",
+            run_id="run_1",
+            assistant_message=assistant,
+            tool_call=tool_call,
+        )
+
+    with pytest.raises(ValueError, match="tool_call.id is required"):
+        PendingApproval(
+            approval_id="approval_1",
+            session_id="session_1",
+            run_id="run_1",
+            assistant_message=assistant,
+            tool_call=ToolCall(id="", name="custom_mutate", arguments={}),
+        )
+
+
+def test_denied_approval_result_preserves_recovery_metadata() -> None:
+    from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+    from codepilot.runtime.approval_flow import denied_tool_result
+
+    tool_call = ToolCall(id="call_1", name="custom_mutate", arguments={})
+    approval = PendingApproval(
+        approval_id="approval_1",
+        session_id="session_1",
+        run_id="run_1",
+        assistant_message=AssistantMessage(content=[tool_call]),
+        tool_call=tool_call,
+        reason="workspace_write",
+    )
+
+    result = denied_tool_result(approval)
+
+    assert result.tool_call_id == "call_1"
+    assert result.tool_name == "custom_mutate"
+    assert result.status == "denied"
+    assert result.approved is False
+    assert result.approval_id == "approval_1"
+    assert result.error_code == "user_denied"
+    assert result.details["reason"] == "user_denied"
+    assert result.metadata["approval_resume"] == {
+        "approval_id": "approval_1",
+        "decision": "denied",
+    }
+    assert any(
+        isinstance(block, TextContent)
+        and block.text == "Tool execution denied by user"
+        for block in result.content
+    )
+
+
 def test_runtime_approval_resume_executes_pending_tool_and_continues(
     tmp_path: Path,
 ) -> None:
@@ -408,6 +1173,8 @@ def test_runtime_approval_resume_executes_pending_tool_and_continues(
         from codepilot.tools import AgentTool, AgentToolResult
 
         executed: list[dict[str, object]] = []
+        before_hooks: list[tuple[str, dict[str, object]]] = []
+        after_hooks: list[tuple[str, str]] = []
 
         async def fake_stream(_model, context, _options):
             stream = AssistantMessageEventStream()
@@ -449,6 +1216,14 @@ def test_runtime_approval_resume_executes_pending_tool_and_continues(
                 },
             )
 
+        async def before_tool_call(ctx, signal=None):
+            _ = signal
+            before_hooks.append((ctx.tool_call.id, dict(ctx.args)))
+
+        async def after_tool_call(ctx, signal=None):
+            _ = signal
+            after_hooks.append((ctx.tool_call.id, ctx.result.status))
+
         runtime = RuntimeService()
         handle = runtime.create_session(
             _options(
@@ -466,6 +1241,8 @@ def test_runtime_approval_resume_executes_pending_tool_and_continues(
                 memory_enabled=False,
                 task_control_enabled=False,
                 context_governance_enabled=False,
+                before_tool_call=before_tool_call,
+                after_tool_call=after_tool_call,
             )
         )
         try:
@@ -485,6 +1262,8 @@ def test_runtime_approval_resume_executes_pending_tool_and_continues(
             assert approval_id
             assert executed == []
             assert runtime.list_pending_approvals(handle.session_id)[0]["approval_id"] == approval_id
+            assert before_hooks == [("custom_1", {"value": "ok"})]
+            assert after_hooks == [("custom_1", "approval_required")]
 
             resumed = await runtime.approve_tool_call(approval_id, "approve")
 
@@ -496,6 +1275,14 @@ def test_runtime_approval_resume_executes_pending_tool_and_continues(
                 item.tool_name == "custom_mutate" and item.status == "passed"
                 for item in resumed.verification
             )
+            assert before_hooks == [
+                ("custom_1", {"value": "ok"}),
+                ("custom_1", {"value": "ok"}),
+            ]
+            assert after_hooks == [
+                ("custom_1", "approval_required"),
+                ("custom_1", "success"),
+            ]
             assert any(
                 isinstance(message, ToolResultMessage)
                 and message.tool_call_id == "custom_1"

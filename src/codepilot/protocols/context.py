@@ -3,7 +3,7 @@ from __future__ import annotations
 """跨层共享的上下文治理数据契约。"""
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 # 上下文新鲜度：新鲜/过时/已丢失/未知
 ContextFreshness = Literal["fresh", "stale", "missing", "unknown"]
@@ -18,6 +18,20 @@ DroppedContextReason = Literal[
     "superseded",      # 被替代
     "missing_source",  # 来源丢失
 ]
+_CONTEXT_FRESHNESS_VALUES = frozenset({"fresh", "stale", "missing", "unknown"})
+_CONTEXT_TRUST_VALUES = frozenset(
+    {"observed", "derived", "user_given", "model_claim"}
+)
+_DROPPED_CONTEXT_REASONS = frozenset(
+    {
+        "duplicate",
+        "stale",
+        "low_relevance",
+        "over_budget",
+        "superseded",
+        "missing_source",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -73,15 +87,9 @@ class ContextItem:
     source_hash: str | None = None # 来源文件哈希
     freshness: ContextFreshness = "unknown"  # 新鲜度
 
-
-@dataclass
-class ContextSection:
-    """上下文段落：一组同类条目及其 token 预算。"""
-    name: str                                              # 段落名称
-    budget_tokens: int                                     # token 预算
-    min_tokens: int                                        # 最低 token 数
-    items: list[ContextItem] = field(default_factory=list) # 条目列表
-    reduction_policy: str = "drop_low_priority"            # 超预算时的裁剪策略
+    def __post_init__(self) -> None:
+        _ensure_context_trust(self.trust)
+        _ensure_context_freshness(self.freshness)
 
 
 @dataclass(frozen=True)
@@ -103,6 +111,9 @@ class DroppedContextItem:
     section: str                       # 所属段落
     reason: DroppedContextReason       # 丢弃原因
     source: str                        # 来源
+
+    def __post_init__(self) -> None:
+        _ensure_dropped_context_reason(self.reason)
 
 
 @dataclass
@@ -129,11 +140,28 @@ class ContextReport:
         return asdict(self)
 
 
+def _ensure_context_freshness(value: object) -> ContextFreshness:
+    if value not in _CONTEXT_FRESHNESS_VALUES:
+        raise ValueError(f"Unknown context freshness: {value}")
+    return cast(ContextFreshness, value)
+
+
+def _ensure_context_trust(value: object) -> ContextTrust:
+    if value not in _CONTEXT_TRUST_VALUES:
+        raise ValueError(f"Unknown context trust: {value}")
+    return cast(ContextTrust, value)
+
+
+def _ensure_dropped_context_reason(value: object) -> DroppedContextReason:
+    if value not in _DROPPED_CONTEXT_REASONS:
+        raise ValueError(f"Unknown dropped context reason: {value}")
+    return cast(DroppedContextReason, value)
+
+
 __all__ = [
     "ContextFreshness",
     "ContextItem",
     "ContextReport",
-    "ContextSection",
     "ContextSectionReport",
     "ContextTrust",
     "DroppedContextItem",

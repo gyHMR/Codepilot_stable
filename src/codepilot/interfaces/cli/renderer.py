@@ -13,53 +13,15 @@ CLI 终端渲染。
 它不解析命令行参数、不切换运行模式、不直接操作 Session，也不执行工具。
 """
 
-from dataclasses import dataclass, field
 from html import escape
 import sys
 import time
 from typing import Any
 
-from codepilot.core import AgentEvent
-from codepilot.protocols import AssistantMessage, TextContent
-from codepilot.runtime.service import SessionStatus
-from codepilot.runtime.types import OutputFn
+from codepilot.protocols import AgentEvent, AssistantMessage, TextContent
 
-
-@dataclass(frozen=True)
-class CliStartupState:
-    """CLI 启动时需要展示的状态信息。
-
-    Attributes:
-        version: Codepilot 版本号。
-        model_id: 当前模型 ID（如 deepseek/deepseek-chat）。
-        workspace: 工作区目录路径。
-        session_id: 会话 ID（新建或恢复）。
-        permission_mode: 权限模式（如 workspace-write、read-only）。
-        warnings: 启动警告列表（如凭证缺失、只读模式）。
-    """
-
-    version: str
-    model_id: str
-    workspace: str
-    session_id: str
-    permission_mode: str = "workspace-write"
-    warnings: list[str] = field(default_factory=list)
-
-
-def build_startup_state(
-    status: SessionStatus,
-    warnings: list[str] | None = None,
-) -> CliStartupState:
-    """从 SessionStatus 构建启动状态信息。"""
-
-    return CliStartupState(
-        version="0.3",
-        model_id=status.model_id,
-        workspace=status.workspace,
-        session_id=status.session_id,
-        permission_mode=status.permission_mode,
-        warnings=warnings if warnings is not None else list(status.warnings or []),
-    )
+from .startup import CliStartupState
+from .types import OutputFn
 
 
 class TerminalRenderer:
@@ -569,8 +531,6 @@ class SimpleRenderer:
 
 
 __all__ = [
-    "CliStartupState",
     "SimpleRenderer",
     "TerminalRenderer",
-    "build_startup_state",
 ]

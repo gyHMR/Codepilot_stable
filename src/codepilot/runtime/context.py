@@ -17,6 +17,8 @@ Runtime 系统提示词启动上下文。
 
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
+from typing import Mapping
 
 from codepilot.extensions.types import LoadedExtensions
 from codepilot.sessions.context.repository_context import (
@@ -31,13 +33,37 @@ from .config import ResolvedRuntimeConfig
 
 @dataclass(frozen=True)
 class RuntimeContext:
-    """供系统提示词渲染使用的启动上下文。"""
+    """供系统提示词渲染使用的启动上下文。
+
+    RuntimeContext is built once during session assembly and then handed to the
+    prompt renderer.  It copies and freezes collection fields so later mutation
+    of config or extension objects cannot silently change the prompt contract.
+    """
 
     repository_context: str
-    prompt_guidelines: list[str]
-    append_sections: list[str]
-    tool_snippets: dict[str, str]
+    prompt_guidelines: tuple[str, ...]
+    append_sections: tuple[str, ...]
+    tool_snippets: Mapping[str, str]
     memory_text: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "repository_context", _strip_text(self.repository_context))
+        object.__setattr__(
+            self,
+            "prompt_guidelines",
+            tuple(_clean_text_items(self.prompt_guidelines)),
+        )
+        object.__setattr__(
+            self,
+            "append_sections",
+            tuple(_clean_text_items(self.append_sections)),
+        )
+        object.__setattr__(
+            self,
+            "tool_snippets",
+            MappingProxyType(_clean_tool_snippets(self.tool_snippets)),
+        )
+        object.__setattr__(self, "memory_text", _strip_text(self.memory_text))
 
 
 def build_runtime_context(
@@ -93,6 +119,32 @@ def _build_prompt_debug_lines(
         debug_lines.append("### diagnostics")
         debug_lines.extend([f"- {d}" for d in loaded_skills.diagnostics])
     return debug_lines
+
+
+def _strip_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _clean_text_items(values: object) -> list[str]:
+    if values is None:
+        return []
+    return [
+        text
+        for text in (_strip_text(value) for value in values)
+        if text
+    ]
+
+
+def _clean_tool_snippets(values: Mapping[str, str] | None) -> dict[str, str]:
+    if not values:
+        return {}
+    snippets: dict[str, str] = {}
+    for key, value in values.items():
+        name = _strip_text(key)
+        snippet = _strip_text(value)
+        if name and snippet:
+            snippets[name] = snippet
+    return snippets
 
 
 __all__ = [

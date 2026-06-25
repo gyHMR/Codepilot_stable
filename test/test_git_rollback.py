@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 def _git(root: Path, *args: str) -> str:
     result = subprocess.run(
@@ -75,6 +77,13 @@ def _append_run(session, run_id: str, affected_paths: list[str]) -> None:
         workspace_changed=True,
     )
     session.store.append_run_result(result)
+
+
+def test_git_rollback_result_rejects_unknown_status() -> None:
+    from codepilot.sessions.history.git_rollback import GitRollbackResult
+
+    with pytest.raises(ValueError, match="Unknown rollback status"):
+        GitRollbackResult(status="partial", run_id="run_1")  # type: ignore[arg-type]
 
 
 def test_git_rollback_reverts_tracked_file_and_removes_new_file(tmp_path: Path) -> None:

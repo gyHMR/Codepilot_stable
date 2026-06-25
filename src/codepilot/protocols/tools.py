@@ -10,17 +10,22 @@ from __future__ import annotations
 - ToolMetadata: 工具元数据（风险级别、权限要求等）
 """
 
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Literal, Union
+from typing import Any, Literal, Union, cast
 
 from .content import ImageContent, TextContent
 
 
 # 工具风险级别：用于权限控制和审批流程
 ToolRiskLevel = Literal["low", "medium", "high"]
+_TOOL_RISK_LEVELS = frozenset({"low", "medium", "high"})
 
 # 工具执行结果状态
 ToolResultStatus = Literal["success", "error", "denied", "approval_required", "cancelled"]
+_TOOL_RESULT_STATUSES = frozenset(
+    {"success", "error", "denied", "approval_required", "cancelled"}
+)
 
 
 @dataclass
@@ -38,6 +43,16 @@ class Tool:
     name: str
     description: str
     parameters: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        self.name = _require_tool_spec_text(self.name, field_name="tool name")
+        self.description = _require_tool_spec_text(
+            self.description,
+            field_name="description",
+        )
+        if not isinstance(self.parameters, dict):
+            raise TypeError("Tool parameters must be a dict")
+        self.parameters = deepcopy(self.parameters)
 
 
 @dataclass
@@ -113,6 +128,7 @@ class ToolResult:
 
     def __post_init__(self) -> None:
         """初始化后处理：自动同步 is_error 和 status 的一致性。"""
+        ensure_tool_result_status(self.status)
         if self.is_error and self.status == "success":
             self.status = "error"
         elif self.status != "success":
@@ -151,6 +167,96 @@ class ToolMetadata:
     credential_required: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "name",
+            _require_tool_metadata_text(self.name, field_name="name"),
+        )
+        object.__setattr__(
+            self,
+            "category",
+            _require_tool_metadata_text(self.category, field_name="category"),
+        )
+        for field_name in (
+            "read_only",
+            "concurrency_safe",
+            "exclusive",
+            "requires_approval",
+            "network_access",
+            "credential_required",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, bool):
+                raise TypeError(f"Tool metadata {field_name} must be bool")
+        object.__setattr__(self, "risk_level", _ensure_tool_risk_level(self.risk_level))
+        object.__setattr__(
+            self,
+            "resource_scope",
+            tuple(_clean_unique_metadata_items(self.resource_scope)),
+        )
+        if not self.resource_scope:
+            raise ValueError("Tool metadata resource_scope cannot be empty")
+        if not isinstance(self.extra, dict):
+            raise TypeError("Tool metadata extra must be a dict")
+        object.__setattr__(self, "extra", dict(self.extra))
+
+
+def ensure_tool_result_status(value: object) -> ToolResultStatus:
+    if value not in _TOOL_RESULT_STATUSES:
+        raise ValueError(f"Unknown tool result status: {value}")
+    return cast(ToolResultStatus, value)
+
+
+def coerce_tool_result_status(
+    value: object,
+    *,
+    default: ToolResultStatus,
+) -> ToolResultStatus:
+    if value in _TOOL_RESULT_STATUSES:
+        return cast(ToolResultStatus, value)
+    return default
+
+
+def _clean_tool_spec_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _require_tool_spec_text(value: object, *, field_name: str) -> str:
+    text = _clean_tool_spec_text(value)
+    if not text:
+        raise ValueError(f"Tool {field_name} cannot be empty")
+    return text
+
+
+def _clean_tool_metadata_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _require_tool_metadata_text(value: object, *, field_name: str) -> str:
+    text = _clean_tool_metadata_text(value)
+    if not text:
+        raise ValueError(f"tool metadata {field_name} cannot be empty")
+    return text
+
+
+def _ensure_tool_risk_level(value: object) -> ToolRiskLevel:
+    text = _clean_tool_metadata_text(value)
+    if text not in _TOOL_RISK_LEVELS:
+        raise ValueError(f"Unknown tool risk level: {value}")
+    return cast(ToolRiskLevel, text)
+
+
+def _clean_unique_metadata_items(values: tuple[str, ...]) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _clean_tool_metadata_text(value)
+        if text and text not in seen:
+            cleaned.append(text)
+            seen.add(text)
+    return cleaned
+
 
 __all__ = [
     "Tool",
@@ -160,4 +266,6 @@ __all__ = [
     "ToolResultBlock",
     "ToolResultStatus",
     "ToolRiskLevel",
+    "coerce_tool_result_status",
+    "ensure_tool_result_status",
 ]

@@ -9,10 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from codepilot.runtime import (
-    CreateAgentSessionOptions,
-    WorkspaceResourceLoader,
-)
+from codepilot.runtime import WorkspaceResourceLoader
+from codepilot.runtime.types import CreateAgentSessionOptions
 
 from .service import EvaluationService
 from .types import EvalRunOptions

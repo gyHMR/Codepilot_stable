@@ -4,7 +4,8 @@ from io import StringIO
 
 from rich.console import Console
 
-from codepilot.interfaces.cli.renderer import CliStartupState, TerminalRenderer
+from codepilot.interfaces.cli.renderer import TerminalRenderer
+from codepilot.interfaces.cli.startup import CliStartupState
 from codepilot.protocols import LLMErrorInfo
 
 

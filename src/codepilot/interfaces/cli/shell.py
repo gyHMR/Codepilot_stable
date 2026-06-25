@@ -26,6 +26,8 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import HTML
 
+from codepilot.runtime.command_registry import RuntimeCommand, builtin_commands
+
 
 # 自定义样式
 CODEPILOT_STYLE = Style.from_dict({
@@ -38,21 +40,15 @@ CODEPILOT_STYLE = Style.from_dict({
     "completion-menu.meta.completion.current": "bg:#164e63 #a5f3fc",
 })
 
-# 命令列表（用于补全）
-BUILTIN_COMMANDS = [
-    "/help", "/status", "/session", "/tree", "/fork", "/new",
-    "/switch", "/clear", "/compact", "/tools", "/model", "/usage", "/exit",
-]
-
-
 class CommandCompleter(Completer):
     """命令补全器。
 
-    当输入以 / 开头时，补全可用的命令。
+    Shell 只消费运行时命令元数据，不维护第二份命令名称或描述。
+    真正的命令语义由 runtime.command_registry 统一定义。
     """
 
-    def __init__(self, commands: list[str]) -> None:
-        self.commands = commands
+    def __init__(self, commands: Iterable[RuntimeCommand]) -> None:
+        self.commands = tuple(commands)
 
     def get_completions(
         self,
@@ -65,36 +61,18 @@ class CommandCompleter(Completer):
         if not text.startswith("/"):
             return
 
-        # 获取当前正在输入的词
-        word = text.lstrip("/")
+        # 只补全命令名；命令参数由各命令自己的帮助文本解释。
+        word = text[1:]
+        if " " in word:
+            return
 
         for cmd in self.commands:
-            cmd_name = cmd.lstrip("/")
-            if cmd_name.startswith(word):
+            if cmd.name.startswith(word):
                 yield Completion(
-                    cmd_name,
+                    cmd.name,
                     start_position=-len(word),
-                    display_meta=self._get_description(cmd),
+                    display_meta=cmd.description,
                 )
-
-    def _get_description(self, cmd: str) -> str:
-        """获取命令描述。"""
-        descriptions = {
-            "/help": "显示可用命令",
-            "/status": "查看状态",
-            "/session": "查看会话信息",
-            "/tree": "查看会话树",
-            "/fork": "分叉会话",
-            "/new": "新建会话",
-            "/switch": "切换节点",
-            "/clear": "清空上下文",
-            "/compact": "压缩上下文",
-            "/tools": "查看工具",
-            "/model": "查看模型信息",
-            "/usage": "查看 token 用量",
-            "/exit": "退出",
-        }
-        return descriptions.get(cmd, "")
 
 
 class InteractiveShell:
@@ -128,7 +106,7 @@ class InteractiveShell:
         history_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 创建补全器
-        completer = CommandCompleter(BUILTIN_COMMANDS)
+        completer = CommandCompleter(builtin_commands())
 
         # 创建快捷键绑定
         bindings = KeyBindings()

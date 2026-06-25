@@ -26,6 +26,10 @@ class CliApprovalProvider:
         input_fn: Callable[[str], str] = input,
         output_fn: Callable[[str], None] = print,
     ) -> None:
+        if not callable(input_fn):
+            raise TypeError("CliApprovalProvider.input_fn must be callable")
+        if not callable(output_fn):
+            raise TypeError("CliApprovalProvider.output_fn must be callable")
         self.input_fn = input_fn
         self.output_fn = output_fn
 

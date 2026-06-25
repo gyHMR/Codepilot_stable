@@ -39,10 +39,39 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
-from codepilot.protocols import ContextFreshness, RepositorySnapshot, ToolResultMessage
+from codepilot.protocols import (
+    ContextFreshness,
+    ContextTrust,
+    RepositorySnapshot,
+    ToolResultMessage,
+)
 from codepilot.tools.sandbox import file_state_for_path
+
+
+ContextFileRole = Literal["target", "test", "dependency", "config", "reference"]
+ContextEvidenceKind = Literal["tool_result", "verification", "observation"]
+
+_CONTEXT_FILE_ROLES: set[str] = {
+    "target",
+    "test",
+    "dependency",
+    "config",
+    "reference",
+}
+_CONTEXT_EVIDENCE_KINDS: set[str] = {
+    "tool_result",
+    "verification",
+    "observation",
+}
+_CONTEXT_FRESHNESS_VALUES: set[str] = {"fresh", "stale", "missing", "unknown"}
+_CONTEXT_TRUST_VALUES: set[str] = {
+    "observed",
+    "derived",
+    "user_given",
+    "model_claim",
+}
 
 
 @dataclass
@@ -82,7 +111,7 @@ class ActiveFile:
     path: str
 
     # 文件角色：target/test/dependency/config/reference
-    role: str
+    role: ContextFileRole
 
     # 记录原因
     reason: str
@@ -98,6 +127,10 @@ class ActiveFile:
 
     # 新鲜度：fresh/stale/missing/unknown
     freshness: ContextFreshness = "unknown"
+
+    def __post_init__(self) -> None:
+        _ensure_file_role(self.role)
+        _ensure_context_freshness(self.freshness)
 
 
 @dataclass
@@ -144,7 +177,10 @@ class FileSummary:
     created_at: float = field(default_factory=time.time)
 
     # 新鲜度：fresh/stale/missing
-    freshness: str = "fresh"
+    freshness: ContextFreshness = "fresh"
+
+    def __post_init__(self) -> None:
+        _ensure_context_freshness(self.freshness)
 
 
 @dataclass
@@ -190,13 +226,13 @@ class ContextEvidence:
     """
 
     # 证据类型
-    kind: str
+    kind: ContextEvidenceKind
 
     # 证据内容
     content: str
 
     # 信任级别
-    trust: str
+    trust: ContextTrust
 
     # 来源
     source: str
@@ -208,13 +244,18 @@ class ContextEvidence:
     workspace_fingerprint: str | None = None
 
     # 新鲜度
-    freshness: str = "unknown"
+    freshness: ContextFreshness = "unknown"
 
     # 相关文件路径
     path: str | None = None
 
     # 创建时间
     created_at: float = field(default_factory=time.time)
+
+    def __post_init__(self) -> None:
+        _ensure_context_evidence_kind(self.kind)
+        _ensure_context_trust(self.trust)
+        _ensure_context_freshness(self.freshness)
 
 
 @dataclass
@@ -379,7 +420,7 @@ class SessionContextState:
         self,
         path: str,
         *,
-        role: str,
+        role: ContextFileRole,
         reason: str,
         source_hash: str | None = None,
     ) -> None:
@@ -403,6 +444,7 @@ class SessionContextState:
         """
 
         # 规范化路径为 POSIX 格式
+        role = _ensure_file_role(role)
         normalized = Path(path).as_posix()
         current = self.active_files.get(normalized)
 
@@ -562,9 +604,35 @@ def _tool_result_text(message: ToolResultMessage, *, limit: int = 1200) -> str:
     return text[:limit]
 
 
+def _ensure_file_role(value: str) -> ContextFileRole:
+    if value not in _CONTEXT_FILE_ROLES:
+        raise ValueError(f"Unknown active file role: {value}")
+    return cast(ContextFileRole, value)
+
+
+def _ensure_context_evidence_kind(value: str) -> ContextEvidenceKind:
+    if value not in _CONTEXT_EVIDENCE_KINDS:
+        raise ValueError(f"Unknown context evidence kind: {value}")
+    return cast(ContextEvidenceKind, value)
+
+
+def _ensure_context_freshness(value: str) -> ContextFreshness:
+    if value not in _CONTEXT_FRESHNESS_VALUES:
+        raise ValueError(f"Unknown context freshness: {value}")
+    return cast(ContextFreshness, value)
+
+
+def _ensure_context_trust(value: str) -> ContextTrust:
+    if value not in _CONTEXT_TRUST_VALUES:
+        raise ValueError(f"Unknown context trust: {value}")
+    return cast(ContextTrust, value)
+
+
 __all__ = [
     "ActiveFile",           # 活跃文件记录
     "ContextEvidence",      # 上下文证据
+    "ContextEvidenceKind",  # 上下文证据类型
+    "ContextFileRole",      # 活跃文件角色
     "FileSummary",          # 文件摘要
     "SessionContextState",  # 会话上下文状态
 ]

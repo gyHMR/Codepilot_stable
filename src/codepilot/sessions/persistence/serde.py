@@ -24,6 +24,7 @@ from codepilot.protocols import (
     Usage,
     UserMessage,
 )
+from codepilot.protocols.tools import coerce_tool_result_status
 
 
 def _user_block_to_dict(block: TextContent | ImageContent) -> dict[str, Any]:
@@ -203,12 +204,16 @@ def message_from_dict(data: dict[str, Any]) -> Message:
         )
 
     if role == "toolResult":
+        is_error = bool(data.get("is_error", False))
         return ToolResultMessage(
             tool_call_id=data.get("tool_call_id", ""),
             tool_name=data.get("tool_name", ""),
             content=[_tool_result_block_from_dict(i) for i in data.get("content", []) if isinstance(i, dict)],
-            status=data.get("status", "error" if data.get("is_error") else "success"),
-            is_error=bool(data.get("is_error", False)),
+            status=coerce_tool_result_status(
+                data.get("status"),
+                default="error" if is_error else "success",
+            ),
+            is_error=is_error,
             approved=bool(data.get("approved", True)),
             approval_id=(
                 data.get("approval_id")

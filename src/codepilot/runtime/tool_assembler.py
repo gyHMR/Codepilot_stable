@@ -27,7 +27,7 @@ from codepilot.tools.builtin import (
     get_builtin_tool_metadata,
 )
 from codepilot.tools.permissions import PermissionPolicy
-from codepilot.tools.approval import DenyApprovalProvider
+from codepilot.tools.approval import DeferredApprovalProvider
 from codepilot.tools.registry import ToolRegistry, infer_tool_metadata
 from codepilot.tools.runtime import ToolRuntime
 from codepilot.tools.shell_policy import ShellExecutionPolicy
@@ -293,7 +293,7 @@ def assemble_tools(
             bash_allow_patterns=config.bash_allow_patterns,
             bash_block_patterns=config.bash_block_patterns,
         ),
-        approval_provider=options.approval_provider or DenyApprovalProvider(),
+        approval_provider=options.approval_provider or DeferredApprovalProvider(),
     )
 
     return AssembledTools(

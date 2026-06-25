@@ -9,7 +9,7 @@ from .approval import (
     ApprovalDecision,
     ApprovalProvider,
     ApprovalRequest,
-    DenyApprovalProvider,
+    DeferredApprovalProvider,
 )
 from .builtin import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES, create_builtin_tools
 from .permissions import PermissionPolicy, ToolDecision, ToolPermissionMode, ToolRequest
@@ -34,7 +34,7 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalProvider",
     "ApprovalRequest",
-    "DenyApprovalProvider",
+    "DeferredApprovalProvider",
     "MUTATING_TOOL_NAMES",
     "PermissionPolicy",
     "READ_ONLY_TOOL_NAMES",

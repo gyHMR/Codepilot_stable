@@ -133,7 +133,7 @@ class LLMStreamRunner:
         if self._config.prepare_context:
             prepared = await maybe_await(
                 self._config.prepare_context(
-                    context,
+                    prepared_context,
                     ContextPreparationRequest(
                         session_id=self._config.session_id,
                         model_context_window=self._config.model.context_window,
@@ -147,9 +147,9 @@ class LLMStreamRunner:
                 system_prompt=prepared.system_prompt,
                 messages=list(prepared.messages),
                 tools=list(prepared.tools),
-                current_task=context.current_task,
-                recovered_task=context.recovered_task,
-                task_signal=context.task_signal,
+                current_task=prepared_context.current_task,
+                task_recovery_projection=prepared_context.task_recovery_projection,
+                task_signal=prepared_context.task_signal,
             )
             # 发射上下文准备完成事件，通知外部上下文已准备好
             await self._emitter.emit(
@@ -494,6 +494,6 @@ def _with_current_task_context(context: AgentContext) -> AgentContext:
         messages=context.messages,
         tools=context.tools,
         current_task=context.current_task,
-        recovered_task=context.recovered_task,
+        task_recovery_projection=context.task_recovery_projection,
         task_signal=context.task_signal,
     )

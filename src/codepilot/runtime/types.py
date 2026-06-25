@@ -15,8 +15,9 @@ Runtime 对外类型定义模块。
 
 import asyncio
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping, Optional, cast
 
 from codepilot.protocols import Message, Model
 from codepilot.core import (
@@ -29,12 +30,12 @@ from codepilot.core import (
     ToolExecutionMode,
 )
 from codepilot.extensions.types import LifecycleHook, RegisteredCommand
+from codepilot.sessions.context.repository_context import RepositoryBootstrap
 from codepilot.sessions.types import AgentSessionOptions, ConvertToLlmFn
 from codepilot.tools import AgentTool, ToolMetadata
 from codepilot.tools.approval import ApprovalProvider
 
 if TYPE_CHECKING:
-    from codepilot.sessions.context.repository_context import RepositoryBootstrap
     from codepilot.sessions.session import AgentSession
 
 
@@ -168,12 +169,16 @@ class CreateAgentSessionOptions:
     stream_fn: StreamFn | None = None
 
 
-# 运行模式：print（单次输出）、interactive（交互式）、rpc（远程调用）
-RunMode = Literal["print", "interactive", "rpc"]
-# 输出函数类型：接收文本并输出（如打印到终端）
-OutputFn = Callable[[str], None]
-# 输入函数类型：接收提示文本并返回用户输入
-InputFn = Callable[[str], str]
+RuntimePermissionMode = Literal["read-only", "workspace-write", "ask"]
+RuntimeDiagnosticSeverity = Literal["info", "warning", "error"]
+ConfigSourceKind = Literal["cli", "session", "project", "user", "default"]
+ActiveRunStatus = Literal["running", "completed", "failed", "aborted"]
+RegisteredToolSource = Literal["builtin", "caller", "extension", "mcp"]
+_RUNTIME_PERMISSION_MODES = frozenset({"read-only", "workspace-write", "ask"})
+_RUNTIME_DIAGNOSTIC_SEVERITIES = frozenset({"info", "warning", "error"})
+_CONFIG_SOURCE_KINDS = frozenset({"cli", "session", "project", "user", "default"})
+_ACTIVE_RUN_STATUSES = frozenset({"running", "completed", "failed", "aborted"})
+_REGISTERED_TOOL_SOURCES = frozenset({"builtin", "caller", "extension", "mcp"})
 
 
 # ── 装配产物类型（Runtime 装配优化引入） ──────────────────────────
@@ -190,10 +195,32 @@ class RuntimeDiagnostic:
         message: 诊断消息。
         source: 来源（可选）。
     """
-    severity: Literal["info", "warning", "error"]
+    severity: RuntimeDiagnosticSeverity
     code: str
     message: str
     source: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "severity",
+            _ensure_runtime_diagnostic_severity(self.severity),
+        )
+        object.__setattr__(
+            self,
+            "code",
+            _require_runtime_text(self.code, field_name="code"),
+        )
+        object.__setattr__(
+            self,
+            "message",
+            _require_runtime_text(self.message, field_name="message"),
+        )
+        object.__setattr__(
+            self,
+            "source",
+            _optional_runtime_text(self.source, field_name="source"),
+        )
 
 
 @dataclass(frozen=True)
@@ -204,8 +231,20 @@ class ConfigValueSource:
         kind: 来源类型（cli/session/project/user/default）。
         location: 具体位置（可选，如文件路径）。
     """
-    kind: str
+    kind: ConfigSourceKind
     location: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "kind",
+            _ensure_config_source_kind(self.kind),
+        )
+        object.__setattr__(
+            self,
+            "location",
+            _optional_runtime_text(self.location, field_name="location"),
+        )
 
 
 @dataclass(frozen=True)
@@ -224,8 +263,38 @@ class ResolvedRuntimeProfile:
     model: Model
     credential_source: str
     credential_location: str | None = None
-    permission_mode: Literal["read-only", "workspace-write", "ask"] = "workspace-write"
-    sources: dict[str, ConfigValueSource] = field(default_factory=dict)
+    permission_mode: RuntimePermissionMode = "workspace-write"
+    sources: Mapping[str, ConfigValueSource] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.model, Model):
+            raise TypeError("ResolvedRuntimeProfile.model must be Model")
+        object.__setattr__(
+            self,
+            "credential_source",
+            _require_runtime_text(
+                self.credential_source,
+                field_name="credential_source",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "credential_location",
+            _optional_runtime_text(
+                self.credential_location,
+                field_name="credential_location",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "permission_mode",
+            _ensure_runtime_permission_mode(self.permission_mode),
+        )
+        object.__setattr__(
+            self,
+            "sources",
+            _copy_config_sources(self.sources),
+        )
 
 
 @dataclass(frozen=True)
@@ -235,6 +304,15 @@ class ResolvedConfigValue:
     key: str
     value: Any
     source: ConfigValueSource
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "key",
+            _require_runtime_text(self.key, field_name="key"),
+        )
+        if not isinstance(self.source, ConfigValueSource):
+            raise TypeError("ResolvedConfigValue.source must be ConfigValueSource")
 
 
 @dataclass(frozen=True)
@@ -251,11 +329,32 @@ class RegisteredTool:
     name: str
     tool: AgentTool
     metadata: ToolMetadata | None
-    source: str
+    source: RegisteredToolSource
     origin: str | None = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "name",
+            _require_runtime_text(self.name, field_name="tool name"),
+        )
+        if not isinstance(self.tool, AgentTool):
+            raise TypeError("RegisteredTool.tool must be AgentTool")
+        if self.metadata is not None and not isinstance(self.metadata, ToolMetadata):
+            raise TypeError("RegisteredTool.metadata must be ToolMetadata or None")
+        object.__setattr__(
+            self,
+            "source",
+            _ensure_registered_tool_source(self.source),
+        )
+        object.__setattr__(
+            self,
+            "origin",
+            _optional_runtime_text(self.origin, field_name="tool origin"),
+        )
 
-@dataclass
+
+@dataclass(frozen=True)
 class CapabilityCatalog:
     """能力目录。
 
@@ -265,11 +364,23 @@ class CapabilityCatalog:
         tools: 已注册的工具列表。
         commands: 已注册的命令字典。
     """
-    tools: list[RegisteredTool] = field(default_factory=list)
-    commands: dict[str, RegisteredCommand] = field(default_factory=dict)
+    tools: tuple[RegisteredTool, ...] = field(default_factory=tuple)
+    commands: Mapping[str, RegisteredCommand] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "tools",
+            _copy_registered_tools(self.tools),
+        )
+        object.__setattr__(
+            self,
+            "commands",
+            _copy_registered_commands(self.commands),
+        )
 
 
-@dataclass
+@dataclass(frozen=True)
 class RuntimeAssembly:
     """完整装配产物。
 
@@ -286,7 +397,22 @@ class RuntimeAssembly:
     profile: ResolvedRuntimeProfile
     repository: RepositoryBootstrap
     capabilities: CapabilityCatalog
-    diagnostics: list[RuntimeDiagnostic] = field(default_factory=list)
+    diagnostics: tuple[RuntimeDiagnostic, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.session_options, AgentSessionOptions):
+            raise TypeError("RuntimeAssembly.session_options must be AgentSessionOptions")
+        if not isinstance(self.profile, ResolvedRuntimeProfile):
+            raise TypeError("RuntimeAssembly.profile must be ResolvedRuntimeProfile")
+        if not isinstance(self.repository, RepositoryBootstrap):
+            raise TypeError("RuntimeAssembly.repository must be RepositoryBootstrap")
+        if not isinstance(self.capabilities, CapabilityCatalog):
+            raise TypeError("RuntimeAssembly.capabilities must be CapabilityCatalog")
+        object.__setattr__(
+            self,
+            "diagnostics",
+            _copy_runtime_diagnostics(self.diagnostics),
+        )
 
 
 @dataclass(frozen=True)
@@ -297,13 +423,54 @@ class SessionHandle:
     session: AgentSession
     assembly: RuntimeAssembly
 
+    def __post_init__(self) -> None:
+        session_id = _require_runtime_text(
+            self.session_id,
+            field_name="session_id",
+        )
+        if not isinstance(self.assembly, RuntimeAssembly):
+            raise TypeError("SessionHandle.assembly must be RuntimeAssembly")
+        session_session_id = _session_identity(self.session)
+        if session_session_id != session_id:
+            raise ValueError(
+                "SessionHandle.session_id must match session.session_id"
+            )
+        assembly_session_id = _require_runtime_text(
+            self.assembly.session_options.session_id,
+            field_name="assembly.session_options.session_id",
+        )
+        if assembly_session_id != session_id:
+            raise ValueError(
+                "SessionHandle.session_id must match assembly.session_options.session_id"
+            )
+        object.__setattr__(self, "session_id", session_id)
+
 
 @dataclass(frozen=True)
 class UserInput:
     """发送给会话的用户输入。"""
 
     text: str
-    images: list[str] | None = None
+    images: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.text, str):
+            raise TypeError("UserInput.text must be a string")
+        text = self.text.strip()
+        if not text:
+            raise ValueError("UserInput.text is required")
+        object.__setattr__(self, "text", text)
+        if self.images is None:
+            return
+        images: list[str] = []
+        for image in self.images:
+            if not isinstance(image, str):
+                raise TypeError("UserInput.images must contain strings")
+            normalized = image.strip()
+            if not normalized:
+                raise ValueError("UserInput.images cannot contain empty image paths")
+            images.append(normalized)
+        object.__setattr__(self, "images", tuple(images))
 
 
 @dataclass(frozen=True)
@@ -313,12 +480,62 @@ class SessionStatus:
     session_id: str
     model_id: str
     workspace: str
-    permission_mode: str
+    permission_mode: RuntimePermissionMode
     message_count: int
     leaf_id: str
     is_running: bool = False
     credential_source: str = "unknown"
-    warnings: list[str] | None = None
+    warnings: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "session_id",
+            _require_runtime_text(self.session_id, field_name="session_id"),
+        )
+        object.__setattr__(
+            self,
+            "model_id",
+            _require_runtime_text(self.model_id, field_name="model_id"),
+        )
+        object.__setattr__(
+            self,
+            "workspace",
+            _require_runtime_text(self.workspace, field_name="workspace"),
+        )
+        object.__setattr__(
+            self,
+            "permission_mode",
+            _ensure_runtime_permission_mode(self.permission_mode),
+        )
+        object.__setattr__(
+            self,
+            "message_count",
+            _ensure_non_negative_runtime_int(
+                self.message_count,
+                field_name="message_count",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "leaf_id",
+            _require_runtime_text(self.leaf_id, field_name="leaf_id"),
+        )
+        if not isinstance(self.is_running, bool):
+            raise TypeError("SessionStatus.is_running must be bool")
+        object.__setattr__(
+            self,
+            "credential_source",
+            _require_runtime_text(
+                self.credential_source,
+                field_name="credential_source",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "warnings",
+            _clean_runtime_warnings(self.warnings),
+        )
 
 
 @dataclass
@@ -329,4 +546,158 @@ class ActiveRun:
     session_id: str
     task: asyncio.Task[Any] | None = None
     started_at: float = 0
-    status: Literal["running", "completed", "failed", "aborted"] = "running"
+    status: ActiveRunStatus = "running"
+
+    def __post_init__(self) -> None:
+        _ensure_active_run_status(self.status)
+
+
+def _ensure_active_run_status(value: object) -> ActiveRunStatus:
+    if value not in _ACTIVE_RUN_STATUSES:
+        raise ValueError(f"Unknown active run status: {value}")
+    return cast(ActiveRunStatus, value)
+
+
+def _ensure_registered_tool_source(value: object) -> RegisteredToolSource:
+    if isinstance(value, str):
+        value = value.strip()
+    if value not in _REGISTERED_TOOL_SOURCES:
+        raise ValueError(f"Unknown tool source: {value}")
+    return cast(RegisteredToolSource, value)
+
+
+def _ensure_runtime_permission_mode(value: object) -> RuntimePermissionMode:
+    if value not in _RUNTIME_PERMISSION_MODES:
+        raise ValueError(f"Unknown permission_mode: {value}")
+    return cast(RuntimePermissionMode, value)
+
+
+def _ensure_runtime_diagnostic_severity(
+    value: object,
+) -> RuntimeDiagnosticSeverity:
+    if isinstance(value, str):
+        value = value.strip()
+    if value not in _RUNTIME_DIAGNOSTIC_SEVERITIES:
+        raise ValueError(f"Unknown diagnostic severity: {value}")
+    return cast(RuntimeDiagnosticSeverity, value)
+
+
+def _ensure_config_source_kind(value: object) -> ConfigSourceKind:
+    if isinstance(value, str):
+        value = value.strip()
+    if value not in _CONFIG_SOURCE_KINDS:
+        raise ValueError(f"Unknown config source kind: {value}")
+    return cast(ConfigSourceKind, value)
+
+
+def _require_runtime_text(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{field_name} is required")
+    return text
+
+
+def _optional_runtime_text(value: object, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    text = value.strip()
+    return text or None
+
+
+def _ensure_non_negative_runtime_int(value: object, *, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{field_name} must be an integer")
+    if value < 0:
+        raise ValueError(f"{field_name} cannot be negative")
+    return value
+
+
+def _clean_runtime_warnings(
+    warnings: object,
+) -> tuple[str, ...] | None:
+    if warnings is None:
+        return None
+    if isinstance(warnings, (str, bytes)):
+        raise TypeError("SessionStatus.warnings must be a sequence of strings")
+    cleaned: list[str] = []
+    for warning in warnings:
+        if not isinstance(warning, str):
+            raise TypeError("SessionStatus.warnings must contain strings")
+        text = warning.strip()
+        if text:
+            cleaned.append(text)
+    return tuple(cleaned)
+
+
+def _copy_config_sources(
+    sources: object,
+) -> Mapping[str, ConfigValueSource]:
+    if not isinstance(sources, Mapping):
+        raise TypeError("ResolvedRuntimeProfile.sources must be a mapping")
+    copied: dict[str, ConfigValueSource] = {}
+    for key, source in sources.items():
+        clean_key = _require_runtime_text(key, field_name="source key")
+        if not isinstance(source, ConfigValueSource):
+            raise TypeError(
+                "ResolvedRuntimeProfile.sources values must be ConfigValueSource"
+            )
+        copied[clean_key] = source
+    return MappingProxyType(copied)
+
+
+def _copy_registered_tools(
+    tools: object,
+) -> tuple[RegisteredTool, ...]:
+    if isinstance(tools, (str, bytes)):
+        raise TypeError("CapabilityCatalog.tools must be a sequence of RegisteredTool")
+    copied: list[RegisteredTool] = []
+    for tool in tools:
+        if not isinstance(tool, RegisteredTool):
+            raise TypeError(
+                "CapabilityCatalog.tools values must be RegisteredTool"
+            )
+        copied.append(tool)
+    return tuple(copied)
+
+
+def _copy_registered_commands(
+    commands: object,
+) -> Mapping[str, RegisteredCommand]:
+    if not isinstance(commands, Mapping):
+        raise TypeError("CapabilityCatalog.commands must be a mapping")
+    copied: dict[str, RegisteredCommand] = {}
+    for key, command in commands.items():
+        clean_key = _require_runtime_text(key, field_name="command name")
+        if not isinstance(command, RegisteredCommand):
+            raise TypeError(
+                "CapabilityCatalog.commands values must be RegisteredCommand"
+            )
+        copied[clean_key] = command
+    return MappingProxyType(copied)
+
+
+def _copy_runtime_diagnostics(
+    diagnostics: object,
+) -> tuple[RuntimeDiagnostic, ...]:
+    if isinstance(diagnostics, (str, bytes)):
+        raise TypeError("RuntimeAssembly.diagnostics must be a sequence of RuntimeDiagnostic")
+    copied: list[RuntimeDiagnostic] = []
+    for diagnostic in diagnostics:
+        if not isinstance(diagnostic, RuntimeDiagnostic):
+            raise TypeError(
+                "RuntimeAssembly.diagnostics values must be RuntimeDiagnostic"
+            )
+        copied.append(diagnostic)
+    return tuple(copied)
+
+
+def _session_identity(session: object) -> str:
+    try:
+        value = getattr(session, "session_id")
+    except AttributeError as exc:
+        raise TypeError("SessionHandle.session must expose session_id") from exc
+    return _require_runtime_text(value, field_name="session.session_id")

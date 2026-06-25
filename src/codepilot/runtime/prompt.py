@@ -14,7 +14,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from codepilot.tools import AgentTool
 
@@ -30,23 +29,83 @@ class PromptSection:
     source: str
     priority: int
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "name",
+            _require_prompt_text(self.name, field_name="section name"),
+        )
+        object.__setattr__(
+            self,
+            "content",
+            _require_prompt_text(self.content, field_name="section content"),
+        )
+        object.__setattr__(
+            self,
+            "source",
+            _require_prompt_text(self.source, field_name="section source"),
+        )
+        if isinstance(self.priority, bool) or not isinstance(self.priority, int):
+            raise TypeError("Prompt section priority must be int")
+
 
 @dataclass
 class PromptPlan:
-    """结构化系统提示词计划。"""
+    """结构化系统提示词计划。
+
+    PromptPlan owns section assembly rules: names are unique, empty optional
+    content is skipped at the boundary, and rendering always follows priority.
+    """
 
     sections: list[PromptSection] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        seen: set[str] = set()
+        for section in self.sections:
+            if not isinstance(section, PromptSection):
+                raise TypeError("PromptPlan sections must be PromptSection instances")
+            if section.name in seen:
+                raise ValueError(f"Duplicate prompt section: {section.name}")
+            seen.add(section.name)
+
+    def add_section(
+        self,
+        *,
+        name: str,
+        content: str,
+        source: str,
+        priority: int,
+    ) -> bool:
+        """Add one section, returning False when optional content is empty."""
+
+        if not _normalize_prompt_text(content):
+            return False
+        section = PromptSection(
+            name=name,
+            content=content,
+            source=source,
+            priority=priority,
+        )
+        if any(existing.name == section.name for existing in self.sections):
+            raise ValueError(f"Duplicate prompt section: {section.name}")
+        self.sections.append(section)
+        return True
+
     def render(self) -> str:
-        sections = sorted(self.sections, key=lambda section: section.priority)
+        sections = self._ordered_sections()
         return "\n\n".join(
-            section.content.strip()
+            section.content
             for section in sections
-            if section.content.strip()
         )
 
     def get_sources(self) -> dict[str, str]:
-        return {section.name: section.source for section in self.sections}
+        return {
+            section.name: section.source
+            for section in self._ordered_sections()
+        }
+
+    def _ordered_sections(self) -> list[PromptSection]:
+        return sorted(self.sections, key=lambda section: section.priority)
 
 
 # ── 段落优先级常量 ────────────────────────────────────────────────
@@ -86,65 +145,64 @@ def build_runtime_system_prompt(
 
     # 1. 身份和核心规则
     if base_system_prompt:
-        plan.sections.append(PromptSection(
+        plan.add_section(
             name="identity",
             content=base_system_prompt,
             source="config",
             priority=PRIORITY_IDENTITY,
-        ))
+        )
     else:
-        plan.sections.append(PromptSection(
+        plan.add_section(
             name="identity",
             content=_build_default_identity(tools, runtime_context),
             source="default",
             priority=PRIORITY_IDENTITY,
-        ))
+        )
 
     # 2. 安全策略
-    plan.sections.append(PromptSection(
+    plan.add_section(
         name="safety",
         content=_build_safety_section(),
         source="default",
         priority=PRIORITY_SAFETY,
-    ))
+    )
 
     # 3. 仓库上下文
     if runtime_context.repository_context:
-        plan.sections.append(PromptSection(
+        plan.add_section(
             name="repository",
             content=runtime_context.repository_context,
             source="workspace",
             priority=PRIORITY_REPOSITORY,
-        ))
+        )
 
     # 4. 长期记忆
     if runtime_context.memory_text:
-        plan.sections.append(PromptSection(
+        plan.add_section(
             name="memory",
             content=f"长期记忆（MEMORY）：\n{runtime_context.memory_text}",
             source="memory",
             priority=PRIORITY_MEMORY,
-        ))
+        )
 
     # 5. 扩展内容
     for i, section in enumerate(runtime_context.append_sections or []):
-        if section.strip():
-            plan.sections.append(PromptSection(
-                name=f"extension_{i}",
-                content=section.strip(),
-                source="extension",
-                priority=PRIORITY_EXTENSIONS,
-            ))
+        plan.add_section(
+            name=f"extension_{i}",
+            content=section,
+            source="extension",
+            priority=PRIORITY_EXTENSIONS,
+        )
 
     # 6. 运行时事实
     date = datetime.now().strftime("%Y-%m-%d")
     cwd_text = str(workspace.resolve()).replace("\\", "/")
-    plan.sections.append(PromptSection(
+    plan.add_section(
         name="runtime_facts",
         content=f"当前日期：{date}\n当前工作目录：{cwd_text}",
         source="runtime",
         priority=PRIORITY_RUNTIME,
-    ))
+    )
 
     return plan.render()
 
@@ -225,7 +283,7 @@ def build_default_system_prompt(tool_names: list[str] | None = None) -> str:
         默认系统提示词字符串。
     """
     plan = PromptPlan()
-    plan.sections.append(PromptSection(
+    plan.add_section(
         name="identity",
         content=_build_default_identity(
             [],
@@ -240,21 +298,21 @@ def build_default_system_prompt(tool_names: list[str] | None = None) -> str:
         ),
         source="default",
         priority=PRIORITY_IDENTITY,
-    ))
-    plan.sections.append(PromptSection(
+    )
+    plan.add_section(
         name="safety",
         content=_build_safety_section(),
         source="default",
         priority=PRIORITY_SAFETY,
-    ))
+    )
     date = datetime.now().strftime("%Y-%m-%d")
     cwd_text = str(Path.cwd().resolve()).replace("\\", "/")
-    plan.sections.append(PromptSection(
+    plan.add_section(
         name="runtime_facts",
         content=f"当前日期：{date}\n当前工作目录：{cwd_text}",
         source="runtime",
         priority=PRIORITY_RUNTIME,
-    ))
+    )
     return plan.render()
 
 
@@ -280,3 +338,14 @@ def _canonical_tool_names(tools: list[AgentTool]) -> list[str]:
             seen.add(tool.name)
             names.append(tool.name)
     return names
+
+
+def _normalize_prompt_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _require_prompt_text(value: object, *, field_name: str) -> str:
+    text = _normalize_prompt_text(value)
+    if not text:
+        raise ValueError(f"Prompt {field_name} cannot be empty")
+    return text

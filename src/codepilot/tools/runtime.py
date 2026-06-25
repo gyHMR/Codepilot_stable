@@ -9,7 +9,7 @@ from typing import Any
 
 from codepilot.protocols import TextContent
 
-from .approval import ApprovalProvider, DenyApprovalProvider
+from .approval import ApprovalProvider, DeferredApprovalProvider
 from .permissions import PermissionPolicy, ToolDecision, ToolRequest
 from .registry import ToolRegistry
 from .types import (
@@ -73,7 +73,7 @@ class ToolRuntime:
     """工具运行时：将注册表、权限策略和审批提供者组合为统一的执行引擎。"""
     registry: ToolRegistry                                      # 工具注册表
     permission_policy: PermissionPolicy = field(default_factory=PermissionPolicy)  # 权限策略
-    approval_provider: ApprovalProvider = field(default_factory=DenyApprovalProvider)  # 审批提供者
+    approval_provider: ApprovalProvider = field(default_factory=DeferredApprovalProvider)  # 审批提供者
 
     def as_agent_tools(self) -> list[AgentTool]:
         """将注册表中的工具转换为 Agent 可用的工具列表（包装权限检查逻辑）。"""

@@ -203,7 +203,13 @@ class TaskState:
 
 ```python
 class TaskController:
-    def initialize(self, prompts, *, proposed_steps=None, recovered_task=None) -> TaskState:
+    def initialize(
+        self,
+        prompts,
+        *,
+        proposed_steps=None,
+        task_recovery_projection=None,
+    ) -> TaskState:
         """初始化任务状态"""
         goal = _goal_from_prompts(prompts)  # 从用户消息提取目标
         steps = self._normalize_steps(proposed_steps or ["完成当前请求"])
@@ -402,9 +408,12 @@ def _replan_after_failure(self, task, results):
 ### 5.9 会话恢复支持
 
 ```python
-def _from_recovered_task(self, prompts, recovered_task) -> TaskState | None:
+def build_task_state_from_recovery_projection(
+    prompts,
+    task_recovery_projection,
+) -> TaskState | None:
     """从恢复的 task recovery projection 中重建 TaskState"""
-    progress = recovered_task.get("task_progress")
+    progress = task_recovery_projection.get("task_progress")
     if not isinstance(progress, Mapping):
         return None
     
@@ -439,7 +448,7 @@ async def _run_loop(...):
     task_controller = TaskController()
     task = task_controller.initialize(
         current_context.messages,
-        recovered_task=current_context.recovered_task,
+        task_recovery_projection=current_context.task_recovery_projection,
     )
     # 发送任务计划创建事件
     await emitter.emit({"type": "task_plan_created", "task": ...})

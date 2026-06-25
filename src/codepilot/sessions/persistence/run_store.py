@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from codepilot.observability import (
     EventRecorder,
@@ -23,6 +23,8 @@ from codepilot.tools.sandbox import file_state_for_path
 
 
 RUN_ARTIFACT_SCHEMA_VERSION = "1"
+FreshnessStatus = Literal["valid", "stale", "mismatch"]
+_FRESHNESS_STATUSES: set[str] = {"valid", "stale", "mismatch"}
 
 
 def _utc_now_iso() -> str:
@@ -32,11 +34,25 @@ def _utc_now_iso() -> str:
 @dataclass(frozen=True)
 class FreshnessResult:
     """文件新鲜度检查结果。"""
-    status: str                              # 状态：valid/stale/mismatch
+    status: FreshnessStatus                  # 状态：valid/stale/mismatch
     checked_paths: list[str] = field(default_factory=list)   # 已检查的文件路径
     changed_paths: list[str] = field(default_factory=list)   # 内容已变更的文件
     missing_paths: list[str] = field(default_factory=list)   # 已删除的文件
     workspace_path: str = ""                 # 工作区路径
+
+    def __post_init__(self) -> None:
+        if self.status not in _FRESHNESS_STATUSES:
+            raise ValueError(f"Unknown freshness status: {self.status}")
+
+    def should_record_event(self) -> bool:
+        """Return whether this freshness check is meaningful for observability."""
+
+        return bool(self.checked_paths) or self.status != "valid"
+
+    def requires_steering(self) -> bool:
+        """Return whether the Agent should be warned about stale context."""
+
+        return self.status != "valid"
 
     def to_event_payload(self) -> dict[str, Any]:
         """转换为事件载荷字典。"""
@@ -193,6 +209,7 @@ class RunStore:
             if content_changed or timestamp_changed:
                 changed.append(path)
 
+        status: FreshnessStatus
         if mismatch:
             status = "mismatch"
         elif changed or missing:

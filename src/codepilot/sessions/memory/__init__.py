@@ -19,7 +19,7 @@ from .records import (
 from .rendering import render_memory
 from .retriever import MemoryRetriever
 from .store import MemoryStore
-from .writer import MemoryWriter
+from .writer import MemoryAdmissionDecision, MemoryWriter, decide_prompt_memory_admission
 
 
 __all__ = [
@@ -28,6 +28,7 @@ __all__ = [
     "LEGACY_MEMORY_KINDS",
     "ExperienceExtractor",
     "MemoryKind",
+    "MemoryAdmissionDecision",
     "MemoryConsolidator",
     "MemoryQuery",
     "MemoryRecord",
@@ -37,6 +38,7 @@ __all__ = [
     "MemoryStore",
     "MemoryTrust",
     "MemoryWriter",
+    "decide_prompt_memory_admission",
     "RetrievedMemory",
     "load_global_memory",
     "render_memory",

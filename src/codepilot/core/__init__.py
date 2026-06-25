@@ -7,7 +7,9 @@ Codepilot Agent Run 核心模块
 - RunState           记录本次运行的机械性执行事实（计数器、受影响路径等）。
 - TaskState / TaskController  根据工具反馈跟踪任务进度。
 - LLMStreamRunner    将 LLM 流式响应转换为 Agent 消息事件。
-- ToolCallCoordinator  准备、执行并上报工具调用。
+
+注意：协议事件、运行结果和工具定义由 protocols/tools 层拥有。
+core 门面只导出核心编排对象，避免调用方误以为跨层数据模型属于 core。
 """
 
 from .agent import Agent, AgentOptions
@@ -23,27 +25,6 @@ from .task_controller import TaskController
 from .task_planner import PlannedTaskStep, TaskPlanDraft, TaskPlanner
 from .task_tools import COMPLETE_TASK_STEP_TOOL
 from .task_state import CompletionCheck, ExecutionDecision, TaskState, TaskStep
-from .tool_coordinator import ToolCallCoordinator
-from codepilot.protocols import (
-    AgentEndEvent,
-    AgentEvent,
-    AgentEventBase,
-    AgentRunCounters,
-    AgentRunResult,
-    AgentRunStatus,
-    AgentRunStopReason,
-    AgentStartEvent,
-    ErrorEvent,
-    MessageEndEvent,
-    MessageStartEvent,
-    MessageUpdateEvent,
-    ToolExecutionEndEvent,
-    ToolExecutionStartEvent,
-    ToolExecutionUpdateEvent,
-    TurnEndEvent,
-    TurnStartEvent,
-)
-from codepilot.tools import AgentTool, AgentToolResult
 from .types import (
     AfterToolCallContext,
     AfterToolCallResult,
@@ -70,7 +51,6 @@ __all__ = [
     "convert_to_llm",
     "RunState",
     "new_run_id",
-    "ToolCallCoordinator",
     "TaskController",
     "PlannedTaskStep",
     "TaskPlanDraft",
@@ -83,28 +63,9 @@ __all__ = [
     "AfterToolCallContext",
     "AfterToolCallResult",
     "AgentContext",
-    "AgentEvent",
-    "AgentEventBase",
-    "AgentRunCounters",
-    "AgentRunResult",
-    "AgentRunStatus",
-    "AgentRunStopReason",
-    "AgentStartEvent",
-    "AgentEndEvent",
-    "TurnStartEvent",
-    "TurnEndEvent",
-    "MessageStartEvent",
-    "MessageUpdateEvent",
-    "MessageEndEvent",
-    "ToolExecutionStartEvent",
-    "ToolExecutionUpdateEvent",
-    "ToolExecutionEndEvent",
-    "ErrorEvent",
     "AgentLoopConfig",
     "AgentMessage",
     "AgentState",
-    "AgentTool",
-    "AgentToolResult",
     "BeforeToolCallContext",
     "BeforeToolCallResult",
     "ContextPreparationRequest",

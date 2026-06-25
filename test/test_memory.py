@@ -59,6 +59,110 @@ def test_memory_store_persists_session_and_project_records(tmp_path: Path) -> No
     assert '"schema_version": 1' in payload
 
 
+def test_memory_record_declares_retrieval_eligibility() -> None:
+    from codepilot.sessions.memory import MemoryRecord
+
+    project_constraint = MemoryRecord(
+        id="project_constraint",
+        kind="project",
+        scope="project",
+        content={"knowledge": "保持学习项目边界"},
+        source="user",
+        trust="user_given",
+    )
+    transient_task_state = MemoryRecord(
+        id="task_state",
+        kind="task",
+        scope="session",
+        content={"goal": "修复测试"},
+        source="task_recovery",
+        trust="observed",
+    )
+    stale_decision = MemoryRecord(
+        id="old_decision",
+        kind="decision",
+        scope="project",
+        content={"decision": "旧方案"},
+        source="user",
+        trust="user_given",
+        status="stale",
+    )
+    candidate_experience = MemoryRecord(
+        id="candidate_experience",
+        kind="experience",
+        scope="session",
+        content={"maturity": "candidate", "better_action": "未验证经验"},
+        source="experience_extractor",
+        trust="observed",
+    )
+
+    assert project_constraint.is_retrievable
+    assert project_constraint.retrieval_exclusion_reason() is None
+    assert transient_task_state.is_legacy_state
+    assert transient_task_state.retrieval_exclusion_reason() == "transient_kind:task"
+    assert stale_decision.retrieval_exclusion_reason() == "status:stale"
+    assert candidate_experience.retrieval_exclusion_reason() == "candidate_experience"
+
+
+def test_memory_record_rejects_unknown_enum_values() -> None:
+    import pytest
+    from codepilot.sessions.memory import MemoryRecord
+
+    with pytest.raises(ValueError, match="Unknown memory kind"):
+        MemoryRecord(
+            id="bad_kind",
+            kind="note",
+            scope="session",
+            content={},
+            source="test",
+        )
+
+    with pytest.raises(ValueError, match="Unknown memory scope"):
+        MemoryRecord(
+            id="bad_scope",
+            kind="project",
+            scope="global",
+            content={},
+            source="test",
+        )
+
+    with pytest.raises(ValueError, match="Unknown memory trust"):
+        MemoryRecord(
+            id="bad_trust",
+            kind="project",
+            scope="project",
+            content={},
+            source="test",
+            trust="certain",
+        )
+
+    with pytest.raises(ValueError, match="Unknown memory status"):
+        MemoryRecord(
+            id="bad_status",
+            kind="project",
+            scope="project",
+            content={},
+            source="test",
+            status="archived",
+        )
+
+    loaded = MemoryRecord.from_dict(
+        {
+            "id": "legacy_bad_values",
+            "kind": "note",
+            "scope": "global",
+            "content": {"knowledge": "legacy"},
+            "source": "legacy",
+            "trust": "certain",
+            "status": "archived",
+        }
+    )
+    assert loaded.kind == "project"
+    assert loaded.scope == "session"
+    assert loaded.trust == "observed"
+    assert loaded.status == "active"
+
+
 def test_memory_writer_keeps_transient_task_file_and_failure_out_of_memory(
     tmp_path: Path,
 ) -> None:
@@ -74,7 +178,7 @@ def test_memory_writer_keeps_transient_task_file_and_failure_out_of_memory(
     store = MemoryStore(session_store)
     writer = MemoryWriter(store=store, workspace_dir=tmp_path)
 
-    task = writer.remember_task("Fix service.py API_KEY=secret-value", run_id="run_1")
+    task = writer.admit_prompt_memory("Fix service.py API_KEY=secret-value", run_id="run_1")
     state_v1 = file_state_for_path(tmp_path, "service.py")
     read_records = writer.observe_tool_result(
         ToolResultMessage(
@@ -140,7 +244,7 @@ def test_memory_writer_promotes_project_constraint_from_user_correction(
     store = MemoryStore(session_store)
     writer = MemoryWriter(store=store, workspace_dir=tmp_path)
 
-    writer.remember_task("这个项目是学生学习和求职展示项目，不要做生产级复杂设计")
+    writer.admit_prompt_memory("这个项目是学生学习和求职展示项目，不要做生产级复杂设计")
 
     project_records = store.load_project()
     assert any(
@@ -150,6 +254,28 @@ def test_memory_writer_promotes_project_constraint_from_user_correction(
         and "生产级" in record.content.get("knowledge", "")
         for record in project_records
     )
+
+
+def test_prompt_memory_admission_explains_what_is_durable() -> None:
+    from codepilot.sessions.memory import decide_prompt_memory_admission
+
+    ordinary_task = decide_prompt_memory_admission("修复 service.py 并运行测试")
+    production_request = decide_prompt_memory_admission(
+        "这个项目现在要按生产级复杂设计推进"
+    )
+    durable_constraint = decide_prompt_memory_admission(
+        "这个项目是学生学习和求职展示项目，不要做生产级复杂设计"
+    )
+
+    assert ordinary_task.should_store is False
+    assert ordinary_task.reason == "ordinary_task_prompt"
+    assert production_request.should_store is False
+    assert production_request.reason == "mentions_production_without_constraint"
+    assert durable_constraint.should_store is True
+    assert durable_constraint.category == "project_constraint"
+    assert durable_constraint.scope == "project"
+    assert durable_constraint.knowledge is not None
+    assert "清晰" in durable_constraint.knowledge
 
 
 def test_task_recovery_store_projects_unfinished_task_summary(tmp_path: Path) -> None:
@@ -235,6 +361,79 @@ def test_task_recovery_store_projects_task_step_details(tmp_path: Path) -> None:
     progress = projection["task_progress"]
     assert progress["step_details"]["定位任务模块"]["kind"] == "investigate"
     assert progress["step_details"]["修改执行逻辑"]["verification_hint"] == "pytest task"
+
+
+def test_build_task_recovery_projection_defines_task_summary_mapping() -> None:
+    from codepilot.protocols import AgentRunResult, TaskSummary
+    from codepilot.sessions.history.task_recovery import build_task_recovery_projection
+
+    projection = build_task_recovery_projection(
+        AgentRunResult(
+            run_id="run_projection",
+            session_id="session_projection",
+            status="waiting_user",
+            stop_reason="task_blocked",
+            task=TaskSummary(
+                task_id="task_projection",
+                goal="  继续修复失败测试  ",
+                completed_steps=["定位失败"],
+                pending_steps=["重新运行验证"],
+                blocked_steps=["等待用户确认"],
+                next_action="报告阻塞并等待指示",
+                completion_satisfied=False,
+                completion_reason="blocked_steps",
+                step_details={
+                    "重新运行验证": {
+                        "kind": "verify",
+                        "acceptance": "测试通过",
+                        "verification_hint": "pytest task",
+                    }
+                },
+            ),
+        ),
+        current_projection={"created_at": "created-before"},
+    )
+
+    assert projection is not None
+    assert projection["goal"] == "继续修复失败测试"
+    assert projection["next_action"] == "报告阻塞并等待指示"
+    assert projection["source_run_id"] == "run_projection"
+    assert projection["created_at"] == "created-before"
+    assert projection["task_progress"] == {
+        "completed_steps": ["定位失败"],
+        "pending_steps": ["重新运行验证"],
+        "blocked_steps": ["等待用户确认"],
+        "completion_satisfied": False,
+        "completion_reason": "blocked_steps",
+        "step_details": {
+            "重新运行验证": {
+                "kind": "verify",
+                "acceptance": "测试通过",
+                "verification_hint": "pytest task",
+            }
+        },
+    }
+
+    completed = build_task_recovery_projection(
+        AgentRunResult(
+            run_id="run_done",
+            session_id="session_projection",
+            status="completed",
+            stop_reason="final_answer",
+            task=TaskSummary(
+                task_id="task_done",
+                goal="完成任务",
+                completed_steps=["收尾"],
+                next_action="不应保留",
+                completion_satisfied=True,
+                completion_reason="all_steps_completed",
+            ),
+        ),
+        current_projection={},
+    )
+
+    assert completed is not None
+    assert completed["next_action"] is None
 
 
 def test_memory_writer_extracts_verified_experience_from_edit_repair_loop(
@@ -433,7 +632,7 @@ def test_memory_writer_does_not_infer_project_constraint_from_production_request
     store = MemoryStore(session_store)
     writer = MemoryWriter(store=store, workspace_dir=tmp_path)
 
-    assert writer.remember_task("这个项目现在要按生产级复杂设计推进", run_id="run_prod") is None
+    assert writer.admit_prompt_memory("这个项目现在要按生产级复杂设计推进", run_id="run_prod") is None
 
     assert not any(
         record.kind == "project"
@@ -650,6 +849,57 @@ def test_memory_retriever_excludes_legacy_state_and_explains_selection(tmp_path:
 
     assert [item.record.id for item in retrieved] == ["constraint"]
     assert "project_memory" in retrieved[0].reasons
+
+
+def test_memory_score_explains_single_record_relevance() -> None:
+    from codepilot.sessions.memory.records import MemoryQuery, MemoryRecord
+    from codepilot.sessions.memory.retriever import score_memory_record
+
+    record = MemoryRecord(
+        id="exp_verify",
+        kind="experience",
+        scope="session",
+        content={
+            "maturity": "verified",
+            "situation": "配置加载验证失败",
+            "better_action": "先复现失败再修改",
+            "failed_attempt": "直接重写配置模块",
+            "applies_when": [
+                "phase:acting",
+                "intent:debug_failure",
+                "error:verification_failed",
+            ],
+        },
+        source="run",
+        related_paths=["src/codepilot/config.py"],
+        trust="verified",
+    )
+
+    scored = score_memory_record(
+        record,
+        MemoryQuery(
+            text="修复配置加载验证失败",
+            active_paths=["src/codepilot/config.py"],
+            task_phase="acting",
+            action_intent="debug_failure",
+            recent_error="verification_failed",
+            retrieval_mode="repair",
+        ),
+    )
+
+    assert scored is not None
+    assert scored.record is record
+    assert scored.score == 180
+    assert scored.reasons == [
+        "related_path:src/codepilot/config.py",
+        "keyword:配置加载验证失败",
+        "trust:verified",
+        "mode:repair_experience_memory",
+        "phase:acting",
+        "intent:debug_failure",
+        "error:verification_failed",
+        "maturity:verified",
+    ]
 
 
 def test_context_compiler_reads_pinned_memory_dynamically(tmp_path: Path) -> None:

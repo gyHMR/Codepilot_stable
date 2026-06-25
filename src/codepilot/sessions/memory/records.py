@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-"""结构化记忆记录和共享值类型。"""
+"""结构化记忆记录和共享值类型。
+
+本模块只描述“什么是记忆”，不负责决定何时写入记忆。
+写入策略在 ``MemoryWriter``，检索策略在 ``MemoryRetriever``；
+但“哪些记录属于可复用长期记忆”是数据模型自身的语义，集中放在这里，
+避免调用方用零散的字符串判断重复解释。
+"""
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 
-# 记忆类型：任务/文件/失败教训/经验/决策/项目知识
+# 记忆类型：
+# - task/file/failure 是早期运行态记忆，仅为兼容旧存储保留，不再进入检索。
+# - experience/decision/project 是可复用的 durable memory。
 MemoryKind = Literal["task", "file", "failure", "experience", "decision", "project"]
 # 记忆作用域：会话级/项目级
 MemoryScope = Literal["session", "project"]
@@ -17,8 +25,16 @@ MemoryTrust = Literal["observed", "verified", "user_given", "model_claim"]
 MemoryStatus = Literal["active", "stale", "superseded", "deleted"]
 
 MEMORY_SCHEMA_VERSION = 1
-DURABLE_MEMORY_KINDS = {"project", "decision", "experience"}
-LEGACY_MEMORY_KINDS = {"task", "file", "failure"}
+DURABLE_MEMORY_KINDS = frozenset({"project", "decision", "experience"})
+LEGACY_MEMORY_KINDS = frozenset({"task", "file", "failure"})
+_MEMORY_KINDS = frozenset(
+    {"task", "file", "failure", "experience", "decision", "project"}
+)
+_MEMORY_SCOPES = frozenset({"session", "project"})
+_MEMORY_TRUST_VALUES = frozenset(
+    {"observed", "verified", "user_given", "model_claim"}
+)
+_MEMORY_STATUS_VALUES = frozenset({"active", "stale", "superseded", "deleted"})
 
 
 def utc_now_iso() -> str:
@@ -27,7 +43,14 @@ def utc_now_iso() -> str:
 
 @dataclass
 class MemoryRecord:
-    """结构化记忆记录。"""
+    """一条结构化记忆记录。
+
+    设计边界：
+    - ``kind`` 表示这条记录的语义类型，而不是存储位置。
+    - ``scope`` 表示生命周期边界：当前会话可见，还是整个项目可见。
+    - ``trust`` 表示证据强度，检索时只影响排序，不替代新鲜度检查。
+    - ``status`` 表示当前是否仍可使用；非 active 记录不会进入上下文。
+    """
     id: str                              # 记忆唯一标识
     kind: MemoryKind                     # 记忆类型
     scope: MemoryScope                   # 作用域
@@ -40,6 +63,12 @@ class MemoryRecord:
     status: MemoryStatus = "active"      # 状态
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
+
+    def __post_init__(self) -> None:
+        _ensure_memory_kind(self.kind)
+        _ensure_memory_scope(self.scope)
+        _ensure_memory_trust(self.trust)
+        _ensure_memory_status(self.status)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "MemoryRecord":
@@ -64,6 +93,50 @@ class MemoryRecord:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @property
+    def is_active(self) -> bool:
+        """记录是否仍可用于后续推理。"""
+
+        return self.status == "active"
+
+    @property
+    def is_durable(self) -> bool:
+        """记录是否属于可复用长期记忆。"""
+
+        return self.kind in DURABLE_MEMORY_KINDS
+
+    @property
+    def is_legacy_state(self) -> bool:
+        """记录是否只是旧版运行态记忆，不应再被检索注入上下文。"""
+
+        return self.kind in LEGACY_MEMORY_KINDS
+
+    @property
+    def is_retrievable(self) -> bool:
+        """记录是否有资格参与记忆检索。"""
+
+        return self.retrieval_exclusion_reason() is None
+
+    def retrieval_exclusion_reason(self) -> str | None:
+        """返回记录不能参与检索的原因；可检索时返回 ``None``。
+
+        这个方法只表达数据模型层面的硬约束。相关性评分、数量限制和
+        查询模式仍由 ``MemoryRetriever`` 负责。
+        """
+
+        if not self.is_active:
+            return f"status:{self.status}"
+        if self.is_legacy_state:
+            return f"transient_kind:{self.kind}"
+        if not self.is_durable:
+            return f"unsupported_kind:{self.kind}"
+        if (
+            self.kind == "experience"
+            and self.content.get("maturity") == "candidate"
+        ):
+            return "candidate_experience"
+        return None
+
 
 @dataclass(frozen=True)
 class MemoryQuery:
@@ -86,19 +159,43 @@ class RetrievedMemory:
 
 
 def _memory_kind(value: object) -> MemoryKind:
-    return value if value in {"task", "file", "failure", "experience", "decision", "project"} else "project"  # type: ignore[return-value]
+    return _ensure_memory_kind(value) if value in _MEMORY_KINDS else "project"
 
 
 def _memory_scope(value: object) -> MemoryScope:
-    return value if value in {"session", "project"} else "session"  # type: ignore[return-value]
+    return _ensure_memory_scope(value) if value in _MEMORY_SCOPES else "session"
 
 
 def _memory_trust(value: object) -> MemoryTrust:
-    return value if value in {"observed", "verified", "user_given", "model_claim"} else "observed"  # type: ignore[return-value]
+    return _ensure_memory_trust(value) if value in _MEMORY_TRUST_VALUES else "observed"
 
 
 def _memory_status(value: object) -> MemoryStatus:
-    return value if value in {"active", "stale", "superseded", "deleted"} else "active"  # type: ignore[return-value]
+    return _ensure_memory_status(value) if value in _MEMORY_STATUS_VALUES else "active"
+
+
+def _ensure_memory_kind(value: object) -> MemoryKind:
+    if value not in _MEMORY_KINDS:
+        raise ValueError(f"Unknown memory kind: {value}")
+    return cast(MemoryKind, value)
+
+
+def _ensure_memory_scope(value: object) -> MemoryScope:
+    if value not in _MEMORY_SCOPES:
+        raise ValueError(f"Unknown memory scope: {value}")
+    return cast(MemoryScope, value)
+
+
+def _ensure_memory_trust(value: object) -> MemoryTrust:
+    if value not in _MEMORY_TRUST_VALUES:
+        raise ValueError(f"Unknown memory trust: {value}")
+    return cast(MemoryTrust, value)
+
+
+def _ensure_memory_status(value: object) -> MemoryStatus:
+    if value not in _MEMORY_STATUS_VALUES:
+        raise ValueError(f"Unknown memory status: {value}")
+    return cast(MemoryStatus, value)
 
 
 __all__ = [

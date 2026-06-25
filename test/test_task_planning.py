@@ -5,6 +5,153 @@ from pathlib import Path
 from typing import Any
 
 
+def test_task_step_owns_basic_state_transitions() -> None:
+    from codepilot.core.task_state import TaskStep
+
+    step = TaskStep(id="step_1", title="运行验证")
+
+    step.mark_in_progress()
+    step.add_evidence_refs(["tool:read_1", "tool:read_1"])
+    step.record_failure("验证失败，需要修复", evidence_refs=["tool:test_1"])
+    step.block("等待用户审批", evidence_refs=["tool:write_1", "tool:write_1"])
+    step.complete(
+        summary="验证通过",
+        evidence_refs=["verification:test_2"],
+        progress_state="verified",
+    )
+
+    assert step.status == "completed"
+    assert step.failure_count == 1
+    assert step.note is None
+    assert step.summary == "验证通过"
+    assert step.progress_state == "verified"
+    assert step.evidence_refs == [
+        "tool:read_1",
+        "tool:test_1",
+        "tool:write_1",
+        "verification:test_2",
+    ]
+
+
+def test_task_state_records_reject_unknown_enum_values() -> None:
+    import pytest
+    from codepilot.core.task_state import (
+        AttemptRecord,
+        ChangeSet,
+        CompletionCheck,
+        ExecutionDecision,
+        TaskState,
+        TaskStep,
+    )
+
+    with pytest.raises(ValueError, match="Unknown task step status"):
+        TaskStep(id="step_1", title="bad status", status="paused")
+
+    with pytest.raises(ValueError, match="Unknown task step kind"):
+        TaskStep(id="step_1", title="bad kind", kind="deploy")
+
+    with pytest.raises(ValueError, match="Unknown task progress state"):
+        TaskStep(id="step_1", title="bad progress", progress_state="almost_done")
+
+    with pytest.raises(ValueError, match="Unknown task phase"):
+        TaskState(task_id="task_1", goal="bad phase", phase="paused")
+
+    with pytest.raises(ValueError, match="Unknown execution action"):
+        ExecutionDecision(action="retry", reason="bad action")
+
+    with pytest.raises(ValueError, match="Unknown completion reason"):
+        CompletionCheck(satisfied=False, reason="almost_done")
+
+    with pytest.raises(ValueError, match="Unknown attempt status"):
+        AttemptRecord(
+            attempt_id="attempt_1",
+            step_id="step_1",
+            action_intent="edit_file",
+            status="partial",
+        )
+
+    with pytest.raises(ValueError, match="Unknown change set status"):
+        ChangeSet(
+            change_id="change_1",
+            attempt_id="attempt_1",
+            step_id="step_1",
+            status="needs_review",
+        )
+
+
+def test_task_state_owns_step_navigation_and_status_projections() -> None:
+    from codepilot.core.task_state import TaskState, TaskStep
+
+    task = TaskState(
+        task_id="task_1",
+        goal="修复任务推进",
+        steps=[
+            TaskStep(id="step_1", title="定位问题", status="completed"),
+            TaskStep(id="step_2", title="修改实现"),
+            TaskStep(id="step_3", title="等待确认", status="blocked"),
+        ],
+        current_step_id="missing",
+        next_action="旧动作",
+    )
+
+    assert task.current_step() is None
+
+    next_step = task.advance_to_next_open_step()
+
+    assert next_step is task.steps[1]
+    assert task.current_step() is next_step
+    assert task.current_step_id == "step_2"
+    assert task.next_action == "修改实现"
+    assert task.completed_step_titles() == ["定位问题"]
+    assert task.pending_step_titles() == ["修改实现"]
+    assert task.blocked_step_titles() == ["等待确认"]
+
+    task.steps[1].complete()
+    assert task.advance_to_next_open_step() is None
+    assert task.current_step_id is None
+    assert task.next_action is None
+
+
+def test_agent_session_records_task_recovery_warning_separately_from_memory(
+    tmp_path: Path,
+) -> None:
+    from codepilot.runtime.types import AgentSessionOptions
+    from codepilot.sessions.session import AgentSession
+
+    class BrokenTaskRecovery:
+        def begin_task(self, text: str, *, run_id: str | None = None):
+            _ = text, run_id
+            raise RuntimeError("task recovery write failed")
+
+    session = AgentSession(
+        AgentSessionOptions(
+            model=_task_test_model(),
+            workspace_dir=tmp_path,
+            system_prompt="sys",
+            memory_enabled=False,
+        )
+    )
+    session.task_recovery = BrokenTaskRecovery()  # type: ignore[assignment]
+
+    try:
+        session._begin_task_recovery("修复任务推进", run_id="run_1")
+
+        events = session.store.load_events()
+        recovery_warnings = [
+            event
+            for event in events
+            if event.get("operation") == "task_recovery_begin"
+        ]
+        assert recovery_warnings[-1]["type"] == "task_recovery_warning"
+        assert not any(
+            event.get("type") == "memory_warning"
+            and event.get("operation") == "task_recovery_begin"
+            for event in events
+        )
+    finally:
+        session.close()
+
+
 def test_task_planner_parses_json_plan_from_llm_message() -> None:
     from codepilot.core.task_planner import TaskPlanner
     from codepilot.protocols import AssistantMessage, TextContent
@@ -47,6 +194,41 @@ def test_task_planner_parses_json_plan_from_llm_message() -> None:
     assert draft.steps[1].verification_hint == "python -m pytest test/test_task_planning.py -q"
 
 
+def test_task_plan_draft_owns_planner_output_invariants() -> None:
+    import pytest
+    from codepilot.core.task_planner import PlannedTaskStep, TaskPlanDraft
+
+    step = PlannedTaskStep(
+        title="  定位\n任务模块  ",
+        kind="investigate",
+        acceptance="  ",
+        verification_hint="  python -m pytest test/test_task_planning.py -q  ",
+    )
+    draft = TaskPlanDraft(goal="  修复\n任务推进  ", steps=[step], source=" llm ")
+
+    assert step.title == "定位 任务模块"
+    assert step.acceptance is None
+    assert step.verification_hint == "python -m pytest test/test_task_planning.py -q"
+    assert draft.goal == "修复 任务推进"
+    assert draft.source == "llm"
+    assert draft.steps == (step,)
+
+    with pytest.raises(ValueError, match="step title"):
+        PlannedTaskStep(title="")
+
+    with pytest.raises(ValueError, match="Unknown task step kind"):
+        PlannedTaskStep(title="部署", kind="deploy")
+
+    with pytest.raises(ValueError, match="plan goal"):
+        TaskPlanDraft(goal=" ", steps=[step], source="llm")
+
+    with pytest.raises(ValueError, match="at least one step"):
+        TaskPlanDraft(goal="修复任务推进", steps=[], source="llm")
+
+    with pytest.raises(ValueError, match="plan source"):
+        TaskPlanDraft(goal="修复任务推进", steps=[step], source="manual")
+
+
 def test_task_controller_initializes_from_planned_steps_and_exports_details() -> None:
     from codepilot.core.task_controller import TaskController
     from codepilot.core.task_planner import PlannedTaskStep
@@ -82,6 +264,25 @@ def test_task_controller_initializes_from_planned_steps_and_exports_details() ->
     assert summary.step_details["修改 step 推进逻辑"]["verification_hint"] == (
         "python -m pytest test/test_task_planning.py -q"
     )
+
+
+def test_task_controller_coerces_unknown_raw_step_kind() -> None:
+    from codepilot.core.task_controller import TaskController
+    from codepilot.protocols import UserMessage
+
+    task = TaskController().initialize(
+        [UserMessage(content="部署并验证")],
+        proposed_steps=[
+            {
+                "title": "部署预览",
+                "kind": "deploy",
+                "acceptance": "预览环境可访问",
+            }
+        ],
+    )
+
+    assert task.steps[0].kind == "other"
+    assert task.steps[0].acceptance == "预览环境可访问"
 
 
 def test_task_controller_normalizes_steps_and_updates_from_tool_results() -> None:
@@ -482,7 +683,7 @@ def test_task_controller_rebuilds_task_state_from_memory_projection() -> None:
     controller = TaskController()
     task = controller.initialize(
         [UserMessage(content="继续修复失败测试")],
-        recovered_task={
+        task_recovery_projection={
             "goal": "修复失败测试",
             "task_progress": {
                 "completed_steps": ["定位失败"],
@@ -519,6 +720,74 @@ def test_task_controller_rebuilds_task_state_from_memory_projection() -> None:
     assert task.steps[2].verification_hint == "python -m pytest test/test_task.py -q"
     assert task.next_action == "报告连续失败并等待用户指示"
     assert task.completion_reason == "replan_limit_exceeded"
+
+
+def test_task_recovery_projection_mapping_builds_task_state() -> None:
+    from codepilot.core.task_controller import build_task_state_from_recovery_projection
+    from codepilot.protocols import UserMessage
+
+    task = build_task_state_from_recovery_projection(
+        [UserMessage(content="继续修复")],
+        {
+            "goal": "恢复任务",
+            "task_progress": {
+                "completed_steps": ["定位失败"],
+                "blocked_steps": ["等待审批"],
+                "pending_steps": ["重新运行验证"],
+                "completion_satisfied": False,
+                "completion_reason": "blocked_steps",
+                "step_details": {
+                    "重新运行验证": {
+                        "kind": "verify",
+                        "acceptance": "验证通过",
+                        "verification_hint": "pytest task",
+                    }
+                },
+            },
+            "next_action": "继续验证",
+        },
+    )
+
+    assert task is not None
+    assert task.goal == "恢复任务"
+    assert [(step.title, step.status) for step in task.steps] == [
+        ("定位失败", "completed"),
+        ("等待审批", "blocked"),
+        ("重新运行验证", "in_progress"),
+    ]
+    assert task.current_step_id == "step_3"
+    assert task.phase == "acting"
+    assert task.next_action == "继续验证"
+    assert task.steps[2].kind == "verify"
+    assert task.steps[2].acceptance == "验证通过"
+    assert task.steps[2].verification_hint == "pytest task"
+
+
+def test_task_recovery_projection_coerces_unknown_step_kind() -> None:
+    from codepilot.core.task_controller import build_task_state_from_recovery_projection
+    from codepilot.protocols import UserMessage
+
+    task = build_task_state_from_recovery_projection(
+        [UserMessage(content="继续旧任务")],
+        {
+            "goal": "恢复旧任务",
+            "task_progress": {
+                "pending_steps": ["部署预览"],
+                "step_details": {
+                    "部署预览": {
+                        "kind": "deploy",
+                        "acceptance": "预览环境可访问",
+                        "verification_hint": "curl localhost",
+                    }
+                },
+            },
+        },
+    )
+
+    assert task is not None
+    assert task.steps[0].kind == "other"
+    assert task.steps[0].acceptance == "预览环境可访问"
+    assert task.steps[0].verification_hint == "curl localhost"
 
 
 def test_agent_loop_emits_task_events_and_result_summary() -> None:
@@ -776,7 +1045,7 @@ async def _agent_loop_recovered_task_context_case() -> None:
         context=AgentContext(
             system_prompt="rules",
             messages=[],
-            recovered_task={
+            task_recovery_projection={
                 "goal": "修复失败测试",
                 "task_progress": {
                     "completed_steps": ["定位失败"],
