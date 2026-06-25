@@ -33,7 +33,7 @@ from codepilot.runtime.command_registry import RuntimeCommand, builtin_commands
 CODEPILOT_STYLE = Style.from_dict({
     "prompt": "bold #67e8f9",
     "continuation": "#64748b",
-    "bottom-toolbar": "bg:#172033 #94a3b8",
+    "bottom-toolbar": "bg:#0b0f10 #94a3b8",
     "completion-menu.completion": "bg:#111827 #cbd5e1",
     "completion-menu.completion.current": "bg:#164e63 #ecfeff bold",
     "completion-menu.meta.completion": "bg:#111827 #64748b",

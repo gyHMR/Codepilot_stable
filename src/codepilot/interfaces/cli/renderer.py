@@ -59,16 +59,22 @@ class TerminalRenderer:
             from rich.theme import Theme
 
             theme = Theme({
-                "brand": "bold bright_cyan",
-                "info": "cyan",
-                "muted": "grey62",
-                "warning": "yellow",
-                "error": "bold red",
-                "success": "green",
-                "cancelled": "yellow",
-                "tool": "bright_cyan",
-                "model": "bright_magenta",
-                "path": "cyan",
+                "brand": "bold #67e8f9",
+                "brand_dim": "#22d3ee",
+                "info": "#7dd3fc",
+                "muted": "#64748b",
+                "muted2": "#94a3b8",
+                "warning": "#fbbf24",
+                "error": "bold #f87171",
+                "success": "#86efac",
+                "cancelled": "#fbbf24",
+                "tool": "#67e8f9",
+                "model": "#c084fc",
+                "path": "#93c5fd",
+                "panel.border": "#0e7490",
+                "panel.title": "bold #67e8f9",
+                "label": "#94a3b8",
+                "value": "#e5e7eb",
             })
             self._console = Console(theme=theme)
             self._output = None
@@ -113,35 +119,63 @@ class TerminalRenderer:
     def _render_rich_startup(self, state: CliStartupState) -> None:
         """使用 Rich 渲染紧凑启动摘要。"""
 
+        from rich import box
+        from rich.panel import Panel
+        from rich.table import Table
         from rich.text import Text
 
         workspace = self._shorten_tail(state.workspace, 54)
         session_display = self._short_session(state.session_id)
 
-        title = Text("  Codepilot", style="brand")
-        title.append(f" {state.version}", style="muted")
-        title.append("  Local coding agent", style="muted")
+        title = Text(" Codepilot", style="bold #67e8f9")
+        title.append(f" {state.version}", style="#64748b")
+        title.append("  local coding agent", style="#64748b")
+
+        identity = Table.grid(expand=True)
+        identity.add_column(ratio=1)
+        identity.add_row(Text("Welcome back", style="bold #e5e7eb"))
+        identity.add_row(Text("Local engineering console", style="#22d3ee"))
+
+        status = Table.grid(padding=(0, 2))
+        status.add_column(style="#94a3b8", no_wrap=True)
+        status.add_column()
+        status.add_row("Model", Text(self._shorten_tail(state.model_id, 40), style="#c084fc"))
+        status.add_row("Workspace", Text(workspace, style="#93c5fd"))
+        status.add_row(
+            "Permission",
+            Text(
+                state.permission_mode,
+                style="#fbbf24" if state.permission_mode == "read-only" else "#86efac",
+            ),
+        )
+        status.add_row("Session", Text(session_display, style="#94a3b8"))
+
+        quickstart = Table.grid(expand=True)
+        quickstart.add_column(ratio=1)
+        quickstart.add_row(Text("Quick start", style="#fbbf24"))
+        quickstart.add_row(Text("/help       commands", style="#e5e7eb"))
+        quickstart.add_row(Text("Ctrl+C      exit / cancel run", style="#94a3b8"))
+        quickstart.add_row(Text("Alt+Enter   newline", style="#94a3b8"))
+
+        body = Table.grid(expand=True)
+        body.add_column(ratio=4)
+        body.add_column(ratio=5)
+        body.add_row(identity, quickstart)
+        body.add_row(status, "")
+
         self._console.print()
-        self._console.print(title)
-
-        primary = Text("  ")
-        primary.append(self._shorten_tail(state.model_id, 40), style="model")
-        primary.append("  ·  ", style="muted")
-        primary.append(workspace, style="path")
-        self._console.print(primary)
-
-        secondary = Text("  ")
-        secondary.append(state.permission_mode, style=self._permission_style(state.permission_mode))
-        secondary.append("  ·  ", style="muted")
-        secondary.append(session_display, style="muted")
-        self._console.print(secondary)
+        self._console.print(
+            Panel(
+                body,
+                title=title,
+                border_style="#0e7490",
+                box=box.ROUNDED,
+                padding=(0, 1),
+            )
+        )
 
         for warning in state.warnings:
             self.render_status(warning, kind="warning")
-
-        hint = Text("  /help", style="muted")
-        hint.append(" commands  ·  Ctrl+C exit / cancel run  ·  Alt+Enter newline", style="muted")
-        self._console.print(hint)
         self._console.print()
 
     def _render_plain_startup(self, state: CliStartupState) -> None:
@@ -152,24 +186,29 @@ class TerminalRenderer:
         session_display = self._short_session(state.session_id)
 
         self._print()
-        self._print(f"  Codepilot {state.version}  Local coding agent")
-        self._print(f"  {model_display}  ·  {workspace}")
-        self._print(f"  {state.permission_mode}  ·  {session_display}")
+        self._print(f"+-- Codepilot {state.version} - local coding agent " + "-" * 28)
+        self._print("| Welcome back")
+        self._print(f"| Model      {model_display}")
+        self._print(f"| Workspace  {workspace}")
+        self._print(f"| Permission {state.permission_mode}")
+        self._print(f"| Session    {session_display}")
+        self._print("|")
+        self._print("| /help commands   Ctrl+C exit/cancel   Alt+Enter newline")
+        self._print("+" + "-" * 72)
 
         for warning in state.warnings:
             self.render_status(warning, kind="warning")
-
-        self._print("  /help commands  ·  Ctrl+C exit / cancel run  ·  Alt+Enter newline")
         self._print()
 
     def build_toolbar(self, state: CliStartupState) -> str:
         """构建 prompt_toolkit 底栏，保持内容短且可扫读。"""
 
-        model = escape(self._shorten_tail(state.model_id, 34))
+        model = escape(self._shorten_tail(state.model_id, 28))
         permission = escape(state.permission_mode)
+        session = escape(self._short_session(state.session_id))
         return (
-            f"<b>{model}</b>  ·  {permission}"
-            "  ·  <b>/help</b> commands  ·  <b>Ctrl+C</b> exit / cancel run"
+            f"<b>{model}</b>  ·  {permission}  ·  {session}"
+            "  ·  <b>/help</b>  ·  <b>Ctrl+C</b> cancel  ·  <b>Alt+Enter</b> newline"
         )
 
     def render_status(self, message: str, *, kind: str = "info") -> None:
@@ -186,7 +225,14 @@ class TerminalRenderer:
         if self._console:
             from rich.text import Text
 
-            text = Text(f"{symbol} ", style=kind if kind in symbols else "info")
+            styles = {
+                "info": "#7dd3fc",
+                "success": "#86efac",
+                "warning": "#fbbf24",
+                "error": "bold #f87171",
+                "cancelled": "#fbbf24",
+            }
+            text = Text(f"{symbol} ", style=styles.get(kind, styles["info"]))
             text.append(message)
             self._console.print(text)
             return
@@ -254,7 +300,7 @@ class TerminalRenderer:
 
         tool_name = event.get("toolName", "unknown")
         args = event.get("args", {})
-        target = self._shorten_tail(self._extract_tool_target(tool_name, args), 68)
+        target = self._shorten_tail(self._extract_tool_target(tool_name, args), 64)
 
         if self._stream_started:
             self._print()
@@ -264,13 +310,13 @@ class TerminalRenderer:
             from rich.text import Text
 
             text = Text()
-            text.append("◆ ", style="tool")
-            text.append(tool_name, style="bold")
+            text.append("[tool] ", style="#67e8f9")
+            text.append(tool_name, style="bold #e5e7eb")
             if target:
-                text.append(f"  {target}", style="muted")
+                text.append(f"  {target}", style="#64748b")
             self._console.print(text)
         else:
-            self._print(f"◆ {tool_name}" + (f"  {target}" if target else ""))
+            self._print(f"[tool] {tool_name}" + (f"  {target}" if target else ""))
 
         self._current_tool = tool_name
         self._tool_start_time = time.time()
@@ -294,25 +340,25 @@ class TerminalRenderer:
             from rich.text import Text
 
             text = Text()
-            text.append("  └ ", style="muted")
+            text.append("  ", style="#64748b")
             if status == "cancelled":
-                text.append("cancelled", style="warning")
+                text.append("[cancelled]", style="#fbbf24")
             elif is_error:
-                text.append("failed", style="error")
+                text.append("[error]", style="bold #f87171")
                 if error_reason:
-                    text.append(f"  {error_reason}", style="muted")
+                    text.append(f"  {error_reason}", style="#64748b")
             else:
-                text.append("done", style="success")
-                text.append(f"  {elapsed_str}", style="muted")
+                text.append("[ok]", style="#86efac")
+                text.append(f"  {elapsed_str}", style="#64748b")
             self._console.print(text)
         else:
             if status == "cancelled":
-                self._print(f"  └ cancelled  {elapsed_str}")
+                self._print(f"  [cancelled] {elapsed_str}")
             elif is_error:
                 suffix = f"  {error_reason}" if error_reason else ""
-                self._print(f"  └ failed{suffix}")
+                self._print(f"  [error]{suffix}")
             else:
-                self._print(f"  └ done  {elapsed_str}")
+                self._print(f"  [ok] {elapsed_str}")
 
         self._current_tool = None
         self._tool_start_time = 0
@@ -350,7 +396,7 @@ class TerminalRenderer:
             self._console.print(panel)
         else:
             self._print()
-            self._print(f"⚠️  Tool requests permission: {tool_name} {target}")
+            self._print(f"[approval] Tool requests permission: {tool_name} {target}")
             self._print(f"   Risk level: {risk_level}")
 
     def _handle_error(self, event: AgentEvent) -> None:
@@ -378,7 +424,7 @@ class TerminalRenderer:
             if message:
                 content.append(message)
             else:
-                content.append(error, style="error")
+                content.append(error, style="bold #f87171")
             if provider_response:
                 content.append(f"\nProvider response: {provider_response}", style="dim")
             if provider:
@@ -386,8 +432,8 @@ class TerminalRenderer:
             if model:
                 content.append(f"\nModel: {model}", style="dim")
 
-            title = Text("Error · ", style="error")
-            title.append(str(error), style="error")
+            title = Text("Error · ", style="bold #f87171")
+            title.append(str(error), style="bold #f87171")
             panel = Panel(
                 content,
                 title=title,

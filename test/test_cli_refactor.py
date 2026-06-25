@@ -105,8 +105,8 @@ class TestTerminalRenderer:
         })
 
         rendered = [call.args[0] for call in output.call_args_list]
-        assert "◆ read  src/codepilot/core/agent_loop.py:10-29" in rendered
-        assert "◆ ls  src/codepilot" in rendered
+        assert "[tool] read  src/codepilot/core/agent_loop.py:10-29" in rendered
+        assert "[tool] ls  src/codepilot" in rendered
 
     def test_tool_target_is_shortened_for_narrow_terminal_readability(self):
         output = MagicMock()
@@ -121,7 +121,7 @@ class TestTerminalRenderer:
         })
 
         rendered = output.call_args.args[0]
-        assert rendered.startswith("◆ read  …")
+        assert rendered.startswith("[tool] read  …")
         assert rendered.endswith("/module.py")
         assert len(rendered) <= 78
 
@@ -160,7 +160,7 @@ class TestTerminalRenderer:
         })
 
         rendered = [call.args[0] for call in output.call_args_list]
-        assert rendered[-2:] == ["  └ done  2.0s", "  └ done  2.0s"]
+        assert rendered[-2:] == ["  [ok] 2.0s", "  [ok] 2.0s"]
 
     def test_plain_startup_is_compact_and_has_no_box_table(self):
         output = MagicMock()
@@ -177,7 +177,7 @@ class TestTerminalRenderer:
 
         rendered = "\n".join(call.args[0] for call in output.call_args_list)
         assert "Codepilot 0.3" in rendered
-        assert "Local coding agent" in rendered
+        assert "local coding agent" in rendered
         assert "deepseek/deepseek-chat" in rendered
         assert "workspace-write" in rendered
         assert "session-1.." in rendered
