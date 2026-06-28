@@ -104,6 +104,12 @@ def _recovery_hint(error_code: str | None) -> dict[str, Any] | None:
             "run_verification",
             False,
         ),
+        "workspace_path_alias_not_supported": (
+            "refine_edit",
+            "Commands already run in the configured workspace; remove hard-coded /workspace paths and rerun.",
+            "run_verification",
+            False,
+        ),
     }
     spec = hints.get(error_code or "")
     if spec is None:
@@ -236,6 +242,19 @@ def create_shell_tools(
                 command=command,
                 status="error",
                 error_code="invalid_timeout",
+            )
+
+        workspace_alias_error = _workspace_alias_error(command, cwd_text, sandbox.root)
+        if workspace_alias_error is not None:
+            return _shell_result(
+                workspace_alias_error,
+                command=command,
+                status="error",
+                error_code="workspace_path_alias_not_supported",
+                metadata={
+                    "workspace": str(sandbox.root.resolve()),
+                    "invalid_alias": "/workspace",
+                },
             )
 
         cwd = sandbox.resolve_path(cwd_text)
@@ -469,6 +488,28 @@ def _compare_effects(
         f"{len(paths)} workspace path(s) changed" if paths else "No Git status change"
     )
     return paths, changed, summary
+
+
+def _workspace_alias_error(command: str, cwd_text: str, workspace: Path) -> str | None:
+    """Return an actionable error when the model uses a hard-coded /workspace path."""
+
+    workspace_posix = workspace.resolve().as_posix().rstrip("/")
+    if workspace_posix == "/workspace" or workspace_posix.startswith("/workspace/"):
+        return None
+    command_text = command.replace("\\", "/")
+    cwd = str(cwd_text).strip().replace("\\", "/").rstrip("/")
+    if (
+        "/workspace" not in command_text
+        and cwd != "/workspace"
+        and not cwd.startswith("/workspace/")
+    ):
+        return None
+    return (
+        "Hard-coded /workspace is not available for this session. "
+        f"Commands already run in the workspace cwd: {workspace.resolve()}. "
+        "Rerun the command without `cd /workspace`; for tests, use commands like "
+        "`python -m pytest -q` directly."
+    )
 
 
 def _path_fingerprint(path: Path) -> str:

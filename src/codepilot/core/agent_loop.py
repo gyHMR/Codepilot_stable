@@ -479,6 +479,12 @@ async def _run_loop(
         await emitter.emit(
             {
                 "type": "task_plan_created",
+                "plan": _task_plan_event_payload(
+                    planned_task,
+                    task_step_count=len(task.steps),
+                    planner_enabled=config.task_planner_enabled,
+                    recovered=current_context.task_recovery_projection is not None,
+                ),
                 "task": task_controller.event_payload(task),
             }
         )
@@ -707,8 +713,13 @@ async def _run_loop(
                         messages=new_messages,
                         final_message=assistant,
                         task=task_summary,
-                    ),
-                )
+                        ),
+                    )
+
+            if post_tool.force_completion_check:
+                has_more_tool_calls = False
+                pending_messages = []
+                continue
 
             # 获取新的待处理消息（可能由工具执行触发）
             pending_messages = await _drain(config.get_steering_messages)
@@ -969,3 +980,27 @@ def _latest_user_goal(messages: list[AgentMessage]) -> str:
         ).strip()
         return text or "完成当前请求"
     return "继续当前任务"
+
+
+def _task_plan_event_payload(
+    planned_task: TaskPlanDraft | None,
+    *,
+    task_step_count: int,
+    planner_enabled: bool,
+    recovered: bool,
+) -> dict[str, object]:
+    if planned_task is not None:
+        payload: dict[str, object] = {
+            "source": planned_task.source,
+            "step_count": len(planned_task.steps),
+        }
+        if planned_task.fallback_reason:
+            payload["fallback_reason"] = planned_task.fallback_reason
+        return payload
+    source = "recovered" if recovered else "default"
+    if not planner_enabled:
+        source = "planner_disabled"
+    return {
+        "source": source,
+        "step_count": task_step_count,
+    }

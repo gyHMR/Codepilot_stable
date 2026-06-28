@@ -522,6 +522,25 @@ async def _shell_limits_case(tmp_path: Path) -> None:
     assert "allow_dangerous" not in bash.parameters["properties"]
 
 
+def test_shell_tool_reports_workspace_alias_misuse(tmp_path: Path) -> None:
+    asyncio.run(_shell_workspace_alias_case(tmp_path))
+
+
+async def _shell_workspace_alias_case(tmp_path: Path) -> None:
+    from codepilot.tools.builtin import create_builtin_tools
+
+    tools = {tool.name: tool for tool in create_builtin_tools(tmp_path)}
+    result = await tools["bash"].execute(
+        "bash_workspace_alias",
+        {"command": "cd /workspace && python -m pytest -q"},
+    )
+
+    assert result.status == "error"
+    assert result.error_code == "workspace_path_alias_not_supported"
+    assert str(tmp_path.resolve()) in result.content[0].text
+    assert result.metadata["recovery_hint"]["suggested_action_intent"] == "run_verification"
+
+
 def test_shell_tool_applies_env_allowlist_and_output_limits(
     tmp_path: Path,
     monkeypatch,

@@ -229,6 +229,39 @@ def test_task_plan_draft_owns_planner_output_invariants() -> None:
         TaskPlanDraft(goal="修复任务推进", steps=[step], source="manual")
 
 
+def test_task_planner_records_fallback_reason_when_generation_fails() -> None:
+    asyncio.run(_task_planner_fallback_reason_case())
+
+
+async def _task_planner_fallback_reason_case() -> None:
+    from codepilot.core.task_planner import TaskPlanner
+    from codepilot.protocols import Model, UserMessage
+
+    async def broken_stream(*_args):
+        raise RuntimeError("planner unavailable")
+
+    draft = await TaskPlanner().generate(
+        model=Model(
+            id="task-test",
+            name="Task Test",
+            api="unit-test",
+            provider="unit-test",
+            base_url="",
+            reasoning=False,
+            input=["text"],
+            context_window=4000,
+            max_tokens=500,
+        ),
+        messages=[UserMessage(content="修复任务规划")],
+        convert_to_llm=lambda items: items,
+        fallback_goal="修复任务规划",
+        stream_fn=broken_stream,
+    )
+
+    assert draft.source == "fallback"
+    assert draft.fallback_reason == "RuntimeError: planner unavailable"
+
+
 def test_task_controller_initializes_from_planned_steps_and_exports_details() -> None:
     from codepilot.core.task_controller import TaskController
     from codepilot.core.task_planner import PlannedTaskStep
@@ -832,6 +865,10 @@ def test_agent_loop_can_plan_before_react_execution() -> None:
     asyncio.run(_agent_loop_llm_planner_case())
 
 
+def test_agent_loop_exposes_planner_fallback_reason_in_task_event() -> None:
+    asyncio.run(_agent_loop_planner_fallback_event_case())
+
+
 def test_agent_loop_complete_task_step_advances_plan_execution() -> None:
     asyncio.run(_agent_loop_complete_step_advances_case())
 
@@ -969,6 +1006,47 @@ async def _agent_loop_complete_step_advances_case() -> None:
     assert "定位任务模块" in result.task.completed_steps
     assert result.task.pending_steps == ["修改执行逻辑"]
     assert result.workspace_changed is True
+
+
+async def _agent_loop_planner_fallback_event_case() -> None:
+    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
+    from codepilot.llm.event_stream import AssistantMessageEventStream
+    from codepilot.protocols import AssistantMessage, Model, TextContent, UserMessage
+
+    async def fake_stream(_model, context, _options):
+        if "Task Planner" in (context.system_prompt or ""):
+            raise RuntimeError("planner unavailable")
+        stream = AssistantMessageEventStream()
+        stream.end(AssistantMessage(content=[TextContent(text="done")]))
+        return stream
+
+    events: list[dict[str, Any]] = []
+    result = await run_agent_loop(
+        prompts=[UserMessage(content="实现 planner")],
+        context=AgentContext(system_prompt="rules", messages=[]),
+        config=AgentLoopConfig(
+            model=Model(
+                id="task-test",
+                name="Task Test",
+                api="unit-test",
+                provider="unit-test",
+                base_url="",
+                reasoning=False,
+                input=["text"],
+                context_window=4000,
+                max_tokens=500,
+            ),
+            convert_to_llm=lambda items: items,
+            task_planner_enabled=True,
+        ),
+        emit=events.append,
+        stream_fn=fake_stream,
+    )
+
+    created = next(event for event in events if event.get("type") == "task_plan_created")
+    assert result.status == "completed"
+    assert created["plan"]["source"] == "fallback"
+    assert created["plan"]["fallback_reason"] == "RuntimeError: planner unavailable"
 
 
 async def _agent_loop_llm_planner_case() -> None:

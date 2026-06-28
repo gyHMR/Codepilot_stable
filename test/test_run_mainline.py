@@ -112,7 +112,7 @@ async def _run_result_case() -> None:
 
     assert result.status == "completed"
     assert result.stop_reason == "final_answer"
-    assert result.counters.model_attempts == 2
+    assert result.counters.model_attempts == 1
     assert result.counters.tool_iterations == 1
     assert result.counters.tool_calls == 1
     assert result.affected_paths == ["src/example.py"]
@@ -325,6 +325,10 @@ def test_post_tool_run_decision_explains_pause_and_stop_cases() -> None:
         [],
         task_decision=ExecutionDecision("stop", "tool_unavailable"),
     )
+    finished = decide_post_tool_run(
+        [],
+        task_decision=ExecutionDecision("finish", "all_steps_completed"),
+    )
     keep_going = decide_post_tool_run(
         [],
         task_decision=ExecutionDecision("continue", "next_step"),
@@ -342,8 +346,79 @@ def test_post_tool_run_decision_explains_pause_and_stop_cases() -> None:
     assert replan_limit.stop_reason == "replan_limit"
     assert task_blocked.status == "waiting_user"
     assert task_blocked.stop_reason == "task_blocked"
+    assert finished.should_stop is False
+    assert finished.force_completion_check is True
+    assert finished.reason == "finish"
     assert keep_going.should_stop is False
     assert keep_going.reason == "continue"
+
+
+def test_task_finish_decision_exits_tool_loop_for_completion_check() -> None:
+    asyncio.run(_task_finish_exits_tool_loop_case())
+
+
+async def _task_finish_exits_tool_loop_case() -> None:
+    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
+    from codepilot.llm.event_stream import AssistantMessageEventStream
+    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, UserMessage
+    from codepilot.tools import AgentTool, AgentToolResult
+
+    model_calls = 0
+
+    async def fake_stream(_model, _context, _options):
+        nonlocal model_calls
+        model_calls += 1
+        stream = AssistantMessageEventStream()
+        stream.end(
+            AssistantMessage(
+                content=[ToolCall(id=f"test_{model_calls}", name="run_tests", arguments={})],
+                stop_reason="toolUse",
+            )
+        )
+        return stream
+
+    async def run_tests(*_args):
+        return AgentToolResult(
+            content=[TextContent(text="tests passed")],
+            verification={
+                "status": "passed",
+                "command": "python -m pytest test -q",
+                "exit_code": 0,
+                "summary": "passed",
+            },
+        )
+
+    events: list[dict[str, Any]] = []
+    result = await run_agent_loop(
+        prompts=[UserMessage(content="运行验证")],
+        context=AgentContext(
+            system_prompt="",
+            messages=[],
+            tools=[
+                AgentTool(
+                    name="run_tests",
+                    label="Run tests",
+                    description="Run tests",
+                    parameters={},
+                    execute=run_tests,
+                )
+            ],
+        ),
+        config=AgentLoopConfig(
+            model=_model(),
+            convert_to_llm=lambda items: items,
+            allow_unmanaged_tools=True,
+            max_tool_iterations=1,
+            repeated_tool_call_limit=20,
+        ),
+        emit=events.append,
+        stream_fn=fake_stream,
+    )
+
+    assert result.status == "completed"
+    assert result.stop_reason == "final_answer"
+    assert model_calls == 1
+    assert any(event.get("type") == "completion_checked" for event in events)
 
 
 def test_completion_run_decision_explains_continue_wait_and_done_cases() -> None:

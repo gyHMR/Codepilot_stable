@@ -105,10 +105,12 @@ class TaskPlanDraft:
         goal: 任务目标（最多 1200 字符）。
         steps: 规范化后的步骤元组（至少 1 个步骤）。
         source: 计划来源（"llm" 表示由 LLM 生成，"fallback" 表示降级计划）。
+        fallback_reason: 降级原因，便于评测和审计定位 planner 为什么没有生效。
     """
     goal: str                                                              # 任务目标
     steps: tuple[PlannedTaskStep, ...] = field(default_factory=tuple)       # 步骤元组
     source: str = "fallback"                                               # 计划来源
+    fallback_reason: str | None = None                                      # 降级原因
 
     def __post_init__(self) -> None:
         """初始化后校验：确保目标非空、步骤至少一个、来源合法。"""
@@ -130,6 +132,11 @@ class TaskPlanDraft:
         object.__setattr__(self, "goal", goal)
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "steps", steps)
+        object.__setattr__(
+            self,
+            "fallback_reason",
+            _clean_text(self.fallback_reason, limit=_MAX_FIELD_CHARS) or None,
+        )
 
 
 StreamFn = Callable[
@@ -206,8 +213,11 @@ class TaskPlanner:
             else:
                 message = await maybe_await(complete_simple(model, context, options))
             return self.parse_plan_message(message, fallback_goal=fallback_goal)
-        except Exception:
-            return self.fallback(fallback_goal)
+        except Exception as exc:
+            return self.fallback(
+                fallback_goal,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
 
     def parse_plan_message(
         self,
@@ -235,11 +245,11 @@ class TaskPlanner:
         text = _assistant_text(message)
         data = _loads_json_object(text)
         if not isinstance(data, dict):
-            return self.fallback(fallback_goal)
+            return self.fallback(fallback_goal, reason="invalid_json")
         goal = _clean_text(data.get("goal"), limit=1200) or fallback_goal
         raw_steps = data.get("steps")
         if not isinstance(raw_steps, list):
-            return self.fallback(goal)
+            return self.fallback(goal, reason="missing_steps")
         steps: list[PlannedTaskStep] = []
         seen: set[str] = set()
         for raw in raw_steps:
@@ -267,10 +277,10 @@ class TaskPlanner:
             if len(steps) >= _MAX_PLANNED_STEPS:
                 break
         if not steps:
-            return self.fallback(goal)
+            return self.fallback(goal, reason="empty_steps")
         return TaskPlanDraft(goal=goal, steps=steps, source="llm")
 
-    def fallback(self, goal: str) -> TaskPlanDraft:
+    def fallback(self, goal: str, *, reason: str | None = None) -> TaskPlanDraft:
         """返回安全的单步降级计划。
 
         当 LLM 规划失败（解析错误、网络异常等）时，返回一个最简单的
@@ -278,6 +288,7 @@ class TaskPlanner:
 
         Args:
             goal: 任务目标描述。
+            reason: 降级原因。
 
         Returns:
             TaskPlanDraft: 单步降级计划。
@@ -287,6 +298,7 @@ class TaskPlanner:
             goal=clean_goal,
             steps=[PlannedTaskStep(title="完成当前请求")],
             source="fallback",
+            fallback_reason=reason,
         )
 
 

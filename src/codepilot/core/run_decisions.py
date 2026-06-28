@@ -92,6 +92,7 @@ class PostToolRunDecision:
         stop_reason: 停止原因（如 "approval_required"、"aborted"、"task_blocked"）。
         error_code: 错误代码（仅在需要报告错误时有值）。
         message: 错误描述信息。
+        force_completion_check: 是否跳出工具循环并立即进入任务完成检查。
     """
     should_stop: bool           # 是否停止
     reason: str                 # 决策原因
@@ -99,6 +100,7 @@ class PostToolRunDecision:
     stop_reason: AgentRunStopReason | None = None  # 停止原因
     error_code: str | None = None               # 错误代码
     message: str | None = None                  # 错误描述
+    force_completion_check: bool = False        # 是否立即进入完成检查
 
 
 @dataclass(frozen=True)
@@ -272,6 +274,13 @@ def decide_post_tool_run(
             reason=task_decision.reason,
             status="waiting_user",
             stop_reason="task_blocked",
+        )
+    # 任务决策为"完成"时，不再继续工具循环，交给完成检查生成闭环证据
+    if task_decision.action == "finish":
+        return PostToolRunDecision(
+            should_stop=False,
+            reason="finish",
+            force_completion_check=True,
         )
     # 任务决策非"停止"时继续运行
     if task_decision.action != "stop":

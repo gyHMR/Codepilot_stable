@@ -248,6 +248,8 @@ def _build_default_identity(
 3. edit 只做精确替换；需要大段重构或新文件时再用 write。
 4. 执行 bash 前先检查副作用，禁止与目标无关的破坏性命令。
 5. 若可先做只读验证，就先只读验证，再执行写操作。
+6. bash 命令默认已经在当前工作目录运行；不要 cd /workspace，不要把 /tmp 当作工作区。
+7. 本地环境可能是 Windows；验证优先直接运行 python -m pytest ...，避免 cat/ls/pwd/which/python3 等 Linux 专属写法。
 
 短任务探索规则：
 1. 任务缺少具体文件、符号或错误信息时，先获取最小事实，不立即修改。

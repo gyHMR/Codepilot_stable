@@ -127,6 +127,7 @@ class AgentSession:
             stream_fn=options.stream_fn,
             prepare_context=prepare_context,
             task_control_enabled=options.task_control_enabled,
+            task_planner_enabled=options.task_planner_enabled,
             max_task_replans_per_run=options.max_task_replans_per_run,
         )
         if options.convert_to_llm is not None:

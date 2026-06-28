@@ -621,6 +621,29 @@ def test_runtime_assembly_is_registered_with_session(tmp_path: Path) -> None:
         runtime.close_all()
 
 
+def test_runtime_assembly_passes_task_planner_option_to_session(tmp_path: Path) -> None:
+    runtime = RuntimeService()
+    handle = runtime.create_session(
+        _options(tmp_path, task_planner_enabled=False)
+    )
+    try:
+        assert handle.assembly.session_options.task_planner_enabled is False
+        assert handle.session.agent._options.task_planner_enabled is False
+    finally:
+        runtime.close_all()
+
+
+def test_default_prompt_guides_shell_to_current_workspace() -> None:
+    from codepilot.runtime.prompt import build_default_system_prompt
+
+    prompt = build_default_system_prompt(["bash"])
+
+    assert "命令默认已经在当前工作目录运行" in prompt
+    assert "不要 cd /workspace" in prompt
+    assert "python -m pytest" in prompt
+    assert "python3" in prompt
+
+
 def test_runtime_exposes_read_only_recovery_state(tmp_path: Path) -> None:
     first = RuntimeService()
     handle = first.create_session(_options(tmp_path))
