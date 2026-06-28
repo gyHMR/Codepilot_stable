@@ -277,13 +277,17 @@ def _task_report(
     for event in events:
         event_type = event.get("type")
         if event_type == "task_decision":
-            action = event.get("action")
+            decision = event.get("decision")
+            decision_dict = decision if isinstance(decision, dict) else {}
+            action = decision_dict.get("action") or event.get("action")
             if action:
                 decisions[str(action)] += 1
         elif event_type == "task_step_updated":
             step_updates += 1
         elif event_type == "completion_checked":
-            reason = event.get("reason")
+            completion = event.get("completion")
+            completion_dict = completion if isinstance(completion, dict) else {}
+            reason = completion_dict.get("reason") or event.get("reason")
             if reason:
                 completion_reasons[str(reason)] += 1
     task = result.get("task")

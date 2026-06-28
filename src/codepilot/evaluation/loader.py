@@ -8,6 +8,7 @@ from typing import Any, cast
 
 from .types import (
     AssertionSpec,
+    AssertionRole,
     AssertionType,
     EvalBudgets,
     EvalCase,
@@ -70,6 +71,7 @@ _METRIC_DIMENSIONS: dict[str, EvalDimension] = {
     "security": "tool_security",
 }
 _METRIC_OPERATORS = {">=", ">", "<=", "<", "==", "!="}
+_ASSERTION_ROLES = {"primary", "outcome", "guardrail", "diagnostic"}
 
 
 def load_eval_definition(path: str | Path) -> EvalDefinition:
@@ -199,7 +201,7 @@ def _parse_assertion(value: Any, source: str) -> AssertionSpec:
     options = {
         key: item
         for key, item in value.items()
-        if key not in {"type", "dimension", "required"}
+        if key not in {"type", "dimension", "required", "role"}
     }
     _validate_assertion_options(str(assertion_type), options, source)
     dimension = value.get("dimension")
@@ -220,11 +222,17 @@ def _parse_assertion(value: Any, source: str) -> AssertionSpec:
         "efficiency",
     }:
         raise EvalCaseValidationError(f"{source}.dimension is not supported")
+    role = value.get("role")
+    if role is None:
+        role = _default_assertion_role(str(assertion_type))
+    if role not in _ASSERTION_ROLES:
+        raise EvalCaseValidationError(f"{source}.role is not supported")
     return AssertionSpec(
         type=cast(AssertionType, assertion_type),
         dimension=cast(EvalDimension, dimension),
         options=options,
         required=bool(value.get("required", True)),
+        role=cast(AssertionRole, role),
     )
 
 
@@ -293,6 +301,16 @@ def _validate_assertion_options(
 def _metric_dimension(metric: str) -> EvalDimension:
     prefix = metric.split(".", 1)[0]
     return _METRIC_DIMENSIONS.get(prefix, "runtime_contract")
+
+
+def _default_assertion_role(assertion_type: str) -> AssertionRole:
+    if assertion_type == "metric":
+        return "primary"
+    if assertion_type in {"command", "file", "diff"}:
+        return "outcome"
+    if assertion_type == "trace":
+        return "diagnostic"
+    return "guardrail"
 
 
 def _parse_step(value: Any, source: str) -> ScenarioStep:
@@ -385,6 +403,7 @@ def _parse_runtime(value: Any, source: str) -> EvalRuntimeProfile:
         memory_enabled=bool(value.get("memory_enabled", True)),
         task_control_enabled=bool(value.get("task_control_enabled", True)),
         permission_mode=permission_mode,
+        auto_approve=bool(value.get("auto_approve", False)),
         scripted_stream=scripted_stream,
     )
 

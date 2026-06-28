@@ -142,6 +142,7 @@ class AgentOptions:
     task_recovery_projection: dict[str, object] | None = None
     task_control_enabled: bool = True
     task_planner_enabled: bool = True
+    max_task_replans_per_run: int = 2
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, Model):
@@ -196,6 +197,10 @@ class AgentOptions:
         self.task_planner_enabled = _ensure_bool(
             self.task_planner_enabled,
             field_name="task_planner_enabled",
+        )
+        self.max_task_replans_per_run = _ensure_positive_int(
+            self.max_task_replans_per_run,
+            field_name="max_task_replans_per_run",
         )
 
 
@@ -416,6 +421,7 @@ class Agent:
                 retry_base_delay_ms=self._options.retry_base_delay_ms,
                 task_control_enabled=self._options.task_control_enabled,
                 task_planner_enabled=self._options.task_planner_enabled,
+                max_task_replans_per_run=self._options.max_task_replans_per_run,
             ),
             emitter=AgentEventEmitter(
                 self._dispatch_event,
@@ -495,6 +501,7 @@ class Agent:
             retry_base_delay_ms=self._options.retry_base_delay_ms,
             task_control_enabled=self._options.task_control_enabled,
             task_planner_enabled=self._options.task_planner_enabled,
+            max_task_replans_per_run=self._options.max_task_replans_per_run,
         )
 
         # 构建上下文快照（使用副本，避免循环过程中被外部修改）

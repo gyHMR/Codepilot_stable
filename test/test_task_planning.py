@@ -346,6 +346,9 @@ def test_task_controller_normalizes_steps_and_updates_from_tool_results() -> Non
     decision = controller.after_tool_results(task, run, [failed_verification])
 
     assert decision.action == "repair"
+    assert decision.next_action is not None
+    assert "python -m pytest test/test_config.py -q" in decision.next_action
+    assert "修复" in decision.next_action
     assert task.steps[0].failure_count == 1
     assert task.steps[0].status == "in_progress"
     assert task.recent_error_code == "verification_failed"
@@ -600,6 +603,37 @@ def test_replan_preserves_completed_steps_and_stops_after_limit() -> None:
     assert decision.reason == "replan_limit_exceeded"
     assert task.steps[0].status == "blocked"
     assert task.next_action == "报告连续失败并等待用户指示"
+
+
+def test_task_controller_respects_configured_replan_limit() -> None:
+    from codepilot.core.run_state import RunState
+    from codepilot.core.task_controller import TaskController
+    from codepilot.protocols import UserMessage
+
+    controller = TaskController()
+    task = controller.initialize(
+        [UserMessage(content="修复失败测试")],
+        proposed_steps=["定位失败", "修改实现", "运行验证"],
+        max_replans_per_run=1,
+    )
+    run = RunState(run_id="run_1", session_id="session_1")
+
+    for call_id in ["test_1", "test_2"]:
+        failed = _failed_verification(call_id)
+        run.collect_tool_results([failed])
+        decision = controller.after_tool_results(task, run, [failed])
+
+    assert decision.action == "replan"
+    assert task.replan_count == 1
+    assert task.max_replans_per_run == 1
+
+    for call_id in ["test_3", "test_4"]:
+        failed = _failed_verification(call_id)
+        run.collect_tool_results([failed])
+        decision = controller.after_tool_results(task, run, [failed])
+
+    assert decision.action == "stop"
+    assert decision.reason == "replan_limit_exceeded"
 
 
 def test_repeated_failed_verification_after_change_proposes_revert() -> None:

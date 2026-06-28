@@ -159,11 +159,25 @@ def _first_command(command: str) -> str:
     if not segments:
         return ""
     if len(segments) > 1:
-        classes = {classify_shell_command(segment) for segment in segments}
-        if classes == {"verification"}:
-            return segments[0]
+        verification_segments = [
+            segment for segment in segments if not _is_safe_env_setup(segment)
+        ]
+        if verification_segments and all(
+            classify_shell_command(segment) == "verification"
+            for segment in verification_segments
+        ):
+            return verification_segments[0]
         return "<compound>"
     return segments[0]
+
+
+def _is_safe_env_setup(command: str) -> bool:
+    normalized = " ".join(command.strip().lower().split())
+    return bool(
+        re.fullmatch(r"set\s+pythonpath=.*", normalized)
+        or re.fullmatch(r"\$env:pythonpath\s*=.*", normalized)
+        or re.fullmatch(r"export\s+pythonpath=.*", normalized)
+    )
 
 
 __all__ = [

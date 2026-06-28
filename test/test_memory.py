@@ -350,6 +350,34 @@ def test_prompt_memory_admission_explains_what_is_durable() -> None:
     assert "清晰" in durable_constraint.knowledge
 
 
+def test_memory_writer_admits_explicit_remember_prompt(tmp_path: Path) -> None:
+    from codepilot.sessions.memory import (
+        MemoryQuery,
+        MemoryRetriever,
+        MemoryStore,
+        MemoryWriter,
+    )
+    from codepilot.sessions.persistence.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "session_explicit_memory")
+    session_store.ensure_initialized(model_id="test", provider="test", system_prompt="")
+    store = MemoryStore(session_store)
+    writer = MemoryWriter(store=store, workspace_dir=tmp_path)
+
+    record = writer.admit_prompt_memory(
+        "请记住：通知修复 checkpoint 是 notify-close-42。",
+        run_id="run_explicit",
+    )
+
+    assert record is not None
+    assert record.content["category"] == "explicit_memory"
+    assert record.content["always_recall"] is True
+    retrieved = MemoryRetriever(store=store, workspace_dir=tmp_path).retrieve(
+        MemoryQuery(text="恢复 checkpoint", active_paths=[], retrieval_mode="qa")
+    )
+    assert [item.record.id for item in retrieved] == [record.id]
+
+
 def test_task_recovery_store_projects_unfinished_task_summary(tmp_path: Path) -> None:
     from codepilot.protocols import AgentRunResult, TaskSummary
     from codepilot.sessions.persistence.store import SessionStore

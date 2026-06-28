@@ -43,6 +43,21 @@ def decide_prompt_memory_admission(text: str) -> MemoryAdmissionDecision:
     safe_text = sanitize_memory_text(text, limit=1200)
     if not safe_text:
         return MemoryAdmissionDecision(False, "empty_after_sanitization")
+    explicit_markers = (
+        "请记住",
+        "记住：",
+        "记住:",
+        "remember:",
+        "remember that",
+    )
+    if any(marker in safe_text.lower() for marker in explicit_markers):
+        return MemoryAdmissionDecision(
+            should_store=True,
+            reason="explicit_memory_request",
+            scope="project",
+            category="explicit_memory",
+            knowledge=safe_text,
+        )
     markers = ("学生", "求职", "学习", "生产级", "过度设计", "复杂设计")
     if not any(marker in safe_text for marker in markers):
         return MemoryAdmissionDecision(False, "ordinary_task_prompt")
@@ -91,6 +106,8 @@ class MemoryWriter:
             return None
         if decision.category == "project_constraint" and decision.knowledge is not None:
             return self._upsert_prompt_project_constraint(decision, run_id=run_id)
+        if decision.category == "explicit_memory" and decision.knowledge is not None:
+            return self._upsert_explicit_memory(decision, run_id=run_id)
         return None
 
     def observe_tool_result(
@@ -166,6 +183,39 @@ class MemoryWriter:
                     "knowledge": knowledge,
                 },
                 source="user_correction",
+                source_run_id=run_id,
+                trust="user_given",
+            )
+        )
+
+    def _upsert_explicit_memory(
+        self,
+        decision: MemoryAdmissionDecision,
+        *,
+        run_id: str | None,
+    ) -> MemoryRecord | None:
+        if decision.category != "explicit_memory" or decision.knowledge is None:
+            return None
+        knowledge = decision.knowledge
+        for record in self.store.load_project():
+            if (
+                record.kind == "project"
+                and record.content.get("category") == "explicit_memory"
+                and record.content.get("knowledge") == knowledge
+            ):
+                record.source_run_id = run_id
+                return self.store.update(record)
+        return self.store.update(
+            MemoryRecord(
+                id=_new_memory_id(),
+                kind="project",
+                scope="project",
+                content={
+                    "category": "explicit_memory",
+                    "knowledge": knowledge,
+                    "always_recall": True,
+                },
+                source="user_explicit_memory",
                 source_run_id=run_id,
                 trust="user_given",
             )

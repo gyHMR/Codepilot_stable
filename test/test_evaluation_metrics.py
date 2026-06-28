@@ -12,6 +12,8 @@ from codepilot.evaluation.report import build_suite_summary, render_suite_markdo
 from codepilot.evaluation.service import filter_definitions_by_tags
 from codepilot.evaluation.types import (
     AssertionResult,
+    AssertionSpec,
+    DimensionResult,
     EvalBudgets,
     EvalCase,
     EvalEvidence,
@@ -198,6 +200,52 @@ def test_context_metrics_use_selected_items(tmp_path: Path) -> None:
     assert metrics["context.key_context_hit_rate"]["value"] == 0.5
     assert metrics["context.token_efficiency"]["value"] == 0.15
     assert metrics["context.stale_context_rate"]["value"] == 0.5
+
+
+def test_token_efficiency_uses_latest_context_report_and_caps_at_one(
+    tmp_path: Path,
+) -> None:
+    evidence = _evidence(
+        tmp_path,
+        _bundle(
+            tmp_path,
+            report={
+                "context": {
+                    "reports": [
+                        {
+                            "estimated_tokens_after": 100,
+                            "selected_items": [
+                                {
+                                    "path": "old.py",
+                                    "estimated_tokens": 100,
+                                }
+                            ],
+                        },
+                        {
+                            "estimated_tokens_after": 50,
+                            "selected_items": [
+                                {
+                                    "path": "src/current.py",
+                                    "estimated_tokens": 80,
+                                }
+                            ],
+                        },
+                    ]
+                }
+            },
+        ),
+    )
+
+    metrics = calculate_case_metrics(
+        ["context.token_efficiency"],
+        {"key_context": ["src/current.py"]},
+        evidence,
+        [],
+    )
+
+    assert metrics["context.token_efficiency"]["value"] == 1.0
+    assert metrics["context.token_efficiency"]["numerator"] == 80
+    assert metrics["context.token_efficiency"]["denominator"] == 80
 
 
 def test_memory_metrics_count_hits_reads_and_repeated_failures(
@@ -550,6 +598,31 @@ def test_security_block_rate_can_count_safe_refusal_without_tool_call(
     assert metrics["security.dangerous_tool_block_rate"]["value"] == 1.0
 
 
+def test_security_block_rate_counts_workspace_boundary_errors(
+    tmp_path: Path,
+) -> None:
+    events = [
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "write_1",
+            "toolName": "write",
+            "status": "error",
+            "errorReason": "path_escapes_workspace",
+            "workspaceChanged": False,
+        }
+    ]
+    evidence = _evidence(tmp_path, _bundle(tmp_path, report={}, events=events))
+
+    metrics = calculate_case_metrics(
+        ["security.dangerous_tool_block_rate"],
+        {"dangerous_tools": ["write"]},
+        evidence,
+        [],
+    )
+
+    assert metrics["security.dangerous_tool_block_rate"]["value"] == 1.0
+
+
 def test_ratio_metric_is_not_applicable_when_denominator_is_zero(
     tmp_path: Path,
 ) -> None:
@@ -647,6 +720,21 @@ def test_runtime_profile_can_disable_context_memory_and_task_control(
     )
 
 
+def test_runtime_profile_can_enable_eval_auto_approval(tmp_path: Path) -> None:
+    base = CreateAgentSessionOptions(
+        workspace_dir=tmp_path,
+        model=_model(),
+        stream_fn=_direct_final_stream,
+    )
+
+    applied = EvaluationExecutor._apply_runtime_profile(
+        base,
+        EvalRuntimeProfile(auto_approve=True),
+    )
+
+    assert applied.approval_provider is not None
+
+
 def test_executor_adds_declared_metrics_to_eval_result(tmp_path: Path) -> None:
     evidence = _evidence(
         tmp_path,
@@ -683,6 +771,56 @@ def test_executor_adds_declared_metrics_to_eval_result(tmp_path: Path) -> None:
 
     assert result.metrics["memory.memory_retrieval_hit_rate"]["value"] == 1.0
     assert result.metrics["runtime.run_count"] == 1
+
+
+def test_budget_assertions_are_diagnostic_and_do_not_fail_case(
+    tmp_path: Path,
+) -> None:
+    evidence = _evidence(
+        tmp_path,
+        _bundle(
+            tmp_path,
+            report={
+                "run": {
+                    "summary": {
+                        "tool_calls": 3,
+                        "model_attempts": 1,
+                    }
+                }
+            },
+        ),
+    )
+    passed = AssertionResult(
+        name="run",
+        dimension="runtime_contract",
+        status="passed",
+        summary="completed",
+        required=True,
+        role="guardrail",
+    )
+    artifacts = EvalArtifactStore(tmp_path / "evals", "eval_1")
+
+    result = EvaluationExecutor()._evaluate(
+        "budget-diagnostic",
+        [],
+        EvalBudgets(max_tool_calls=1),
+        evidence,
+        artifacts,
+        error=None,
+        started=0.0,
+        precomputed=[passed],
+    )
+
+    budget_assertion = next(
+        assertion
+        for dimension in result.dimensions
+        for assertion in dimension.assertion_results
+        if assertion.name == "budget_tool_calls"
+    )
+    assert result.overall == "passed"
+    assert budget_assertion.status == "failed"
+    assert budget_assertion.required is False
+    assert budget_assertion.role == "diagnostic"
 
 
 def test_suite_summary_and_markdown_include_metric_averages() -> None:
@@ -725,3 +863,113 @@ def test_suite_summary_and_markdown_include_metric_averages() -> None:
     assert summary["metric_averages"]["context.key_context_hit_rate"] == 0.75
     assert "Key Context Hit Rate" in markdown
     assert "75.0%" in markdown
+
+
+def test_suite_summary_separates_primary_metrics_and_diagnostics() -> None:
+    primary_pass = AssertionResult(
+        name="metric",
+        dimension="context_governance",
+        status="passed",
+        summary="context.key_context_hit_rate >= 1",
+        actual={
+            "metric": "context.key_context_hit_rate",
+            "value": 1.0,
+            "display": "100.0%",
+        },
+        role="primary",
+    )
+    diagnostic_fail = AssertionResult(
+        name="budget_tool_calls",
+        dimension="efficiency",
+        status="failed",
+        summary="tool_calls exceeded budget",
+        actual={"value": 6},
+        required=False,
+        role="diagnostic",
+    )
+    diagnostic_metric = AssertionResult(
+        name="metric",
+        dimension="memory",
+        status="failed",
+        summary="memory.memory_retrieval_hit_rate expected >= 1, got 0",
+        actual={
+            "metric": "memory.memory_retrieval_hit_rate",
+            "value": 0.0,
+            "display": "0.0%",
+        },
+        required=False,
+        role="diagnostic",
+    )
+    results = [
+        EvalResult(
+            case_id="context-case",
+            overall="passed",
+            session_id="session-1",
+            run_ids=["run-1"],
+            dimensions=[],
+            failure_categories=[],
+            metrics={
+                "context.key_context_hit_rate": {
+                    "value": 1.0,
+                    "display": "100.0%",
+                },
+                "runtime.tool_calls": 6,
+            },
+            artifact_dir="context-case",
+        ),
+        EvalResult(
+            case_id="security-case",
+            overall="passed",
+            session_id="session-2",
+            run_ids=["run-2"],
+            dimensions=[
+                DimensionResult(
+                    dimension="context_governance",
+                    status="passed",
+                    summary="1/1 assertions passed",
+                    assertion_results=[primary_pass],
+                ),
+                DimensionResult(
+                    dimension="efficiency",
+                    status="failed",
+                    summary="0/1 assertions passed",
+                    assertion_results=[diagnostic_fail],
+                ),
+                DimensionResult(
+                    dimension="memory",
+                    status="failed",
+                    summary="0/1 assertions passed",
+                    assertion_results=[diagnostic_metric],
+                ),
+            ],
+            failure_categories=["efficiency.budget_tool_calls_failed"],
+            metrics={
+                "context.key_context_hit_rate": {
+                    "value": 0.5,
+                    "display": "50.0%",
+                },
+                "memory.memory_retrieval_hit_rate": {
+                    "value": 0.0,
+                    "display": "0.0%",
+                },
+                "runtime.tool_calls": 6,
+            },
+            artifact_dir="security-case",
+        ),
+    ]
+
+    summary = build_suite_summary(results)
+
+    assert summary["domains"] == {
+        "context": {"failed": 0, "passed": 1, "pass_rate": 1.0, "total": 1},
+        "security": {"failed": 0, "passed": 1, "pass_rate": 1.0, "total": 1},
+    }
+    assert summary["primary_metric_averages"] == {
+        "context.key_context_hit_rate": 1.0
+    }
+    assert "memory.memory_retrieval_hit_rate" not in summary["primary_metric_averages"]
+    assert summary["assertion_roles"]["diagnostic"]["failed"] == 2
+    assert summary["diagnostic_failures"] == {
+        "efficiency.budget_tool_calls_failed": 1,
+        "memory.metric_failed": 1,
+    }

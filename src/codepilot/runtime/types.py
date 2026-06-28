@@ -128,6 +128,7 @@ class CreateAgentSessionOptions:
     context_governance_enabled: bool = True
     memory_enabled: bool = True
     task_control_enabled: bool = True
+    max_task_replans_per_run: Optional[int] = None
     load_workspace_resources: bool = True
     enabled_builtin_tools: Optional[list[str]] = None
     max_context_messages: Optional[int] = None

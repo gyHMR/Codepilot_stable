@@ -11,7 +11,9 @@ from .rendering import render_memory
 from .store import MemoryStore
 from .writer import MemoryWriter
 
-PROJECT_ALWAYS_RECALL_CATEGORIES = frozenset({"project_constraint", "user_preference"})
+PROJECT_ALWAYS_RECALL_CATEGORIES = frozenset(
+    {"project_constraint", "user_preference", "explicit_memory"}
+)
 
 
 class MemoryRetriever:

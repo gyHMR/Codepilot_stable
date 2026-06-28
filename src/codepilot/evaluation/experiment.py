@@ -127,13 +127,16 @@ async def run_experiment(
     if repeat <= 0:
         raise ValueError("repeat must be positive")
     experiment_id = options.eval_id or f"experiment_{uuid.uuid4().hex[:12]}"
+    root = Path(options.artifact_root) / experiment_id
+    runs_root = root / "runs"
     runs: dict[str, list[dict[str, Any]]] = {"off": [], "on": []}
     run_artifacts: dict[str, list[str]] = {"off": [], "on": []}
     for variant, overrides in experiment_variants(module):
         for index in range(repeat):
             run_options = replace(
                 options,
-                eval_id=f"{experiment_id}_{variant}_{index + 1}",
+                artifact_root=runs_root,
+                eval_id=f"{variant}_{index + 1}",
                 benchmark_name=f"{options.benchmark_name or module}-{variant}",
                 runtime_overrides=overrides,
             )
@@ -143,7 +146,6 @@ async def run_experiment(
 
     comparison = build_experiment_comparison(module, runs)
     comparison["runs"] = run_artifacts
-    root = Path(options.artifact_root) / experiment_id
     root.mkdir(parents=True, exist_ok=True)
     (root / "experiment.json").write_text(
         json.dumps(comparison, ensure_ascii=False, indent=2),
@@ -186,7 +188,7 @@ def _average_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     metric_names = {
         name
         for summary in summaries
-        for name in summary.get("metric_averages", {})
+        for name in _metric_summary(summary)
     }
     return {
         "pass_rate": _average(
@@ -202,7 +204,7 @@ def _average_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
                     float(value)
                     for summary in summaries
                     if isinstance(
-                        value := summary.get("metric_averages", {}).get(name),
+                        value := _metric_summary(summary).get(name),
                         (int, float),
                     )
                 ]
@@ -214,6 +216,14 @@ def _average_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _average(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
+
+
+def _metric_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    primary = summary.get("primary_metric_averages")
+    if isinstance(primary, dict) and primary:
+        return primary
+    metrics = summary.get("metric_averages")
+    return metrics if isinstance(metrics, dict) else {}
 
 
 def _display(value: Any, *, signed: bool = False) -> str:

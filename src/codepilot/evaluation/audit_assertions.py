@@ -521,6 +521,7 @@ def _result(
         actual=actual,
         evidence_refs=list(dict.fromkeys(refs)),
         required=spec.required,
+        role=spec.role,
     )
 
 
@@ -532,6 +533,7 @@ def _skipped(spec: AssertionSpec, summary: str) -> AssertionResult:
         summary=summary,
         expected=spec.options,
         required=spec.required,
+        role=spec.role,
     )
 
 

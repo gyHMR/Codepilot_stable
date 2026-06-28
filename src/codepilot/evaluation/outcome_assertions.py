@@ -212,6 +212,7 @@ def _result(
         actual=actual,
         evidence_refs=refs,
         required=spec.required,
+        role=spec.role,
     )
 
 

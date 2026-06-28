@@ -465,6 +465,7 @@ async def _run_loop(
             current_context.messages,
             goal=planned_task.goal if planned_task is not None else None,
             proposed_steps=planned_task.steps if planned_task is not None else None,
+            max_replans_per_run=config.max_task_replans_per_run,
             task_recovery_projection=current_context.task_recovery_projection,
         )
         if task_controller is not None
@@ -591,6 +592,11 @@ async def _run_loop(
                         messages=new_messages,
                         final_message=assistant,
                         error=error,
+                        task=(
+                            task_controller.summarize(task)
+                            if task_controller is not None and task is not None
+                            else None
+                        ),
                     ),
                 )
 
@@ -608,6 +614,11 @@ async def _run_loop(
                 if not gate.should_execute:
                     if gate.assistant_stop_reason is not None:
                         assistant.stop_reason = gate.assistant_stop_reason
+                    task_summary = (
+                        task_controller.summarize(task)
+                        if task_controller is not None and task is not None
+                        else None
+                    )
                     return await _stop_with_error(
                         emitter,
                         state,
@@ -616,6 +627,7 @@ async def _run_loop(
                         code=gate.error_code or "run.tool_execution_blocked",
                         message=gate.message or gate.reason,
                         stop_reason=gate.stop_reason or "internal_error",
+                        task=task_summary,
                     )
 
                 # 记录工具迭代次数

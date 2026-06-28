@@ -71,6 +71,7 @@ class TaskController:
         goal: str | None = None,
         acceptance_criteria: Iterable[str] | None = None,
         constraints: Iterable[str] | None = None,
+        max_replans_per_run: int | None = None,
         task_recovery_projection: Mapping[str, object] | None = None,
     ) -> TaskState:
         """初始化任务状态：从用户消息中提取目标，生成初始步骤。
@@ -98,6 +99,11 @@ class TaskController:
                 task_recovery_projection,
             )
             if recovered is not None:
+                if max_replans_per_run is not None:
+                    recovered.max_replans_per_run = _positive_int_or_default(
+                        max_replans_per_run,
+                        default=recovered.max_replans_per_run,
+                    )
                 return recovered
         goal = (goal or _goal_from_prompts(prompts)).strip() or "完成当前请求"
         steps = self._normalize_steps(proposed_steps or ["完成当前请求"])
@@ -112,6 +118,10 @@ class TaskController:
             current_step_id=steps[0].id if steps else None,
             phase="acting",
             next_action=steps[0].title if steps else None,
+            max_replans_per_run=_positive_int_or_default(
+                max_replans_per_run,
+                default=2,
+            ),
         )
         if steps:
             steps[0].mark_in_progress()
@@ -211,10 +221,11 @@ class TaskController:
             task.action_intent = "debug_failure"
             task.recent_error_code = "verification_failed"
             task.recent_failure_type = "verification_failed"
+            task.next_action = _repair_next_action(results)
             self._mark_latest_changes_failed(task, results)
             if step is not None:
                 step.record_failure(
-                    "验证失败，需要修复",
+                    _verification_failure_note(results),
                     evidence_refs=_evidence_refs(results),
                 )
                 if step.failure_count >= 2:
@@ -548,19 +559,28 @@ class TaskController:
             trigger="verification_failed",
             evidence_refs=_evidence_refs(results),
             requires_revert=False,
+            new_strategy=_repair_next_action(results),
         )
         current.title = "根据最新失败证据调整方案"
         current.mark_in_progress()
         current.failure_count = 0
-        current.note = "保留已完成步骤，局部替换当前和待办步骤"
+        current.note = _verification_failure_note(results)
+        current.acceptance = "基于失败验证定位根因，并完成可重新验证的最小修复"
+        current.verification_hint = _verification_command(results)
         current.add_evidence_refs(_evidence_refs(results))
         current_index = task.steps.index(current)
         task.steps = [
             *task.steps[: current_index + 1],
-            TaskStep(id=f"step_{current_index + 2}", title="重新运行相关验证"),
+            TaskStep(
+                id=f"step_{current_index + 2}",
+                title="重新运行相关验证",
+                kind="verify",
+                acceptance="最新失败验证通过",
+                verification_hint=_verification_command(results),
+            ),
         ]
         task.current_step_id = current.id
-        task.next_action = current.title
+        task.next_action = _repair_next_action(results)
         task.phase = "acting"
 
     def _has_failed_verification(self, results: list[ToolResultMessage]) -> bool:
@@ -781,6 +801,7 @@ class TaskController:
         trigger: str,
         evidence_refs: list[str],
         requires_revert: bool,
+        new_strategy: str | None = None,
     ) -> None:
         current = task.current_step()
         task.replans.append(
@@ -791,7 +812,7 @@ class TaskController:
                     task.attempts[-1].attempt_id if task.attempts else None
                 ),
                 abandoned_strategy=current.title if current else None,
-                new_strategy="根据最新失败证据调整方案",
+                new_strategy=new_strategy or "根据最新失败证据调整方案",
                 evidence_refs=list(evidence_refs),
                 requires_revert=requires_revert,
                 rollback_targets=list(task.rollback_targets),
@@ -859,6 +880,12 @@ def _goal_from_prompts(prompts: Iterable[AgentMessage]) -> str:
     return "继续当前任务"
 
 
+def _positive_int_or_default(value: int | None, *, default: int) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return default
+
+
 def _step_fields(raw: object) -> tuple[str, TaskStepKind, str | None, str | None]:
     """Extract normalized step fields from string/dict/PlannedTaskStep-like input."""
 
@@ -898,6 +925,55 @@ def _complete_step_payload(result: ToolResultMessage) -> Mapping[str, object] | 
     if payload.get("valid") is False:
         return None
     return payload
+
+
+def _repair_next_action(results: list[ToolResultMessage]) -> str:
+    detail = _verification_failure_detail(results)
+    if detail:
+        return (
+            f"根据验证失败证据修复实现：{detail}。"
+            "先读取失败断言和相关调用链，完成最小修复后重新运行同一验证。"
+        )
+    return "根据最新验证失败证据定位根因，完成最小修复后重新运行相关验证"
+
+
+def _verification_failure_note(results: list[ToolResultMessage]) -> str:
+    detail = _verification_failure_detail(results)
+    return f"验证失败，需要修复：{detail}" if detail else "验证失败，需要修复"
+
+
+def _verification_failure_detail(results: list[ToolResultMessage]) -> str:
+    for result in results:
+        verification = result.verification
+        if not isinstance(verification, Mapping):
+            continue
+        if verification.get("status") != "failed":
+            continue
+        parts: list[str] = []
+        command = _compact(verification.get("command"), limit=160)
+        if command:
+            parts.append(f"命令 {command}")
+        exit_code = verification.get("exit_code")
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+            parts.append(f"exit_code={exit_code}")
+        summary = _compact(verification.get("summary"), limit=220)
+        if summary:
+            parts.append(f"摘要 {summary}")
+        return "；".join(parts)
+    return ""
+
+
+def _verification_command(results: list[ToolResultMessage]) -> str | None:
+    for result in results:
+        verification = result.verification
+        if not isinstance(verification, Mapping):
+            continue
+        if verification.get("status") != "failed":
+            continue
+        command = _compact(verification.get("command"), limit=160)
+        if command:
+            return command
+    return None
 
 
 def _optional_text(value: object) -> str | None:

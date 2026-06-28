@@ -41,6 +41,7 @@ def run_assertions(
                     summary="Metric assertions run after metrics are calculated",
                     expected=spec.options,
                     required=spec.required,
+                    role=spec.role,
                 )
             else:
                 result = run_audit_assertion(spec, evidence)
@@ -53,6 +54,7 @@ def run_assertions(
                 expected=spec.options,
                 actual={"error_kind": type(exc).__name__},
                 required=spec.required,
+                role=spec.role,
             )
         results.append(result)
     return results
@@ -78,6 +80,7 @@ def run_metric_assertions(
                     expected=spec.options,
                     actual={"error_kind": type(exc).__name__},
                     required=spec.required,
+                    role=spec.role,
                 )
             )
     return results
@@ -136,7 +139,11 @@ def failure_categories(
 def required_assertions_passed(
     assertion_results: list[AssertionResult],
 ) -> bool:
-    required = [result for result in assertion_results if result.required]
+    required = [
+        result
+        for result in assertion_results
+        if result.required and result.role != "diagnostic"
+    ]
     return bool(required) and all(
         result.status == "passed" for result in required
     )
@@ -174,6 +181,7 @@ def _assert_metric(
                 actual=actual,
                 evidence_refs=[f"metric:{metric_name}"],
                 required=spec.required,
+                role=spec.role,
             )
         return AssertionResult(
             name=spec.type,
@@ -184,6 +192,7 @@ def _assert_metric(
             actual=actual,
             evidence_refs=[f"metric:{metric_name}"],
             required=spec.required,
+            role=spec.role,
         )
     passed = _compare(float(actual_value), operator, expected_value)
     summary = (
@@ -203,6 +212,7 @@ def _assert_metric(
         actual=actual,
         evidence_refs=[f"metric:{metric_name}"],
         required=spec.required,
+        role=spec.role,
     )
 
 

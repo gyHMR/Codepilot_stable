@@ -154,3 +154,49 @@ def test_run_metrics_and_report_capture_calls_without_driving_the_run() -> None:
     assert report["model_calls"][0]["latency_ms"] == 50
     assert report["tool_calls"][0]["error_reason"] == "command_failed"
     assert report["event_counts"]["message_end"] == 2
+
+
+def test_audit_report_counts_nested_task_decisions_and_completion_reasons() -> None:
+    from codepilot.observability.audit import build_audit_report
+
+    report = build_audit_report(
+        {
+            "run_id": "run_task",
+            "session_id": "session_task",
+            "status": "waiting_user",
+            "stop_reason": "task_incomplete",
+            "counters": {},
+            "messages": [],
+            "task": {
+                "completed_steps": [],
+                "pending_steps": ["修复失败测试"],
+                "blocked_steps": [],
+                "completion_satisfied": False,
+                "completion_reason": "incomplete_steps",
+            },
+        },
+        events=[
+            {
+                "type": "task_decision",
+                "decision": {
+                    "action": "repair",
+                    "reason": "verification_failed",
+                },
+            },
+            {
+                "type": "task_decision",
+                "action": "replan",
+                "reason": "repeated_step_failure",
+            },
+            {
+                "type": "completion_checked",
+                "completion": {
+                    "satisfied": False,
+                    "reason": "incomplete_steps",
+                },
+            },
+        ],
+    )
+
+    assert report["task"]["decision_counts"] == {"repair": 1, "replan": 1}
+    assert report["task"]["completion_reason_counts"] == {"incomplete_steps": 1}

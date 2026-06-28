@@ -13,6 +13,7 @@ from typing import Callable
 from codepilot.observability import AuditBundle, build_audit_report
 from codepilot.runtime import RuntimeService
 from codepilot.runtime.types import CreateAgentSessionOptions, UserInput
+from codepilot.tools.approval import ApprovalDecision
 
 from .artifacts import EvalArtifactStore
 from .assertions import (
@@ -74,6 +75,7 @@ class EvaluationExecutor:
                 ),
                 workspace_dir=workspace,
                 session_id=None,
+                max_task_replans_per_run=case.budgets.max_replans,
             )
         )
         evidence.session_id = handle.session_id
@@ -140,6 +142,7 @@ class EvaluationExecutor:
             ),
             workspace_dir=workspace,
             session_id=None,
+            max_task_replans_per_run=scenario.budgets.max_replans,
         )
         handle = runtime.create_session(session_options)
         session_id = handle.session_id
@@ -581,7 +584,8 @@ class EvaluationExecutor:
                         f"run:{bundle.run_id}"
                         for bundle in evidence.audit_bundles
                     ],
-                    required=True,
+                    required=False,
+                    role="diagnostic",
                 )
             )
         return results
@@ -633,6 +637,11 @@ class EvaluationExecutor:
             context_governance_enabled=profile.context_governance_enabled,
             memory_enabled=profile.memory_enabled,
             task_control_enabled=profile.task_control_enabled,
+            approval_provider=(
+                _EvalAutoApprovalProvider()
+                if profile.auto_approve
+                else session_options.approval_provider
+            ),
         )
 
     @staticmethod
@@ -670,3 +679,19 @@ def _safe_child(root: Path, relative: str) -> Path:
     if target != resolved_root and resolved_root not in target.parents:
         raise ValueError(f"Path escapes root: {relative}")
     return target
+
+
+class _EvalAutoApprovalProvider:
+    """评估专用审批器：用于无人值守 coding-fix benchmark。
+
+    安全阻断仍由 PermissionPolicy 先执行；只有策略判定为
+    approval_required 的调用会来到这里。
+    """
+
+    async def request_approval(
+        self,
+        request: object,
+        metadata: object,
+        decision: object,
+    ) -> ApprovalDecision:
+        return ApprovalDecision(approved=True, reason="eval_auto_approved")

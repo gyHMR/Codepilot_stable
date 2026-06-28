@@ -21,6 +21,7 @@ from .report import build_suite_summary, render_suite_markdown
 from .service import EvaluationService
 from .types import (
     AssertionResult,
+    AssertionRole,
     AssertionSpec,
     DimensionResult,
     EvalBudgets,
@@ -35,6 +36,7 @@ from .types import (
 
 __all__ = [
     "AssertionResult",
+    "AssertionRole",
     "AssertionSpec",
     "DimensionResult",
     "EvalBudgets",

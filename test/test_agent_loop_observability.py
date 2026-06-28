@@ -296,6 +296,9 @@ async def _run_agent_loop_max_tool_iterations_case() -> None:
 
     assert any(event["type"] == "error" and event["error"] == "run.max_iterations" for event in events)
     assert events[-1]["type"] == "agent_end"
+    assert result.task is not None
+    assert result.task.completion_satisfied is False
+    assert result.task.pending_steps
     assert any(
         isinstance(message, AssistantMessage) and message.stop_reason == "max_iterations"
         for message in messages

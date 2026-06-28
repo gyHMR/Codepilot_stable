@@ -25,6 +25,8 @@ EvalOverall = Literal["passed", "failed", "invalid_case", "execution_error"]
 DimensionStatus = Literal["passed", "failed", "error", "not_applicable"]
 # 断言状态
 AssertionStatus = Literal["passed", "failed", "error", "skipped"]
+# 断言角色：区分核心指标、真实结果、安全护栏和调试诊断
+AssertionRole = Literal["primary", "outcome", "guardrail", "diagnostic"]
 # 断言类型：命令/文件/差异/运行/追踪/上下文/记忆/安全/任务
 AssertionType = Literal[
     "command", "file", "diff", "run", "trace", "context", "memory", "security", "task",
@@ -43,6 +45,7 @@ class AssertionSpec:
     dimension: EvalDimension
     options: dict[str, Any] = field(default_factory=dict)
     required: bool = True  # 是否为必需断言（失败则整体不通过）
+    role: AssertionRole = "guardrail"  # 断言在评估口径中的角色
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,7 @@ class EvalRuntimeProfile:
     memory_enabled: bool = True               # 是否启用记忆
     task_control_enabled: bool = True         # 是否启用任务控制
     permission_mode: str = "workspace-write"  # 权限模式
+    auto_approve: bool = False                # 是否自动批准需审批的工具调用
     scripted_stream: str | None = None        # 脚本化流式响应（用于测试）
 
 
@@ -120,6 +124,7 @@ class AssertionResult:
     actual: object | None = None
     evidence_refs: list[str] = field(default_factory=list)  # 证据引用
     required: bool = True
+    role: AssertionRole = "guardrail"
 
 
 @dataclass(frozen=True)

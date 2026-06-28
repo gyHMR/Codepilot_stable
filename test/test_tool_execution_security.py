@@ -105,6 +105,29 @@ def test_shell_verification_classification_requires_token_boundary() -> None:
         assert decision.reason == "unknown_shell_command"
 
 
+def test_shell_verification_allows_pythonpath_setup_prefix() -> None:
+    from codepilot.tools.permissions import PermissionPolicy, ToolRequest
+
+    bash = _metadata("bash", read_only=False, exclusive=True)
+    policy = PermissionPolicy(mode="workspace-write")
+
+    for command in [
+        "set PYTHONPATH=src && python -m pytest tests/test_app.py -q",
+        "$env:PYTHONPATH='src'; python -m pytest tests/test_app.py -q",
+        "export PYTHONPATH=src && python -m pytest tests/test_app.py -q",
+    ]:
+        decision = policy.decide(
+            ToolRequest(
+                name="bash",
+                params={"command": command},
+                metadata=bash,
+            )
+        )
+
+        assert decision.allowed
+        assert decision.reason == "verification_command"
+
+
 def test_tool_permission_request_and_decision_own_policy_boundary_invariants() -> None:
     from codepilot.tools.permissions import ToolDecision, ToolRequest
 

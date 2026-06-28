@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+from types import SimpleNamespace
+
 from codepilot.evaluation.__main__ import build_parser
 from codepilot.evaluation.experiment import (
     build_experiment_comparison,
     experiment_variants,
+    run_experiment,
 )
+from codepilot.evaluation.types import EvalRunOptions
+from codepilot.runtime.types import CreateAgentSessionOptions
 
 
 def test_cli_exposes_check_run_experiment_and_report_commands() -> None:
@@ -87,6 +94,42 @@ def test_experiment_comparison_reports_on_off_averages_and_change() -> None:
     }
 
 
+def test_experiment_comparison_prefers_primary_metric_averages() -> None:
+    comparison = build_experiment_comparison(
+        "context",
+        {
+            "off": [
+                {
+                    "primary_metric_averages": {
+                        "context.key_context_hit_rate": 0.25,
+                    },
+                    "metric_averages": {
+                        "context.key_context_hit_rate": 0.0,
+                    },
+                    "pass_rate": 0.5,
+                }
+            ],
+            "on": [
+                {
+                    "primary_metric_averages": {
+                        "context.key_context_hit_rate": 0.75,
+                    },
+                    "metric_averages": {
+                        "context.key_context_hit_rate": 1.0,
+                    },
+                    "pass_rate": 1.0,
+                }
+            ],
+        },
+    )
+
+    assert comparison["metrics"]["context.key_context_hit_rate"] == {
+        "off": 0.25,
+        "on": 0.75,
+        "change": 0.5,
+    }
+
+
 def test_planning_experiment_reports_invalid_tool_call_reduction() -> None:
     comparison = build_experiment_comparison(
         "planning",
@@ -119,4 +162,47 @@ def test_planning_experiment_reports_invalid_tool_call_reduction() -> None:
         "off": 0.0,
         "on": 2.0,
         "change": 2.0,
+    }
+
+
+def test_experiment_run_artifacts_are_nested_under_experiment_root(
+    tmp_path: Path,
+) -> None:
+    class FakeService:
+        def __init__(self) -> None:
+            self.options = []
+
+        async def run_suite(self, suite_path: Path, options: EvalRunOptions):
+            self.options.append(options)
+            return SimpleNamespace(
+                summary={"primary_metric_averages": {}, "pass_rate": 1.0},
+                artifact_dir=str(Path(options.artifact_root) / str(options.eval_id)),
+            )
+
+    service = FakeService()
+    options = EvalRunOptions(
+        fixtures_root=tmp_path / "fixtures",
+        artifact_root=tmp_path / "evals",
+        eval_id="exp-context-r1",
+        benchmark_name="context",
+        session_options=CreateAgentSessionOptions(workspace_dir=tmp_path),
+    )
+
+    result = asyncio.run(
+        run_experiment(
+            service,
+            tmp_path / "suite",
+            options,
+            module="context",
+            repeat=1,
+        )
+    )
+
+    expected_runs_root = tmp_path / "evals" / "exp-context-r1" / "runs"
+    assert [item.eval_id for item in service.options] == ["off_1", "on_1"]
+    assert all(item.artifact_root == expected_runs_root for item in service.options)
+    assert result["artifact_dir"] == str(tmp_path / "evals" / "exp-context-r1")
+    assert result["runs"] == {
+        "off": [str(expected_runs_root / "off_1")],
+        "on": [str(expected_runs_root / "on_1")],
     }

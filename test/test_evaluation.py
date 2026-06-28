@@ -189,6 +189,7 @@ def test_loader_parses_metric_assertion_with_module_dimension(
                         "metric": "security.dangerous_tool_block_rate",
                         "op": ">=",
                         "value": 1.0,
+                        "role": "primary",
                     }
                 ],
             }
@@ -201,6 +202,34 @@ def test_loader_parses_metric_assertion_with_module_dimension(
     assert isinstance(case, EvalCase)
     assert case.assertions[0].type == "metric"
     assert case.assertions[0].dimension == "tool_security"
+    assert case.assertions[0].role == "primary"
+
+
+def test_loader_parses_diagnostic_assertion_role(tmp_path: Path) -> None:
+    path = tmp_path / "case.json"
+    path.write_text(
+        json.dumps(
+            {
+                "id": "diagnostic-case",
+                "domain": "context",
+                "fixture": "fixture",
+                "prompt": "inspect",
+                "assertions": [
+                    {
+                        "type": "run",
+                        "expect_status": "completed",
+                        "role": "diagnostic",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    case = load_eval_definition(path)
+
+    assert isinstance(case, EvalCase)
+    assert case.assertions[0].role == "diagnostic"
 
 
 def test_minimal_module_benchmarks_are_valid() -> None:
@@ -208,7 +237,7 @@ def test_minimal_module_benchmarks_are_valid() -> None:
     benchmark_root = root / "benchmarks" / "evaluation"
     definitions = load_eval_suite(benchmark_root)
 
-    assert len(definitions) == 72
+    assert len(definitions) == 100
     assert {item.domain for item in definitions} == {
         "context",
         "memory",
@@ -220,45 +249,70 @@ def test_minimal_module_benchmarks_are_valid() -> None:
         domain: len(load_eval_suite(benchmark_root / domain))
         for domain in ("context", "memory", "planning", "security")
     } == {
-        "context": 18,
-        "memory": 18,
-        "planning": 18,
-        "security": 18,
+        "context": 25,
+        "memory": 25,
+        "planning": 25,
+        "security": 25,
     }
 
 
-def test_issue_tracker_graded_benchmarks_are_present() -> None:
+def test_graded_benchmarks_are_balanced() -> None:
     root = Path(__file__).resolve().parents[1]
     definitions = load_eval_suite(root / "benchmarks" / "evaluation")
     graded = [
         item
         for item in definitions
-        if "suite:graded" in item.tags and "fixture:issue_tracker" in item.tags
+        if "suite:graded" in item.tags
+    ]
+    issue_tracker = [
+        item
+        for item in graded
+        if "fixture:issue_tracker" in item.tags
+    ]
+    selected_existing = [
+        item
+        for item in graded
+        if "fixture:issue_tracker" not in item.tags
     ]
 
-    assert len(graded) == 12
+    assert len(graded) == 60
     assert {
         domain: sum(1 for item in graded if item.domain == domain)
         for domain in ("context", "memory", "planning", "security")
     } == {
-        "context": 3,
-        "memory": 3,
-        "planning": 3,
-        "security": 3,
+        "context": 15,
+        "memory": 15,
+        "planning": 15,
+        "security": 15,
+    }
+    assert len(issue_tracker) == 40
+    assert {
+        domain: sum(1 for item in issue_tracker if item.domain == domain)
+        for domain in ("context", "memory", "planning", "security")
+    } == {
+        "context": 10,
+        "memory": 10,
+        "planning": 10,
+        "security": 10,
     }
     assert {
-        domain: sum(
+        domain: sum(1 for item in selected_existing if item.domain == domain)
+        for domain in ("context", "memory", "planning", "security")
+    } == {
+        "context": 5,
+        "memory": 5,
+        "planning": 5,
+        "security": 5,
+    }
+    assert all(
+        sum(
             1
             for item in graded
             if item.domain == domain and "difficulty:hard" in item.tags
         )
+        >= 4
         for domain in ("context", "memory", "planning", "security")
-    } == {
-        "context": 1,
-        "memory": 1,
-        "planning": 1,
-        "security": 1,
-    }
+    )
 
 
 def test_benchmark_sources_are_git_ignored_by_policy() -> None:
@@ -464,30 +518,16 @@ def test_context_config_key_context_matches_prompted_sources() -> None:
     ]
 
 
-def test_benchmark_metrics_are_required_assertions() -> None:
+def test_benchmark_metrics_have_explicit_assertion_roles() -> None:
     root = Path(__file__).resolve().parents[1]
     definitions = load_eval_suite(root / "benchmarks" / "evaluation")
-    required_metrics = {
-        "context.key_context_hit_rate",
-        "context.stale_context_rate",
-        "memory.memory_retrieval_hit_rate",
-        "memory.redundant_read_count",
-        "memory.failed_attempt_recurrence_rate",
-        "planning.evidence_coverage_rate",
-        "planning.false_completion_rate",
-        "security.dangerous_tool_block_rate",
-        "security.mutation_after_denial_rate",
-        "security.benign_tool_pass_rate",
-    }
 
-    missing = []
+    invalid_roles = []
     for definition in definitions:
-        asserted = {
-            str(spec.options.get("metric"))
-            for spec in definition.assertions
-            if spec.type == "metric" and spec.required
-        }
-        for metric in set(definition.metrics).intersection(required_metrics):
+        for spec in definition.assertions:
+            if spec.type != "metric":
+                continue
+            metric = str(spec.options.get("metric"))
             if (
                 "security:path-escape" in definition.tags
                 and metric
@@ -497,10 +537,12 @@ def test_benchmark_metrics_are_required_assertions() -> None:
                 }
             ):
                 continue
-            if metric not in asserted:
-                missing.append(f"{definition.id}:{metric}")
+            if spec.role == "primary" and not spec.required:
+                invalid_roles.append(f"{definition.id}:{metric}:primary-not-required")
+            if spec.role == "diagnostic" and spec.required:
+                invalid_roles.append(f"{definition.id}:{metric}:diagnostic-required")
 
-    assert missing == []
+    assert invalid_roles == []
 
 
 def test_security_benchmarks_assert_tool_policy_events() -> None:

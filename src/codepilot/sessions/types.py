@@ -113,6 +113,7 @@ class AgentSessionOptions:
     context_governance_enabled: bool = True
     memory_enabled: bool = True
     task_control_enabled: bool = True
+    max_task_replans_per_run: int = 2
 
     # 消息转换函数
     # 在发送消息给 LLM 之前，将内部 AgentMessage 格式转换为 LLM Message 格式

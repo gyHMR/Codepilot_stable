@@ -13,10 +13,18 @@ def build_suite_summary(results: list[EvalResult]) -> dict[str, Any]:
     overall = Counter(result.overall for result in results)
     dimensions: dict[str, Counter[str]] = defaultdict(Counter)
     failures: Counter[str] = Counter()
+    diagnostic_failures: Counter[str] = Counter()
     totals: Counter[str] = Counter()
     metric_values: dict[str, list[float]] = defaultdict(list)
+    primary_metric_values: dict[str, list[float]] = defaultdict(list)
+    primary_metric_na: Counter[str] = Counter()
+    domains: dict[str, Counter[str]] = defaultdict(Counter)
+    assertion_roles: dict[str, Counter[str]] = defaultdict(Counter)
     for result in results:
         failures.update(result.failure_categories)
+        domain = _case_domain(result.case_id)
+        domains[domain][result.overall] += 1
+        metric_roles: dict[str, str] = {}
         for key, value in result.metrics.items():
             if isinstance(value, int) and not isinstance(value, bool):
                 totals[key] += value
@@ -29,6 +37,47 @@ def build_suite_summary(results: list[EvalResult]) -> dict[str, Any]:
                     metric_values[key].append(float(metric_value))
         for dimension in result.dimensions:
             dimensions[dimension.dimension][dimension.status] += 1
+            for assertion in dimension.assertion_results:
+                assertion_roles[assertion.role][assertion.status] += 1
+                if assertion.status in {"failed", "error"}:
+                    category = (
+                        f"{assertion.dimension}.{assertion.name}_"
+                        f"{assertion.status}"
+                    )
+                    if assertion.role == "diagnostic":
+                        diagnostic_failures[category] += 1
+                if assertion.name != "metric":
+                    continue
+                actual = assertion.actual if isinstance(assertion.actual, dict) else {}
+                metric_name = actual.get("metric")
+                metric_value = actual.get("value")
+                if not isinstance(metric_name, str):
+                    continue
+                metric_roles[metric_name] = assertion.role
+                if assertion.role != "primary":
+                    continue
+                if isinstance(metric_value, (int, float)) and not isinstance(
+                    metric_value,
+                    bool,
+                ):
+                    primary_metric_values[metric_name].append(float(metric_value))
+                else:
+                    primary_metric_na[metric_name] += 1
+        for metric_name, metric in result.metrics.items():
+            if metric_name in metric_roles or not _is_module_metric(metric_name):
+                continue
+            metric_value = (
+                metric.get("value")
+                if isinstance(metric, dict)
+                else metric
+            )
+            if isinstance(metric_value, (int, float)) and not isinstance(
+                metric_value,
+                bool,
+            ):
+                primary_metric_values[metric_name].append(float(metric_value))
+            else:
+                primary_metric_na[metric_name] += 1
     total = len(results)
     passed = overall.get("passed", 0)
     return {
@@ -40,13 +89,25 @@ def build_suite_summary(results: list[EvalResult]) -> dict[str, Any]:
             name: dict(sorted(statuses.items()))
             for name, statuses in sorted(dimensions.items())
         },
+        "domains": _domain_summary(domains),
+        "assertion_roles": {
+            name: dict(sorted(statuses.items()))
+            for name, statuses in sorted(assertion_roles.items())
+        },
         "failure_categories": dict(sorted(failures.items())),
+        "diagnostic_failures": dict(sorted(diagnostic_failures.items())),
         "metrics": dict(sorted(totals.items())),
         "metric_averages": {
             name: sum(values) / len(values)
             for name, values in sorted(metric_values.items())
             if values
         },
+        "primary_metric_averages": {
+            name: sum(values) / len(values)
+            for name, values in sorted(primary_metric_values.items())
+            if values
+        },
+        "primary_metric_na": dict(sorted(primary_metric_na.items())),
         "duration_ms": sum(result.duration_ms or 0 for result in results),
     }
 
@@ -91,6 +152,21 @@ def render_suite_markdown(
             ]
         )
         for name, value in metric_averages.items():
+            lines.append(
+                f"| {_metric_label(name)} | {_metric_display(name, value)} |"
+            )
+    primary_metric_averages = summary.get("primary_metric_averages", {})
+    if primary_metric_averages:
+        lines.extend(
+            [
+                "",
+                "## Primary Metrics",
+                "",
+                "| Metric | Average |",
+                "|---|---:|",
+            ]
+        )
+        for name, value in primary_metric_averages.items():
             lines.append(
                 f"| {_metric_label(name)} | {_metric_display(name, value)} |"
             )
@@ -146,6 +222,28 @@ def _metric_label(name: str) -> str:
         "security.benign_tool_pass_rate": "Benign Tool Pass Rate",
     }
     return labels.get(name, name)
+
+
+def _case_domain(case_id: str) -> str:
+    return case_id.split("-", 1)[0] if "-" in case_id else "unknown"
+
+
+def _is_module_metric(name: str) -> bool:
+    return name.startswith(("context.", "memory.", "planning.", "security."))
+
+
+def _domain_summary(domains: dict[str, Counter[str]]) -> dict[str, dict[str, Any]]:
+    summary = {}
+    for domain, statuses in sorted(domains.items()):
+        total = sum(statuses.values())
+        passed = statuses.get("passed", 0)
+        summary[domain] = {
+            "failed": statuses.get("failed", 0),
+            "passed": passed,
+            "pass_rate": passed / total if total else 0.0,
+            "total": total,
+        }
+    return summary
 
 
 def _metric_display(name: str, value: float) -> str:
