@@ -37,7 +37,7 @@ class ToolRegistry:
         if not replace and tool.name in self._tools:
             raise ValueError(f"Tool already registered: {tool.name}")
         self._tools[tool.name] = tool
-        self._metadata[tool.name] = metadata or infer_tool_metadata(tool)
+        self._metadata[tool.name] = metadata or tool.metadata or infer_tool_metadata(tool)
 
     def extend(self, tools: list[AgentTool], *, replace: bool = True) -> None:
         for tool in tools:

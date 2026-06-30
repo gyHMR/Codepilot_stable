@@ -39,6 +39,7 @@ RuntimeEventType = Literal[
     "tool_approval_resolved",    # 工具调用审批已解决
     "tool_approval_decision",    # 用户提交了工具审批决策
     "tool_approval_result_replaced",  # 审批恢复替换了 pending 工具结果
+    "tool_execution_grace",      # 工具执行获得一次受控宽限
     "tool_execution_end",        # 工具执行结束
     "context_prepared",          # 模型调用前上下文已编译
     "context_freshness_checked", # 上下文新鲜度已检查
@@ -74,6 +75,7 @@ _RUNTIME_EVENT_TYPES = frozenset(
         "tool_approval_resolved",
         "tool_approval_decision",
         "tool_approval_result_replaced",
+        "tool_execution_grace",
         "tool_execution_end",
         "context_prepared",
         "context_freshness_checked",

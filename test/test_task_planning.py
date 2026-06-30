@@ -233,6 +233,54 @@ def test_task_planner_records_fallback_reason_when_generation_fails() -> None:
     asyncio.run(_task_planner_fallback_reason_case())
 
 
+def test_task_planner_accepts_common_plan_aliases_and_string_steps() -> None:
+    from codepilot.core.task_planner import TaskPlanner
+    from codepilot.protocols import AssistantMessage, TextContent
+
+    message = AssistantMessage(
+        content=[
+            TextContent(
+                text=(
+                    '{"goal":"修复 planner","plan":['
+                    '"定位 planner 输出",'
+                    '{"title":"运行验证","kind":"verify",'
+                    '"acceptance":"测试通过",'
+                    '"verification_hint":"python -m pytest test/test_task_planning.py -q"}'
+                    ']}'
+                )
+            )
+        ]
+    )
+
+    draft = TaskPlanner().parse_plan_message(message, fallback_goal="fallback")
+
+    assert draft.source == "llm"
+    assert [step.title for step in draft.steps] == ["定位 planner 输出", "运行验证"]
+    assert draft.steps[0].kind == "investigate"
+    assert draft.steps[1].kind == "verify"
+    assert draft.steps[1].verification_hint == "python -m pytest test/test_task_planning.py -q"
+
+
+def test_task_planner_fallback_keeps_parse_diagnostics() -> None:
+    from codepilot.core.task_planner import TaskPlanner
+    from codepilot.protocols import AssistantMessage, TextContent
+
+    message = AssistantMessage(
+        content=[
+            TextContent(
+                text='{"goal":"修复 planner","unexpected":["定位","验证"]}'
+            )
+        ]
+    )
+
+    draft = TaskPlanner().parse_plan_message(message, fallback_goal="fallback")
+
+    assert draft.source == "fallback"
+    assert draft.fallback_reason == "missing_steps"
+    assert draft.fallback_output_preview == '{"goal":"修复 planner","unexpected":["定位","验证"]}'
+    assert draft.fallback_parsed_keys == ("goal", "unexpected")
+
+
 async def _task_planner_fallback_reason_case() -> None:
     from codepilot.core.task_planner import TaskPlanner
     from codepilot.protocols import Model, UserMessage
@@ -869,6 +917,10 @@ def test_agent_loop_exposes_planner_fallback_reason_in_task_event() -> None:
     asyncio.run(_agent_loop_planner_fallback_event_case())
 
 
+def test_agent_loop_allows_one_final_verification_at_iteration_limit() -> None:
+    asyncio.run(_agent_loop_final_verification_grace_case())
+
+
 def test_agent_loop_complete_task_step_advances_plan_execution() -> None:
     asyncio.run(_agent_loop_complete_step_advances_case())
 
@@ -1047,6 +1099,102 @@ async def _agent_loop_planner_fallback_event_case() -> None:
     assert result.status == "completed"
     assert created["plan"]["source"] == "fallback"
     assert created["plan"]["fallback_reason"] == "RuntimeError: planner unavailable"
+
+
+async def _agent_loop_final_verification_grace_case() -> None:
+    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
+    from codepilot.llm.event_stream import AssistantMessageEventStream
+    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, UserMessage
+    from codepilot.tools import AgentTool, AgentToolResult
+
+    attempts = 0
+
+    async def fake_stream(_model, _context, _options):
+        nonlocal attempts
+        attempts += 1
+        stream = AssistantMessageEventStream()
+        if attempts == 1:
+            stream.end(
+                AssistantMessage(
+                    content=[ToolCall(id="edit_1", name="edit_test", arguments={})],
+                    stop_reason="toolUse",
+                )
+            )
+            return stream
+        stream.end(
+            AssistantMessage(
+                content=[
+                    ToolCall(
+                        id="verify_1",
+                        name="bash",
+                        arguments={
+                            "command": "python -m pytest test/test_task_planning.py -q"
+                        },
+                    )
+                ],
+                stop_reason="toolUse",
+            )
+        )
+        return stream
+
+    async def edit_tool(*_args):
+        return AgentToolResult(
+            content=[TextContent(text="edited")],
+            workspace_changed=True,
+            affected_paths=["src/codepilot/core/task_controller.py"],
+        )
+
+    async def bash_tool(*_args):
+        return AgentToolResult(
+            content=[TextContent(text="passed")],
+            verification={
+                "status": "passed",
+                "command": "python -m pytest test/test_task_planning.py -q",
+                "exit_code": 0,
+                "summary": "passed",
+            },
+        )
+
+    events: list[dict[str, Any]] = []
+    result = await run_agent_loop(
+        prompts=[UserMessage(content="修改代码并运行验证")],
+        context=AgentContext(
+            system_prompt="rules",
+            messages=[],
+            tools=[
+                AgentTool(
+                    name="edit_test",
+                    label="edit",
+                    description="edit",
+                    parameters={},
+                    execute=edit_tool,
+                ),
+                AgentTool(
+                    name="bash",
+                    label="bash",
+                    description="bash",
+                    parameters={},
+                    execute=bash_tool,
+                ),
+            ],
+        ),
+        config=AgentLoopConfig(
+            model=_task_test_model(),
+            convert_to_llm=lambda items: items,
+            allow_unmanaged_tools=True,
+            max_tool_iterations=1,
+            repeated_tool_call_limit=20,
+        ),
+        emit=events.append,
+        stream_fn=fake_stream,
+    )
+
+    assert result.status == "completed"
+    assert result.stop_reason == "final_answer"
+    assert result.counters.tool_iterations == 2
+    assert result.task is not None
+    assert result.task.completion_satisfied is True
+    assert any(event.get("type") == "tool_execution_grace" for event in events)
 
 
 async def _agent_loop_llm_planner_case() -> None:

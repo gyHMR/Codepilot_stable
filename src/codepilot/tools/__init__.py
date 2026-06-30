@@ -14,8 +14,10 @@ from .approval import (
 from .builtin import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES, create_builtin_tools
 from .permissions import PermissionPolicy, ToolDecision, ToolPermissionMode, ToolRequest
 from .registry import ToolRegistry
+from .result_guard import ToolResultGuard, apply_result_guard
 from .runtime import ToolRuntime
 from .sandbox import WorkspaceSandbox
+from .schema_validation import SchemaValidationResult, SchemaValidator, validate_tool_arguments
 from .types import (
     AgentTool,
     AgentToolResult,
@@ -48,5 +50,10 @@ __all__ = [
     "ToolRuntimeRequest",
     "ToolRuntimeResult",
     "WorkspaceSandbox",
+    "SchemaValidationResult",
+    "SchemaValidator",
+    "ToolResultGuard",
+    "apply_result_guard",
     "create_builtin_tools",
+    "validate_tool_arguments",
 ]

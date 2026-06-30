@@ -12,6 +12,8 @@ from codepilot.protocols import TextContent
 from .approval import ApprovalProvider, DeferredApprovalProvider
 from .permissions import PermissionPolicy, ToolDecision, ToolRequest
 from .registry import ToolRegistry
+from .result_guard import apply_result_guard
+from .schema_validation import validate_tool_arguments
 from .types import (
     AgentTool,
     AgentToolResult,
@@ -125,7 +127,7 @@ class ToolRuntime:
         signal: Any | None = None,
         on_update: AgentToolUpdateCallback | None = None,
     ) -> ToolRuntimeResult:
-        """执行工具调用：权限检查 → 审批 → 执行 → 返回结果。"""
+        """执行工具调用：权限检查 → 参数校验 → 审批 → 执行 → 结果防护。"""
         tool = self.registry.get(request.name)
         if tool is None:
             result = _tool_result(
@@ -155,6 +157,38 @@ class ToolRuntime:
         )
         if decision.denied:
             return self._blocked_result(request, decision)
+
+        validation = validate_tool_arguments(tool.parameters, request.params)
+        if not validation.valid:
+            result = _tool_result(
+                "Tool arguments failed schema validation: "
+                + "; ".join(validation.errors),
+                status="error",
+                error_code="invalid_tool_arguments",
+                details={
+                    "tool": request.name,
+                    "reason": "schema_validation_failed",
+                    "errors": list(validation.errors),
+                },
+            )
+            result.tool_call_id = request.tool_call_id
+            result.tool_name = request.name
+            result.approved = False
+            result.metadata["permission_decision"] = {
+                "decision": decision.kind,
+                "reason": decision.reason,
+                **decision.details,
+            }
+            result.metadata["schema_validation"] = {
+                "valid": False,
+                "errors": list(validation.errors),
+            }
+            return ToolRuntimeResult(
+                result=result,
+                status="error",
+                is_error=True,
+                approved=False,
+            )
 
         approval_id: str | None = None
         if decision.requires_approval:
@@ -224,6 +258,7 @@ class ToolRuntime:
                 "duration_ms",
                 int((time.monotonic() - started_at) * 1000),
             )
+            result = apply_result_guard(result, metadata=metadata)
             status: ToolResultStatus = result.status
             if status == "success" and result.is_error:
                 status = "error"
@@ -262,6 +297,7 @@ class ToolRuntime:
                 "duration_ms",
                 int((time.monotonic() - started_at) * 1000),
             )
+            result = apply_result_guard(result, metadata=metadata)
             result.tool_call_id = request.tool_call_id
             result.tool_name = request.name
             return ToolRuntimeResult(

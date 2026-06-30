@@ -68,6 +68,7 @@ from .run_decisions import (
 from .run_state import RunState, new_run_id
 from .task_controller import TaskController
 from .task_planner import TaskPlanner, TaskPlanDraft
+from .task_state import TaskState
 from .task_tools import complete_task_step_tool, has_complete_task_step_tool
 from .tool_coordinator import ToolCallCoordinator
 from .types import AgentContext, AgentLoopConfig, AgentMessage
@@ -498,6 +499,9 @@ async def _run_loop(
     # 模型重试计数器
     model_retries = 0
 
+    # 最终验证宽限只允许一次：用于“已修改但最后验证被 max_tool_iterations 卡住”的收口场景。
+    final_verification_grace_used = False
+
     # ── 主循环 ──────────────────────────────────────────────────
 
     while True:
@@ -618,23 +622,43 @@ async def _run_loop(
             if has_more_tool_calls:
                 gate = decide_tool_execution_gate(tool_calls, state, config)
                 if not gate.should_execute:
-                    if gate.assistant_stop_reason is not None:
-                        assistant.stop_reason = gate.assistant_stop_reason
-                    task_summary = (
-                        task_controller.summarize(task)
-                        if task_controller is not None and task is not None
-                        else None
-                    )
-                    return await _stop_with_error(
-                        emitter,
-                        state,
-                        new_messages,
-                        assistant,
-                        code=gate.error_code or "run.tool_execution_blocked",
-                        message=gate.message or gate.reason,
-                        stop_reason=gate.stop_reason or "internal_error",
-                        task=task_summary,
-                    )
+                    if _should_allow_final_verification_grace(
+                        gate_reason=gate.reason,
+                        tool_calls=tool_calls,
+                        state=state,
+                        task=task,
+                        already_used=final_verification_grace_used,
+                    ):
+                        final_verification_grace_used = True
+                        await emitter.emit(
+                            {
+                                "type": "tool_execution_grace",
+                                "reason": "final_verification_at_iteration_limit",
+                                "max_tool_iterations": config.max_tool_iterations,
+                                "tool_calls": [
+                                    {"id": call.id, "name": call.name}
+                                    for call in tool_calls
+                                ],
+                            }
+                        )
+                    else:
+                        if gate.assistant_stop_reason is not None:
+                            assistant.stop_reason = gate.assistant_stop_reason
+                        task_summary = (
+                            task_controller.summarize(task)
+                            if task_controller is not None and task is not None
+                            else None
+                        )
+                        return await _stop_with_error(
+                            emitter,
+                            state,
+                            new_messages,
+                            assistant,
+                            code=gate.error_code or "run.tool_execution_blocked",
+                            message=gate.message or gate.reason,
+                            stop_reason=gate.stop_reason or "internal_error",
+                            task=task_summary,
+                        )
 
                 # 记录工具迭代次数
                 state.counters.tool_iterations += 1
@@ -996,6 +1020,10 @@ def _task_plan_event_payload(
         }
         if planned_task.fallback_reason:
             payload["fallback_reason"] = planned_task.fallback_reason
+        if planned_task.fallback_output_preview:
+            payload["fallback_output_preview"] = planned_task.fallback_output_preview
+        if planned_task.fallback_parsed_keys:
+            payload["fallback_parsed_keys"] = list(planned_task.fallback_parsed_keys)
         return payload
     source = "recovered" if recovered else "default"
     if not planner_enabled:
@@ -1004,3 +1032,77 @@ def _task_plan_event_payload(
         "source": source,
         "step_count": task_step_count,
     }
+
+
+def _should_allow_final_verification_grace(
+    *,
+    gate_reason: str,
+    tool_calls: list[ToolCall],
+    state: RunState,
+    task: TaskState | None,
+    already_used: bool,
+) -> bool:
+    """判断是否允许一次最终验证越过 max_tool_iterations。
+
+    这个宽限只覆盖一种窄场景：代码已经改动，当前还没有新鲜成功验证，
+    模型此时只请求一个明显的验证工具。它不放宽重复调用，也不放宽编辑/写入工具。
+    """
+    if gate_reason != "max_iterations" or already_used:
+        return False
+    if len(tool_calls) != 1:
+        return False
+    if not state.workspace_changed or state.fresh_verification_passed:
+        return False
+    current_step = task.current_step() if task is not None else None
+    verification_hint = current_step.verification_hint if current_step is not None else None
+    return _is_verification_tool_call(tool_calls[0], verification_hint)
+
+
+def _is_verification_tool_call(
+    tool_call: ToolCall,
+    verification_hint: str | None,
+) -> bool:
+    command = _tool_call_command(tool_call)
+    normalized_command = _normalize_shell_text(command)
+    normalized_hint = _normalize_shell_text(verification_hint)
+    if normalized_command and normalized_hint:
+        return (
+            normalized_command == normalized_hint
+            or normalized_command in normalized_hint
+            or normalized_hint in normalized_command
+        )
+
+    name = tool_call.name.strip().lower()
+    if normalized_command:
+        return name in {"bash", "shell", "sh", "powershell", "cmd"} and (
+            _looks_like_verification_command(normalized_command)
+        )
+    return name in {"run_tests", "pytest", "test", "verify", "lint", "typecheck"}
+
+
+def _tool_call_command(tool_call: ToolCall) -> str | None:
+    if not isinstance(tool_call.arguments, dict):
+        return None
+    command = tool_call.arguments.get("command") or tool_call.arguments.get("cmd")
+    return command if isinstance(command, str) else None
+
+
+def _normalize_shell_text(value: str | None) -> str:
+    return " ".join(value.strip().split()) if value else ""
+
+
+def _looks_like_verification_command(command: str) -> bool:
+    tokens = (
+        "pytest",
+        "python -m pytest",
+        "python -m compileall",
+        "npm test",
+        "pnpm test",
+        "yarn test",
+        "go test",
+        "cargo test",
+        "ruff",
+        "mypy",
+        "tsc",
+    )
+    return any(token in command for token in tokens)

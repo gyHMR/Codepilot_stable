@@ -106,11 +106,15 @@ class TaskPlanDraft:
         steps: 规范化后的步骤元组（至少 1 个步骤）。
         source: 计划来源（"llm" 表示由 LLM 生成，"fallback" 表示降级计划）。
         fallback_reason: 降级原因，便于评测和审计定位 planner 为什么没有生效。
+        fallback_output_preview: 降级时保留的模型输出短预览，便于定位解析失败。
+        fallback_parsed_keys: 降级时解析出的顶层 JSON key，便于判断 schema 偏差。
     """
     goal: str                                                              # 任务目标
     steps: tuple[PlannedTaskStep, ...] = field(default_factory=tuple)       # 步骤元组
     source: str = "fallback"                                               # 计划来源
     fallback_reason: str | None = None                                      # 降级原因
+    fallback_output_preview: str | None = None                              # 降级输出预览
+    fallback_parsed_keys: tuple[str, ...] = field(default_factory=tuple)     # 降级 JSON key
 
     def __post_init__(self) -> None:
         """初始化后校验：确保目标非空、步骤至少一个、来源合法。"""
@@ -136,6 +140,20 @@ class TaskPlanDraft:
             self,
             "fallback_reason",
             _clean_text(self.fallback_reason, limit=_MAX_FIELD_CHARS) or None,
+        )
+        object.__setattr__(
+            self,
+            "fallback_output_preview",
+            _clean_text(self.fallback_output_preview, limit=500) or None,
+        )
+        object.__setattr__(
+            self,
+            "fallback_parsed_keys",
+            tuple(
+                key
+                for item in self.fallback_parsed_keys
+                if (key := _clean_text(item, limit=80))
+            ),
         )
 
 
@@ -245,21 +263,30 @@ class TaskPlanner:
         text = _assistant_text(message)
         data = _loads_json_object(text)
         if not isinstance(data, dict):
-            return self.fallback(fallback_goal, reason="invalid_json")
+            return self.fallback(
+                fallback_goal,
+                reason="invalid_json",
+                output_preview=text,
+            )
         goal = _clean_text(data.get("goal"), limit=1200) or fallback_goal
-        raw_steps = data.get("steps")
+        raw_steps = _extract_raw_steps(data)
         if not isinstance(raw_steps, list):
-            return self.fallback(goal, reason="missing_steps")
+            return self.fallback(
+                goal,
+                reason="missing_steps",
+                output_preview=text,
+                parsed_keys=_parsed_keys(data),
+            )
         steps: list[PlannedTaskStep] = []
         seen: set[str] = set()
         for raw in raw_steps:
-            if not isinstance(raw, dict):
+            fields = _raw_step_fields(raw)
+            if fields is None:
                 continue
-            title = _clean_text(raw.get("title"), limit=80)
+            title, kind, acceptance, verification_hint = fields
             if not title or title in seen:
                 continue
             seen.add(title)
-            kind = _clean_text(raw.get("kind"), limit=40) or "other"
             if kind not in TASK_STEP_KINDS:
                 kind = "other"
             planned_kind = cast(TaskStepKind, kind)
@@ -267,20 +294,29 @@ class TaskPlanner:
                 PlannedTaskStep(
                     title=title,
                     kind=planned_kind,
-                    acceptance=_clean_text(raw.get("acceptance"), limit=_MAX_FIELD_CHARS) or None,
-                    verification_hint=(
-                        _clean_text(raw.get("verification_hint"), limit=_MAX_FIELD_CHARS)
-                        or None
-                    ),
+                    acceptance=acceptance,
+                    verification_hint=verification_hint,
                 )
             )
             if len(steps) >= _MAX_PLANNED_STEPS:
                 break
         if not steps:
-            return self.fallback(goal, reason="empty_steps")
+            return self.fallback(
+                goal,
+                reason="empty_steps",
+                output_preview=text,
+                parsed_keys=_parsed_keys(data),
+            )
         return TaskPlanDraft(goal=goal, steps=steps, source="llm")
 
-    def fallback(self, goal: str, *, reason: str | None = None) -> TaskPlanDraft:
+    def fallback(
+        self,
+        goal: str,
+        *,
+        reason: str | None = None,
+        output_preview: str | None = None,
+        parsed_keys: tuple[str, ...] | None = None,
+    ) -> TaskPlanDraft:
         """返回安全的单步降级计划。
 
         当 LLM 规划失败（解析错误、网络异常等）时，返回一个最简单的
@@ -299,6 +335,8 @@ class TaskPlanner:
             steps=[PlannedTaskStep(title="完成当前请求")],
             source="fallback",
             fallback_reason=reason,
+            fallback_output_preview=output_preview,
+            fallback_parsed_keys=parsed_keys or (),
         )
 
 
@@ -343,6 +381,81 @@ def _loads_json_object(text: str) -> object:
             return json.loads(match.group(0))
         except json.JSONDecodeError:
             return None
+
+
+def _extract_raw_steps(data: dict[str, object]) -> object:
+    """从常见 planner JSON 形态中提取步骤列表。"""
+    raw_steps = data.get("steps")
+    if isinstance(raw_steps, list):
+        return raw_steps
+
+    raw_plan = data.get("plan")
+    if isinstance(raw_plan, list):
+        return raw_plan
+    if isinstance(raw_plan, dict):
+        nested_steps = raw_plan.get("steps")
+        if isinstance(nested_steps, list):
+            return nested_steps
+
+    raw_tasks = data.get("tasks")
+    if isinstance(raw_tasks, list):
+        return raw_tasks
+    return None
+
+
+def _raw_step_fields(raw: object) -> tuple[str, str, str | None, str | None] | None:
+    """把 dict 或字符串步骤规范化为 planner 内部字段。"""
+    if isinstance(raw, str):
+        title = _clean_text(raw, limit=80)
+        if not title:
+            return None
+        return title, _infer_step_kind(title), None, None
+    if not isinstance(raw, dict):
+        return None
+
+    title = _clean_text(
+        raw.get("title")
+        or raw.get("name")
+        or raw.get("task")
+        or raw.get("description"),
+        limit=80,
+    )
+    if not title:
+        return None
+    kind = _clean_text(raw.get("kind") or raw.get("type"), limit=40)
+    if kind not in TASK_STEP_KINDS:
+        kind = _infer_step_kind(title)
+    return (
+        title,
+        kind,
+        _clean_text(
+            raw.get("acceptance") or raw.get("acceptance_criteria"),
+            limit=_MAX_FIELD_CHARS,
+        )
+        or None,
+        _clean_text(
+            raw.get("verification_hint") or raw.get("verify") or raw.get("verification"),
+            limit=_MAX_FIELD_CHARS,
+        )
+        or None,
+    )
+
+
+def _infer_step_kind(title: str) -> str:
+    text = title.lower()
+    if any(token in text for token in ("pytest", "test", "测试", "验证", "检查")):
+        return "verify"
+    if any(token in text for token in ("修改", "修复", "编辑", "实现", "更新", "fix", "edit")):
+        return "edit"
+    if any(token in text for token in ("定位", "阅读", "排查", "分析", "调查", "查找", "inspect")):
+        return "investigate"
+    if any(token in text for token in ("总结", "汇报", "说明", "summarize")):
+        return "summarize"
+    return "other"
+
+
+def _parsed_keys(data: dict[str, object]) -> tuple[str, ...]:
+    return tuple(str(key) for key in data.keys())
 
 
 def _clean_text(value: object, *, limit: int) -> str:

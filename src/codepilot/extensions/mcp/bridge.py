@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from codepilot.protocols import TextContent
+from codepilot.protocols import TextContent, ToolMetadata, ToolRiskLevel
 from codepilot.tools import AgentTool, AgentToolResult
 
 
@@ -13,6 +13,60 @@ class MCPClient(Protocol):
     """MCP 客户端协议：由外部 MCP 适配器实现。"""
     async def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> Any:
         """调用 MCP 服务器工具并返回结果对象。"""
+
+
+@dataclass(frozen=True)
+class MCPToolPolicy:
+    """MCP 工具策略：记录风险、审批、资源范围和输出可信度。"""
+
+    risk_level: ToolRiskLevel = "medium"
+    requires_approval: bool = True
+    resource_scope: tuple[str, ...] = ("mcp",)
+    network_access: bool = True
+    credential_required: bool = False
+    output_trust: str = "untrusted"
+
+    @classmethod
+    def from_raw(cls, raw: dict[str, Any], *, server_name: str) -> "MCPToolPolicy":
+        return cls(
+            risk_level=_risk_level(raw.get("risk_level")),
+            requires_approval=_bool_config(raw.get("requires_approval"), default=True),
+            resource_scope=_resource_scope(raw.get("resource_scope"), server_name=server_name),
+            network_access=_bool_config(raw.get("network_access"), default=True),
+            credential_required=_bool_config(raw.get("credential_required"), default=False),
+            output_trust=_output_trust(raw.get("output_trust")),
+        )
+
+    @classmethod
+    def from_config(cls, cfg: "MCPToolConfig") -> "MCPToolPolicy":
+        return cls(
+            risk_level=cfg.risk_level,
+            requires_approval=cfg.requires_approval,
+            resource_scope=cfg.resource_scope,
+            network_access=cfg.network_access,
+            credential_required=cfg.credential_required,
+            output_trust=cfg.output_trust,
+        )
+
+    def to_metadata(self, *, name: str, server: str, tool: str) -> ToolMetadata:
+        return ToolMetadata(
+            name=name,
+            category="mcp",
+            read_only=False,
+            concurrency_safe=False,
+            exclusive=True,
+            requires_approval=self.requires_approval,
+            risk_level=self.risk_level,
+            resource_scope=self.resource_scope,
+            network_access=self.network_access,
+            credential_required=self.credential_required,
+            extra={
+                "server": server,
+                "tool": tool,
+                "output_trust": self.output_trust,
+                "capabilities": ["mcp.call"],
+            },
+        )
 
 
 @dataclass
@@ -23,6 +77,12 @@ class MCPToolConfig:
     parameters: dict[str, Any]  # JSON Schema 参数定义
     server: str                 # MCP 服务器名称
     tool: str                   # MCP 服务器上的工具名
+    risk_level: ToolRiskLevel = "medium"
+    requires_approval: bool = True
+    resource_scope: tuple[str, ...] = ("mcp",)
+    network_access: bool = True
+    credential_required: bool = False
+    output_trust: str = "untrusted"
 
 
 def parse_mcp_tool_configs(raw_servers: list[dict[str, Any]] | None) -> list[MCPToolConfig]:
@@ -50,6 +110,7 @@ def parse_mcp_tool_configs(raw_servers: list[dict[str, Any]] | None) -> list[MCP
                 description = str(description)
             if not isinstance(params, dict):
                 params = {"type": "object", "properties": {}, "required": [], "additionalProperties": True}
+            policy = MCPToolPolicy.from_raw(item, server_name=server_name)
             result.append(
                 MCPToolConfig(
                     name=name,
@@ -57,6 +118,12 @@ def parse_mcp_tool_configs(raw_servers: list[dict[str, Any]] | None) -> list[MCP
                     parameters=params,
                     server=server_name,
                     tool=tool,
+                    risk_level=policy.risk_level,
+                    requires_approval=policy.requires_approval,
+                    resource_scope=policy.resource_scope,
+                    network_access=policy.network_access,
+                    credential_required=policy.credential_required,
+                    output_trust=policy.output_trust,
                 )
             )
     return result
@@ -73,6 +140,7 @@ def create_mcp_proxy_tools(configs: list[MCPToolConfig], client: MCPClient | Non
                 return AgentToolResult(
                     content=[TextContent(text=f"MCP bridge unavailable for `{_cfg.name}`")],
                     is_error=True,
+                    metadata={"output_trust": _cfg.output_trust},
                 )
             try:
                 result = await client.call_tool(_cfg.server, _cfg.tool, args)
@@ -80,14 +148,17 @@ def create_mcp_proxy_tools(configs: list[MCPToolConfig], client: MCPClient | Non
                 return AgentToolResult(
                     content=[TextContent(text=f"MCP call failed `{_cfg.server}.{_cfg.tool}`: {exc}")],
                     is_error=True,
+                    metadata={"output_trust": _cfg.output_trust},
                 )
             text, metadata = _normalize_mcp_result(result)
+            metadata.setdefault("output_trust", _cfg.output_trust)
             return AgentToolResult(
                 content=[TextContent(text=text)],
                 details={"server": _cfg.server, "tool": _cfg.tool},
                 metadata=metadata,
             )
 
+        metadata = _mcp_tool_metadata(cfg)
         tools.append(
             AgentTool(
                 name=cfg.name,
@@ -95,9 +166,38 @@ def create_mcp_proxy_tools(configs: list[MCPToolConfig], client: MCPClient | Non
                 description=cfg.description,
                 parameters=cfg.parameters,
                 execute=_execute,
+                metadata=metadata,
             )
         )
     return tools
+
+
+def _mcp_tool_metadata(cfg: MCPToolConfig) -> ToolMetadata:
+    return MCPToolPolicy.from_config(cfg).to_metadata(
+        name=cfg.name,
+        server=cfg.server,
+        tool=cfg.tool,
+    )
+
+
+def _risk_level(value: object) -> ToolRiskLevel:
+    return value if value in {"low", "medium", "high"} else "medium"  # type: ignore[return-value]
+
+
+def _resource_scope(value: object, *, server_name: str) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple)):
+        cleaned = tuple(str(item).strip() for item in value if str(item).strip())
+        if cleaned:
+            return cleaned
+    return ("mcp", server_name)
+
+
+def _bool_config(value: object, *, default: bool) -> bool:
+    return value if isinstance(value, bool) else default
+
+
+def _output_trust(value: object) -> str:
+    return value if value in {"trusted", "untrusted"} else "untrusted"  # type: ignore[return-value]
 
 
 def _output_quality(

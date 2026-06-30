@@ -264,7 +264,7 @@ def assemble_tools(
         metadata = (
             get_builtin_tool_metadata(tool.name)
             if source == "builtin"
-            else infer_tool_metadata(tool)
+            else tool.metadata or infer_tool_metadata(tool)
         )
 
         registered_tools.append(RegisteredTool(
