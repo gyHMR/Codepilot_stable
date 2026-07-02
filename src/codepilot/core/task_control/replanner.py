@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from codepilot.protocols import ToolResultMessage
 
-from .task_verifier import verification_failure_detail
+from .verifier import verification_failure_detail
 
 
 def repair_next_action(results: list[ToolResultMessage]) -> str:

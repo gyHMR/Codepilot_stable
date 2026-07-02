@@ -42,7 +42,7 @@ class MemoryStore:
         self.workspace_dir = session_store.workspace_dir
         self.session_id = session_store.session_id
         self.session_file = session_store.memory_file
-        self.project_file = self.workspace_dir / ".codepilot" / "memory" / "project.jsonl"
+        self.project_file = session_store.layout.project_memory_file
         self.max_session_records = max_session_records
         self.max_project_records = max_project_records
         self.project_compact_after_lines = project_compact_after_lines

@@ -34,6 +34,7 @@ from codepilot.llm import AssistantMessageEventStream
 from codepilot.observability import (
     AuditBundle,
     build_audit_report,
+    load_audit_bundle,
     redact_artifact,
 )
 from codepilot.protocols import AssistantMessage, Model, TextContent
@@ -1346,7 +1347,7 @@ def test_real_runtime_writes_run_audit_report(tmp_path: Path) -> None:
 
     assert result.overall == "passed"
     assert len(result.run_ids) == 1
-    run_report = (
+    run_dir = (
         tmp_path
         / "artifacts"
         / "eval-scripted"
@@ -1355,11 +1356,11 @@ def test_real_runtime_writes_run_audit_report(tmp_path: Path) -> None:
         / ".codepilot"
         / "runs"
         / result.run_ids[0]
-        / "report.json"
     )
-    assert run_report.is_file()
-    payload = json.loads(run_report.read_text(encoding="utf-8"))
-    assert payload["context"]["preparation_count"] >= 1
+    assert (run_dir / "run.json").is_file()
+    assert not (run_dir / "report.json").exists()
+    bundle = load_audit_bundle(run_dir)
+    assert bundle.report["context"]["preparation_count"] >= 1
 
 
 def test_missing_fixture_is_invalid_case(tmp_path: Path) -> None:

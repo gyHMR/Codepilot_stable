@@ -6,7 +6,7 @@ from __future__ import annotations
 1) 管理工作区会话目录。
 2) 持久化 Agent 事件和消息。
 3) 提供稳定的 run（发送任务）和 continue（继续运行）入口。
-4) 执行上下文溢出检测与压缩（compaction）。
+4) 通过 ContextGovernor 为每轮模型调用投影上下文。
 """
 
 from pathlib import Path
@@ -14,13 +14,10 @@ import inspect
 import logging
 from typing import Callable
 
-from codepilot.llm.overflow import estimate_context_tokens, is_context_overflow
 from codepilot.protocols import (
     AgentEvent,
     AgentRunResult,
     AssistantMessage,
-    Context,
-    Message,
     ToolCall,
     ToolResultMessage,
 )
@@ -29,18 +26,13 @@ from codepilot.core import (
     AgentMessage,
     AgentOptions,
     TaskMode,
+    ensure_planning_budget_profile,
     ensure_task_mode,
     new_run_id,
 )
 
 from codepilot.extensions.types import ExtensionLifecycleContext
 from codepilot.tools import AgentTool
-from .context.compaction import (
-    build_compacted_context,
-    build_llm_compaction_summary,
-    decide_context_compaction,
-    fallback_summary,
-)
 from .context.freshness import build_context_freshness_notice
 from .context.governor import ContextGovernor
 from .context.state import SessionContextState
@@ -72,7 +64,7 @@ class AgentSession:
 
     封装了一个完整的 Agent 对话生命周期，包括：
     - 消息的收发与持久化存储
-    - 上下文窗口的溢出检测与自动压缩
+    - 每轮通过 ContextGovernor 投影上下文视图
     - 会话分支（fork）与切换
     - 生命周期钩子的执行
     - 请求失败时的自动重试
@@ -108,16 +100,15 @@ class AgentSession:
         )
         self.task_recovery = TaskRecoveryStore(self.store)
         self.memory_enabled = options.memory_enabled
-        self.context_governance_enabled = options.context_governance_enabled
         self.task_mode = ensure_task_mode(options.task_mode)
-        self._base_prepare_context = options.prepare_context
+        self.planning_budget_profile = ensure_planning_budget_profile(
+            options.planning_budget_profile
+        )
         self.context_governor: ContextGovernor | None = None
         prepare_context = self._build_context_preparer()
 
-        # 加载已持久化的历史消息；优先读取会话消息，若无则读取上下文消息
+        # 加载已持久化的 canonical transcript。
         persisted_messages = self.store.load_session_messages()
-        if not persisted_messages:
-            persisted_messages = self.store.load_context_messages()
         # 将历史消息与本次传入的新消息合并
         merged_messages = [*persisted_messages, *options.messages]
 
@@ -141,6 +132,7 @@ class AgentSession:
             prepare_context=prepare_context,
             task_control_enabled=options.task_control_enabled,
             task_mode=self.task_mode,
+            planning_budget_profile=self.planning_budget_profile,
             max_task_replans_per_run=options.max_task_replans_per_run,
         )
         if options.convert_to_llm is not None:
@@ -149,11 +141,6 @@ class AgentSession:
         # 创建核心 Agent 实例
         self.agent = Agent(agent_opts)
 
-        # 上下文管理相关配置
-        self.max_context_messages = options.max_context_messages       # 消息数量上限
-        self.max_context_tokens = options.max_context_tokens           # token 数量上限
-        self.retain_recent_messages = options.retain_recent_messages   # 压缩时保留的最近消息数
-        self.summary_builder = options.summary_builder                 # 自定义摘要构建器
         self.latest_context_report: dict | None = None
         self.prepare_context = prepare_context
         self.stream_fn = options.stream_fn
@@ -560,8 +547,9 @@ class AgentSession:
 
         This is the boundary between application session concerns and the core
         run loop: hooks, durable memory admission, task recovery projection,
-        context freshness, and context compaction all happen before the Agent
-        asks the model for the next response.
+        and context freshness are prepared here. The ContextGovernor projection
+        runs later through AgentOptions.prepare_context, immediately before the
+        Agent asks the model for the next response.
         """
 
         rollback_baseline = rollback_baseline or capture_git_baseline(self.workspace_dir)
@@ -576,8 +564,6 @@ class AgentSession:
             self._begin_task_recovery(text, run_id=run_id)
         self.agent.set_task_recovery_projection(self._active_task_recovery_projection())
         self._check_context_freshness()
-        if self.context_governor is None:
-            await self._check_and_compact_before_prompt()
         return rollback_baseline
 
     async def _complete_run_lifecycle(
@@ -599,10 +585,7 @@ class AgentSession:
         self._finalize_task_recovery(result)
         if self.memory_enabled:
             self._finalize_memory(result)
-        if self.context_governor is not None:
-            self.context_governor.finalize_run(result)
-        else:
-            await self._compact_context_if_needed()
+        self.context_governor.finalize_run(result)
         await self._run_lifecycle_hooks(
             text=hook_text,
             is_continue=is_continue,
@@ -626,7 +609,6 @@ class AgentSession:
         if not replaced:
             return False
         self.agent.set_messages(messages)
-        self.store.rewrite_context_messages(messages)
         self.store.rewrite_session_messages(messages)
         self.store.append_event(
             {
@@ -660,7 +642,7 @@ class AgentSession:
                     )
         if event["type"] == "message_end":
             message = event["message"]
-            self.store.append_context_message(message)
+            self.store.append_message(message)
             if self.memory_enabled and isinstance(message, ToolResultMessage):
                 self._observe_tool_memory(
                     message,
@@ -669,47 +651,15 @@ class AgentSession:
 
     def _build_context_preparer(self):
         """构建当前会话的上下文准备入口。"""
-        if self.context_governance_enabled:
-            self.context_governor = ContextGovernor(
-                workspace_dir=self.workspace_dir,
-                session_id=self.session_id,
-                state=SessionContextState(workspace_dir=self.workspace_dir),
-                memory_retriever=(
-                    self.memory_retriever if self.memory_enabled else None
-                ),
-            )
-            return self.context_governor.prepare
-        self.context_governor = None
-        return self._prepare_context_for_session(self._base_prepare_context)
-
-    def _prepare_context_for_session(self, prepare_context):
-        """为当前会话准备上下文编译函数。
-
-        如果 prepare_context 是一个绑定方法（如 ContextCompiler.compile），
-        则为当前会话派生独立编译器，并绑定当前会话的 memory_retriever。
-
-        Args:
-            prepare_context: 原始的上下文准备函数（可为 None）。
-
-        Returns:
-            绑定到当前会话的上下文准备函数。
-        """
-        if prepare_context is None:
-            return None
-        # 检测是否为绑定方法（有 __self__ 属性）
-        owner = getattr(prepare_context, "__self__", None)
-        if owner is not None and hasattr(owner, "fork_for_session"):
-            # 派生编译器实例，避免多会话共享 active files / evidence。
-            owner = owner.fork_for_session()
-            prepare_context = owner.compile
-        if (
-            self.memory_enabled
-            and owner is not None
-            and hasattr(owner, "bind_memory_retriever")
-        ):
-            # 绑定当前会话的记忆检索器
-            owner.bind_memory_retriever(self.memory_retriever)
-        return prepare_context
+        self.context_governor = ContextGovernor(
+            workspace_dir=self.workspace_dir,
+            session_id=self.session_id,
+            state=SessionContextState(workspace_dir=self.workspace_dir),
+            memory_retriever=(
+                self.memory_retriever if self.memory_enabled else None
+            ),
+        )
+        return self.context_governor.prepare
 
     def _admit_prompt_memory(self, text: str, *, run_id: str | None) -> None:
         """Admit durable project memory from the user prompt when policy allows it."""
@@ -916,108 +866,3 @@ class AgentSession:
             if inspect.isawaitable(value):
                 await value
 
-    async def _check_and_compact_before_prompt(self) -> None:
-        """在调用 LLM 之前检测上下文是否溢出。
-
-        先应用会话自己的消息数/token 阈值，再检查 provider 上下文窗口。
-        这样 run/continue_run 在每次模型调用前都能使用同一套压缩入口。
-        """
-        await self._compact_context_if_needed()
-        model = self.agent.state.model
-        ctx = Context(
-            messages=self.agent.state.messages,
-            system_prompt=self.agent.state.system_prompt,
-            tools=self.agent.state.tools,
-        )
-        if is_context_overflow(model, ctx):
-            logger.warning(
-                "context overflow detected before prompt, triggering compaction session_id=%s",
-                self.session_id,
-            )
-            await self._compact_context_if_needed(force=True)
-
-    async def _compact_context_if_needed(self, *, force: bool = False) -> None:
-        """根据需要压缩上下文消息。
-
-        触发条件（满足任一即触发）：
-        - force=True（强制压缩）
-        - 消息数量超过 max_context_messages
-        - 估算 token 数超过 max_context_tokens
-
-        压缩策略：
-        1. 保留最近的 retain_recent_messages 条消息不动
-        2. 将更早的消息交给 LLM 生成摘要（或使用自定义摘要构建器）
-        3. 用一条摘要消息替换所有旧消息
-
-        Args:
-            force: 是否强制执行压缩（忽略阈值判断）。
-        """
-        messages = list(self.agent.state.messages)
-        estimated_tokens = estimate_context_tokens(messages, self.agent.state.system_prompt)
-        decision = decide_context_compaction(
-            message_count=len(messages),
-            estimated_tokens=estimated_tokens,
-            max_context_messages=self.max_context_messages,
-            max_context_tokens=self.max_context_tokens,
-            retain_recent_messages=self.retain_recent_messages,
-            force=force,
-        )
-        if not decision.should_compact:
-            return
-
-        # 分割：旧消息（待压缩）和近期消息（保留原样）
-        older = messages[:-decision.retain_recent_messages]
-
-        # 生成摘要：优先使用自定义构建器，否则调用 LLM
-        if self.summary_builder:
-            summary_text = self.summary_builder(older).strip()
-        else:
-            summary_text = await self._llm_summary(older)
-
-        # LLM 摘要失败时，使用基于规则的降级摘要
-        if not summary_text:
-            summary_text = fallback_summary(older)
-
-        compacted_context = build_compacted_context(
-            messages=messages,
-            summary_text=summary_text,
-            retain_recent_messages=decision.retain_recent_messages,
-            reason=decision.reason,
-            system_prompt=self.agent.state.system_prompt,
-        )
-
-        # 更新 Agent 状态和持久化存储
-        self.agent.set_messages(compacted_context.messages)
-        self.store.rewrite_context_messages(compacted_context.messages)
-        # 记录压缩事件，便于调试和审计
-        self.store.append_event(
-            {
-                "type": "context_compacted",
-                "sessionId": self.session_id,
-                "before_count": len(messages),
-                "after_count": len(compacted_context.messages),
-                "retained_recent": decision.retain_recent_messages,
-                "estimated_tokens_before": decision.estimated_tokens,
-                "reason": decision.reason,
-                "report": compacted_context.report,
-            }
-        )
-        logger.info(
-            "context compacted session_id=%s before=%d after=%d",
-            self.session_id, len(messages), len(compacted_context.messages),
-        )
-
-    async def _llm_summary(self, messages: list[Message]) -> str:
-        """使用当前 LLM 对历史消息生成上下文摘要。
-
-        Args:
-            messages: 需要压缩的旧消息列表。
-
-        Returns:
-            生成的摘要文本；失败时返回空字符串。
-        """
-        return await build_llm_compaction_summary(
-            messages,
-            model=self.agent.state.model,
-            get_api_key=self.get_api_key,
-        )

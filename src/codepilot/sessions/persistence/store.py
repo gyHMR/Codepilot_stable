@@ -1,56 +1,51 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-"""会话持久化存储。
+"""Slim session persistence store.
 
-默认目录布局：
+Canonical layout:
+
 .codepilot/sessions/<session_id>/
-  - meta.json        会话元数据
-  - session.jsonl    会话消息树（支持分支）
-  - context.jsonl    上下文消息（用于恢复）
-  - events.jsonl     事件日志
-  - runs.jsonl       Run 结果记录
-  - memory.json      结构化记忆
-  - task_recovery.json 当前任务恢复投影
+  - session.json      session metadata, leaf pointer, task recovery projection
+  - messages.jsonl    canonical transcript tree
+  - events.jsonl      lazily-created lightweight session events
+  - memory.json       lazily-created session durable memory
 """
 
+import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from codepilot.protocols import AgentRunResult, Message
 from codepilot.observability import EventRecorder
-from codepilot.observability.events import normalize_event_value
+from codepilot.protocols import AgentRunResult, Message
 
+from ..layout import SessionLayout
 from .run_store import RunStore
 from .serde import message_from_dict, message_to_dict
 
 
 def _utc_now_iso() -> str:
-    """返回当前 UTC 时间的 ISO 格式字符串。"""
     return datetime.now(timezone.utc).isoformat()
 
 
 def new_session_id() -> str:
-    """生成新的会话 ID（格式：session_ + 12位UUID hex）。"""
     return f"session_{uuid.uuid4().hex[:12]}"
 
 
 class SessionStore:
-    """会话持久化存储：管理会话的消息树、上下文、事件和 Run 产物。"""
+    """Session fact store: metadata, transcript tree, and lightweight events."""
 
     def __init__(self, workspace_dir: str | Path, session_id: str) -> None:
         self.workspace_dir = Path(workspace_dir)
         self.session_id = session_id
-        self.root = self.workspace_dir / ".codepilot" / "sessions" / session_id
-        self.meta_file = self.root / "meta.json"
-        self.session_file = self.root / "session.jsonl"
-        self.context_file = self.root / "context.jsonl"
-        self.events_file = self.root / "events.jsonl"
-        self.runs_file = self.root / "runs.jsonl"
-        self.memory_file = self.root / "memory.json"
-        self.task_recovery_file = self.root / "task_recovery.json"
+        self.layout = SessionLayout.for_workspace(self.workspace_dir, self.session_id)
+        self.root = self.layout.session_dir
+        self.session_file = self.layout.session_file
+        self.messages_file = self.layout.messages_file
+        self.events_file = self.layout.session_events_file
+        self.memory_file = self.layout.session_memory_file
         self.event_recorder = EventRecorder(self.events_file)
         self.run_store = RunStore(self.workspace_dir, self.session_id)
 
@@ -61,201 +56,98 @@ class SessionStore:
         provider: str,
         system_prompt: str,
     ) -> None:
-        """确保存储目录和文件已创建；已存在时跳过。"""
         self.root.mkdir(parents=True, exist_ok=True)
-        if self.meta_file.exists():
-            return
-        meta = {
-            "session_id": self.session_id,
-            "model_id": model_id,
-            "provider": provider,
-            "system_prompt": system_prompt,
-            "leaf_id": None,
-            "parent_session_id": None,
-            "created_at": _utc_now_iso(),
-            "updated_at": _utc_now_iso(),
-        }
-        self.meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         if not self.session_file.exists():
-            header = {
-                "type": "session",
-                "version": 1,
-                "id": self.session_id,
-                "timestamp": _utc_now_iso(),
-                "cwd": str(self.workspace_dir.resolve()),
-                "parent_session": None,
-            }
-            self.session_file.write_text(json.dumps(header, ensure_ascii=False) + "\n", encoding="utf-8")
-        if not self.context_file.exists():
-            self.context_file.write_text("", encoding="utf-8")
-        if not self.events_file.exists():
-            self.events_file.write_text("", encoding="utf-8")
-        if not self.runs_file.exists():
-            self.runs_file.write_text("", encoding="utf-8")
+            self._write_session_state(
+                {
+                    "schema_version": 1,
+                    "session_id": self.session_id,
+                    "parent_session_id": None,
+                    "model_id": model_id,
+                    "provider": provider,
+                    "system_prompt": system_prompt,
+                    "system_prompt_hash": _hash_text(system_prompt),
+                    "leaf_id": None,
+                    "task_recovery": None,
+                    "created_at": _utc_now_iso(),
+                    "updated_at": _utc_now_iso(),
+                }
+            )
+        if not self.messages_file.exists():
+            self.messages_file.write_text("", encoding="utf-8", newline="\n")
 
     def touch_updated_at(self) -> None:
-        """更新 meta.json 中的 updated_at 时间戳。"""
-        if not self.meta_file.exists():
+        state = self.read_meta()
+        if state is None:
             return
-        meta = json.loads(self.meta_file.read_text(encoding="utf-8"))
-        meta["updated_at"] = _utc_now_iso()
-        self.meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        state["updated_at"] = _utc_now_iso()
+        self._write_session_state(state)
 
     def read_meta(self) -> dict[str, Any] | None:
-        """读取会话元数据；文件不存在时返回 None。"""
-        if not self.meta_file.exists():
+        if not self.session_file.exists():
             return None
-        return json.loads(self.meta_file.read_text(encoding="utf-8"))
+        return json.loads(self.session_file.read_text(encoding="utf-8"))
 
-    def append_context_message(self, message: Message) -> None:
-        """追加一条消息到上下文文件和会话消息树。"""
+    def update_meta(self, updates: dict[str, Any]) -> dict[str, Any]:
+        state = self.read_meta() or {
+            "schema_version": 1,
+            "session_id": self.session_id,
+            "created_at": _utc_now_iso(),
+        }
+        state.update(updates)
+        state["session_id"] = self.session_id
+        state["updated_at"] = _utc_now_iso()
+        self._write_session_state(state)
+        return state
+
+    def load_task_recovery(self) -> dict[str, Any] | None:
+        state = self.read_meta() or {}
+        projection = state.get("task_recovery")
+        return dict(projection) if isinstance(projection, dict) else None
+
+    def save_task_recovery(self, projection: dict[str, Any] | None) -> None:
+        self.update_meta({"task_recovery": projection})
+
+    def append_message(self, message: Message) -> str:
+        lines = self._read_message_lines()
+        state = self.read_meta() or {}
+        parent_id = state.get("leaf_id")
+        entry_id = self._new_entry_id()
         entry = {
-            "ts": _utc_now_iso(),
+            "type": "message",
+            "id": entry_id,
+            "parent_id": parent_id if isinstance(parent_id, str) else None,
+            "timestamp": _utc_now_iso(),
             "message": message_to_dict(message),
         }
-        with self.context_file.open("a", encoding="utf-8") as fp:
-            fp.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        self.touch_updated_at()
-        self.append_session_message(message)
+        self._write_message_lines([*lines, entry])
+        self.update_meta({"leaf_id": entry_id})
+        return entry_id
 
     def append_event(self, event: dict[str, Any]) -> None:
-        """追加事件到事件日志和 Run Store。"""
         self.event_recorder.append(event)
         self.run_store.append_event(event)
         self.touch_updated_at()
 
     def load_events(self, *, limit: int | None = None) -> list[dict[str, Any]]:
-        """加载事件列表（可选限制数量）。"""
         return self.event_recorder.load(limit=limit)
 
     def summarize_events(self) -> dict[str, Any]:
-        """统计事件摘要（事件计数、工具调用数、错误数等）。"""
         return self.event_recorder.summarize()
 
     def append_run_result(self, result: AgentRunResult) -> None:
-        """追加 Run 结果到 Run Store 和 runs.jsonl。"""
         self.run_store.append_run_result(result)
-        record = normalize_event_value(result)
-        with self.runs_file.open("a", encoding="utf-8") as fp:
-            fp.write(json.dumps(record, ensure_ascii=False) + "\n")
         self.touch_updated_at()
 
     def write_rollback_metadata(self, run_id: str, metadata: dict[str, Any]) -> None:
-        """为指定 Run 写入 Git 回退元数据。"""
         self.run_store.write_rollback_metadata(run_id, metadata)
         self.touch_updated_at()
 
     def load_run_results(self, *, limit: int | None = None) -> list[dict[str, Any]]:
-        """加载 Run 结果列表（优先从 RunStore 加载，fallback 到 runs.jsonl）。"""
-        records = self.run_store.load_run_results(limit=limit)
-        if records:
-            return records
-        if not self.runs_file.exists():
-            return []
-        records = [
-            json.loads(line)
-            for line in self.runs_file.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        return records[-limit:] if limit is not None else records
-
-    def rewrite_context_messages(self, messages: list[Message]) -> None:
-        """重写上下文文件（用于压缩后替换全部消息）。"""
-        lines = []
-        for msg in messages:
-            lines.append(json.dumps({"ts": _utc_now_iso(), "message": message_to_dict(msg)}, ensure_ascii=False))
-        self.context_file.write_text(("\n".join(lines) + ("\n" if lines else "")), encoding="utf-8")
-        self.touch_updated_at()
-
-    def load_context_messages(self) -> list[Message]:
-        """从上下文文件加载消息列表。"""
-        if not self.context_file.exists():
-            return []
-
-        out: list[Message] = []
-        for line in self.context_file.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            payload = json.loads(line)
-            message_data = payload.get("message", {})
-            if isinstance(message_data, dict):
-                out.append(message_from_dict(message_data))
-        return out
-
-    def _new_entry_id(self) -> str:
-        return uuid.uuid4().hex[:8]
-
-    def _read_session_lines(self) -> list[dict[str, Any]]:
-        if not self.session_file.exists():
-            return []
-        out: list[dict[str, Any]] = []
-        for line in self.session_file.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            data = json.loads(line)
-            if isinstance(data, dict):
-                out.append(data)
-        return out
-
-    def _write_session_lines(self, lines: list[dict[str, Any]]) -> None:
-        text = "\n".join(json.dumps(line, ensure_ascii=False) for line in lines)
-        self.session_file.write_text((text + ("\n" if text else "")), encoding="utf-8")
-        self.touch_updated_at()
-
-    def append_session_message(self, message: Message) -> str:
-        """追加消息到会话消息树（支持分支/切换），返回 entry_id。
-
-        消息树是一条 JSONL 链，每条记录包含 id 和 parent_id，
-        形成单向链表结构。fork 时从某个节点分叉出新分支，
-        switch_to_entry 时沿 parent_id 回溯恢复消息。
-
-        流程：
-        1. 读取现有 JSONL 行
-        2. 从 meta.json 获取当前 leaf_id 作为 parent_id
-        3. 生成新 entry_id，构建消息条目
-        4. 追加到 JSONL 文件
-        5. 更新 meta.json 的 leaf_id 指向新条目
-        """
-        lines = self._read_session_lines()
-        header = lines[0] if lines and lines[0].get("type") == "session" else None
-        entries = lines[1:] if header else lines
-        meta = self.read_meta() or {}
-        parent_id = meta.get("leaf_id")
-        entry_id = self._new_entry_id()
-        entry = {
-            "type": "message",
-            "id": entry_id,
-            "parent_id": parent_id,
-            "timestamp": _utc_now_iso(),
-            "message": message_to_dict(message),
-        }
-        new_lines = ([header] if header else []) + [*entries, entry]
-        self._write_session_lines(new_lines)
-
-        meta["leaf_id"] = entry_id
-        if "session_id" not in meta:
-            meta["session_id"] = self.session_id
-        self.meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        return entry_id
+        return self.run_store.load_run_results(limit=limit)
 
     def rewrite_session_messages(self, messages: list[Message]) -> None:
-        """重写整个会话消息树（用于 fork 时复制消息，或压缩后重建）。
-
-        与 append_session_message 不同，此方法会完全替换 JSONL 内容，
-        为每条消息重新生成 entry_id 并重建 parent_id 链。
-        """
-        lines = self._read_session_lines()
-        header = lines[0] if lines and lines[0].get("type") == "session" else {
-            "type": "session",
-            "version": 1,
-            "id": self.session_id,
-            "timestamp": _utc_now_iso(),
-            "cwd": str(self.workspace_dir.resolve()),
-            "parent_session": None,
-        }
-        rebuilt: list[dict[str, Any]] = [header]
+        rebuilt: list[dict[str, Any]] = []
         parent_id: str | None = None
         for message in messages:
             entry_id = self._new_entry_id()
@@ -269,27 +161,19 @@ class SessionStore:
                 }
             )
             parent_id = entry_id
-        self._write_session_lines(rebuilt)
-        meta = self.read_meta() or {}
-        meta["leaf_id"] = parent_id
-        if "session_id" not in meta:
-            meta["session_id"] = self.session_id
-        self.meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_message_lines(rebuilt)
+        self.update_meta({"leaf_id": parent_id})
 
     def load_session_messages(self, *, leaf_id: str | None = None) -> list[Message]:
-        """从会话消息树恢复指定分支的消息列表（沿 parent_id 链回溯）。"""
-
-        lines = self._read_session_lines()
-        if not lines:
-            return []
-        entries = [line for line in lines if line.get("type") == "message"]
+        entries = [
+            line for line in self._read_message_lines() if line.get("type") == "message"
+        ]
         if not entries:
             return []
         by_id = {str(e.get("id")): e for e in entries if isinstance(e.get("id"), str)}
-        meta = self.read_meta() or {}
-        current = leaf_id or meta.get("leaf_id")
+        state = self.read_meta() or {}
+        current = leaf_id or state.get("leaf_id")
         if not isinstance(current, str) or current not in by_id:
-            # If the leaf marker is missing, open the latest recorded entry.
             current = str(entries[-1].get("id"))
 
         chain: list[dict[str, Any]] = []
@@ -310,30 +194,27 @@ class SessionStore:
         return messages
 
     def list_entry_ids(self) -> list[str]:
-        """列出会话消息树中所有条目的 ID（包括分叉分支的条目）。"""
-        lines = self._read_session_lines()
-        return [str(line.get("id")) for line in lines if line.get("type") == "message" and isinstance(line.get("id"), str)]
+        return [
+            str(line.get("id"))
+            for line in self._read_message_lines()
+            if line.get("type") == "message" and isinstance(line.get("id"), str)
+        ]
 
     def get_leaf_id(self) -> str | None:
-        """获取当前会话的叶子条目 ID（即最新消息的 ID）。"""
-        meta = self.read_meta() or {}
-        leaf = meta.get("leaf_id")
+        state = self.read_meta() or {}
+        leaf = state.get("leaf_id")
         return leaf if isinstance(leaf, str) else None
 
     def list_entries(self) -> list[dict[str, Any]]:
-        """返回扁平化的条目列表（含深度、叶子标记和文本预览）。"""
-
-        lines = self._read_session_lines()
-        entries = [line for line in lines if line.get("type") == "message"]
-        by_id: dict[str, dict[str, Any]] = {}
-        for entry in entries:
-            eid = entry.get("id")
-            if isinstance(eid, str):
-                by_id[eid] = entry
-
+        entries = [
+            line for line in self._read_message_lines() if line.get("type") == "message"
+        ]
         leaf_id = self.get_leaf_id()
         result: list[dict[str, Any]] = []
-        for eid, entry in by_id.items():
+        for entry in entries:
+            eid = entry.get("id")
+            if not isinstance(eid, str):
+                continue
             msg = entry.get("message", {})
             role = msg.get("role") if isinstance(msg, dict) else "unknown"
             depth = len(self.get_entry_path(eid)) - 1
@@ -352,12 +233,9 @@ class SessionStore:
         return result
 
     def get_entry_path(self, entry_id: str) -> list[str]:
-        """返回从根条目到指定条目的路径（ID 列表）。"""
-
-        lines = self._read_session_lines()
         by_id = {
             str(line.get("id")): line
-            for line in lines
+            for line in self._read_message_lines()
             if line.get("type") == "message" and isinstance(line.get("id"), str)
         }
         if entry_id not in by_id:
@@ -375,43 +253,31 @@ class SessionStore:
         return path
 
     def set_leaf(self, entry_id: str) -> None:
-        """设置会话的叶子指针（用于 switch_to_entry 切换分支）。
-
-        不修改 JSONL 内容，只更新 meta.json 的 leaf_id 字段。
-        后续 load_session_messages 会沿新的 leaf_id 回溯恢复消息。
-        """
-        lines = self._read_session_lines()
-        ids = {str(line.get("id")) for line in lines if line.get("type") == "message" and isinstance(line.get("id"), str)}
+        ids = set(self.list_entry_ids())
         if entry_id not in ids:
             raise ValueError(f"Entry not found: {entry_id}")
-        meta = self.read_meta() or {}
-        meta["leaf_id"] = entry_id
-        self.meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.update_meta({"leaf_id": entry_id})
 
     def get_session_tree(self) -> list[dict[str, Any]]:
-        """返回按 parent_id 分组的会话树结构。"""
-
-        lines = self._read_session_lines()
-        entries = [line for line in lines if line.get("type") == "message"]
+        entries = [
+            line for line in self._read_message_lines() if line.get("type") == "message"
+        ]
         node_by_id: dict[str, dict[str, Any]] = {}
         roots: list[dict[str, Any]] = []
-
         for entry in entries:
             eid = entry.get("id")
             if not isinstance(eid, str):
                 continue
             msg = entry.get("message", {})
             role = msg.get("role") if isinstance(msg, dict) else "unknown"
-            preview = self._preview_message(msg if isinstance(msg, dict) else {})
             node_by_id[eid] = {
                 "id": eid,
                 "parent_id": entry.get("parent_id"),
                 "timestamp": entry.get("timestamp"),
                 "role": role,
-                "preview": preview,
+                "preview": self._preview_message(msg if isinstance(msg, dict) else {}),
                 "children": [],
             }
-
         for node in node_by_id.values():
             parent_id = node.get("parent_id")
             if isinstance(parent_id, str) and parent_id in node_by_id:
@@ -420,53 +286,22 @@ class SessionStore:
                 roots.append(node)
         return roots
 
-    @staticmethod
-    def _preview_message(message: dict[str, Any]) -> str:
-        role = message.get("role")
-        content = message.get("content")
-        if role == "user":
-            if isinstance(content, str):
-                return content[:80]
-            if isinstance(content, list):
-                text = ""
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text += str(block.get("text", ""))
-                return text[:80]
-        if role == "assistant" and isinstance(content, list):
-            text = ""
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text += str(block.get("text", ""))
-            return text[:80]
-        if role == "toolResult" and isinstance(content, list):
-            text = ""
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text += str(block.get("text", ""))
-            return text[:80]
-        return ""
-
     def fork_to(
         self,
         new_session_id: str,
         *,
         from_entry_id: str | None = None,
     ) -> "SessionStore":
-        """从当前会话分支创建新会话（复制消息和记忆）。"""
-
         target = SessionStore(self.workspace_dir, new_session_id)
-        meta = self.read_meta() or {}
+        state = self.read_meta() or {}
         target.ensure_initialized(
-            model_id=str(meta.get("model_id", "")),
-            provider=str(meta.get("provider", "")),
-            system_prompt=str(meta.get("system_prompt", "")),
+            model_id=str(state.get("model_id", "")),
+            provider=str(state.get("provider", "")),
+            system_prompt=str(state.get("system_prompt", "")),
         )
-
-        messages = self.load_session_messages(leaf_id=from_entry_id)
-        target.rewrite_session_messages(messages)
-        target.rewrite_context_messages(messages)
+        target.rewrite_session_messages(self.load_session_messages(leaf_id=from_entry_id))
         if self.memory_file.exists():
+            target.memory_file.parent.mkdir(parents=True, exist_ok=True)
             target.memory_file.write_text(
                 self.memory_file.read_text(encoding="utf-8"),
                 encoding="utf-8",
@@ -483,29 +318,12 @@ class SessionStore:
                     encoding="utf-8",
                     newline="\n",
                 )
-        if self.task_recovery_file.exists():
-            target.task_recovery_file.write_text(
-                self.task_recovery_file.read_text(encoding="utf-8"),
-                encoding="utf-8",
-                newline="\n",
-            )
-            try:
-                recovery_payload = json.loads(
-                    target.task_recovery_file.read_text(encoding="utf-8")
-                )
-            except json.JSONDecodeError:
-                recovery_payload = None
-            if isinstance(recovery_payload, dict):
-                recovery_payload["session_id"] = new_session_id
-                target.task_recovery_file.write_text(
-                    json.dumps(recovery_payload, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                    newline="\n",
-                )
-
-        tmeta = target.read_meta() or {}
-        tmeta["parent_session_id"] = self.session_id
-        target.meta_file.write_text(json.dumps(tmeta, ensure_ascii=False, indent=2), encoding="utf-8")
+        target.update_meta(
+            {
+                "parent_session_id": self.session_id,
+                "task_recovery": state.get("task_recovery"),
+            }
+        )
         target.append_event(
             {
                 "type": "session_forked",
@@ -515,3 +333,63 @@ class SessionStore:
             }
         )
         return target
+
+    def _new_entry_id(self) -> str:
+        return uuid.uuid4().hex[:8]
+
+    def _read_message_lines(self) -> list[dict[str, Any]]:
+        if not self.messages_file.exists():
+            return []
+        out: list[dict[str, Any]] = []
+        for line in self.messages_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            data = json.loads(line)
+            if isinstance(data, dict):
+                out.append(data)
+        return out
+
+    def _write_message_lines(self, lines: list[dict[str, Any]]) -> None:
+        self.messages_file.parent.mkdir(parents=True, exist_ok=True)
+        text = "\n".join(json.dumps(line, ensure_ascii=False) for line in lines)
+        self.messages_file.write_text(
+            text + ("\n" if text else ""),
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    def _write_session_state(self, state: dict[str, Any]) -> None:
+        self.session_file.parent.mkdir(parents=True, exist_ok=True)
+        self.session_file.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    @staticmethod
+    def _preview_message(message: dict[str, Any]) -> str:
+        role = message.get("role")
+        content = message.get("content")
+        if role == "user":
+            if isinstance(content, str):
+                return content[:80]
+            if isinstance(content, list):
+                return _text_blocks_preview(content)
+        if role == "assistant" and isinstance(content, list):
+            return _text_blocks_preview(content)
+        if role == "toolResult" and isinstance(content, list):
+            return _text_blocks_preview(content)
+        return ""
+
+
+def _hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _text_blocks_preview(content: list[Any]) -> str:
+    text = ""
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text += str(block.get("text", ""))
+    return text[:80]

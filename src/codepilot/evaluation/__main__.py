@@ -55,7 +55,7 @@ def _add_run_arguments(
     *,
     experiment: bool,
 ) -> None:
-    choices = ("context", "memory", "planning") if experiment else MODULES
+    choices = ("memory", "planning") if experiment else MODULES
     parser.add_argument("module", choices=choices)
     parser.add_argument("--provider")
     parser.add_argument("--model", dest="model_id")

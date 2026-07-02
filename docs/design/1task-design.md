@@ -138,7 +138,7 @@ src/codepilot/core/task_controller.py
     ↓
 初始化 TaskState
     ↓
-ContextCompiler 注入任务上下文
+ContextGovernor 投影任务相关上下文
     ↓
 LLM 决定下一步动作
     ↓
@@ -692,9 +692,9 @@ TaskMemory（跨 Run 恢复所需的任务摘要）
 - blocked_on
 - next_action
 
-### 9.3 与 ContextCompiler
+### 9.3 与 ContextGovernor
 
-`ContextCompiler` 负责把任务状态组织给模型：
+`ContextGovernor` 负责把任务状态投影给模型：
 - 当前任务目标
 - 当前步骤
 - 最新工具证据

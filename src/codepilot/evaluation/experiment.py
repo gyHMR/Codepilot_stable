@@ -12,7 +12,6 @@ from .types import EvalRunOptions
 
 
 _TOGGLES = {
-    "context": "context_governance_enabled",
     "memory": "memory_enabled",
     "planning": "task_control_enabled",
 }
@@ -25,7 +24,7 @@ def experiment_variants(module: str) -> list[tuple[str, dict[str, bool]]]:
         toggle = _TOGGLES[module]
     except KeyError as exc:
         raise ValueError(
-            "Experiment module must be context, memory, or planning"
+            "Experiment module must be memory or planning"
         ) from exc
     return [
         ("off", {toggle: False}),

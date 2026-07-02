@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from codepilot.protocols import TextContent, UserMessage
 
-from .run_state import RunState
-from .task_state import CompletionCheck, TaskState
+from ..run_state import RunState
+from .state import CompletionCheck, TaskState
 
 
 def build_completion_check(task: TaskState, run: RunState) -> CompletionCheck:

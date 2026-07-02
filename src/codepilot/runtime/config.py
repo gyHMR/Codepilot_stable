@@ -17,7 +17,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
 
-from codepilot.core import TaskMode, ToolExecutionMode, ensure_task_mode
+from codepilot.core import (
+    PlanningBudgetProfile,
+    TaskMode,
+    ToolExecutionMode,
+    ensure_planning_budget_profile,
+    ensure_task_mode,
+)
 from codepilot.sessions.persistence.store import SessionStore
 
 from .resources import WorkspaceResourceLoader, WorkspaceResources
@@ -38,9 +44,6 @@ class RuntimeDefaults:
         system_prompt: 默认系统提示词（空字符串，由 prompt 模块填充）。
         thinking_level: 默认推理级别（"off" 关闭推理）。
         tool_execution: 默认工具执行模式（"parallel" 并行）。
-        max_context_messages: 消息数量上限（None 表示不限制）。
-        retain_recent_messages: 压缩时保留的最近消息数（24 条）。
-        max_context_tokens: token 数量上限（None 表示不限制）。
         retry_enabled: 是否启用重试（默认 True）。
         max_retries: 最大重试次数（默认 2 次）。
         retry_base_delay_ms: 重试基础延迟（默认 1200ms，即指数退避起始值）。
@@ -63,10 +66,8 @@ class RuntimeDefaults:
     thinking_level: str = "off"
     tool_execution: ToolExecutionMode = "parallel"
     task_mode: TaskMode = "edit"
+    planning_budget_profile: PlanningBudgetProfile = "balanced"
     max_tool_calls_per_turn: int = 8
-    max_context_messages: int | None = None
-    retain_recent_messages: int = 24
-    max_context_tokens: int | None = None
     retry_enabled: bool = True
     max_retries: int = 2
     retry_base_delay_ms: int = 1200
@@ -122,9 +123,7 @@ class ResolvedRuntimeConfig:
     thinking_level: str
     tool_execution: ToolExecutionMode
     task_mode: TaskMode
-    max_context_messages: int | None
-    retain_recent_messages: int
-    max_context_tokens: int | None
+    planning_budget_profile: PlanningBudgetProfile
     retry_enabled: bool
     max_retries: int
     retry_base_delay_ms: int
@@ -266,29 +265,21 @@ def resolve_runtime_config(
         default=defaults.task_mode,
     )
     task_mode = ensure_task_mode(raw_task_mode)
+    raw_planning_budget_profile = choose(
+        "planning_budget_profile",
+        ("options", options.planning_budget_profile),
+        (
+            "workspace",
+            settings.planning_budget_profile if settings is not None else None,
+        ),
+        default=defaults.planning_budget_profile,
+    )
+    planning_budget_profile = ensure_planning_budget_profile(raw_planning_budget_profile)
     max_tool_calls_per_turn = choose(
         "max_tool_calls_per_turn",
         ("options", options.max_tool_calls_per_turn),
         ("workspace", settings.max_tool_calls_per_turn if settings is not None else None),
         default=defaults.max_tool_calls_per_turn,
-    )
-    max_context_messages = choose(
-        "max_context_messages",
-        ("options", options.max_context_messages),
-        ("workspace", settings.max_context_messages if settings is not None else None),
-        default=defaults.max_context_messages,
-    )
-    retain_recent_messages = choose(
-        "retain_recent_messages",
-        ("options", options.retain_recent_messages),
-        ("workspace", settings.retain_recent_messages if settings is not None else None),
-        default=defaults.retain_recent_messages,
-    )
-    max_context_tokens = choose(
-        "max_context_tokens",
-        ("options", options.max_context_tokens),
-        ("workspace", settings.max_context_tokens if settings is not None else None),
-        default=defaults.max_context_tokens,
     )
     retry_enabled = choose(
         "retry_enabled",
@@ -434,10 +425,8 @@ def resolve_runtime_config(
         thinking_level=thinking_level,
         tool_execution=tool_execution,
         task_mode=task_mode,
+        planning_budget_profile=planning_budget_profile,
         max_tool_calls_per_turn=max_tool_calls_per_turn,
-        max_context_messages=max_context_messages,
-        retain_recent_messages=retain_recent_messages,
-        max_context_tokens=max_context_tokens,
         retry_enabled=retry_enabled,
         max_retries=max_retries,
         retry_base_delay_ms=retry_base_delay_ms,

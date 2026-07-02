@@ -409,7 +409,7 @@ def test_task_recovery_store_projects_unfinished_task_summary(tmp_path: Path) ->
 
     assert projection["next_action"] == "报告连续失败并等待用户指示"
     assert projection["task_mode"] == "edit"
-    assert projection["plan_source"] == "default"
+    assert projection["planning"]["source"] == "default"
     assert projection["task_progress"] == {
         "completed_steps": ["定位失败"],
         "pending_steps": ["重新运行相关验证"],
@@ -499,7 +499,7 @@ def test_build_task_recovery_projection_defines_task_summary_mapping() -> None:
     assert projection is not None
     assert projection["goal"] == "继续修复失败测试"
     assert projection["task_mode"] == "edit"
-    assert projection["plan_source"] == "default"
+    assert projection["planning"]["source"] == "default"
     assert projection["next_action"] == "报告阻塞并等待指示"
     assert projection["source_run_id"] == "run_projection"
     assert projection["created_at"] == "created-before"
@@ -538,6 +538,65 @@ def test_build_task_recovery_projection_defines_task_summary_mapping() -> None:
 
     assert completed is not None
     assert completed["next_action"] is None
+
+
+def test_task_recovery_projection_persists_unified_planning_state() -> None:
+    from codepilot.protocols import AgentRunResult, TaskSummary
+    from codepilot.sessions.history.task_recovery import build_task_recovery_projection
+
+    projection = build_task_recovery_projection(
+        AgentRunResult(
+            run_id="run_planning",
+            session_id="session_projection",
+            status="failed",
+            stop_reason="task_incomplete",
+            task=TaskSummary(
+                task_id="task_projection",
+                goal="继续两阶段规划",
+                pending_steps=["更新 planning contract"],
+                completion_satisfied=False,
+                completion_reason="incomplete_steps",
+                control_signal={
+                    "mode": "plan",
+                    "planning": {
+                        "phase": "execution",
+                        "source": "llm_with_discovery",
+                        "budget": {
+                            "profile": "balanced",
+                            "max_model_rounds": 4,
+                            "max_tool_calls": 12,
+                            "max_estimated_tokens": 12000,
+                            "max_wall_seconds": 60,
+                        },
+                        "discovery": {
+                            "status": "completed",
+                            "facts": ["TaskController owns task context"],
+                            "relevant_files": ["src/codepilot/core/task_controller.py"],
+                            "risks": [],
+                            "verification_hints": ["pytest task"],
+                            "open_questions": [],
+                            "evidence_refs": ["tool:read_1"],
+                            "budget": {
+                                "model_rounds": 2,
+                                "tool_calls": 1,
+                                "estimated_tokens": 300,
+                                "stop_reason": "sufficient_evidence",
+                            },
+                        },
+                    },
+                },
+            ),
+        ),
+        current_projection={},
+    )
+
+    assert projection is not None
+    assert projection["task_mode"] == "plan"
+    assert "plan_source" not in projection
+    assert projection["planning"]["source"] == "llm_with_discovery"
+    assert projection["planning"]["discovery"]["facts"] == [
+        "TaskController owns task context"
+    ]
 
 
 def test_memory_writer_extracts_verified_experience_from_edit_repair_loop(
@@ -1052,14 +1111,14 @@ def test_memory_score_explains_single_record_relevance() -> None:
     ]
 
 
-def test_context_compiler_reads_pinned_memory_dynamically(tmp_path: Path) -> None:
+def test_context_governor_reads_pinned_memory_dynamically(tmp_path: Path) -> None:
     asyncio.run(_dynamic_pinned_memory_case(tmp_path))
 
 
 async def _dynamic_pinned_memory_case(tmp_path: Path) -> None:
     from codepilot.core import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
-    from codepilot.sessions.context.compiler import ContextCompiler
+    from codepilot.sessions.context.governor import ContextGovernor
     from codepilot.sessions.context.state import SessionContextState
     from codepilot.sessions.memory import MemoryRetriever, MemoryStore
     from codepilot.sessions.persistence.store import SessionStore
@@ -1070,15 +1129,16 @@ async def _dynamic_pinned_memory_case(tmp_path: Path) -> None:
         store=MemoryStore(session_store),
         workspace_dir=tmp_path,
     )
-    compiler = ContextCompiler(
-        workspace=str(tmp_path),
+    governor = ContextGovernor(
+        workspace_dir=tmp_path,
+        session_id="session_context_memory",
         state=SessionContextState(workspace_dir=tmp_path),
         memory_retriever=retriever,
     )
     memory_file = tmp_path / ".codepilot" / "MEMORY.md"
     memory_file.write_text("Always run focused tests first.", encoding="utf-8", newline="\n")
 
-    prepared = await compiler.compile(
+    prepared = await governor.prepare(
         AgentContext(system_prompt="rules", messages=[UserMessage(content="test")]),
         ContextPreparationRequest(
             session_id="session_context_memory",
@@ -1088,10 +1148,10 @@ async def _dynamic_pinned_memory_case(tmp_path: Path) -> None:
     )
 
     assert "Always run focused tests first." in prepared.system_prompt
-    memory_section = next(
-        section for section in prepared.report.sections if section.name == "memory"
-    )
-    assert memory_section.selected_items == 1
+    assert prepared.report.context_view is not None
+    assert prepared.report.context_view.recalled_memory == [
+        "[Pinned project memory] Always run focused tests first."
+    ]
 
 
 def test_fork_copies_task_recovery_then_evolves_independently(tmp_path: Path) -> None:
@@ -1271,7 +1331,7 @@ async def _session_task_recovery_case(tmp_path: Path) -> None:
             {
                 "goal": "继续修复失败测试",
                 "task_mode": "plan",
-                "plan_source": "recovered",
+                "planning": {"phase": "recovered", "source": "recovered"},
                 "task_progress": {
                     "completed_steps": ["定位失败"],
                     "pending_steps": ["重新运行相关验证"],

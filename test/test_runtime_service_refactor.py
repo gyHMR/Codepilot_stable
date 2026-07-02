@@ -1313,7 +1313,6 @@ def test_runtime_approval_resume_executes_pending_tool_and_continues(
                 stream_fn=fake_stream,
                 memory_enabled=False,
                 task_control_enabled=False,
-                context_governance_enabled=False,
                 before_tool_call=before_tool_call,
                 after_tool_call=after_tool_call,
             )
@@ -1523,7 +1522,6 @@ def test_runtime_approval_resume_records_follow_up_approval_under_same_session(
                 stream_fn=fake_stream,
                 memory_enabled=False,
                 task_control_enabled=False,
-                context_governance_enabled=False,
             )
         )
         try:

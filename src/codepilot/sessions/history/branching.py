@@ -29,14 +29,10 @@ def build_session_options_from_existing(
         thinking_level=session.agent.state.thinking_level,
         tool_execution=session.tool_execution,
         max_tool_calls_per_turn=session.max_tool_calls_per_turn,
-        context_governance_enabled=session.context_governance_enabled,
         memory_enabled=session.memory_enabled,
         task_mode=session.task_mode,
+        planning_budget_profile=session.planning_budget_profile,
         get_api_key=session.get_api_key,
-        max_context_messages=session.max_context_messages,
-        max_context_tokens=session.max_context_tokens,
-        retain_recent_messages=session.retain_recent_messages,
-        summary_builder=session.summary_builder,
         retry_enabled=session.retry_enabled,
         max_retries=session.max_retries,
         retry_base_delay_ms=session.retry_base_delay_ms,
@@ -46,7 +42,6 @@ def build_session_options_from_existing(
         before_tool_call=session.before_tool_call,
         after_tool_call=session.after_tool_call,
         stream_fn=session.stream_fn,
-        prepare_context=session.prepare_context,
     )
 
 
@@ -107,6 +102,4 @@ def switch_session(session: "AgentSession", session_id: str) -> None:
     session.session_id = session_id
     session.rebind_store(new_store)
     restored = new_store.load_session_messages()
-    if not restored:
-        restored = new_store.load_context_messages()
     session.agent.set_messages(restored)

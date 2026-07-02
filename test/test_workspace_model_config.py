@@ -71,7 +71,7 @@ def test_factory_does_not_persist_api_key(tmp_path) -> None:
     try:
         assert session.get_api_key is not None
         assert session.get_api_key("deepseek") == "secret-value"
-        assert "secret-value" not in session.store.meta_file.read_text(encoding="utf-8")
+        assert "secret-value" not in session.store.session_file.read_text(encoding="utf-8")
     finally:
         session.close()
 
@@ -186,7 +186,7 @@ def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
     (root / "settings.json").write_text(
-        json.dumps({"retain_recent_messages": 8, "tool_execution": "sequential"}),
+        json.dumps({"max_tool_calls_per_turn": 3, "tool_execution": "sequential"}),
         encoding="utf-8",
     )
 
@@ -195,10 +195,10 @@ def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
         inputs=_runtime_inputs(tmp_path),
     )
 
-    assert config.retain_recent_messages == 8
+    assert config.max_tool_calls_per_turn == 3
     assert config.tool_execution == "sequential"
     assert config.max_retries == 2
-    assert config.sources["retain_recent_messages"] == "workspace"
+    assert config.sources["max_tool_calls_per_turn"] == "workspace"
     assert config.sources["tool_execution"] == "workspace"
     assert config.sources["max_retries"] == "default"
 
@@ -220,6 +220,26 @@ def test_workspace_settings_can_select_task_mode(tmp_path) -> None:
 
     assert config.task_mode == "plan"
     assert config.sources["task_mode"] == "workspace"
+
+
+def test_workspace_settings_can_select_planning_budget_profile(tmp_path) -> None:
+    from codepilot.runtime.config import resolve_runtime_config
+
+    root = tmp_path / ".codepilot"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "settings.json").write_text(
+        json.dumps({"planning_budget_profile": "wide"}),
+        encoding="utf-8",
+    )
+
+    config = resolve_runtime_config(
+        CreateAgentSessionOptions(workspace_dir=tmp_path),
+        inputs=_runtime_inputs(tmp_path),
+    )
+
+    assert config.task_mode == "edit"
+    assert config.planning_budget_profile == "wide"
+    assert config.sources["planning_budget_profile"] == "workspace"
 
 
 def test_read_task_mode_forces_read_only_permission(tmp_path) -> None:

@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from codepilot.evaluation.__main__ import build_parser
 from codepilot.evaluation.experiment import (
     build_experiment_comparison,
@@ -29,14 +31,12 @@ def test_cli_exposes_check_run_experiment_and_report_commands() -> None:
     assert experiment.module == "memory"
     assert experiment.repeat == 3
     assert experiment.include_tags == ["suite:graded"]
+    with pytest.raises(SystemExit):
+        parser.parse_args(["experiment", "context"])
     assert parser.parse_args(["report", ".codepilot/evals/eval_1"]).command == "report"
 
 
 def test_experiment_variants_map_module_to_one_runtime_toggle() -> None:
-    assert experiment_variants("context") == [
-        ("off", {"context_governance_enabled": False}),
-        ("on", {"context_governance_enabled": True}),
-    ]
     assert experiment_variants("memory") == [
         ("off", {"memory_enabled": False}),
         ("on", {"memory_enabled": True}),
@@ -45,6 +45,8 @@ def test_experiment_variants_map_module_to_one_runtime_toggle() -> None:
         ("off", {"task_control_enabled": False}),
         ("on", {"task_control_enabled": True}),
     ]
+    with pytest.raises(ValueError):
+        experiment_variants("context")
 
 
 def test_experiment_comparison_reports_on_off_averages_and_change() -> None:
@@ -96,15 +98,15 @@ def test_experiment_comparison_reports_on_off_averages_and_change() -> None:
 
 def test_experiment_comparison_prefers_primary_metric_averages() -> None:
     comparison = build_experiment_comparison(
-        "context",
+        "memory",
         {
             "off": [
                 {
                     "primary_metric_averages": {
-                        "context.key_context_hit_rate": 0.25,
+                        "memory.memory_retrieval_hit_rate": 0.25,
                     },
                     "metric_averages": {
-                        "context.key_context_hit_rate": 0.0,
+                        "memory.memory_retrieval_hit_rate": 0.0,
                     },
                     "pass_rate": 0.5,
                 }
@@ -112,10 +114,10 @@ def test_experiment_comparison_prefers_primary_metric_averages() -> None:
             "on": [
                 {
                     "primary_metric_averages": {
-                        "context.key_context_hit_rate": 0.75,
+                        "memory.memory_retrieval_hit_rate": 0.75,
                     },
                     "metric_averages": {
-                        "context.key_context_hit_rate": 1.0,
+                        "memory.memory_retrieval_hit_rate": 1.0,
                     },
                     "pass_rate": 1.0,
                 }
@@ -123,7 +125,7 @@ def test_experiment_comparison_prefers_primary_metric_averages() -> None:
         },
     )
 
-    assert comparison["metrics"]["context.key_context_hit_rate"] == {
+    assert comparison["metrics"]["memory.memory_retrieval_hit_rate"] == {
         "off": 0.25,
         "on": 0.75,
         "change": 0.5,
@@ -183,8 +185,8 @@ def test_experiment_run_artifacts_are_nested_under_experiment_root(
     options = EvalRunOptions(
         fixtures_root=tmp_path / "fixtures",
         artifact_root=tmp_path / "evals",
-        eval_id="exp-context-r1",
-        benchmark_name="context",
+        eval_id="exp-memory-r1",
+        benchmark_name="memory",
         session_options=CreateAgentSessionOptions(workspace_dir=tmp_path),
     )
 
@@ -193,15 +195,15 @@ def test_experiment_run_artifacts_are_nested_under_experiment_root(
             service,
             tmp_path / "suite",
             options,
-            module="context",
+            module="memory",
             repeat=1,
         )
     )
 
-    expected_runs_root = tmp_path / "evals" / "exp-context-r1" / "runs"
+    expected_runs_root = tmp_path / "evals" / "exp-memory-r1" / "runs"
     assert [item.eval_id for item in service.options] == ["off_1", "on_1"]
     assert all(item.artifact_root == expected_runs_root for item in service.options)
-    assert result["artifact_dir"] == str(tmp_path / "evals" / "exp-context-r1")
+    assert result["artifact_dir"] == str(tmp_path / "evals" / "exp-memory-r1")
     assert result["runs"] == {
         "off": [str(expected_runs_root / "off_1")],
         "on": [str(expected_runs_root / "on_1")],

@@ -3,11 +3,7 @@ from __future__ import annotations
 """Task mode policy for Codepilot's user-facing run behavior."""
 
 from dataclasses import asdict, dataclass
-from typing import Literal, cast
-
-
-TaskMode = Literal["read", "edit", "plan"]
-_TASK_MODES = frozenset({"read", "edit", "plan"})
+from .contracts import TaskMode, ensure_task_mode
 
 
 @dataclass(frozen=True)
@@ -22,13 +18,6 @@ class TaskModePolicy:
 
     def to_signal(self) -> dict[str, object]:
         return asdict(self)
-
-
-def ensure_task_mode(value: object) -> TaskMode:
-    text = value.strip() if isinstance(value, str) else ""
-    if text not in _TASK_MODES:
-        raise ValueError(f"Unknown task mode: {value}")
-    return cast(TaskMode, text)
 
 
 def policy_for_mode(mode: TaskMode | str) -> TaskModePolicy:

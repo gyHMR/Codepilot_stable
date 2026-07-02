@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from codepilot.protocols import ContextCheckpoint
+from codepilot.sessions.layout import SessionLayout
 
 
 class ContextCheckpointManager:
@@ -16,8 +17,9 @@ class ContextCheckpointManager:
     def __init__(self, *, workspace_dir: str | Path, session_id: str) -> None:
         self.workspace_dir = Path(workspace_dir)
         self.session_id = session_id
-        self.root = self.workspace_dir / ".codepilot" / "sessions" / session_id
-        self.file = self.root / "checkpoints.jsonl"
+        self.layout = SessionLayout.for_workspace(self.workspace_dir, self.session_id)
+        self.root = self.layout.session_dir
+        self.file = self.layout.context_ledger_file
 
     def create(
         self,
@@ -47,7 +49,8 @@ class ContextCheckpointManager:
     def append(self, checkpoint: ContextCheckpoint) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         with self.file.open("a", encoding="utf-8", newline="\n") as fp:
-            fp.write(json.dumps(asdict(checkpoint), ensure_ascii=False) + "\n")
+            payload = {"type": "checkpoint", **asdict(checkpoint)}
+            fp.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def load_all(self) -> list[ContextCheckpoint]:
         if not self.file.exists():
@@ -57,7 +60,7 @@ class ContextCheckpointManager:
             if not line.strip():
                 continue
             payload = json.loads(line)
-            if isinstance(payload, dict):
+            if isinstance(payload, dict) and payload.get("type") == "checkpoint":
                 items.append(_checkpoint_from_dict(payload))
         return items
 

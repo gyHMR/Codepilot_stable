@@ -48,7 +48,12 @@ from codepilot.tools.types import (
     AgentTool,
     AgentToolResult,
 )
-from .task_modes import TaskMode, ensure_task_mode
+from .task_control.contracts import (
+    PlanningBudgetProfile,
+    TaskMode,
+    ensure_planning_budget_profile,
+    ensure_task_mode,
+)
 
 
 # ── 类型别名与常量 ──────────────────────────────────────────────
@@ -333,6 +338,7 @@ class AgentLoopConfig:
     # ── 任务控制 ────────────────────────────────────────────────
     task_control_enabled: bool = True                                         # 是否启用任务控制
     task_mode: TaskMode = "edit"                                              # 用户任务模式
+    planning_budget_profile: PlanningBudgetProfile = "balanced"               # plan discovery 预算档位
     max_task_replans_per_run: int = 2                                         # 最大任务重规划次数
 
     def __post_init__(self) -> None:
@@ -380,6 +386,9 @@ class AgentLoopConfig:
             field_name="task_control_enabled",
         )
         self.task_mode = ensure_task_mode(self.task_mode)
+        self.planning_budget_profile = ensure_planning_budget_profile(
+            self.planning_budget_profile
+        )
         self.max_task_replans_per_run = _ensure_positive_int(
             self.max_task_replans_per_run,
             field_name="max_task_replans_per_run",

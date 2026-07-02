@@ -147,6 +147,9 @@ def test_tool_artifact_ledger_persists_large_outputs_and_projects_light_messages
     assert "failure line" not in projected.content[0].text * 20
     assert entry.artifact.path in projected.content[0].text
     assert ledger.load_entries()[0].tool_call_id == "call_1"
+    session_dir = tmp_path / ".codepilot" / "sessions" / "session_1"
+    assert (session_dir / "context_ledger.jsonl").exists()
+    assert not (session_dir / "tool_ledger.jsonl").exists()
 
 
 def test_context_governor_projects_decision_view_with_checkpoint_and_memory(
@@ -241,3 +244,17 @@ def test_context_governor_projects_decision_view_with_checkpoint_and_memory(
     assert prepared.report.context_view is not None
     assert prepared.report.context_view.recalled_memory
     assert governor.checkpoints.load_latest() is not None
+    session_dir = tmp_path / ".codepilot" / "sessions" / "session_1"
+    assert (session_dir / "context_ledger.jsonl").exists()
+    assert not (session_dir / "context_views.jsonl").exists()
+    assert not (session_dir / "checkpoints.jsonl").exists()
+
+
+def test_context_compiler_is_not_public_sessions_api() -> None:
+    import codepilot.sessions as sessions
+    import codepilot.sessions.context as context
+
+    assert not hasattr(sessions, "ContextCompiler")
+    assert not hasattr(sessions, "ContextPolicy")
+    assert not hasattr(context, "ContextCompiler")
+    assert not hasattr(context, "ContextPolicy")

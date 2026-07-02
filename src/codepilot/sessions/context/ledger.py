@@ -10,6 +10,7 @@ from typing import Any
 
 from codepilot.llm.overflow import estimate_context_tokens
 from codepilot.protocols import ContextArtifactRef, TextContent, ToolResultMessage
+from codepilot.sessions.layout import SessionLayout
 
 
 @dataclass(frozen=True)
@@ -70,9 +71,10 @@ class ToolArtifactLedger:
     def __init__(self, *, workspace_dir: str | Path, session_id: str) -> None:
         self.workspace_dir = Path(workspace_dir)
         self.session_id = session_id
-        self.root = self.workspace_dir / ".codepilot" / "sessions" / session_id
-        self.artifact_dir = self.root / "artifacts" / "tool_outputs"
-        self.ledger_file = self.root / "tool_ledger.jsonl"
+        self.layout = SessionLayout.for_workspace(self.workspace_dir, self.session_id)
+        self.root = self.layout.session_dir
+        self.artifact_dir = self.layout.tool_outputs_dir
+        self.ledger_file = self.layout.context_ledger_file
 
     def record_tool_result(
         self,
@@ -168,7 +170,7 @@ class ToolArtifactLedger:
             if not line.strip():
                 continue
             payload = json.loads(line)
-            if isinstance(payload, dict):
+            if isinstance(payload, dict) and payload.get("type") == "tool_artifact":
                 entries.append(ToolLedgerEntry.from_dict(payload))
         return entries
 
@@ -178,7 +180,8 @@ class ToolArtifactLedger:
     def _append(self, entry: ToolLedgerEntry) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         with self.ledger_file.open("a", encoding="utf-8", newline="\n") as fp:
-            fp.write(json.dumps(entry.to_dict(), ensure_ascii=False) + "\n")
+            payload = {"type": "tool_artifact", **entry.to_dict()}
+            fp.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def _entry_for_call(self, tool_call_id: str) -> ToolLedgerEntry | None:
         for entry in reversed(self.load_entries()):

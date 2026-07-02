@@ -66,11 +66,18 @@ from .run_decisions import (
     decide_tool_execution_gate,
 )
 from .run_state import RunState, new_run_id
-from .task_controller import TaskController
-from .task_modes import policy_for_mode
-from .task_planner import TaskPlanner, TaskPlanDraft
-from .task_state import TaskState
-from .task_tools import complete_task_step_tool, has_complete_task_step_tool
+from .task_control import (
+    PlannedTaskStep,
+    PlanningBootstrap,
+    TaskController,
+    TaskPlanDraft,
+    TaskPlanningState,
+    TaskState,
+    budget_for_profile,
+    complete_task_step_tool,
+    has_complete_task_step_tool,
+    policy_for_mode,
+)
 from .tool_coordinator import ToolCallCoordinator
 from .types import AgentContext, AgentLoopConfig, AgentMessage
 
@@ -441,26 +448,25 @@ async def _run_loop(
     task_controller = TaskController() if config.task_control_enabled else None
     task_policy = policy_for_mode(config.task_mode)
     planned_task: TaskPlanDraft | None = None
+    planning_state = TaskPlanningState(
+        phase="execution" if task_policy.planner_required else "none",
+        source="default",
+    )
     if (
         task_controller is not None
         and task_policy.planner_required
-        and current_context.task_recovery_projection is None
         and current_context.messages
     ):
-        api_key = (
-            await maybe_await(config.get_api_key(config.model.provider))
-            if config.get_api_key is not None
-            else None
-        )
-        planned_task = await TaskPlanner().generate(
-            model=config.model,
-            messages=current_context.messages,
-            convert_to_llm=config.convert_to_llm,
-            fallback_goal=_latest_user_goal(current_context.messages),
+        bootstrap = await PlanningBootstrap().run(
+            current_context,
+            config=config,
+            emitter=emitter,
             stream_fn=stream_fn,
-            api_key=api_key,
-            session_id=config.session_id,
+            fallback_goal=_latest_user_goal(current_context.messages),
+            signal=signal,
         )
+        planned_task = bootstrap.plan
+        planning_state = bootstrap.planning
 
     # 初始化任务（如果启用了任务控制）
     task = (
@@ -469,8 +475,7 @@ async def _run_loop(
             goal=planned_task.goal if planned_task is not None else None,
             proposed_steps=planned_task.steps if planned_task is not None else None,
             mode=task_policy.mode,
-            plan_source=planned_task.source if planned_task is not None else None,
-            mode_policy=task_policy.to_signal(),
+            planning=planning_state,
             max_replans_per_run=config.max_task_replans_per_run,
             task_recovery_projection=current_context.task_recovery_projection,
         )
@@ -488,6 +493,7 @@ async def _run_loop(
                 "plan": _task_plan_event_payload(
                     planned_task,
                     mode=task.mode,
+                    planning=task.planning,
                     task_step_count=len(task.steps),
                     recovered=current_context.task_recovery_projection is not None,
                 ),
@@ -1015,29 +1021,31 @@ def _task_plan_event_payload(
     planned_task: TaskPlanDraft | None,
     *,
     mode: str,
+    planning: TaskPlanningState,
     task_step_count: int,
     recovered: bool,
 ) -> dict[str, object]:
     if planned_task is not None:
         payload: dict[str, object] = {
             "mode": mode,
-            "source": planned_task.source,
-            "planSource": planned_task.source,
+            "source": planning.source,
+            "planSource": planning.source,
             "step_count": len(planned_task.steps),
+            "planning": planning.to_signal(),
         }
-        if planned_task.fallback_reason:
-            payload["fallback_reason"] = planned_task.fallback_reason
+        if planning.fallback_reason:
+            payload["fallback_reason"] = planning.fallback_reason
         if planned_task.fallback_output_preview:
             payload["fallback_output_preview"] = planned_task.fallback_output_preview
         if planned_task.fallback_parsed_keys:
             payload["fallback_parsed_keys"] = list(planned_task.fallback_parsed_keys)
         return payload
-    source = "recovered" if recovered else "default"
     return {
         "mode": mode,
-        "source": source,
-        "planSource": source,
+        "source": planning.source,
+        "planSource": planning.source,
         "step_count": task_step_count,
+        "planning": planning.to_signal(),
     }
 
 

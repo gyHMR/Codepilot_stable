@@ -41,14 +41,15 @@ from codepilot.protocols import (
     UserMessage,
 )
 
-from .events import maybe_await
-from .task_state import TASK_STEP_KINDS, TaskStepKind
-from .types import AgentMessage
+from ..events import maybe_await
+from ..types import AgentMessage
+from .contracts import PlanningDiscoveryReport
+from .state import TASK_STEP_KINDS, TaskStepKind
 
 
 _MAX_PLANNED_STEPS = 6
 _MAX_FIELD_CHARS = 240
-_TASK_PLAN_SOURCES = frozenset({"llm", "fallback"})
+_TASK_PLAN_SOURCES = frozenset({"llm", "llm_with_discovery", "fallback"})
 
 
 @dataclass(frozen=True)
@@ -187,6 +188,7 @@ class TaskPlanner:
         stream_fn: StreamFn | None = None,
         api_key: str | None = None,
         session_id: str | None = None,
+        discovery_report: PlanningDiscoveryReport | None = None,
     ) -> TaskPlanDraft:
         """向 LLM 请求生成初始执行计划，失败时返回安全的降级计划。
 
@@ -215,6 +217,15 @@ class TaskPlanner:
                 system_prompt=_planner_system_prompt(),
                 messages=[
                     *llm_messages,
+                    *(
+                        [
+                            UserMessage(
+                                content=_render_discovery_for_planner(discovery_report)
+                            )
+                        ]
+                        if discovery_report is not None
+                        else []
+                    ),
                     UserMessage(
                         content=(
                             "请为当前用户请求生成一个简洁执行计划。"
@@ -230,7 +241,18 @@ class TaskPlanner:
                 message = await stream.result()
             else:
                 message = await maybe_await(complete_simple(model, context, options))
-            return self.parse_plan_message(message, fallback_goal=fallback_goal)
+            draft = self.parse_plan_message(message, fallback_goal=fallback_goal)
+            if (
+                discovery_report is not None
+                and discovery_report.status == "completed"
+                and draft.source == "llm"
+            ):
+                return TaskPlanDraft(
+                    goal=draft.goal,
+                    steps=draft.steps,
+                    source="llm_with_discovery",
+                )
+            return draft
         except Exception as exc:
             return self.fallback(
                 fallback_goal,
@@ -349,8 +371,34 @@ def _planner_system_prompt() -> str:
         "\"kind\": \"investigate|edit|verify|summarize|other\", "
         "\"acceptance\": string|null, \"verification_hint\": string|null}]}.\n"
         "Use 2-5 steps for implementation tasks and at most 6 steps. "
-        "Keep steps concrete and executable. Do not include markdown."
+        "Keep steps concrete and executable. Do not include markdown.\n"
+        "If a planning discovery report is provided, use those facts as the "
+        "primary evidence. Do not invent files or verification commands that "
+        "are not supported by the report."
     )
+
+
+def _render_discovery_for_planner(report: PlanningDiscoveryReport) -> str:
+    lines = [
+        "Planning discovery report:",
+        f"status: {report.status}",
+    ]
+    if report.facts:
+        lines.append("facts:")
+        lines.extend(f"- {item}" for item in report.facts)
+    if report.relevant_files:
+        lines.append("relevant_files:")
+        lines.extend(f"- {item}" for item in report.relevant_files)
+    if report.risks:
+        lines.append("risks:")
+        lines.extend(f"- {item}" for item in report.risks)
+    if report.verification_hints:
+        lines.append("verification_hints:")
+        lines.extend(f"- {item}" for item in report.verification_hints)
+    if report.open_questions:
+        lines.append("open_questions:")
+        lines.extend(f"- {item}" for item in report.open_questions)
+    return "\n".join(lines)
 
 
 def _assistant_text(message: AssistantMessage) -> str:

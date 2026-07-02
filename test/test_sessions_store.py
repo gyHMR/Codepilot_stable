@@ -25,8 +25,8 @@ def test_session_store_persists_messages_forks_and_summarizes_events(tmp_path: P
         content=[TextContent(text="world")],
         usage=Usage(input=3, output=4, total_tokens=7, cost=Cost(total=0.01)),
     )
-    store.append_context_message(user)
-    store.append_context_message(assistant)
+    store.append_message(user)
+    store.append_message(assistant)
     store.append_event(
         {
             "type": "tool_execution_end",
@@ -69,6 +69,33 @@ def test_session_store_persists_messages_forks_and_summarizes_events(tmp_path: P
     assert summary["total_events"] == 2
     assert summary["tool_errors"] == 0
     assert summary["usage"]["total_tokens"] == 7
+
+
+def test_session_store_uses_slim_layout_and_lazy_files(tmp_path: Path) -> None:
+    from codepilot.protocols import UserMessage
+    from codepilot.sessions.persistence.store import SessionStore
+
+    store = SessionStore(tmp_path, "session_layout")
+    store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
+
+    session_dir = tmp_path / ".codepilot" / "sessions" / "session_layout"
+    assert sorted(path.name for path in session_dir.iterdir()) == [
+        "messages.jsonl",
+        "session.json",
+    ]
+    assert not (session_dir / "meta.json").exists()
+    assert not (session_dir / "session.jsonl").exists()
+    assert not (session_dir / "context.jsonl").exists()
+    assert not (session_dir / "runs.jsonl").exists()
+    assert not (session_dir / "task_recovery.json").exists()
+
+    store.append_message(UserMessage(content="hello"))
+
+    assert sorted(path.name for path in session_dir.iterdir()) == [
+        "messages.jsonl",
+        "session.json",
+    ]
+    assert len(store.load_session_messages()) == 1
 
 
 def test_event_recorder_builds_eval_summary(tmp_path: Path) -> None:
@@ -127,7 +154,7 @@ def test_session_store_restores_assistant_error_info(tmp_path: Path) -> None:
         status_code=429,
         details={"retry_after": "1s"},
     )
-    store.append_context_message(
+    store.append_message(
         AssistantMessage(
             stop_reason="error",
             error_message=info.message,
@@ -189,7 +216,12 @@ def test_session_store_persists_run_results(tmp_path: Path) -> None:
     assert loaded[0]["schema_version"] == "1"
     assert loaded[0]["counters"]["model_attempts"] == 2
     assert loaded[0]["affected_paths"] == ["a.py"]
-    assert (tmp_path / ".codepilot" / "runs" / "run_1" / "result.json").exists()
+    run_dir = tmp_path / ".codepilot" / "runs" / "run_1"
+    assert (run_dir / "run.json").exists()
+    assert not (run_dir / "result.json").exists()
+    assert not (run_dir / "state.json").exists()
+    assert not (run_dir / "report.json").exists()
+    assert not (tmp_path / ".codepilot" / "sessions" / "session_run" / "runs.jsonl").exists()
 
     run_store = RunStore(tmp_path, "session_run")
     assert run_store.load_run_result("run_1")["run_id"] == "run_1"

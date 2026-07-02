@@ -634,7 +634,6 @@ class EvaluationExecutor:
             # PermissionPolicy can emit denied/approval evidence instead of
             # turning the call into "Tool not found".
             read_only_mode=False,
-            context_governance_enabled=profile.context_governance_enabled,
             memory_enabled=profile.memory_enabled,
             task_control_enabled=profile.task_control_enabled,
             approval_provider=(
