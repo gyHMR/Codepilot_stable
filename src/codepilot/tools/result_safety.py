@@ -8,7 +8,7 @@ from typing import Pattern
 
 from codepilot.protocols import TextContent
 
-from .types import AgentToolResult, ToolMetadata
+from .contracts import AgentToolResult, ToolMetadata
 
 
 @dataclass(frozen=True)

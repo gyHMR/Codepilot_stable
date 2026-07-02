@@ -15,7 +15,8 @@ ToolRegistry 是工具的中心化存储，由 runtime 装配和插件加载使�
 
 from dataclasses import dataclass, field
 
-from .types import AgentTool, ToolMetadata
+from .contracts import AgentTool, ToolMetadata
+from .metadata import infer_tool_metadata
 
 
 @dataclass
@@ -54,60 +55,3 @@ class ToolRegistry:
 
     def list_metadata(self) -> list[ToolMetadata]:
         return list(self._metadata.values())
-
-
-def infer_tool_metadata(tool: AgentTool) -> ToolMetadata:
-    """从工具定义推断元数据（用于非内置工具）。"""
-    name = tool.name
-    read_only = name in {"read", "grep", "find", "ls", "workspace_status"}
-    mutating = name in {"write", "edit", "bash"}
-    category = _infer_category(name)
-    external = category in {"extension", "mcp"}
-    if external:
-        return ToolMetadata(
-            name=name,
-            category=category,
-            read_only=False,
-            concurrency_safe=False,
-            exclusive=True,
-            requires_approval=True,
-            risk_level=_infer_risk(name, mutating=False),
-            resource_scope=(category,),
-            network_access=True,
-            credential_required=False,
-            extra={"metadata_inferred": True},
-        )
-    return ToolMetadata(
-        name=name,
-        category=category,
-        read_only=read_only,
-        concurrency_safe=read_only,
-        exclusive=not read_only,
-        requires_approval=external,
-        risk_level=_infer_risk(name, mutating),
-        resource_scope=(category,),
-        network_access=False,
-        credential_required=False,
-    )
-
-
-def _infer_category(name: str) -> str:
-    if name in {"read", "write", "edit", "ls", "workspace_status"}:
-        return "filesystem"
-    if name in {"grep", "find"}:
-        return "search"
-    if name == "bash":
-        return "shell"
-    if name.startswith("mcp_"):
-        return "mcp"
-    return "extension"
-
-
-def _infer_risk(name: str, mutating: bool) -> str:
-    if name.startswith("mcp_"):
-        return "medium"
-    if _infer_category(name) == "extension":
-        return "medium"
-    if name == "bash":
-        return "medium"
-    return "medium" if mutating else "low"

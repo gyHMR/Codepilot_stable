@@ -16,7 +16,7 @@ from codepilot.observability import (
 )
 from codepilot.observability.events import normalize_event_value
 from codepilot.protocols import AgentRunResult, ToolResultMessage
-from codepilot.tools.sandbox import file_state_for_path
+from codepilot.tools.workspace_safety import file_state_for_path
 
 from ..layout import SessionLayout
 

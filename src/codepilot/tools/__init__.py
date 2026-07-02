@@ -11,14 +11,15 @@ from .approval import (
     ApprovalRequest,
     DeferredApprovalProvider,
 )
-from .builtin import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES, create_builtin_tools
-from .permissions import PermissionPolicy, ToolDecision, ToolPermissionMode, ToolRequest
+from .builtins import create_builtin_tools
+from .metadata import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES
+from .policy import PermissionPolicy, ToolDecision, ToolPermissionMode, ToolRequest
 from .registry import ToolRegistry
-from .result_guard import ToolResultGuard, apply_result_guard
-from .runtime import ToolRuntime
-from .sandbox import WorkspaceSandbox
-from .schema_validation import SchemaValidationResult, SchemaValidator, validate_tool_arguments
-from .types import (
+from .result_safety import ToolResultGuard, apply_result_guard
+from .execution import ToolRuntime
+from .workspace_safety import WorkspaceSandbox
+from .argument_schema import SchemaValidationResult, SchemaValidator, validate_tool_arguments
+from .contracts import (
     AgentTool,
     AgentToolResult,
     AgentToolUpdateCallback,

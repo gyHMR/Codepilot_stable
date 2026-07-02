@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from codepilot.protocols import TextContent
-from codepilot.tools.sandbox import WorkspaceSandbox, file_state_for_path
-from codepilot.tools.types import AgentTool, AgentToolResult
+from codepilot.tools.workspace_safety import WorkspaceSandbox, file_state_for_path
+from codepilot.tools.contracts import AgentTool, AgentToolResult
 
 
 def _output_quality(

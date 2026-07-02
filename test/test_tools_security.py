@@ -14,7 +14,7 @@ if str(SRC) not in sys.path:
 
 
 def test_workspace_sandbox_blocks_path_escape(tmp_path: Path) -> None:
-    from codepilot.tools.sandbox import WorkspaceSandbox
+    from codepilot.tools.workspace_safety import WorkspaceSandbox
 
     sandbox = WorkspaceSandbox(tmp_path)
 
@@ -23,7 +23,7 @@ def test_workspace_sandbox_blocks_path_escape(tmp_path: Path) -> None:
 
 
 def test_permission_policy_blocks_dangerous_bash() -> None:
-    from codepilot.tools.permissions import PermissionPolicy, ToolRequest
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
 
     decision = PermissionPolicy().decide(ToolRequest(name="bash", params={"command": "rm -rf ."}))
 
@@ -32,7 +32,7 @@ def test_permission_policy_blocks_dangerous_bash() -> None:
 
 
 def test_permission_policy_supports_future_approval_flow() -> None:
-    from codepilot.tools.permissions import PermissionPolicy, ToolRequest
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
 
     decision = PermissionPolicy(require_approval_for_mutations=True).decide(
         ToolRequest(name="write", params={"path": "a.txt", "content": "x"})
@@ -43,8 +43,8 @@ def test_permission_policy_supports_future_approval_flow() -> None:
 
 
 def test_permission_policy_uses_tool_metadata_for_read_only() -> None:
-    from codepilot.tools.permissions import PermissionPolicy, ToolRequest
-    from codepilot.tools.types import ToolMetadata
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
+    from codepilot.tools.contracts import ToolMetadata
 
     metadata = ToolMetadata(
         name="database.query",
@@ -65,8 +65,8 @@ def test_permission_policy_uses_tool_metadata_for_read_only() -> None:
 
 
 def test_permission_policy_requires_approval_for_high_risk_metadata() -> None:
-    from codepilot.tools.permissions import PermissionPolicy, ToolRequest
-    from codepilot.tools.types import ToolMetadata
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
+    from codepilot.tools.contracts import ToolMetadata
 
     metadata = ToolMetadata(
         name="email.send",
@@ -106,8 +106,8 @@ async def _run_tool_runtime_blocks_dangerous_bash_before_execution() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
     from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.runtime import ToolRuntime
-    from codepilot.tools.types import ToolRuntimeRequest
+    from codepilot.tools.execution import ToolRuntime
+    from codepilot.tools.contracts import ToolRuntimeRequest
 
     executed = False
 
@@ -147,8 +147,8 @@ async def _run_tool_runtime_requires_approval_for_high_risk_tool() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
     from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.runtime import ToolRuntime
-    from codepilot.tools.types import ToolMetadata, ToolRuntimeRequest
+    from codepilot.tools.execution import ToolRuntime
+    from codepilot.tools.contracts import ToolMetadata, ToolRuntimeRequest
 
     executed = False
 
@@ -201,7 +201,7 @@ async def _run_tool_runtime_agent_tool_adapter_preserves_denied_status() -> None
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
     from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.runtime import ToolRuntime
+    from codepilot.tools.execution import ToolRuntime
 
     executed = False
 
