@@ -24,11 +24,12 @@ from codepilot.core import (
     AfterToolCallContext,
     AfterToolCallResult,
     AgentMessage,
-    TaskMode,
     BeforeToolCallContext,
     BeforeToolCallResult,
+    PlanningBudgetProfile,
     PrepareContextFn,
     StreamFn,
+    TaskMode,
     ToolExecutionMode,
 )
 from codepilot.extensions.types import LifecycleHook, RegisteredCommand
@@ -54,8 +55,8 @@ class AgentSessionOptions:
     属性分类:
         1. 核心配置 (model, workspace_dir, system_prompt)
         2. 工具相关 (tools, tool_execution, max_tool_calls_per_turn)
-        3. 消息管理 (messages, convert_to_llm, max_context_messages)
-        4. 上下文控制 (max_context_tokens, retain_recent_messages)
+        3. 消息管理 (messages, convert_to_llm)
+        4. 任务域开关 (memory_enabled, task_control_enabled)
         5. 重试机制 (retry_enabled, max_retries, retry_base_delay_ms)
         6. 扩展功能 (extension_commands, lifecycle hooks)
         7. 流式处理 (stream_fn, prepare_context)
@@ -111,10 +112,10 @@ class AgentSessionOptions:
     # 每轮对话中允许的最大工具调用次数
     # 防止 Agent 在单轮中执行过多工具调用，默认为 8
     max_tool_calls_per_turn: int = 8
-    context_governance_enabled: bool = True
     memory_enabled: bool = True
     task_control_enabled: bool = True
     task_mode: TaskMode = "edit"
+    planning_budget_profile: PlanningBudgetProfile = "balanced"
     max_task_replans_per_run: int = 2
 
     # 消息转换函数
@@ -126,27 +127,6 @@ class AgentSessionOptions:
     # 接受 provider 名称，返回对应的 API 密钥
     # 支持同步和异步调用，返回 None 表示未找到密钥
     get_api_key: Optional[Callable[[str], str | None | Awaitable[str | None]]] = None
-
-    # ==================== 上下文控制 ====================
-
-    # 上下文中保留的最大消息数量
-    # 当消息数量超过此限制时，旧消息会被压缩或移除
-    # None 表示不限制消息数量
-    max_context_messages: Optional[int] = None
-
-    # 上下文的最大 token 数量
-    # 用于控制发送给 LLM 的上下文长度，避免超出模型限制
-    # None 表示不限制 token 数量
-    max_context_tokens: Optional[int] = None
-
-    # 上下文压缩时保留的最近消息数量
-    # 确保最近的对话不会被压缩，默认保留 24 条消息
-    retain_recent_messages: int = 24
-
-    # 摘要构建函数
-    # 用于将旧消息压缩为摘要，减少上下文长度
-    # 接受消息列表，返回摘要字符串
-    summary_builder: Optional[Callable[[list[Message]], str]] = None
 
     # ==================== 重试机制 ====================
 

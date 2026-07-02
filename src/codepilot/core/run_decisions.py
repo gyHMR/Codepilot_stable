@@ -30,7 +30,7 @@ from codepilot.protocols import (
 )
 
 from .run_state import RunState
-from .task_state import CompletionCheck, ExecutionDecision
+from .task_control import CompletionCheck, ExecutionDecision
 from .types import AgentLoopConfig
 
 

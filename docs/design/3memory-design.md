@@ -8,7 +8,7 @@ Codepilot 的记忆模块只负责保存 **可跨任务复用的稳定知识**�
 TaskRecoveryStore
   当前任务目标、步骤进展、下一步动作
 
-SessionContextState / ContextCompiler
+SessionContextState / ContextGovernor
   活跃文件、近期工具证据、验证证据、文件新鲜度、上下文预算
 
 MemoryStore / MemoryWriter / MemoryRetriever
@@ -127,18 +127,17 @@ DURABLE_MEMORY_KINDS = {"project", "decision", "experience"}
 LEGACY_MEMORY_KINDS = {"task", "file", "failure"}
 ```
 
-`ContextCompiler` 仍然负责最终注入顺序和 token 预算：
+`ContextGovernor` 负责把 durable memory 作为 recalled memory 层注入本轮 ContextView：
 
 ```text
-Repository Context
-Active Files
-Recent Evidence
-Durable Memory
-History
-Current Task
+Stable Rules
+Working State
+Recalled Memory
+Evidence
+Recent Messages
 ```
 
-也就是说，memory 是 context compiler 的一个候选来源，而不是上下文系统本身。
+也就是说，memory 是上下文投影的一个来源，而不是上下文系统本身；失败经验如何总结仍由 MemoryWriter 负责。
 
 ## 6. 设计亮点
 
@@ -146,7 +145,7 @@ Current Task
 2. **保守写入**：普通任务、普通 read、单次失败不会污染长期记忆。
 3. **证据驱动**：experience 必须来自真实工具结果和验证闭环。
 4. **可解释召回**：`RetrievedMemory.reasons` 说明为什么一条 memory 被选中。
-5. **上下文协同**：ContextCompiler 统一决定 active files、evidence、memory、history 的预算和注入。
+5. **上下文协同**：ContextGovernor 统一决定 working state、evidence、memory、recent history 的投影和压力裁剪。
 
 ## 7. 学习路径
 
@@ -154,4 +153,4 @@ Current Task
 2. 读 `sessions/context/state.py`，理解 active files 和 recent evidence。
 3. 读 `sessions/memory/writer.py`，理解 durable memory 的写入准入。
 4. 读 `sessions/memory/retriever.py`，理解 durable memory 的召回策略。
-5. 读 `sessions/context/compiler.py`，理解 memory 如何作为上下文来源被注入。
+5. 读 `sessions/context/governor.py` 和 `sessions/context/projector.py`，理解 memory 如何作为上下文来源被注入。

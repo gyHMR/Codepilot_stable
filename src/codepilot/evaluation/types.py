@@ -66,8 +66,7 @@ class EvalBudgets:
 
 @dataclass(frozen=True)
 class EvalRuntimeProfile:
-    """评估运行时配置：控制上下文治理、记忆、权限等行为。"""
-    context_governance_enabled: bool = True   # 是否启用上下文治理
+    """评估运行时配置：控制记忆、任务控制、权限等行为。"""
     memory_enabled: bool = True               # 是否启用记忆
     task_control_enabled: bool = True         # 是否启用任务控制
     permission_mode: str = "workspace-write"  # 权限模式

@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 一次 Agent Run 的统一只读审计投影模块。
 
-本模块从 Run 的不可变产物（events.jsonl、state.json、result.json）中
+本模块从 Run 的不可变产物（events.jsonl、run.json）中
 加载审计数据，构建结构化的审计报告，供评估和调试使用。
 
 核心功能：
@@ -52,9 +52,9 @@ class AuditBundle:
         run_id: 运行 ID。
         session_id: 会话 ID（可选）。
         events: 事件列表（从 events.jsonl 加载）。
-        state: 状态快照（从 state.json 加载）。
-        result: 执行结果（从 result.json 加载）。
-        report: 审计报告（从 report.json 加载或自动构建）。
+        state: 状态快照（从 run.json 加载）。
+        result: 执行结果（从 run.json 加载）。
+        report: 审计报告（按需从 run.json 和 events.jsonl 构建）。
         workspace: 工作区路径。
         workspace_changes: 工作区变更列表。
     """
@@ -106,6 +106,7 @@ def build_audit_report(
             "memory": _memory_report(events),
             "security": _security_report(events),
             "task": _task_report(result, events),
+            "planning": _planning_report(result, events),
             "recovery": _recovery_report(events),
             "state": dict(state or {}),
         }
@@ -122,12 +123,10 @@ def load_audit_bundle(
 
     root = Path(run_dir)
     events = _read_jsonl(root / "events.jsonl")
-    state = _read_json(root / "state.json")
-    result = _read_json(root / "result.json")
-    report_path = root / "report.json"
-    report = _read_json(report_path)
-    if not report:
-        report = build_audit_report(result, events=events, state=state)
+    run = _read_json(root / "run.json")
+    state = dict(run)
+    result = dict(run)
+    report = build_audit_report(result, events=events, state=state)
     workspace_path = Path(
         workspace
         or state.get("workspace_path")
@@ -320,6 +319,37 @@ def _task_evidence_refs(events: list[dict[str, Any]]) -> list[str]:
         for step in _list_of_dicts(task.get("steps")):
             refs.extend(str(ref) for ref in _list(step.get("evidence_refs")))
     return list(dict.fromkeys(refs))
+
+
+def _planning_report(
+    result: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    task = _dict(result.get("task"))
+    control_signal = _dict(task.get("control_signal"))
+    planning = _dict(control_signal.get("planning"))
+    if not planning:
+        for event in reversed(events):
+            payload = _dict(event.get("planning"))
+            if payload:
+                planning = payload
+                break
+    discovery = _dict(planning.get("discovery"))
+    budget = _dict(discovery.get("budget")) or _dict(planning.get("budget"))
+    return {
+        "phase": planning.get("phase"),
+        "source": planning.get("source"),
+        "discovery_status": discovery.get("status"),
+        "facts_count": len(_list(discovery.get("facts"))),
+        "relevant_files": _list(discovery.get("relevant_files")),
+        "risks": _list(discovery.get("risks")),
+        "verification_hints": _list(discovery.get("verification_hints")),
+        "open_questions": _list(discovery.get("open_questions")),
+        "evidence_refs": _list(discovery.get("evidence_refs")),
+        "budget": budget,
+        "fallback_reason": planning.get("fallbackReason")
+        or planning.get("fallback_reason"),
+    }
 
 
 def _recovery_report(events: list[dict[str, Any]]) -> dict[str, Any]:

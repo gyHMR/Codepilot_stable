@@ -252,6 +252,13 @@ Examples:
         help="Task mode for this session (default: edit)",
     )
     parser.add_argument(
+        "--planning-budget",
+        default=None,
+        choices=["conservative", "balanced", "wide"],
+        dest="planning_budget_profile",
+        help="Planning discovery budget profile (default: balanced)",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         default=False,
@@ -365,6 +372,7 @@ async def _run_from_args(args: argparse.Namespace) -> int:
                     ),
                     tool_permission_mode=args.permission_mode,
                     task_mode=args.task_mode,
+                    planning_budget_profile=args.planning_budget_profile,
                 ),
                 args.config_key,
             )
@@ -390,6 +398,7 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         ),
         tool_permission_mode=permission_mode,
         task_mode=args.task_mode,
+        planning_budget_profile=args.planning_budget_profile,
     )
     if run_mode == "interactive":
         from .approval import CliApprovalProvider

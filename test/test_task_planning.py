@@ -5,8 +5,52 @@ from pathlib import Path
 from typing import Any
 
 
+def test_task_control_contracts_define_planning_budget_and_state() -> None:
+    from codepilot.core.task_control import (
+        PlanningBudgetUsage,
+        PlanningDiscoveryReport,
+        TaskPlanningState,
+        budget_for_profile,
+        ensure_plan_source,
+        ensure_planning_budget_profile,
+    )
+
+    budget = budget_for_profile("balanced")
+    usage = PlanningBudgetUsage(
+        model_rounds=2,
+        tool_calls=3,
+        estimated_tokens=400,
+        stop_reason="sufficient_evidence",
+    )
+    report = PlanningDiscoveryReport(
+        status="completed",
+        facts=["TaskController owns completion checks", ""],
+        relevant_files=["src/codepilot/core/task_controller.py"],
+        risks=["verification can be stale"],
+        verification_hints=["python -m pytest test/test_task_planning.py -q"],
+        open_questions=[],
+        evidence_refs=["tool:read_1", "tool:read_1"],
+        budget=usage,
+    )
+    planning = TaskPlanningState(
+        phase="execution",
+        source="llm_with_discovery",
+        budget=budget,
+        discovery=report,
+    )
+
+    assert budget.profile == "balanced"
+    assert budget.max_model_rounds == 4
+    assert budget.max_tool_calls == 12
+    assert report.facts == ("TaskController owns completion checks",)
+    assert report.evidence_refs == ("tool:read_1",)
+    assert planning.to_signal()["source"] == "llm_with_discovery"
+    assert ensure_planning_budget_profile("wide") == "wide"
+    assert ensure_plan_source("recovered") == "recovered"
+
+
 def test_task_step_owns_basic_state_transitions() -> None:
-    from codepilot.core.task_state import TaskStep
+    from codepilot.core import TaskStep
 
     step = TaskStep(id="step_1", title="运行验证")
 
@@ -35,7 +79,7 @@ def test_task_step_owns_basic_state_transitions() -> None:
 
 def test_task_state_records_reject_unknown_enum_values() -> None:
     import pytest
-    from codepilot.core.task_state import (
+    from codepilot.core import (
         AttemptRecord,
         ChangeSet,
         CompletionCheck,
@@ -80,7 +124,7 @@ def test_task_state_records_reject_unknown_enum_values() -> None:
 
 
 def test_task_state_owns_step_navigation_and_status_projections() -> None:
-    from codepilot.core.task_state import TaskState, TaskStep
+    from codepilot.core import TaskState, TaskStep
 
     task = TaskState(
         task_id="task_1",
@@ -153,7 +197,7 @@ def test_agent_session_records_task_recovery_warning_separately_from_memory(
 
 
 def test_task_planner_parses_json_plan_from_llm_message() -> None:
-    from codepilot.core.task_planner import TaskPlanner
+    from codepilot.core import TaskPlanner
     from codepilot.protocols import AssistantMessage, TextContent
 
     message = AssistantMessage(
@@ -196,7 +240,7 @@ def test_task_planner_parses_json_plan_from_llm_message() -> None:
 
 def test_task_plan_draft_owns_planner_output_invariants() -> None:
     import pytest
-    from codepilot.core.task_planner import PlannedTaskStep, TaskPlanDraft
+    from codepilot.core import PlannedTaskStep, TaskPlanDraft
 
     step = PlannedTaskStep(
         title="  定位\n任务模块  ",
@@ -234,7 +278,7 @@ def test_task_planner_records_fallback_reason_when_generation_fails() -> None:
 
 
 def test_task_planner_accepts_common_plan_aliases_and_string_steps() -> None:
-    from codepilot.core.task_planner import TaskPlanner
+    from codepilot.core import TaskPlanner
     from codepilot.protocols import AssistantMessage, TextContent
 
     message = AssistantMessage(
@@ -262,7 +306,7 @@ def test_task_planner_accepts_common_plan_aliases_and_string_steps() -> None:
 
 
 def test_task_planner_fallback_keeps_parse_diagnostics() -> None:
-    from codepilot.core.task_planner import TaskPlanner
+    from codepilot.core import TaskPlanner
     from codepilot.protocols import AssistantMessage, TextContent
 
     message = AssistantMessage(
@@ -282,7 +326,7 @@ def test_task_planner_fallback_keeps_parse_diagnostics() -> None:
 
 
 async def _task_planner_fallback_reason_case() -> None:
-    from codepilot.core.task_planner import TaskPlanner
+    from codepilot.core import TaskPlanner
     from codepilot.protocols import Model, UserMessage
 
     async def broken_stream(*_args):
@@ -311,8 +355,8 @@ async def _task_planner_fallback_reason_case() -> None:
 
 
 def test_task_controller_initializes_from_planned_steps_and_exports_details() -> None:
-    from codepilot.core.task_controller import TaskController
-    from codepilot.core.task_planner import PlannedTaskStep
+    from codepilot.core import TaskController
+    from codepilot.core import PlannedTaskStep
     from codepilot.protocols import UserMessage
 
     controller = TaskController()
@@ -348,7 +392,7 @@ def test_task_controller_initializes_from_planned_steps_and_exports_details() ->
 
 
 def test_task_controller_coerces_unknown_raw_step_kind() -> None:
-    from codepilot.core.task_controller import TaskController
+    from codepilot.core import TaskController
     from codepilot.protocols import UserMessage
 
     task = TaskController().initialize(
@@ -368,7 +412,7 @@ def test_task_controller_coerces_unknown_raw_step_kind() -> None:
 
 def test_task_controller_normalizes_steps_and_updates_from_tool_results() -> None:
     from codepilot.core.run_state import RunState
-    from codepilot.core.task_controller import TaskController
+    from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
     controller = TaskController()
@@ -438,7 +482,7 @@ def test_task_controller_normalizes_steps_and_updates_from_tool_results() -> Non
 
 def test_completion_gate_requires_fresh_verification_after_workspace_change() -> None:
     from codepilot.core.run_state import RunState
-    from codepilot.core.task_controller import TaskController
+    from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
     controller = TaskController()
@@ -489,7 +533,7 @@ def test_completion_gate_requires_fresh_verification_after_workspace_change() ->
 
 def test_passed_verification_completes_current_step_and_advances() -> None:
     from codepilot.core.run_state import RunState
-    from codepilot.core.task_controller import TaskController
+    from codepilot.core import TaskController
     from codepilot.protocols import ToolResultMessage, UserMessage
 
     controller = TaskController()
@@ -523,7 +567,7 @@ def test_passed_verification_completes_current_step_and_advances() -> None:
 
 def test_passed_verification_keeps_acting_phase_after_fresh_verification() -> None:
     from codepilot.core.run_state import RunState
-    from codepilot.core.task_controller import TaskController
+    from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
     controller = TaskController()
@@ -567,7 +611,7 @@ def test_passed_verification_keeps_acting_phase_after_fresh_verification() -> No
 
 def test_completion_gate_treats_unavailable_tool_as_blocked() -> None:
     from codepilot.core.run_state import RunState
-    from codepilot.core.task_controller import TaskController
+    from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
     controller = TaskController()
@@ -596,7 +640,7 @@ def test_completion_gate_treats_unavailable_tool_as_blocked() -> None:
 
 def test_permission_blocked_steps_keep_tool_evidence() -> None:
     from codepilot.core.run_state import RunState
-    from codepilot.core.task_controller import TaskController
+    from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
     controller = TaskController()
@@ -639,7 +683,7 @@ def test_permission_blocked_steps_keep_tool_evidence() -> None:
 
 def test_replan_preserves_completed_steps_and_stops_after_limit() -> None:
     from codepilot.core.run_state import RunState
-    from codepilot.core.task_controller import TaskController
+    from codepilot.core import TaskController
     from codepilot.protocols import ToolResultMessage, UserMessage
 
     controller = TaskController()
@@ -688,7 +732,7 @@ def test_replan_preserves_completed_steps_and_stops_after_limit() -> None:
 
 def test_task_controller_respects_configured_replan_limit() -> None:
     from codepilot.core.run_state import RunState
-    from codepilot.core.task_controller import TaskController
+    from codepilot.core import TaskController
     from codepilot.protocols import UserMessage
 
     controller = TaskController()
@@ -719,7 +763,7 @@ def test_task_controller_respects_configured_replan_limit() -> None:
 
 def test_repeated_failed_verification_after_change_proposes_revert() -> None:
     from codepilot.core.run_state import RunState
-    from codepilot.core.task_controller import TaskController
+    from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
     controller = TaskController()
@@ -765,7 +809,7 @@ def test_repeated_failed_verification_after_change_proposes_revert() -> None:
 
 def test_task_controller_exports_control_signal_and_attempts() -> None:
     from codepilot.core.run_state import RunState
-    from codepilot.core.task_controller import TaskController
+    from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
     controller = TaskController()
@@ -795,7 +839,7 @@ def test_task_controller_exports_control_signal_and_attempts() -> None:
 
 
 def test_task_controller_rebuilds_task_state_from_memory_projection() -> None:
-    from codepilot.core.task_controller import TaskController
+    from codepilot.core import TaskController
     from codepilot.protocols import UserMessage
 
     controller = TaskController()
@@ -804,7 +848,7 @@ def test_task_controller_rebuilds_task_state_from_memory_projection() -> None:
         task_recovery_projection={
             "goal": "修复失败测试",
             "task_mode": "plan",
-            "plan_source": "recovered",
+            "planning": {"phase": "recovered", "source": "recovered"},
             "task_progress": {
                 "completed_steps": ["定位失败"],
                 "pending_steps": ["重新运行相关验证"],
@@ -825,7 +869,7 @@ def test_task_controller_rebuilds_task_state_from_memory_projection() -> None:
 
     assert task.goal == "修复失败测试"
     assert task.mode == "plan"
-    assert task.plan_source == "recovered"
+    assert task.planning.source == "recovered"
     assert [step.status for step in task.steps] == [
         "completed",
         "blocked",
@@ -845,7 +889,7 @@ def test_task_controller_rebuilds_task_state_from_memory_projection() -> None:
 
 
 def test_task_recovery_projection_mapping_builds_task_state() -> None:
-    from codepilot.core.task_controller import build_task_state_from_recovery_projection
+    from codepilot.core import build_task_state_from_recovery_projection
     from codepilot.protocols import UserMessage
 
     task = build_task_state_from_recovery_projection(
@@ -888,7 +932,7 @@ def test_task_recovery_projection_mapping_builds_task_state() -> None:
 
 
 def test_task_recovery_projection_coerces_unknown_step_kind() -> None:
-    from codepilot.core.task_controller import build_task_state_from_recovery_projection
+    from codepilot.core import build_task_state_from_recovery_projection
     from codepilot.protocols import UserMessage
 
     task = build_task_state_from_recovery_projection(
@@ -920,6 +964,10 @@ def test_agent_loop_emits_task_events_and_result_summary() -> None:
 
 def test_agent_loop_can_plan_before_react_execution() -> None:
     asyncio.run(_agent_loop_llm_planner_case())
+
+
+def test_agent_loop_plan_mode_discovers_facts_before_synthesis() -> None:
+    asyncio.run(_agent_loop_planning_discovery_case())
 
 
 def test_agent_loop_edit_mode_skips_planner() -> None:
@@ -1302,6 +1350,161 @@ async def _agent_loop_llm_planner_case() -> None:
     assert result.task.step_details["定位任务模块"]["acceptance"] == "找到 TaskController"
 
 
+async def _agent_loop_planning_discovery_case() -> None:
+    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
+    from codepilot.llm.event_stream import AssistantMessageEventStream
+    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage, UserMessage
+    from codepilot.tools import AgentTool, AgentToolResult, ToolMetadata
+
+    calls: list[str] = []
+
+    async def fake_stream(_model, context, _options):
+        stream = AssistantMessageEventStream()
+        system_prompt = context.system_prompt or ""
+        tool_names = [tool.name for tool in context.tools]
+        has_tool_result = any(
+            isinstance(message, ToolResultMessage) for message in context.messages
+        )
+        if "Task Planning Discovery" in system_prompt:
+            calls.append("discovery_tools" if not has_tool_result else "discovery_report")
+            assert tool_names == ["read_test"]
+            if not has_tool_result:
+                stream.end(
+                    AssistantMessage(
+                        content=[ToolCall(id="read_1", name="read_test", arguments={})],
+                        stop_reason="toolUse",
+                    )
+                )
+                return stream
+            stream.end(
+                AssistantMessage(
+                    content=[
+                        TextContent(
+                            text=(
+                                '{"status":"completed",'
+                                '"facts":["TaskController renders task context"],'
+                                '"relevant_files":["src/codepilot/core/task_controller.py"],'
+                                '"risks":["stale verification"],'
+                                '"verification_hints":["python -m pytest test/test_task_planning.py -q"],'
+                                '"open_questions":[]}'
+                            )
+                        )
+                    ]
+                )
+            )
+            return stream
+        if "Task Planner" in system_prompt:
+            calls.append("plan")
+            assert any(
+                isinstance(message, UserMessage)
+                and "TaskController renders task context" in str(message.content)
+                for message in context.messages
+            )
+            stream.end(
+                AssistantMessage(
+                    content=[
+                        TextContent(
+                            text=(
+                                '{"goal":"实现两阶段 plan","steps":['
+                                '{"title":"更新 TaskController 上下文","kind":"edit",'
+                                '"acceptance":"上下文包含 discovery facts",'
+                                '"verification_hint":"python -m pytest test/test_task_planning.py -q"}'
+                                ']}'
+                            )
+                        )
+                    ]
+                )
+            )
+            return stream
+        calls.append("execute")
+        assert "TaskController renders task context" in system_prompt
+        assert not any(
+            isinstance(message, ToolResultMessage) and message.tool_call_id == "read_1"
+            for message in context.messages
+        )
+        stream.end(AssistantMessage(content=[TextContent(text="done")]))
+        return stream
+
+    async def read_tool(*_args):
+        return AgentToolResult(
+            content=[TextContent(text="TaskController source")],
+            details={"path": "src/codepilot/core/task_controller.py"},
+        )
+
+    async def edit_tool(*_args):
+        raise AssertionError("mutating tool must not be visible during discovery")
+
+    events: list[dict[str, Any]] = []
+    result = await run_agent_loop(
+        prompts=[UserMessage(content="实现两阶段 plan")],
+        context=AgentContext(
+            system_prompt="rules",
+            messages=[],
+            tools=[
+                AgentTool(
+                    name="read_test",
+                    label="read",
+                    description="read",
+                    parameters={},
+                    execute=read_tool,
+                    metadata=ToolMetadata(
+                        name="read_test",
+                        category="filesystem",
+                        read_only=True,
+                        concurrency_safe=True,
+                        exclusive=False,
+                        requires_approval=False,
+                        risk_level="low",
+                        resource_scope=("workspace",),
+                    ),
+                ),
+                AgentTool(
+                    name="edit_test",
+                    label="edit",
+                    description="edit",
+                    parameters={},
+                    execute=edit_tool,
+                    metadata=ToolMetadata(
+                        name="edit_test",
+                        category="filesystem",
+                        read_only=False,
+                        concurrency_safe=False,
+                        exclusive=True,
+                        requires_approval=False,
+                        risk_level="medium",
+                        resource_scope=("workspace",),
+                    ),
+                ),
+            ],
+        ),
+        config=AgentLoopConfig(
+            model=_task_test_model(),
+            convert_to_llm=lambda items: items,
+            allow_unmanaged_tools=True,
+            task_mode="plan",
+        ),
+        emit=events.append,
+        stream_fn=fake_stream,
+    )
+
+    created = next(event for event in events if event.get("type") == "task_plan_created")
+    assert calls[:4] == ["discovery_tools", "discovery_report", "plan", "execute"]
+    assert result.task is not None
+    assert result.task.control_signal["planning"]["source"] == "llm_with_discovery"
+    assert created["plan"]["planSource"] == "llm_with_discovery"
+    assert [
+        event.get("type")
+        for event in events
+        if str(event.get("type", "")).startswith("planning_")
+    ] == [
+        "planning_discovery_started",
+        "planning_discovery_step",
+        "planning_discovery_completed",
+        "planning_synthesis_started",
+        "planning_synthesis_completed",
+    ]
+
+
 async def _agent_loop_edit_mode_skips_planner_case() -> None:
     from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
     from codepilot.llm.event_stream import AssistantMessageEventStream
@@ -1361,6 +1564,8 @@ async def _agent_loop_recovered_task_context_case() -> None:
             messages=[],
             task_recovery_projection={
                 "goal": "修复失败测试",
+                "task_mode": "plan",
+                "planning": {"phase": "recovered", "source": "recovered"},
                 "task_progress": {
                     "completed_steps": ["定位失败"],
                     "pending_steps": ["重新运行相关验证"],

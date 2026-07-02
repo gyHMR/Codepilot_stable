@@ -136,7 +136,7 @@ class RuntimeService:
             / ".codepilot"
             / "sessions"
             / str(options.session_id)
-            / "meta.json"
+            / "session.json"
         )
         is_restored = options.session_id is not None and persisted_meta.is_file()
         session, assembly = assemble_runtime(options)
@@ -167,11 +167,16 @@ class RuntimeService:
             session_id=session.session_id,
             messages=[],
             task_mode=session.task_mode,
+            planning_budget_profile=session.planning_budget_profile,
         )
         assembly = replace(
             source,
             session_options=session_options,
-            profile=replace(source.profile, task_mode=session.task_mode),
+            profile=replace(
+                source.profile,
+                task_mode=session.task_mode,
+                planning_budget_profile=session.planning_budget_profile,
+            ),
         )
         self._sessions[session.session_id] = session
         self._assemblies[session.session_id] = assembly
@@ -285,6 +290,7 @@ class RuntimeService:
             "entry_ids": session.list_entry_ids(),
             "leaf_id": session.get_leaf_id(),
             "task_mode": session.task_mode,
+            "planning_budget_profile": session.planning_budget_profile,
         }
 
     def get_session_freshness(self, session_id: str) -> dict[str, Any]:

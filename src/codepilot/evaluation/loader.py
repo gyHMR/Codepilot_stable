@@ -397,9 +397,6 @@ def _parse_runtime(value: Any, source: str) -> EvalRuntimeProfile:
             f"{source}.runtime.scripted_stream must be a string"
         )
     return EvalRuntimeProfile(
-        context_governance_enabled=bool(
-            value.get("context_governance_enabled", True)
-        ),
         memory_enabled=bool(value.get("memory_enabled", True)),
         task_control_enabled=bool(value.get("task_control_enabled", True)),
         permission_mode=permission_mode,

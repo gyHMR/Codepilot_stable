@@ -286,37 +286,15 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
             ],
         )
 
-    # /compact: 手动触发上下文压缩
+    # /compact: legacy command; context is now governed before every model call.
     if cmd == "/compact":
-        messages = session.messages
-        if len(messages) < 10:
-            return RuntimeCommandResult(
-                handled=True,
-                output_lines=["Context is too short to compact (need at least 10 messages)."],
-            )
-        # 尝试调用 Session 的压缩方法
-        try:
-            # 检查 Session 是否有压缩方法
-            if hasattr(session, '_compact_context_if_needed'):
-                # 注意：这是内部方法，正式版本应该暴露公开 API
-                return RuntimeCommandResult(
-                    handled=True,
-                    output_lines=[
-                        "[yellow]Warning: Manual compaction not yet fully implemented.[/yellow]",
-                        f"Current messages: {len(messages)}",
-                        "Compaction will happen automatically when context window is full.",
-                    ],
-                )
-            else:
-                return RuntimeCommandResult(
-                    handled=True,
-                    output_lines=["Compaction not available for this session."],
-                )
-        except Exception as exc:
-            return RuntimeCommandResult(
-                handled=True,
-                output_lines=[f"Compact error: {exc}"],
-            )
+        return RuntimeCommandResult(
+            handled=True,
+            output_lines=[
+                "Manual compaction has been removed.",
+                "ContextGovernor now projects a fresh ContextView before every model call.",
+            ],
+        )
 
     # /context [items|stale]: 查看最近一次模型调用的上下文治理报告
     if cmd == "/context":

@@ -215,7 +215,7 @@ ToolCall → ToolRuntime.execute()
 - 生命周期钩子管理
 - 记忆系统 (remember/finalize)
 - 上下文新鲜度检查
-- 上下文压缩
+- 通过 ContextGovernor 投影本轮上下文
 - 会话分支/分叉
 - 委托 `Agent` 执行
 
@@ -223,8 +223,11 @@ ToolCall → ToolRuntime.execute()
 
 | 文件 | 功能 |
 |------|------|
-| `compiler.py` | `ContextCompiler` — 编译上下文，注入记忆检索结果 |
-| `compaction.py` | 上下文压缩（当上下文溢出时进行摘要） |
+| `governor.py` | `ContextGovernor` — 每轮模型调用前投影 ContextView |
+| `projector.py` | `ContextProjector` — 生成 stable/working/memory/evidence/recent 分层上下文 |
+| `policy.py` | `ContextPressurePolicy` — 计算 normal/tight/critical 压力 |
+| `snapshot.py` | `SessionSnapshotBuilder` — 汇总 repository、tool artifact、checkpoint 和短期状态 |
+| `ledger.py` | `ToolArtifactLedger` — 大工具输出 artifact 化并写入 context ledger |
 | `state.py` | `SessionContextState` — 跟踪会话上下文状态 |
 | `repository_context.py` | 仓库文件跟踪 |
 
@@ -251,8 +254,8 @@ ToolCall → ToolRuntime.execute()
 
 | 文件 | 类 | 功能 |
 |------|-----|------|
-| `store.py` | `SessionStore` | 基于文件的会话持久化 (events.jsonl, context.jsonl, state.json) |
-| `run_store.py` | `RunStore` | 运行结果持久化和上下文新鲜度评估 |
+| `store.py` | `SessionStore` | 基于 `session.json/messages.jsonl` 的会话事实源 |
+| `run_store.py` | `RunStore` | 基于 `run.json/events.jsonl` 的 run 事实源和新鲜度评估 |
 | `serde.py` | — | 序列化/反序列化辅助函数 |
 
 ---
@@ -556,7 +559,8 @@ Layer 7: interfaces/       ← 最后看用户接口
 1. `sessions/session.py` — 理解会话主类
 2. `sessions/memory/store.py` — 理解记忆存储
 3. `sessions/memory/writer.py` — 理解记忆写入
-4. `sessions/context/compiler.py` — 理解上下文编译
+4. `sessions/context/governor.py` — 理解上下文治理入口
+5. `sessions/context/projector.py` — 理解 ContextView 分层投影
 
 #### Layer 5: `runtime/` — 先读这些文件
 1. `runtime/assembly.py` — **最重要**，理解组装流水线
@@ -590,10 +594,9 @@ cli.py:main()
         → session.py:_run_hooks("before_prompt")
         → history/task_recovery.py:TaskRecoveryStore.begin_task()
         → session.py:_check_context_freshness()
-        → session.py:_check_and_compact_context()
         → agent.py:Agent.run()
           → agent.py:Agent.prepare_context()
-            → compiler.py:ContextCompiler.compile()
+            → governor.py:ContextGovernor.prepare()
               → retriever.py:MemoryRetriever.retrieve()
           → agent_loop.py:run_agent_loop()
             → llm_runner.py:LLMStreamRunner.stream_assistant_response()
@@ -608,7 +611,6 @@ cli.py:main()
             → task_controller.py:TaskController.update()
         → session.py:_persist_run_result()
         → session.py:_finalize_memory()
-        → session.py:_check_and_compact_context()
         → session.py:_run_hooks("after_prompt")
 ```
 
@@ -697,9 +699,13 @@ src/codepilot/
 │
 ├── sessions/                   # Layer 4: 会话管理层
 │   ├── session.py              # 会话主类
+│   ├── layout.py               # sessions/runs/memory/context 路径契约
 │   ├── context/
-│   │   ├── compiler.py         # 上下文编译器
-│   │   ├── compaction.py       # 上下文压缩
+│   │   ├── governor.py         # 上下文治理入口
+│   │   ├── projector.py        # ContextView 分层投影
+│   │   ├── policy.py           # normal/tight/critical 压力策略
+│   │   ├── snapshot.py         # session/repository/tool/checkpoint 快照
+│   │   ├── ledger.py           # 工具输出 artifact/context ledger
 │   │   ├── state.py            # 上下文状态
 │   │   ├── repository_context.py
 │   │   └── repository_tracker.py

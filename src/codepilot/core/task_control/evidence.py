@@ -6,7 +6,7 @@ from collections.abc import Mapping
 
 from codepilot.protocols import TextContent, ToolResultMessage
 
-from .task_tools import COMPLETE_TASK_STEP_TOOL
+from .tools import COMPLETE_TASK_STEP_TOOL
 
 READ_TOOL_MARKERS = ("read", "grep", "find", "glob", "ls", "search", "status", "codegraph")
 WRITE_TOOL_MARKERS = ("write", "edit", "patch", "apply")

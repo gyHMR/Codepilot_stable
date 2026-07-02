@@ -6,7 +6,7 @@ from collections.abc import Mapping
 
 from codepilot.protocols import ToolResultMessage
 
-from .task_state import TaskStep
+from .state import TaskStep
 
 
 def has_failed_verification(results: list[ToolResultMessage]) -> bool:

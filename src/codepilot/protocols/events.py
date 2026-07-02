@@ -50,6 +50,11 @@ RuntimeEventType = Literal[
     "memory_invalidated",        # 用户命令废弃了记忆
     "memory_updated",            # 运行收尾写入了记忆
     "memory_warning",            # 记忆流程产生警告
+    "planning_discovery_started",    # plan 模式事实发现开始
+    "planning_discovery_step",       # plan 模式事实发现工具步骤
+    "planning_discovery_completed",  # plan 模式事实发现完成
+    "planning_synthesis_started",    # plan 模式计划生成开始
+    "planning_synthesis_completed",  # plan 模式计划生成完成
     "task_plan_created",         # 任务计划已创建
     "task_step_updated",         # 任务步骤状态已更新
     "task_decision",             # 任务控制器做出执行决策
@@ -86,6 +91,11 @@ _RUNTIME_EVENT_TYPES = frozenset(
         "memory_invalidated",
         "memory_updated",
         "memory_warning",
+        "planning_discovery_started",
+        "planning_discovery_step",
+        "planning_discovery_completed",
+        "planning_synthesis_started",
+        "planning_synthesis_completed",
         "task_plan_created",
         "task_step_updated",
         "task_decision",

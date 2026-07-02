@@ -290,7 +290,7 @@ def test_tool_execution_gate_explains_loop_stop_cases() -> None:
 
 def test_post_tool_run_decision_explains_pause_and_stop_cases() -> None:
     from codepilot.core.run_decisions import decide_post_tool_run
-    from codepilot.core.task_state import ExecutionDecision
+    from codepilot.core import ExecutionDecision
     from codepilot.protocols import ToolResultMessage
 
     approval = decide_post_tool_run(
@@ -423,7 +423,7 @@ async def _task_finish_exits_tool_loop_case() -> None:
 
 def test_completion_run_decision_explains_continue_wait_and_done_cases() -> None:
     from codepilot.core.run_decisions import decide_completion_run
-    from codepilot.core.task_state import CompletionCheck
+    from codepilot.core import CompletionCheck
 
     needs_more_work = decide_completion_run(
         CompletionCheck(

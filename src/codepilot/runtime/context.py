@@ -10,9 +10,8 @@ Runtime 系统提示词启动上下文。
 - 工具说明片段。
 
 注意：顶层目录概览虽然会出现在初始系统提示词里，但它不是唯一事实来源。
-每次模型调用前，sessions.context_compiler 会通过 sessions.repository_tracker
-刷新 RepositorySnapshot，并替换系统提示词里的 Repository Context，避免模型长期
-读取到已经删除或新增后的旧目录结构。
+每次模型调用前，sessions.context.ContextGovernor 会刷新 RepositorySnapshot，
+并把动态仓库状态、证据和记忆召回投影到本轮 ContextView 中。
 """
 
 from dataclasses import dataclass
@@ -74,8 +73,8 @@ def build_runtime_context(
 ) -> RuntimeContext:
     """构建系统提示词启动上下文。
 
-    这里不做 active files、recent evidence、memory retrieval 或当前任务上下文编译；
-    这些动态内容由 sessions.context_compiler 在每次模型调用前处理。
+    这里不做 active files、recent evidence、memory retrieval 或当前任务投影；
+    这些动态内容由 sessions.context.ContextGovernor 在每次模型调用前处理。
     """
 
     prompt_guidelines = [

@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
-from .task_modes import TaskMode, ensure_task_mode
+from .contracts import TaskMode, TaskPlanningState, ensure_task_mode
 
 
 # ── 类型别名定义 ────────────────────────────────────────────────
@@ -345,8 +345,7 @@ class TaskState:
     acceptance_criteria: list[str] = field(default_factory=list)                 # 验收标准
     steps: list[TaskStep] = field(default_factory=list)                          # 步骤列表
     mode: TaskMode = "edit"                                                      # 用户任务模式
-    plan_source: str = "default"                                                 # 计划来源
-    mode_policy: dict[str, object] | None = None                                 # 可审计模式策略摘要
+    planning: TaskPlanningState = field(default_factory=TaskPlanningState)        # 规划控制状态
     current_step_id: str | None = None                                           # 当前步骤 ID
     phase: TaskPhase = "understanding"                                           # 当前阶段
     next_action: str | None = None                                               # 下一步动作
@@ -367,6 +366,8 @@ class TaskState:
 
     def __post_init__(self) -> None:
         self.mode = ensure_task_mode(self.mode)
+        if not isinstance(self.planning, TaskPlanningState):
+            self.planning = TaskPlanningState()
         _ensure_task_phase(self.phase)
 
     def current_step(self) -> TaskStep | None:

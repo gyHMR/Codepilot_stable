@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from codepilot.core import TaskMode, ToolExecutionMode
+from codepilot.core import PlanningBudgetProfile, TaskMode, ToolExecutionMode
 from codepilot.protocols import Model, ModelCapabilities
 
 
@@ -112,9 +112,6 @@ class WorkspaceSettings:
         system_prompt: 自定义系统提示词。
         thinking_level: 推理级别。
         tool_execution: 工具执行模式。
-        max_context_messages: 消息数量上限。
-        retain_recent_messages: 压缩时保留的最近消息数。
-        max_context_tokens: token 数量上限。
         retry_enabled: 是否启用重试。
         max_retries: 最大重试次数。
         retry_base_delay_ms: 重试基础延迟（毫秒）。
@@ -138,10 +135,8 @@ class WorkspaceSettings:
     thinking_level: Optional[str] = None
     tool_execution: Optional[ToolExecutionMode] = None
     task_mode: Optional[TaskMode] = None
+    planning_budget_profile: Optional[PlanningBudgetProfile] = None
     max_tool_calls_per_turn: Optional[int] = None
-    max_context_messages: Optional[int] = None
-    retain_recent_messages: Optional[int] = None
-    max_context_tokens: Optional[int] = None
     retry_enabled: Optional[bool] = None
     max_retries: Optional[int] = None
     retry_base_delay_ms: Optional[int] = None
@@ -232,6 +227,13 @@ class WorkspaceResourceLoader:
             and raw_task_mode in {"read", "edit", "plan"}
             else None
         )
+        raw_planning_budget_profile = raw.get("planning_budget_profile")
+        planning_budget_profile = (
+            raw_planning_budget_profile
+            if isinstance(raw_planning_budget_profile, str)
+            and raw_planning_budget_profile in {"conservative", "balanced", "wide"}
+            else None
+        )
         permission_mode = raw.get("tool_permission_mode")
         if permission_mode not in {"read-only", "workspace-write", "ask"}:
             permission_mode = None
@@ -243,10 +245,8 @@ class WorkspaceResourceLoader:
             thinking_level=raw.get("thinking_level") if isinstance(raw.get("thinking_level"), str) else None,
             tool_execution=tool_execution,
             task_mode=task_mode,
+            planning_budget_profile=planning_budget_profile,
             max_tool_calls_per_turn=self._to_positive_int(raw.get("max_tool_calls_per_turn")),
-            max_context_messages=self._to_positive_int(raw.get("max_context_messages")),
-            retain_recent_messages=self._to_positive_int(raw.get("retain_recent_messages")),
-            max_context_tokens=self._to_positive_int(raw.get("max_context_tokens")),
             retry_enabled=raw.get("retry_enabled") if isinstance(raw.get("retry_enabled"), bool) else None,
             max_retries=self._to_positive_int(raw.get("max_retries")),
             retry_base_delay_ms=self._to_positive_int(raw.get("retry_base_delay_ms")),

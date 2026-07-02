@@ -432,9 +432,7 @@ python -m codepilot.evaluation report .codepilot/evals/<eval_id>
     └── <case_id>/
         └── .codepilot/runs/<run_id>/
             ├── events.jsonl
-            ├── state.json
-            ├── result.json
-            └── report.json
+            └── run.json
 ```
 
 最常看的文件：
@@ -446,7 +444,7 @@ python -m codepilot.evaluation report .codepilot/evals/<eval_id>
 | `cases/<case_id>/metrics.json` | 单个 case 的指标 |
 | `cases/<case_id>/assertion-results.json` | 每条断言的 expected / actual / evidence |
 | `workspace.diff` | 本 case 修改了哪些文件 |
-| `workspaces/<case_id>/.codepilot/runs/<run_id>/report.json` | 底层 Run 审计报告 |
+| `workspaces/<case_id>/.codepilot/runs/<run_id>/run.json` | 底层 Run 状态、结果和 rollback metadata |
 
 如果是消融实验，会额外生成：
 

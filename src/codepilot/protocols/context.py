@@ -187,12 +187,12 @@ class ContextView:
 
 @dataclass
 class ContextReport:
-    """上下文编译报告：记录一次上下文编译的完整裁剪和选择结果。"""
-    context_id: str                                              # 编译 ID
+    """上下文治理报告：记录一次 ContextView 投影的压力、裁剪和选择结果。"""
+    context_id: str                                              # 上下文视图 ID
     repository_fingerprint: str                                  # 仓库指纹
     total_budget_tokens: int                                     # 总 token 预算
-    estimated_tokens_before: int                                 # 编译前估算 token 数
-    estimated_tokens_after: int                                  # 编译后估算 token 数
+    estimated_tokens_before: int                                 # 投影前估算 token 数
+    estimated_tokens_after: int                                  # 投影后估算 token 数
     sections: list[ContextSectionReport] = field(default_factory=list)  # 各段落报告
     selected_items: list[dict[str, Any]] = field(default_factory=list)  # 选中条目摘要
     stale_items: list[str] = field(default_factory=list)         # 过时条目列表

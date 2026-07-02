@@ -29,23 +29,29 @@ from typing import Iterable, Mapping, cast
 
 from codepilot.protocols import TaskSummary, TextContent, ToolResultMessage, UserMessage
 
-from .run_state import RunState
-from .task_evidence import (
+from ..run_state import RunState
+from .evidence import (
     complete_step_payload,
     evidence_refs,
     first_error_code,
     infer_action_intent,
     is_tool_unavailable,
 )
-from .task_modes import TaskMode, ensure_task_mode, policy_for_mode
-from .task_planner import PlannedTaskStep
-from .task_replanner import (
+from .contracts import (
+    TaskMode,
+    TaskPlanningState,
+    ensure_task_mode,
+    task_planning_state_from_mapping,
+)
+from .modes import policy_for_mode
+from .planner import PlannedTaskStep
+from .replanner import (
     repair_next_action,
     should_propose_revert_after_repeated_failure,
 )
-from .task_tools import COMPLETE_TASK_STEP_TOOL
-from .task_stop import build_completion_check, completion_steering_message
-from .task_state import (
+from .tools import COMPLETE_TASK_STEP_TOOL
+from .stop import build_completion_check, completion_steering_message
+from .state import (
     AttemptRecord,
     ChangeSet,
     CompletionCheck,
@@ -56,7 +62,7 @@ from .task_state import (
     TaskStep,
     TaskStepKind,
 )
-from .task_verifier import (
+from .verifier import (
     has_failed_verification,
     has_non_verification_error,
     has_passed_verification,
@@ -64,7 +70,7 @@ from .task_verifier import (
     verification_command,
     verification_failure_note,
 )
-from .types import AgentMessage
+from ..types import AgentMessage
 
 
 _MAX_STEPS = 6                   # 单个任务最大步骤数
@@ -93,8 +99,7 @@ class TaskController:
         acceptance_criteria: Iterable[str] | None = None,
         constraints: Iterable[str] | None = None,
         mode: TaskMode | str = "edit",
-        plan_source: str | None = None,
-        mode_policy: Mapping[str, object] | None = None,
+        planning: TaskPlanningState | Mapping[str, object] | None = None,
         max_replans_per_run: int | None = None,
         task_recovery_projection: Mapping[str, object] | None = None,
     ) -> TaskState:
@@ -118,13 +123,12 @@ class TaskController:
             TaskState: 初始化后的任务状态。
         """
         selected_mode = ensure_task_mode(mode)
-        selected_policy = dict(mode_policy or policy_for_mode(selected_mode).to_signal())
+        planning_state = _planning_state_for_initialize(planning, selected_mode)
         if task_recovery_projection is not None:
             recovered = build_task_state_from_recovery_projection(
                 prompts,
                 task_recovery_projection,
                 mode=selected_mode,
-                mode_policy=selected_policy,
             )
             if recovered is not None:
                 if max_replans_per_run is not None:
@@ -145,8 +149,7 @@ class TaskController:
             ],
             steps=steps,
             mode=selected_mode,
-            plan_source=plan_source or "default",
-            mode_policy=selected_policy,
+            planning=planning_state,
             current_step_id=steps[0].id if steps else None,
             phase="acting",
             next_action=steps[0].title if steps else None,
@@ -381,6 +384,23 @@ class TaskController:
         policy = policy_for_mode(task.mode)
         if policy.guidance:
             lines.append(f"Mode guidance: {policy.guidance}")
+        if task.planning.discovery is not None:
+            discovery = task.planning.discovery
+            if discovery.facts:
+                lines.extend(["", "Planning facts:"])
+                lines.extend(f"- {item}" for item in discovery.facts)
+            if discovery.relevant_files:
+                lines.extend(["", "Relevant files:"])
+                lines.extend(f"- {item}" for item in discovery.relevant_files)
+            if discovery.risks:
+                lines.extend(["", "Planning risks:"])
+                lines.extend(f"- {item}" for item in discovery.risks)
+            if discovery.verification_hints:
+                lines.extend(["", "Planning verification hints:"])
+                lines.extend(f"- {item}" for item in discovery.verification_hints)
+            if discovery.open_questions:
+                lines.extend(["", "Planning open questions:"])
+                lines.extend(f"- {item}" for item in discovery.open_questions)
         lines.extend(["", "Steps:"])
         for step in task.steps:
             evidence = (
@@ -493,8 +513,7 @@ class TaskController:
         return {
             "task_id": task.task_id,
             "mode": task.mode,
-            "plan_source": task.plan_source,
-            "mode_policy": dict(task.mode_policy or {}),
+            "planning": task.planning.to_signal(),
             "phase": task.phase,
             "current_step_id": current.id if current else None,
             "current_step_title": current.title if current else None,
@@ -894,12 +913,24 @@ def _optional_text(value: object) -> str | None:
     return text or None
 
 
+def _planning_state_for_initialize(
+    planning: TaskPlanningState | Mapping[str, object] | None,
+    mode: TaskMode,
+) -> TaskPlanningState:
+    if isinstance(planning, TaskPlanningState):
+        return planning
+    if isinstance(planning, Mapping):
+        return task_planning_state_from_mapping(planning)
+    source = "default"
+    phase = "execution" if mode == "plan" else "none"
+    return TaskPlanningState(phase=phase, source=source)
+
+
 def build_task_state_from_recovery_projection(
     prompts: Iterable[AgentMessage],
     recovery_projection: Mapping[str, object],
     *,
     mode: TaskMode | str | None = None,
-    mode_policy: Mapping[str, object] | None = None,
 ) -> TaskState | None:
     """将会话恢复投影重建为本次 run 的 TaskState。
 
@@ -917,11 +948,7 @@ def build_task_state_from_recovery_projection(
     recovered_mode = ensure_task_mode(
         recovery_projection.get("task_mode") or mode or "edit"
     )
-    recovered_plan_source = _compact(
-        recovery_projection.get("plan_source"),
-        limit=40,
-    ) or "recovered"
-    recovered_policy = dict(mode_policy or policy_for_mode(recovered_mode).to_signal())
+    planning = TaskPlanningState(phase="recovered", source="recovered")
 
     steps: list[TaskStep] = []
     seen: set[str] = set()
@@ -978,8 +1005,7 @@ def build_task_state_from_recovery_projection(
         goal=goal,
         steps=steps,
         mode=recovered_mode,
-        plan_source=recovered_plan_source,
-        mode_policy=recovered_policy,
+        planning=planning,
         current_step_id=current.id if current else None,
         phase="acting" if current else "waiting",
         next_action=(

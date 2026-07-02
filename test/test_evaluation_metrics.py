@@ -669,7 +669,7 @@ def test_context_report_exposes_selected_item_summaries() -> None:
     ]
 
 
-def test_runtime_profile_can_disable_context_memory_and_task_control(
+def test_runtime_profile_keeps_context_governor_but_disables_memory_and_task_control(
     tmp_path: Path,
 ) -> None:
     base = CreateAgentSessionOptions(
@@ -680,7 +680,6 @@ def test_runtime_profile_can_disable_context_memory_and_task_control(
     applied = EvaluationExecutor._apply_runtime_profile(
         base,
         EvalRuntimeProfile(
-            context_governance_enabled=False,
             memory_enabled=False,
             task_control_enabled=False,
         ),
@@ -700,15 +699,15 @@ def test_runtime_profile_can_disable_context_memory_and_task_control(
 
     result = asyncio.run(run())
 
-    assert applied.context_governance_enabled is False
     assert applied.memory_enabled is False
     assert applied.task_control_enabled is False
     assert handle.assembly.session_options.prepare_context is None
+    assert handle.session.context_governor is not None
     assert handle.session.memory_enabled is False
     assert result.task is None
+    assert any(event.get("type") == "context_prepared" for event in events)
     assert not any(
         event.get("type") in {
-            "context_prepared",
             "memory_retrieved",
             "memory_updated",
             "task_plan_created",

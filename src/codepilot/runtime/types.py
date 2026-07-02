@@ -19,16 +19,18 @@ from types import MappingProxyType
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping, Optional, cast
 
-from codepilot.protocols import Message, Model
+from codepilot.protocols import Model
 from codepilot.core import (
     AfterToolCallContext,
     AfterToolCallResult,
     AgentMessage,
     BeforeToolCallContext,
     BeforeToolCallResult,
+    PlanningBudgetProfile,
     StreamFn,
     TaskMode,
     ToolExecutionMode,
+    ensure_planning_budget_profile,
     ensure_task_mode,
 )
 from codepilot.extensions.types import LifecycleHook, RegisteredCommand
@@ -87,10 +89,6 @@ class CreateAgentSessionOptions:
         tool_execution: 工具执行模式（parallel/sequential）。
         load_workspace_resources: 是否加载工作区资源文件。
         enabled_builtin_tools: 启用的内置工具名称列表。
-        max_context_messages: 上下文消息数量上限。
-        max_context_tokens: 上下文 token 数量上限。
-        retain_recent_messages: 压缩时保留的最近消息数。
-        summary_builder: 自定义摘要构建器。
         retry_enabled: 是否启用重试。
         max_retries: 最大重试次数。
         retry_base_delay_ms: 重试基础延迟（毫秒）。
@@ -127,17 +125,13 @@ class CreateAgentSessionOptions:
     thinking_level: Optional[str] = None
     tool_execution: Optional[ToolExecutionMode] = None
     max_tool_calls_per_turn: Optional[int] = None
-    context_governance_enabled: bool = True
     memory_enabled: bool = True
     task_control_enabled: bool = True
     task_mode: TaskMode | None = None
+    planning_budget_profile: PlanningBudgetProfile | None = None
     max_task_replans_per_run: Optional[int] = None
     load_workspace_resources: bool = True
     enabled_builtin_tools: Optional[list[str]] = None
-    max_context_messages: Optional[int] = None
-    max_context_tokens: Optional[int] = None
-    retain_recent_messages: Optional[int] = None
-    summary_builder: Optional[Callable[[list[Message]], str]] = None
     retry_enabled: Optional[bool] = None
     max_retries: Optional[int] = None
     retry_base_delay_ms: Optional[int] = None
@@ -269,6 +263,7 @@ class ResolvedRuntimeProfile:
     credential_location: str | None = None
     permission_mode: RuntimePermissionMode = "workspace-write"
     task_mode: TaskMode = "edit"
+    planning_budget_profile: PlanningBudgetProfile = "balanced"
     sources: Mapping[str, ConfigValueSource] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -296,6 +291,11 @@ class ResolvedRuntimeProfile:
             _ensure_runtime_permission_mode(self.permission_mode),
         )
         object.__setattr__(self, "task_mode", ensure_task_mode(self.task_mode))
+        object.__setattr__(
+            self,
+            "planning_budget_profile",
+            ensure_planning_budget_profile(self.planning_budget_profile),
+        )
         object.__setattr__(
             self,
             "sources",

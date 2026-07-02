@@ -27,7 +27,7 @@ from codepilot.protocols import (
 from .agent_loop import run_agent_loop, run_agent_loop_continue
 from .events import AgentEventEmitter
 from .llm_runner import StreamFn
-from .task_modes import TaskMode, ensure_task_mode
+from .task_control import PlanningBudgetProfile, TaskMode, ensure_planning_budget_profile, ensure_task_mode
 from .tool_coordinator import ToolCallCoordinator
 from .types import (
     AfterToolCallContext,
@@ -143,6 +143,7 @@ class AgentOptions:
     task_recovery_projection: dict[str, object] | None = None
     task_control_enabled: bool = True
     task_mode: TaskMode = "edit"
+    planning_budget_profile: PlanningBudgetProfile = "balanced"
     max_task_replans_per_run: int = 2
 
     def __post_init__(self) -> None:
@@ -196,6 +197,9 @@ class AgentOptions:
             field_name="task_control_enabled",
         )
         self.task_mode = ensure_task_mode(self.task_mode)
+        self.planning_budget_profile = ensure_planning_budget_profile(
+            self.planning_budget_profile
+        )
         self.max_task_replans_per_run = _ensure_positive_int(
             self.max_task_replans_per_run,
             field_name="max_task_replans_per_run",
@@ -423,6 +427,7 @@ class Agent:
                 retry_base_delay_ms=self._options.retry_base_delay_ms,
                 task_control_enabled=self._options.task_control_enabled,
                 task_mode=self._options.task_mode,
+                planning_budget_profile=self._options.planning_budget_profile,
                 max_task_replans_per_run=self._options.max_task_replans_per_run,
             ),
             emitter=AgentEventEmitter(
@@ -503,6 +508,7 @@ class Agent:
             retry_base_delay_ms=self._options.retry_base_delay_ms,
             task_control_enabled=self._options.task_control_enabled,
             task_mode=self._options.task_mode,
+            planning_budget_profile=self._options.planning_budget_profile,
             max_task_replans_per_run=self._options.max_task_replans_per_run,
         )
 

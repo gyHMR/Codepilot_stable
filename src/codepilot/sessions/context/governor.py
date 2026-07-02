@@ -14,6 +14,7 @@ from codepilot.protocols import (
     ContextCheckpoint,
     ContextReport,
 )
+from codepilot.sessions.layout import SessionLayout
 from codepilot.sessions.memory.records import DURABLE_MEMORY_KINDS, MemoryQuery, RetrievedMemory
 from codepilot.sessions.memory.rendering import render_memory
 
@@ -52,6 +53,7 @@ class ContextGovernor:
     ) -> None:
         self.workspace_dir = Path(workspace_dir)
         self.session_id = session_id
+        self.layout = SessionLayout.for_workspace(self.workspace_dir, self.session_id)
         self.state = state or SessionContextState(workspace_dir=self.workspace_dir)
         self.memory_retriever = memory_retriever
         self.pressure_policy = pressure_policy or ContextPressurePolicy()
@@ -72,13 +74,7 @@ class ContextGovernor:
             checkpoints=self.checkpoints,
         )
         self.projector = ContextProjector(ledger=self.ledger)
-        self.context_views_file = (
-            self.workspace_dir
-            / ".codepilot"
-            / "sessions"
-            / session_id
-            / "context_views.jsonl"
-        )
+        self.context_ledger_file = self.layout.context_ledger_file
 
     async def prepare(
         self,
@@ -229,11 +225,12 @@ class ContextGovernor:
         return lines
 
     def _append_context_view(self, report: ContextReport) -> None:
-        self.context_views_file.parent.mkdir(parents=True, exist_ok=True)
-        with self.context_views_file.open("a", encoding="utf-8", newline="\n") as fp:
+        self.context_ledger_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.context_ledger_file.open("a", encoding="utf-8", newline="\n") as fp:
             fp.write(
                 json.dumps(
                     {
+                        "type": "context_view",
                         "context_id": report.context_id,
                         "pressure": asdict(report.pressure) if report.pressure else None,
                         "tokens_by_layer": dict(report.tokens_by_layer),
