@@ -30,8 +30,21 @@ from typing import Iterable, Mapping, cast
 from codepilot.protocols import TaskSummary, TextContent, ToolResultMessage, UserMessage
 
 from .run_state import RunState
+from .task_evidence import (
+    complete_step_payload,
+    evidence_refs,
+    first_error_code,
+    infer_action_intent,
+    is_tool_unavailable,
+)
+from .task_modes import TaskMode, ensure_task_mode, policy_for_mode
 from .task_planner import PlannedTaskStep
+from .task_replanner import (
+    repair_next_action,
+    should_propose_revert_after_repeated_failure,
+)
 from .task_tools import COMPLETE_TASK_STEP_TOOL
+from .task_stop import build_completion_check, completion_steering_message
 from .task_state import (
     AttemptRecord,
     ChangeSet,
@@ -42,6 +55,14 @@ from .task_state import (
     TaskState,
     TaskStep,
     TaskStepKind,
+)
+from .task_verifier import (
+    has_failed_verification,
+    has_non_verification_error,
+    has_passed_verification,
+    is_verification_step,
+    verification_command,
+    verification_failure_note,
 )
 from .types import AgentMessage
 
@@ -71,6 +92,9 @@ class TaskController:
         goal: str | None = None,
         acceptance_criteria: Iterable[str] | None = None,
         constraints: Iterable[str] | None = None,
+        mode: TaskMode | str = "edit",
+        plan_source: str | None = None,
+        mode_policy: Mapping[str, object] | None = None,
         max_replans_per_run: int | None = None,
         task_recovery_projection: Mapping[str, object] | None = None,
     ) -> TaskState:
@@ -93,10 +117,14 @@ class TaskController:
         Returns:
             TaskState: 初始化后的任务状态。
         """
+        selected_mode = ensure_task_mode(mode)
+        selected_policy = dict(mode_policy or policy_for_mode(selected_mode).to_signal())
         if task_recovery_projection is not None:
             recovered = build_task_state_from_recovery_projection(
                 prompts,
                 task_recovery_projection,
+                mode=selected_mode,
+                mode_policy=selected_policy,
             )
             if recovered is not None:
                 if max_replans_per_run is not None:
@@ -106,7 +134,8 @@ class TaskController:
                     )
                 return recovered
         goal = (goal or _goal_from_prompts(prompts)).strip() or "完成当前请求"
-        steps = self._normalize_steps(proposed_steps or ["完成当前请求"])
+        default_step = policy_for_mode(selected_mode).default_step_title
+        steps = self._normalize_steps(proposed_steps or [default_step])
         task = TaskState(
             task_id=f"task_{uuid.uuid4().hex[:12]}",
             goal=goal,
@@ -115,6 +144,9 @@ class TaskController:
                 item.strip() for item in acceptance_criteria or [] if item.strip()
             ],
             steps=steps,
+            mode=selected_mode,
+            plan_source=plan_source or "default",
+            mode_policy=selected_policy,
             current_step_id=steps[0].id if steps else None,
             phase="acting",
             next_action=steps[0].title if steps else None,
@@ -171,7 +203,7 @@ class TaskController:
             self._block_current_step(
                 task,
                 "等待工具审批",
-                evidence_refs=_evidence_refs(results),
+                evidence_refs=evidence_refs(results),
             )
             task.phase = "waiting"
             task.recent_error_code = "approval_required"
@@ -182,21 +214,21 @@ class TaskController:
             self._block_current_step(
                 task,
                 "工具权限拒绝",
-                evidence_refs=_evidence_refs(results),
+                evidence_refs=evidence_refs(results),
             )
-            task.recent_error_code = _first_error_code(results) or "permission_denied"
+            task.recent_error_code = first_error_code(results) or "permission_denied"
             task.recent_failure_type = "permission_denied"
             return self._decision(task, "replan", "permission_denied")
 
         unavailable = [
-            result for result in results if _is_tool_unavailable(result)
+            result for result in results if is_tool_unavailable(result)
         ]
         if unavailable:
             step = task.current_step()
             if step is not None:
                 step.block(
                     "工具不可用",
-                    evidence_refs=_evidence_refs(unavailable),
+                    evidence_refs=evidence_refs(unavailable),
                 )
             task.phase = "waiting"
             task.next_action = "报告工具不可用并等待用户指示"
@@ -204,37 +236,40 @@ class TaskController:
             task.recent_failure_type = "tool_unavailable"
             return self._decision(task, "stop", "tool_unavailable")
 
-        if self._has_non_verification_error(results):
+        if has_non_verification_error(results):
             step = task.current_step()
             task.action_intent = "debug_failure"
-            task.recent_error_code = _first_error_code(results) or "tool_error"
+            task.recent_error_code = first_error_code(results) or "tool_error"
             task.recent_failure_type = "tool_error"
             if step is not None:
                 step.record_failure(
                     "工具执行失败，需要修复或调整方案",
-                    evidence_refs=_evidence_refs(results),
+                    evidence_refs=evidence_refs(results),
                 )
             return self._decision(task, "repair", "tool_error")
 
-        if self._has_failed_verification(results):
+        if has_failed_verification(results):
             step = task.current_step()
             task.action_intent = "debug_failure"
             task.recent_error_code = "verification_failed"
             task.recent_failure_type = "verification_failed"
-            task.next_action = _repair_next_action(results)
+            task.next_action = repair_next_action(results)
             self._mark_latest_changes_failed(task, results)
             if step is not None:
                 step.record_failure(
-                    _verification_failure_note(results),
-                    evidence_refs=_evidence_refs(results),
+                    verification_failure_note(results),
+                    evidence_refs=evidence_refs(results),
                 )
                 if step.failure_count >= 2:
-                    if task.change_sets:
+                    if should_propose_revert_after_repeated_failure(
+                        failure_count=step.failure_count,
+                        has_change_sets=bool(task.change_sets),
+                    ):
                         self._mark_rollback_required(task)
                         self._record_replan(
                             task,
                             trigger="verification_failed",
-                            evidence_refs=_evidence_refs(results),
+                            evidence_refs=evidence_refs(results),
                             requires_revert=True,
                         )
                         task.phase = "waiting"
@@ -253,7 +288,7 @@ class TaskController:
                     return self._decision(task, "replan", "repeated_step_failure")
             return self._decision(task, "repair", "verification_failed")
 
-        if self._has_passed_verification(results):
+        if has_passed_verification(results):
             self._complete_verified_steps(task, results)
             self._mark_latest_changes_verified(task, results)
         elif self._has_complete_step_signal(results):
@@ -289,50 +324,27 @@ class TaskController:
         Returns:
             CompletionCheck: 完成检查结果。
         """
-        if task.blocked_step_titles():
-            check = CompletionCheck(
-                satisfied=False,
-                reason="blocked_steps",
-                missing=["unblocked_steps"],
-                can_continue=False,
-            )
-            self._record_completion(task, check)
-            return check
-
-        if run.workspace_changed and not run.fresh_verification_passed:
-            can_continue = task.completion_prompt_count == 0
-            check = CompletionCheck(
-                satisfied=False,
-                reason="modified_without_fresh_verification",
-                missing=["fresh_verification"],
-                can_continue=can_continue,
-                unverified=not can_continue,
-            )
-            if can_continue:
-                task.completion_prompt_count += 1
-            self._record_completion(task, check)
-            return check
-
         incomplete = task.pending_step_titles()
-        if incomplete and not run.workspace_changed and task.recent_error_code is None:
+        blocked = task.blocked_step_titles()
+        if (
+            incomplete
+            and not blocked
+            and not run.workspace_changed
+            and task.recent_error_code is None
+        ):
             for step in task.steps:
                 if step.status == "in_progress":
                     step.complete(evidence_refs=["model:final_answer"])
-            incomplete = task.pending_step_titles()
 
-        if incomplete:
-            check = CompletionCheck(
-                satisfied=False,
-                reason="incomplete_steps",
-                missing=incomplete,
-                can_continue=False,
-            )
-            self._record_completion(task, check)
-            return check
-
-        check = CompletionCheck(satisfied=True, reason="all_steps_completed")
+        check = build_completion_check(task, run)
+        if (
+            check.reason == "modified_without_fresh_verification"
+            and check.can_continue
+        ):
+            task.completion_prompt_count += 1
         self._record_completion(task, check)
-        task.phase = "finished"
+        if check.satisfied:
+            task.phase = "finished"
         return check
 
     def completion_steering(self, check: CompletionCheck) -> UserMessage:
@@ -346,19 +358,7 @@ class TaskController:
         Returns:
             UserMessage: 引导消息。
         """
-        text = (
-            "工作区已经发生修改，但当前没有与最新工作区状态一致的成功验证。\n"
-            "请运行最相关的测试或检查；如果环境无法验证，请明确记录原因和剩余风险。"
-        )
-        return UserMessage(
-            content=[TextContent(text=text)],
-            metadata={
-                "task_completion_gate": {
-                    "reason": check.reason,
-                    "missing": list(check.missing),
-                }
-            },
-        )
+        return completion_steering_message(check)
 
     def render_context(self, task: TaskState) -> str:
         """将任务状态渲染为 Markdown 格式的上下文文本。
@@ -375,10 +375,13 @@ class TaskController:
         lines = [
             "## Current Task",
             f"Goal: {task.goal}",
+            f"Mode: {task.mode}",
             f"Phase: {task.phase}",
-            "",
-            "Steps:",
         ]
+        policy = policy_for_mode(task.mode)
+        if policy.guidance:
+            lines.append(f"Mode guidance: {policy.guidance}")
+        lines.extend(["", "Steps:"])
         for step in task.steps:
             evidence = (
                 f" evidence={', '.join(step.evidence_refs[-3:])}"
@@ -489,6 +492,9 @@ class TaskController:
         current = task.current_step()
         return {
             "task_id": task.task_id,
+            "mode": task.mode,
+            "plan_source": task.plan_source,
+            "mode_policy": dict(task.mode_policy or {}),
             "phase": task.phase,
             "current_step_id": current.id if current else None,
             "current_step_title": current.title if current else None,
@@ -557,17 +563,17 @@ class TaskController:
         self._record_replan(
             task,
             trigger="verification_failed",
-            evidence_refs=_evidence_refs(results),
+            evidence_refs=evidence_refs(results),
             requires_revert=False,
-            new_strategy=_repair_next_action(results),
+            new_strategy=repair_next_action(results),
         )
         current.title = "根据最新失败证据调整方案"
         current.mark_in_progress()
         current.failure_count = 0
-        current.note = _verification_failure_note(results)
+        current.note = verification_failure_note(results)
         current.acceptance = "基于失败验证定位根因，并完成可重新验证的最小修复"
-        current.verification_hint = _verification_command(results)
-        current.add_evidence_refs(_evidence_refs(results))
+        current.verification_hint = verification_command(results)
+        current.add_evidence_refs(evidence_refs(results))
         current_index = task.steps.index(current)
         task.steps = [
             *task.steps[: current_index + 1],
@@ -576,44 +582,22 @@ class TaskController:
                 title="重新运行相关验证",
                 kind="verify",
                 acceptance="最新失败验证通过",
-                verification_hint=_verification_command(results),
+                verification_hint=verification_command(results),
             ),
         ]
         task.current_step_id = current.id
-        task.next_action = _repair_next_action(results)
+        task.next_action = repair_next_action(results)
         task.phase = "acting"
 
-    def _has_failed_verification(self, results: list[ToolResultMessage]) -> bool:
-        """检查工具结果中是否包含失败的验证。"""
-        return any(
-            isinstance(result.verification, dict)
-            and result.verification.get("status") == "failed"
-            for result in results
-        )
-
-    def _has_non_verification_error(self, results: list[ToolResultMessage]) -> bool:
-        return any(
-            (result.status != "success" or result.is_error)
-            and not isinstance(result.verification, dict)
-            for result in results
-        )
-
-    def _has_passed_verification(self, results: list[ToolResultMessage]) -> bool:
-        return any(
-            isinstance(result.verification, dict)
-            and result.verification.get("status") == "passed"
-            for result in results
-        )
-
     def _has_complete_step_signal(self, results: list[ToolResultMessage]) -> bool:
-        return any(_complete_step_payload(result) is not None for result in results)
+        return any(complete_step_payload(result) is not None for result in results)
 
     def _record_attempt(
         self,
         task: TaskState,
         results: list[ToolResultMessage],
     ) -> AttemptRecord:
-        intent = _infer_action_intent(results)
+        intent = infer_action_intent(results)
         current = task.current_step()
         attempt = AttemptRecord(
             attempt_id=f"attempt_{uuid.uuid4().hex[:12]}",
@@ -624,10 +608,10 @@ class TaskController:
                 for result in results
                 if result.tool_call_id
             ],
-            evidence_refs=_evidence_refs(results),
+            evidence_refs=evidence_refs(results),
             status="failed" if any(result.is_error for result in results) else "succeeded",
-            failure_type=_first_error_code(results),
-            failure_reason=_first_error_code(results),
+            failure_type=first_error_code(results),
+            failure_reason=first_error_code(results),
         )
         task.attempts.append(attempt)
         task.action_intent = intent
@@ -680,7 +664,7 @@ class TaskController:
         step = task.current_step()
         if step is None:
             return
-        step.add_evidence_refs(_evidence_refs([result]))
+        step.add_evidence_refs(evidence_refs([result]))
         if result.workspace_changed is True:
             step.mark_in_progress()
             step.progress_state = "changed"
@@ -703,7 +687,7 @@ class TaskController:
         task: TaskState,
         results: list[ToolResultMessage],
     ) -> None:
-        refs = _evidence_refs(results)
+        refs = evidence_refs(results)
         step = task.current_step()
         if step is None:
             step = task.first_open_step()
@@ -718,7 +702,7 @@ class TaskController:
             progress_state="verified",
         )
         next_step = self._next_incomplete_step_after(task, step)
-        if next_step is not None and _is_verification_step(next_step):
+        if next_step is not None and is_verification_step(next_step):
             next_step.complete(
                 summary="验证通过",
                 evidence_refs=refs,
@@ -738,10 +722,10 @@ class TaskController:
         step = task.current_step()
         if step is None:
             return
-        refs = _evidence_refs(results)
+        refs = evidence_refs(results)
         summaries: list[str] = []
         for result in results:
-            payload = _complete_step_payload(result)
+            payload = complete_step_payload(result)
             if payload is None:
                 continue
             summary = payload.get("summary")
@@ -768,7 +752,7 @@ class TaskController:
         task: TaskState,
         results: list[ToolResultMessage],
     ) -> None:
-        refs = _evidence_refs(results)
+        refs = evidence_refs(results)
         for change in task.change_sets:
             if change.status in {"pending", "verified"}:
                 change.status = "failed"
@@ -779,7 +763,7 @@ class TaskController:
         task: TaskState,
         results: list[ToolResultMessage],
     ) -> None:
-        refs = _evidence_refs(results)
+        refs = evidence_refs(results)
         for change in task.change_sets:
             if change.status in {"pending", "failed"}:
                 change.status = "verified"
@@ -905,77 +889,6 @@ def _step_fields(raw: object) -> tuple[str, TaskStepKind, str | None, str | None
         )
     return _compact(raw, limit=_MAX_STEP_TITLE_CHARS), "other", None, None
 
-
-def _is_verification_step(step: TaskStep) -> bool:
-    if step.kind == "verify":
-        return True
-    text = f"{step.title} {step.verification_hint or ''}".lower()
-    markers = ("验证", "测试", "检查", "verify", "test", "pytest")
-    return any(marker in text for marker in markers)
-
-
-def _complete_step_payload(result: ToolResultMessage) -> Mapping[str, object] | None:
-    if result.tool_name != COMPLETE_TASK_STEP_TOOL:
-        return None
-    payload = result.metadata.get("task_control")
-    if not isinstance(payload, Mapping):
-        return None
-    if payload.get("action") != "complete_step":
-        return None
-    if payload.get("valid") is False:
-        return None
-    return payload
-
-
-def _repair_next_action(results: list[ToolResultMessage]) -> str:
-    detail = _verification_failure_detail(results)
-    if detail:
-        return (
-            f"根据验证失败证据修复实现：{detail}。"
-            "先读取失败断言和相关调用链，完成最小修复后重新运行同一验证。"
-        )
-    return "根据最新验证失败证据定位根因，完成最小修复后重新运行相关验证"
-
-
-def _verification_failure_note(results: list[ToolResultMessage]) -> str:
-    detail = _verification_failure_detail(results)
-    return f"验证失败，需要修复：{detail}" if detail else "验证失败，需要修复"
-
-
-def _verification_failure_detail(results: list[ToolResultMessage]) -> str:
-    for result in results:
-        verification = result.verification
-        if not isinstance(verification, Mapping):
-            continue
-        if verification.get("status") != "failed":
-            continue
-        parts: list[str] = []
-        command = _compact(verification.get("command"), limit=160)
-        if command:
-            parts.append(f"命令 {command}")
-        exit_code = verification.get("exit_code")
-        if isinstance(exit_code, int) and not isinstance(exit_code, bool):
-            parts.append(f"exit_code={exit_code}")
-        summary = _compact(verification.get("summary"), limit=220)
-        if summary:
-            parts.append(f"摘要 {summary}")
-        return "；".join(parts)
-    return ""
-
-
-def _verification_command(results: list[ToolResultMessage]) -> str | None:
-    for result in results:
-        verification = result.verification
-        if not isinstance(verification, Mapping):
-            continue
-        if verification.get("status") != "failed":
-            continue
-        command = _compact(verification.get("command"), limit=160)
-        if command:
-            return command
-    return None
-
-
 def _optional_text(value: object) -> str | None:
     text = _compact(value, limit=240)
     return text or None
@@ -984,6 +897,9 @@ def _optional_text(value: object) -> str | None:
 def build_task_state_from_recovery_projection(
     prompts: Iterable[AgentMessage],
     recovery_projection: Mapping[str, object],
+    *,
+    mode: TaskMode | str | None = None,
+    mode_policy: Mapping[str, object] | None = None,
 ) -> TaskState | None:
     """将会话恢复投影重建为本次 run 的 TaskState。
 
@@ -998,6 +914,14 @@ def build_task_state_from_recovery_projection(
     goal = str(recovery_projection.get("goal") or _goal_from_prompts(prompts)).strip()
     if not goal:
         goal = _goal_from_prompts(prompts)
+    recovered_mode = ensure_task_mode(
+        recovery_projection.get("task_mode") or mode or "edit"
+    )
+    recovered_plan_source = _compact(
+        recovery_projection.get("plan_source"),
+        limit=40,
+    ) or "recovered"
+    recovered_policy = dict(mode_policy or policy_for_mode(recovered_mode).to_signal())
 
     steps: list[TaskStep] = []
     seen: set[str] = set()
@@ -1053,6 +977,9 @@ def build_task_state_from_recovery_projection(
         task_id=f"task_{uuid.uuid4().hex[:12]}",
         goal=goal,
         steps=steps,
+        mode=recovered_mode,
+        plan_source=recovered_plan_source,
+        mode_policy=recovered_policy,
         current_step_id=current.id if current else None,
         phase="acting" if current else "waiting",
         next_action=(
@@ -1076,66 +1003,5 @@ def _coerce_task_step_kind(value: object) -> TaskStepKind:
     if text in TASK_STEP_KINDS:
         return cast(TaskStepKind, text)
     return "other"
-
-
-def _evidence_refs(results: list[ToolResultMessage]) -> list[str]:
-    """从工具结果中提取证据引用列表（工具调用ID、审批ID、验证ID、文件路径）。"""
-    refs: list[str] = []
-    for result in results:
-        if result.tool_call_id:
-            refs.append(f"tool:{result.tool_call_id}")
-        if result.approval_id:
-            refs.append(f"approval:{result.approval_id}")
-        if isinstance(result.verification, dict) and result.tool_call_id:
-            refs.append(f"verification:{result.tool_call_id}")
-        for path in result.affected_paths:
-            refs.append(f"file:{path}")
-    return refs
-
-
-def _is_tool_unavailable(result: ToolResultMessage) -> bool:
-    if result.status != "error" and not result.is_error:
-        return False
-    if result.error_code == "tool_not_found":
-        return True
-    text = " ".join(
-        block.text
-        for block in result.content
-        if isinstance(block, TextContent)
-    ).lower()
-    return text.startswith("tool ") and " not found" in text
-
-
-def _first_error_code(results: list[ToolResultMessage]) -> str | None:
-    return next(
-        (
-            result.error_code
-            for result in results
-            if result.error_code
-        ),
-        None,
-    )
-
-
-def _infer_action_intent(results: list[ToolResultMessage]) -> str:
-    if any(_complete_step_payload(result) is not None for result in results):
-        return "complete_step"
-    if any(
-        isinstance(result.verification, dict)
-        and result.verification.get("status") == "failed"
-        for result in results
-    ):
-        return "debug_failure"
-    if any(isinstance(result.verification, dict) for result in results):
-        return "run_verification"
-    if any(result.workspace_changed is True for result in results):
-        return "edit_file"
-    names = " ".join(result.tool_name.lower() for result in results)
-    if any(marker in names for marker in _READ_TOOL_MARKERS):
-        return "read_context"
-    if any(marker in names for marker in _WRITE_TOOL_MARKERS):
-        return "edit_file"
-    return "tool_action"
-
 
 __all__ = ["TaskController", "build_task_state_from_recovery_projection"]

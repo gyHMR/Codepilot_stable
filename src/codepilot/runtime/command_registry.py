@@ -109,6 +109,7 @@ def builtin_commands() -> list[RuntimeCommand]:
     return [
         RuntimeCommand(name="help", description="显示可用命令", source="builtin"),
         RuntimeCommand(name="status", description="查看模型、工作区、会话和权限状态", source="builtin"),
+        RuntimeCommand(name="mode", description="查看或切换任务模式：read/edit/plan", source="builtin"),
         RuntimeCommand(name="session", description="查看当前会话与叶子节点", source="builtin"),
         RuntimeCommand(name="tree", description="查看当前会话树", source="builtin"),
         RuntimeCommand(name="fork", description="从指定节点分叉新会话", source="builtin"),
@@ -208,8 +209,28 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
             f"  Session    : {session_id}",
             f"  Leaf       : {leaf_id}",
             f"  Messages   : {message_count}",
+            f"  Mode       : {session.task_mode}",
         ]
         return RuntimeCommandResult(handled=True, output_lines=lines)
+
+    # /mode [read|edit|plan]: 查看或切换任务模式
+    if cmd == "/mode":
+        if not arg:
+            return RuntimeCommandResult(
+                handled=True,
+                output_lines=[f"task_mode={session.task_mode}"],
+            )
+        try:
+            mode = session.set_task_mode(arg)
+        except ValueError as exc:
+            return RuntimeCommandResult(
+                handled=True,
+                output_lines=[str(exc), "usage: /mode read|edit|plan"],
+            )
+        return RuntimeCommandResult(
+            handled=True,
+            output_lines=[f"task_mode={mode}"],
+        )
 
     # /session: 显示当前会话信息
     if cmd == "/session":

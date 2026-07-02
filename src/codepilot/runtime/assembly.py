@@ -105,6 +105,7 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
         credential_source=credential_source,
         credential_location=credential_location,
         permission_mode=config.tool_permission_mode,  # type: ignore[arg-type]
+        task_mode=config.task_mode,
         sources=sources,
     )
 
@@ -163,7 +164,7 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
         context_governance_enabled=options.context_governance_enabled,
         memory_enabled=options.memory_enabled,
         task_control_enabled=options.task_control_enabled,
-        task_planner_enabled=options.task_planner_enabled,
+        task_mode=config.task_mode,
         max_task_replans_per_run=options.max_task_replans_per_run or 2,
         convert_to_llm=convert_to_llm,
         get_api_key=resolved_model.get_api_key,

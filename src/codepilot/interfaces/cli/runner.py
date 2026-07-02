@@ -323,9 +323,12 @@ async def _handle_rpc_request(
     try:
         if cmd == "prompt":
             text = str(req.get("text", ""))
+            task_mode = req.get("task_mode")
+            if task_mode is not None and not isinstance(task_mode, str):
+                raise ValueError("task_mode must be a string")
             async for event in runtime.send_message(
                 session_id,
-                UserInput(text=text),
+                UserInput(text=text, task_mode=task_mode),
             ):
                 emit({"type": "event", "event": event})
             emit_rpc_ok(emit, req_id=req_id, command="prompt")
@@ -342,6 +345,18 @@ async def _handle_rpc_request(
                 req_id=req_id,
                 command="state",
                 data=state,
+            )
+
+        elif cmd == "set_task_mode":
+            mode = req.get("task_mode")
+            if not isinstance(mode, str):
+                raise ValueError("set_task_mode requires task_mode")
+            current = runtime.set_task_mode(session_id, mode)
+            emit_rpc_ok(
+                emit,
+                req_id=req_id,
+                command="set_task_mode",
+                data={"session_id": session_id, "task_mode": current},
             )
 
         elif cmd == "list_entries":

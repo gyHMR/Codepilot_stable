@@ -48,6 +48,7 @@ from codepilot.tools.types import (
     AgentTool,
     AgentToolResult,
 )
+from .task_modes import TaskMode, ensure_task_mode
 
 
 # ── 类型别名与常量 ──────────────────────────────────────────────
@@ -259,7 +260,7 @@ class AgentLoopConfig:
     5. 推理控制: reasoning（思考深度）
     6. 安全限制: max_tool_iterations, max_tool_calls_per_turn, repeated_tool_call_limit
     7. 重试策略: retry_enabled, max_model_retries, retry_base_delay_ms
-    8. 任务控制: task_control_enabled, task_planner_enabled, max_task_replans_per_run
+    8. 任务控制: task_control_enabled, task_mode, max_task_replans_per_run
 
     Attributes:
         model: 使用的 LLM 模型信息（包含 provider、api、context_window 等）。
@@ -284,7 +285,7 @@ class AgentLoopConfig:
         max_model_retries: LLM 调用最大重试次数。
         retry_base_delay_ms: 重试基础延迟（毫秒），实际延迟按指数退避计算。
         task_control_enabled: 是否启用任务控制器（TaskController）。
-        task_planner_enabled: 是否启用任务规划器（TaskPlanner）。
+        task_mode: 用户选择的任务模式（read/edit/plan）。
         max_task_replans_per_run: 单次任务运行允许的最大局部重新规划次数。
     """
 
@@ -331,7 +332,7 @@ class AgentLoopConfig:
 
     # ── 任务控制 ────────────────────────────────────────────────
     task_control_enabled: bool = True                                         # 是否启用任务控制
-    task_planner_enabled: bool = False                                        # 是否启用任务规划
+    task_mode: TaskMode = "edit"                                              # 用户任务模式
     max_task_replans_per_run: int = 2                                         # 最大任务重规划次数
 
     def __post_init__(self) -> None:
@@ -378,10 +379,7 @@ class AgentLoopConfig:
             self.task_control_enabled,
             field_name="task_control_enabled",
         )
-        self.task_planner_enabled = _ensure_bool(
-            self.task_planner_enabled,
-            field_name="task_planner_enabled",
-        )
+        self.task_mode = ensure_task_mode(self.task_mode)
         self.max_task_replans_per_run = _ensure_positive_int(
             self.max_task_replans_per_run,
             field_name="max_task_replans_per_run",

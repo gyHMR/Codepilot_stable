@@ -27,6 +27,7 @@ from codepilot.protocols import (
 from .agent_loop import run_agent_loop, run_agent_loop_continue
 from .events import AgentEventEmitter
 from .llm_runner import StreamFn
+from .task_modes import TaskMode, ensure_task_mode
 from .tool_coordinator import ToolCallCoordinator
 from .types import (
     AfterToolCallContext,
@@ -141,7 +142,7 @@ class AgentOptions:
     stream_fn: StreamFn | None = None
     task_recovery_projection: dict[str, object] | None = None
     task_control_enabled: bool = True
-    task_planner_enabled: bool = True
+    task_mode: TaskMode = "edit"
     max_task_replans_per_run: int = 2
 
     def __post_init__(self) -> None:
@@ -194,10 +195,7 @@ class AgentOptions:
             self.task_control_enabled,
             field_name="task_control_enabled",
         )
-        self.task_planner_enabled = _ensure_bool(
-            self.task_planner_enabled,
-            field_name="task_planner_enabled",
-        )
+        self.task_mode = ensure_task_mode(self.task_mode)
         self.max_task_replans_per_run = _ensure_positive_int(
             self.max_task_replans_per_run,
             field_name="max_task_replans_per_run",
@@ -291,6 +289,10 @@ class Agent:
     ) -> None:
         """Set the persisted task recovery projection for the next run."""
         self._options.task_recovery_projection = projection
+
+    def set_task_mode(self, mode: TaskMode | str) -> None:
+        """Update the task mode used by future runs."""
+        self._options.task_mode = ensure_task_mode(mode)
 
     def add_steering_message(self, message: AgentMessage) -> None:
         """向引导消息队列中添加一条消息。
@@ -420,7 +422,7 @@ class Agent:
                 max_model_retries=self._options.max_model_retries,
                 retry_base_delay_ms=self._options.retry_base_delay_ms,
                 task_control_enabled=self._options.task_control_enabled,
-                task_planner_enabled=self._options.task_planner_enabled,
+                task_mode=self._options.task_mode,
                 max_task_replans_per_run=self._options.max_task_replans_per_run,
             ),
             emitter=AgentEventEmitter(
@@ -500,7 +502,7 @@ class Agent:
             max_model_retries=self._options.max_model_retries,
             retry_base_delay_ms=self._options.retry_base_delay_ms,
             task_control_enabled=self._options.task_control_enabled,
-            task_planner_enabled=self._options.task_planner_enabled,
+            task_mode=self._options.task_mode,
             max_task_replans_per_run=self._options.max_task_replans_per_run,
         )
 

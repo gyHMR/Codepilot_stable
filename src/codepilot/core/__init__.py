@@ -49,6 +49,7 @@ from .llm_runner import LLMStreamRunner, StreamFn
 from .message_conversion import convert_to_llm
 from .run_state import RunState, new_run_id
 from .task_controller import TaskController
+from .task_modes import TaskMode, TaskModePolicy, ensure_task_mode, policy_for_mode
 from .task_planner import PlannedTaskStep, TaskPlanDraft, TaskPlanner
 from .task_tools import COMPLETE_TASK_STEP_TOOL
 from .task_state import CompletionCheck, ExecutionDecision, TaskState, TaskStep
@@ -79,6 +80,10 @@ __all__ = [
     "RunState",
     "new_run_id",
     "TaskController",
+    "TaskMode",
+    "TaskModePolicy",
+    "ensure_task_mode",
+    "policy_for_mode",
     "PlannedTaskStep",
     "TaskPlanDraft",
     "TaskPlanner",

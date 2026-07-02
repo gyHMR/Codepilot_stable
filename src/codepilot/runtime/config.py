@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
 
-from codepilot.core import ToolExecutionMode
+from codepilot.core import TaskMode, ToolExecutionMode, ensure_task_mode
 from codepilot.sessions.persistence.store import SessionStore
 
 from .resources import WorkspaceResourceLoader, WorkspaceResources
@@ -62,6 +62,7 @@ class RuntimeDefaults:
     system_prompt: str = ""
     thinking_level: str = "off"
     tool_execution: ToolExecutionMode = "parallel"
+    task_mode: TaskMode = "edit"
     max_tool_calls_per_turn: int = 8
     max_context_messages: int | None = None
     retain_recent_messages: int = 24
@@ -120,6 +121,7 @@ class ResolvedRuntimeConfig:
     system_prompt: str
     thinking_level: str
     tool_execution: ToolExecutionMode
+    task_mode: TaskMode
     max_context_messages: int | None
     retain_recent_messages: int
     max_context_tokens: int | None
@@ -257,6 +259,13 @@ def resolve_runtime_config(
         ("workspace", settings.tool_execution if settings is not None else None),
         default=defaults.tool_execution,
     )
+    raw_task_mode = choose(
+        "task_mode",
+        ("options", options.task_mode),
+        ("workspace", settings.task_mode if settings is not None else None),
+        default=defaults.task_mode,
+    )
+    task_mode = ensure_task_mode(raw_task_mode)
     max_tool_calls_per_turn = choose(
         "max_tool_calls_per_turn",
         ("options", options.max_tool_calls_per_turn),
@@ -305,12 +314,16 @@ def resolve_runtime_config(
         ("workspace", settings.read_only_mode if settings is not None else None),
         default=defaults.read_only_mode,
     )
+    if task_mode == "read":
+        read_only_mode = True
     tool_permission_mode = choose(
         "tool_permission_mode",
         ("options", options.tool_permission_mode),
         ("workspace", settings.tool_permission_mode if settings is not None else None),
         default=("read-only" if read_only_mode else defaults.tool_permission_mode),
     )
+    if task_mode == "read" and options.tool_permission_mode not in {None, "read-only"}:
+        raise ValueError("task_mode=read requires tool_permission_mode=read-only")
     if read_only_mode:
         tool_permission_mode = "read-only"
     block_dangerous_bash = choose(
@@ -420,6 +433,7 @@ def resolve_runtime_config(
         system_prompt=system_prompt,
         thinking_level=thinking_level,
         tool_execution=tool_execution,
+        task_mode=task_mode,
         max_tool_calls_per_turn=max_tool_calls_per_turn,
         max_context_messages=max_context_messages,
         retain_recent_messages=retain_recent_messages,

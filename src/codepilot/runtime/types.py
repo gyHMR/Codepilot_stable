@@ -27,7 +27,9 @@ from codepilot.core import (
     BeforeToolCallContext,
     BeforeToolCallResult,
     StreamFn,
+    TaskMode,
     ToolExecutionMode,
+    ensure_task_mode,
 )
 from codepilot.extensions.types import LifecycleHook, RegisteredCommand
 from codepilot.sessions.context.repository_context import RepositoryBootstrap
@@ -128,7 +130,7 @@ class CreateAgentSessionOptions:
     context_governance_enabled: bool = True
     memory_enabled: bool = True
     task_control_enabled: bool = True
-    task_planner_enabled: bool = True
+    task_mode: TaskMode | None = None
     max_task_replans_per_run: Optional[int] = None
     load_workspace_resources: bool = True
     enabled_builtin_tools: Optional[list[str]] = None
@@ -266,6 +268,7 @@ class ResolvedRuntimeProfile:
     credential_source: str
     credential_location: str | None = None
     permission_mode: RuntimePermissionMode = "workspace-write"
+    task_mode: TaskMode = "edit"
     sources: Mapping[str, ConfigValueSource] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -292,6 +295,7 @@ class ResolvedRuntimeProfile:
             "permission_mode",
             _ensure_runtime_permission_mode(self.permission_mode),
         )
+        object.__setattr__(self, "task_mode", ensure_task_mode(self.task_mode))
         object.__setattr__(
             self,
             "sources",
@@ -454,6 +458,7 @@ class UserInput:
 
     text: str
     images: tuple[str, ...] | None = None
+    task_mode: TaskMode | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str):
@@ -462,6 +467,8 @@ class UserInput:
         if not text:
             raise ValueError("UserInput.text is required")
         object.__setattr__(self, "text", text)
+        if self.task_mode is not None:
+            object.__setattr__(self, "task_mode", ensure_task_mode(self.task_mode))
         if self.images is None:
             return
         images: list[str] = []
@@ -485,6 +492,7 @@ class SessionStatus:
     permission_mode: RuntimePermissionMode
     message_count: int
     leaf_id: str
+    task_mode: TaskMode = "edit"
     is_running: bool = False
     credential_source: str = "unknown"
     warnings: tuple[str, ...] | None = None
@@ -510,6 +518,7 @@ class SessionStatus:
             "permission_mode",
             _ensure_runtime_permission_mode(self.permission_mode),
         )
+        object.__setattr__(self, "task_mode", ensure_task_mode(self.task_mode))
         object.__setattr__(
             self,
             "message_count",

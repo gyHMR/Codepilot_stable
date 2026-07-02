@@ -113,17 +113,21 @@ def test_user_input_normalizes_text_and_freezes_images() -> None:
     from codepilot.runtime.types import UserInput
 
     images = ["screen.png"]
-    value = UserInput(text="  hello  ", images=images)
+    value = UserInput(text="  hello  ", images=images, task_mode=" plan ")
     images.append("late.png")
 
     assert value.text == "hello"
     assert value.images == ("screen.png",)
+    assert value.task_mode == "plan"
 
     with pytest.raises(ValueError, match="text"):
         UserInput(text="  ")
 
     with pytest.raises(ValueError, match="image"):
         UserInput(text="hello", images=["ok.png", "  "])
+
+    with pytest.raises(ValueError, match="task mode"):
+        UserInput(text="hello", task_mode="auto")
 
 
 def test_runtime_passes_user_input_images_to_session_as_list() -> None:
@@ -136,6 +140,7 @@ def test_runtime_passes_user_input_images_to_session_as_list() -> None:
             def __init__(self) -> None:
                 self.listeners = []
                 self.received_images = None
+                self.received_task_mode = None
 
             def subscribe(self, listener):
                 self.listeners.append(listener)
@@ -145,9 +150,10 @@ def test_runtime_passes_user_input_images_to_session_as_list() -> None:
 
                 return unsubscribe
 
-            async def run(self, text, *, images=None, run_id=None):
+            async def run(self, text, *, images=None, run_id=None, task_mode=None):
                 _ = text, run_id
                 self.received_images = images
+                self.received_task_mode = task_mode
                 from codepilot.protocols import AgentRunResult
 
                 return AgentRunResult(
@@ -163,11 +169,12 @@ def test_runtime_passes_user_input_images_to_session_as_list() -> None:
 
         await runtime.run_message(
             fake.session_id,
-            UserInput(text="hello", images=[" screen.png "]),
+            UserInput(text="hello", images=[" screen.png "], task_mode="read"),
         )
 
         assert fake.received_images == ["screen.png"]
         assert isinstance(fake.received_images, list)
+        assert fake.received_task_mode == "read"
 
     asyncio.run(run_case())
 
@@ -192,6 +199,7 @@ def test_session_status_normalizes_and_freezes_display_snapshot() -> None:
     assert status.session_id == "session_1"
     assert status.model_id == "test/model"
     assert status.workspace == "/workspace"
+    assert status.task_mode == "edit"
     assert status.leaf_id == "leaf_1"
     assert status.credential_source == "env"
     assert status.warnings == ("config missing",)
@@ -202,6 +210,17 @@ def test_session_status_normalizes_and_freezes_display_snapshot() -> None:
             model_id="test/model",
             workspace="/workspace",
             permission_mode="admin",
+            message_count=0,
+            leaf_id="leaf_1",
+        )
+
+    with pytest.raises(ValueError, match="task mode"):
+        SessionStatus(
+            session_id="session_1",
+            model_id="test/model",
+            workspace="/workspace",
+            permission_mode="read-only",
+            task_mode="auto",
             message_count=0,
             leaf_id="leaf_1",
         )
@@ -621,14 +640,45 @@ def test_runtime_assembly_is_registered_with_session(tmp_path: Path) -> None:
         runtime.close_all()
 
 
-def test_runtime_assembly_passes_task_planner_option_to_session(tmp_path: Path) -> None:
+def test_runtime_assembly_passes_task_mode_to_session(tmp_path: Path) -> None:
     runtime = RuntimeService()
     handle = runtime.create_session(
-        _options(tmp_path, task_planner_enabled=False)
+        _options(tmp_path, task_mode="plan")
     )
     try:
-        assert handle.assembly.session_options.task_planner_enabled is False
-        assert handle.session.agent._options.task_planner_enabled is False
+        assert handle.assembly.session_options.task_mode == "plan"
+        assert handle.session.task_mode == "plan"
+        assert handle.session.agent._options.task_mode == "plan"
+    finally:
+        runtime.close_all()
+
+
+def test_runtime_service_exposes_and_switches_task_mode(tmp_path: Path) -> None:
+    runtime = RuntimeService()
+    handle = runtime.create_session(_options(tmp_path))
+    try:
+        assert runtime.get_session_status(handle.session_id).task_mode == "edit"
+        assert runtime.get_session_state(handle.session_id)["task_mode"] == "edit"
+
+        assert runtime.set_task_mode(handle.session_id, "plan") == "plan"
+
+        assert handle.session.task_mode == "plan"
+        assert runtime.get_session_status(handle.session_id).task_mode == "plan"
+        assert runtime.get_session_state(handle.session_id)["task_mode"] == "plan"
+    finally:
+        runtime.close_all()
+
+
+def test_runtime_read_task_mode_creates_read_only_session(tmp_path: Path) -> None:
+    runtime = RuntimeService()
+    handle = runtime.create_session(_options(tmp_path, task_mode="read"))
+    try:
+        status = runtime.get_session_status(handle.session_id)
+
+        assert handle.session.task_mode == "read"
+        assert status.task_mode == "read"
+        assert status.permission_mode == "read-only"
+        assert handle.assembly.profile.permission_mode == "read-only"
     finally:
         runtime.close_all()
 

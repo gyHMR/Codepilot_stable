@@ -408,6 +408,8 @@ def test_task_recovery_store_projects_unfinished_task_summary(tmp_path: Path) ->
     projection = recovery.update_from_result(result)
 
     assert projection["next_action"] == "报告连续失败并等待用户指示"
+    assert projection["task_mode"] == "edit"
+    assert projection["plan_source"] == "default"
     assert projection["task_progress"] == {
         "completed_steps": ["定位失败"],
         "pending_steps": ["重新运行相关验证"],
@@ -496,6 +498,8 @@ def test_build_task_recovery_projection_defines_task_summary_mapping() -> None:
 
     assert projection is not None
     assert projection["goal"] == "继续修复失败测试"
+    assert projection["task_mode"] == "edit"
+    assert projection["plan_source"] == "default"
     assert projection["next_action"] == "报告阻塞并等待指示"
     assert projection["source_run_id"] == "run_projection"
     assert projection["created_at"] == "created-before"
@@ -1205,6 +1209,39 @@ def test_agent_session_restores_task_progress_from_task_recovery(tmp_path: Path)
     asyncio.run(_session_task_recovery_case(tmp_path))
 
 
+def test_agent_session_mode_selection_overrides_recovery_projection(tmp_path: Path) -> None:
+    from codepilot.sessions.history.task_recovery import TaskRecoveryStore
+    from codepilot.sessions.session import AgentSession
+    from codepilot.sessions.types import AgentSessionOptions
+
+    session = AgentSession(
+        AgentSessionOptions(
+            model=_model(),
+            workspace_dir=tmp_path,
+            system_prompt="rules",
+            task_mode="plan",
+        )
+    )
+    try:
+        recovery = TaskRecoveryStore(session.store)
+        recovery.save_projection(
+            {
+                "goal": "继续旧任务",
+                "task_mode": "read",
+                "task_progress": {"pending_steps": ["继续分析"]},
+            },
+            run_id="old_run",
+        )
+
+        assert session.set_task_mode("plan") == "plan"
+
+        projection = recovery.load_projection()
+        assert projection is not None
+        assert projection["task_mode"] == "plan"
+    finally:
+        session.close()
+
+
 async def _session_task_recovery_case(tmp_path: Path) -> None:
     from codepilot.llm.event_stream import AssistantMessageEventStream
     from codepilot.protocols import AssistantMessage, TextContent
@@ -1233,6 +1270,8 @@ async def _session_task_recovery_case(tmp_path: Path) -> None:
         TaskRecoveryStore(session.store).save_projection(
             {
                 "goal": "继续修复失败测试",
+                "task_mode": "plan",
+                "plan_source": "recovered",
                 "task_progress": {
                     "completed_steps": ["定位失败"],
                     "pending_steps": ["重新运行相关验证"],
@@ -1249,6 +1288,7 @@ async def _session_task_recovery_case(tmp_path: Path) -> None:
         result = await session.run("继续修复失败测试", run_id="recovered_run")
 
         assert result.task is not None
+        assert result.task.control_signal["mode"] == "plan"
         assert result.task.completed_steps == ["定位失败", "重新运行相关验证"]
         assert result.task.pending_steps == []
     finally:

@@ -23,6 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
+from .task_modes import TaskMode, ensure_task_mode
+
 
 # ── 类型别名定义 ────────────────────────────────────────────────
 # 这些 Literal 类型定义了任务控制系统中所有状态的合法值
@@ -342,6 +344,9 @@ class TaskState:
     constraints: list[str] = field(default_factory=list)                         # 约束条件
     acceptance_criteria: list[str] = field(default_factory=list)                 # 验收标准
     steps: list[TaskStep] = field(default_factory=list)                          # 步骤列表
+    mode: TaskMode = "edit"                                                      # 用户任务模式
+    plan_source: str = "default"                                                 # 计划来源
+    mode_policy: dict[str, object] | None = None                                 # 可审计模式策略摘要
     current_step_id: str | None = None                                           # 当前步骤 ID
     phase: TaskPhase = "understanding"                                           # 当前阶段
     next_action: str | None = None                                               # 下一步动作
@@ -361,6 +366,7 @@ class TaskState:
     replans: list[ReplanRecord] = field(default_factory=list)                    # 重新规划记录
 
     def __post_init__(self) -> None:
+        self.mode = ensure_task_mode(self.mode)
         _ensure_task_phase(self.phase)
 
     def current_step(self) -> TaskStep | None:
