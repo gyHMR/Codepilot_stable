@@ -723,8 +723,8 @@ class AgentSession:
         """观察工具结果，并让记忆写入器处理持久记忆副作用。
 
         临时文件摘要、工具输出和验证证据属于上下文状态；未完成任务进度
-        属于 TaskRecoveryStore。MemoryWriter 在这里只处理与 durable memory
-        相关的副作用，例如工作区修改后使旧的路径绑定记忆失效。
+        属于 TaskRecoveryStore。MemoryWriter 在这里不沉淀长期记忆，只保留
+        将来需要观察工具事件时的统一扩展点。
 
         Args:
             message: 工具结果消息。

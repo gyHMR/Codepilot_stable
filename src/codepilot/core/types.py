@@ -44,7 +44,7 @@ from codepilot.protocols import (
     ToolResultMessage,
     UserMessage,
 )
-from codepilot.tools.types import (
+from codepilot.tools.contracts import (
     AgentTool,
     AgentToolResult,
 )

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from codepilot.tools.sandbox import file_state_for_path
+from codepilot.tools.workspace_safety import file_state_for_path
 
 
 RollbackStatus = Literal["reverted", "not_eligible", "conflict", "noop"]

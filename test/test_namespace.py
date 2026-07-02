@@ -204,8 +204,8 @@ def test_removed_protocol_and_llm_aliases_are_gone() -> None:
 
 
 def test_removed_builtin_file_tool_aliases_are_gone(tmp_path: Path) -> None:
-    from codepilot.tools.builtin import create_builtin_tools, get_builtin_tool_metadata
-    from codepilot.tools.permissions import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES
+    from codepilot.tools.builtins import create_builtin_tools, get_builtin_tool_metadata
+    from codepilot.tools.metadata import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES
 
     removed_aliases = {"list_dir", "read_file", "write_file"}
     tool_names = {tool.name for tool in create_builtin_tools(tmp_path)}
@@ -214,6 +214,56 @@ def test_removed_builtin_file_tool_aliases_are_gone(tmp_path: Path) -> None:
     assert READ_ONLY_TOOL_NAMES.isdisjoint(removed_aliases)
     assert MUTATING_TOOL_NAMES.isdisjoint(removed_aliases)
     assert all(get_builtin_tool_metadata(name) is None for name in removed_aliases)
+
+
+def test_tools_refactor_exposes_new_lifecycle_modules() -> None:
+    from importlib.util import find_spec
+
+    expected_modules = (
+        "codepilot.tools.contracts",
+        "codepilot.tools.registry",
+        "codepilot.tools.metadata",
+        "codepilot.tools.policy",
+        "codepilot.tools.execution",
+        "codepilot.tools.argument_schema",
+        "codepilot.tools.result_safety",
+        "codepilot.tools.workspace_safety",
+        "codepilot.tools.shell_safety",
+        "codepilot.tools.builtins",
+        "codepilot.tools.builtins.files",
+        "codepilot.tools.builtins.search",
+        "codepilot.tools.builtins.shell",
+        "codepilot.tools.builtins.workspace_status",
+    )
+
+    missing = []
+    for module in expected_modules:
+        try:
+            spec = find_spec(module)
+        except ModuleNotFoundError:
+            spec = None
+        if spec is None:
+            missing.append(module)
+
+    assert missing == []
+
+
+def test_removed_tools_compat_modules_are_gone() -> None:
+    from importlib.util import find_spec
+
+    removed_modules = (
+        "codepilot.tools.types",
+        "codepilot.tools.permissions",
+        "codepilot.tools.runtime",
+        "codepilot.tools.sandbox",
+        "codepilot.tools.shell_policy",
+        "codepilot.tools.schema_validation",
+        "codepilot.tools.result_guard",
+        "codepilot.tools.builtin",
+    )
+    existing = [module for module in removed_modules if find_spec(module) is not None]
+
+    assert existing == []
 
 
 def test_removed_run_result_compat_entries_are_gone() -> None:

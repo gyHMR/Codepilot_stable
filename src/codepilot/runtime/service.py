@@ -27,6 +27,7 @@ from codepilot.protocols import (
     TextContent,
     ToolResultMessage,
 )
+from codepilot.sessions.memory import load_global_memory
 from codepilot.sessions.session import AgentSession
 from codepilot.tools import AgentTool, AgentToolResult
 
@@ -311,10 +312,29 @@ class RuntimeService:
         session = self.get_session(session_id)
         session_records = session.memory_store.load_session()
         project_records = session.memory_store.load_project()
+        records = [*session_records, *project_records]
+        pinned = load_global_memory(session.workspace_dir)
         return {
             "session_id": session_id,
+            "pinned": {
+                "path": str(Path(session.workspace_dir) / ".codepilot" / "MEMORY.md"),
+                "chars": len(pinned),
+                "preview": pinned[:400],
+            },
             "session": [record.to_dict() for record in session_records],
             "project": [record.to_dict() for record in project_records],
+            "counts": {
+                "session_active": sum(
+                    record.status == "active" for record in session_records
+                ),
+                "project_active": sum(
+                    record.status == "active" for record in project_records
+                ),
+                "deleted": sum(record.status == "deleted" for record in records),
+                "superseded": sum(
+                    record.status == "superseded" for record in records
+                ),
+            },
         }
 
     def get_session_recovery_state(self, session_id: str) -> dict[str, Any]:

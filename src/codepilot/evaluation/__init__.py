@@ -1,64 +1,54 @@
-"""Codepilot 评估与轻量级实验框架。"""
+"""Codepilot evaluation v2."""
 
-from .assertions import (
-    build_dimension_results,
-    failure_categories,
-    run_assertions,
+from .artifacts import EvaluationArtifacts
+from .evidence import (
+    ContextEvidence,
+    EvalEvidence,
+    TaskStepEvidence,
+    ToolCallEvidence,
+    evidence_from_traces,
 )
-from .loader import (
-    EvalCaseValidationError,
-    load_eval_definition,
-    load_eval_suite,
-    parse_eval_definition,
-)
-from .experiment import (
-    build_experiment_comparison,
-    experiment_variants,
-    run_experiment,
-)
-from .metrics import calculate_case_metrics
-from .report import build_suite_summary, render_suite_markdown
-from .service import EvaluationService
-from .types import (
-    AssertionResult,
-    AssertionRole,
-    AssertionSpec,
-    DimensionResult,
-    EvalBudgets,
+from .experiments import experiment_variants, run_context_ab, run_security_ab
+from .loader import EvalCaseValidationError, load_eval_case, load_eval_suite
+from .reports import build_summary, render_markdown
+from .runner import EvaluationRunner
+from .schema import (
+    CheckResult,
     EvalCase,
+    EvalCheck,
     EvalResult,
     EvalRunOptions,
-    EvalRuntimeProfile,
-    EvalScenario,
+    EvalStep,
     EvalSuiteResult,
-    ScenarioStep,
+    MetricScore,
 )
+from .scorers import score_metrics
+from .service import EvaluationService
 
 __all__ = [
-    "AssertionResult",
-    "AssertionRole",
-    "AssertionSpec",
-    "DimensionResult",
-    "EvalBudgets",
+    "CheckResult",
+    "ContextEvidence",
     "EvalCase",
     "EvalCaseValidationError",
+    "EvalCheck",
+    "EvalEvidence",
     "EvalResult",
     "EvalRunOptions",
-    "EvalRuntimeProfile",
-    "EvalScenario",
+    "EvalStep",
     "EvalSuiteResult",
+    "EvaluationArtifacts",
+    "EvaluationRunner",
     "EvaluationService",
-    "ScenarioStep",
-    "build_dimension_results",
-    "build_experiment_comparison",
-    "build_suite_summary",
-    "calculate_case_metrics",
+    "MetricScore",
+    "TaskStepEvidence",
+    "ToolCallEvidence",
+    "build_summary",
+    "evidence_from_traces",
     "experiment_variants",
-    "failure_categories",
-    "load_eval_definition",
+    "load_eval_case",
     "load_eval_suite",
-    "parse_eval_definition",
-    "render_suite_markdown",
-    "run_assertions",
-    "run_experiment",
+    "render_markdown",
+    "run_context_ab",
+    "run_security_ab",
+    "score_metrics",
 ]

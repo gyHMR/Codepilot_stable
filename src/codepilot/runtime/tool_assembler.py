@@ -22,16 +22,17 @@ from pathlib import Path
 from codepilot.extensions import load_extensions, load_skills
 from codepilot.extensions.mcp import create_mcp_proxy_tools, parse_mcp_tool_configs
 from codepilot.extensions.types import LoadedExtensions
-from codepilot.tools.builtin import (
+from codepilot.tools.builtins import (
     create_builtin_tools,
     get_builtin_tool_metadata,
 )
-from codepilot.tools.permissions import PermissionPolicy
+from codepilot.tools.policy import PermissionPolicy
 from codepilot.tools.approval import DeferredApprovalProvider
-from codepilot.tools.registry import ToolRegistry, infer_tool_metadata
-from codepilot.tools.runtime import ToolRuntime
-from codepilot.tools.shell_policy import ShellExecutionPolicy
-from codepilot.tools.types import AgentTool
+from codepilot.tools.metadata import infer_tool_metadata
+from codepilot.tools.registry import ToolRegistry
+from codepilot.tools.execution import ToolRuntime
+from codepilot.tools.shell_safety import ShellExecutionPolicy
+from codepilot.tools.contracts import AgentTool
 
 from .config import RuntimeConfig
 from .types import CreateAgentSessionOptions, RegisteredTool, RuntimeDiagnostic

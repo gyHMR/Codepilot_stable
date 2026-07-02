@@ -4,13 +4,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
-from .shell_policy import classify_shell_command
-from .types import ToolMetadata
-
-# 只读工具名称集合
-READ_ONLY_TOOL_NAMES = {"read", "grep", "find", "ls", "workspace_status"}
-# 修改型工具名称集合
-MUTATING_TOOL_NAMES = {"write", "edit", "bash"}
+from .contracts import ToolMetadata
+from .metadata import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES
+from .shell_safety import classify_shell_command
 
 # 工具决策类型：允许/拒绝/需要审批
 ToolDecisionKind = Literal["allow", "deny", "approval_required"]
@@ -226,9 +222,7 @@ def _ensure_permission_mode(value: object) -> ToolPermissionMode:
 
 
 __all__ = [
-    "MUTATING_TOOL_NAMES",
     "PermissionPolicy",
-    "READ_ONLY_TOOL_NAMES",
     "ToolDecision",
     "ToolDecisionKind",
     "ToolPermissionMode",

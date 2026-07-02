@@ -15,8 +15,7 @@ from codepilot.protocols import (
     ContextReport,
 )
 from codepilot.sessions.layout import SessionLayout
-from codepilot.sessions.memory.records import DURABLE_MEMORY_KINDS, MemoryQuery, RetrievedMemory
-from codepilot.sessions.memory.rendering import render_memory
+from codepilot.sessions.memory.records import MemoryQuery, MemoryRecall
 
 from .checkpoint import ContextCheckpointManager
 from .ledger import ToolArtifactLedger
@@ -84,11 +83,8 @@ class ContextGovernor:
         """准备一次 LLM 调用上下文。"""
 
         snapshot = self.snapshot_builder.build(context)
-        recalled_memories = self._recall_memory(context)
-        memory_lines = self._render_recalled_memory(recalled_memories)
-        pinned = self._pinned_memory()
-        if pinned:
-            memory_lines.insert(0, f"[Pinned project memory] {pinned}")
+        memory_recall = self._recall_memory(context)
+        memory_lines = self._render_recalled_memory(memory_recall)
 
         output_tokens = tool_output_tokens(context.messages)
         history_tokens = estimate_context_tokens(context.messages, "")
@@ -161,10 +157,10 @@ class ContextGovernor:
             selected_items=selected_item_summaries(view),
             stale_items=snapshot.stale_items,
             repository_delta=snapshot.repository_delta,
-            retrieved_memory_ids=[item.record.id for item in recalled_memories],
+            retrieved_memory_ids=[item.record.id for item in memory_recall.retrieved],
             memory_retrieval_reasons={
                 item.record.id: list(item.reasons)
-                for item in recalled_memories
+                for item in memory_recall.retrieved
             },
             context_mode=context_mode(context),
             pressure=pressure,
@@ -189,11 +185,9 @@ class ContextGovernor:
     def finalize_run(self, _result: object) -> None:
         """Run 结束后的治理扩展点；记忆沉淀仍由现有 MemoryWriter 负责。"""
 
-    def _recall_memory(self, context: AgentContext) -> list[RetrievedMemory]:
+    def _recall_memory(self, context: AgentContext) -> MemoryRecall:
         if self.memory_retriever is None:
-            return []
-        if hasattr(self.memory_retriever, "validate_freshness"):
-            self.memory_retriever.validate_freshness()
+            return MemoryRecall()
         query = MemoryQuery(
             text=latest_user_text(context.messages),
             active_paths=sorted(self.state.active_files),
@@ -202,25 +196,24 @@ class ContextGovernor:
             recent_error=optional_signal(context, "recent_error_code"),
             retrieval_mode=context_mode(context),
         )
-        retrieved = self.memory_retriever.retrieve(query)
-        return [
-            item
-            for item in retrieved
-            if item.record.kind in DURABLE_MEMORY_KINDS and item.record.status == "active"
-        ]
+        if hasattr(self.memory_retriever, "recall"):
+            return self.memory_retriever.recall(query)
+        return MemoryRecall()
 
-    def _pinned_memory(self) -> str:
-        if self.memory_retriever is None or not hasattr(self.memory_retriever, "pinned_memory"):
-            return ""
-        value = self.memory_retriever.pinned_memory()
-        return value if isinstance(value, str) else ""
-
-    def _render_recalled_memory(self, items: list[RetrievedMemory]) -> list[str]:
+    def _render_recalled_memory(self, recall: MemoryRecall) -> list[str]:
         lines: list[str] = []
-        for item in items:
+        if recall.pinned_text:
+            lines.append(f"[Pinned memory] {recall.pinned_text}")
+        for item in [*recall.always, *recall.selected]:
+            label = {
+                "correction": "Correction",
+                "constraint": "Constraint",
+                "decision": "Decision",
+                "experience": "Experience",
+            }.get(item.record.kind, "Memory")
             lines.append(
-                f"{render_memory(item.record)} "
-                f"[score={item.score}; reasons={', '.join(item.reasons)}]"
+                f"[{label}] {item.record.text} "
+                f"[reasons={', '.join(item.reasons)}]"
             )
         return lines
 
