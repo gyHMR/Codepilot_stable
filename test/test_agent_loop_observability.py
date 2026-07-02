@@ -74,7 +74,11 @@ async def _run_agent_loop_observability_case() -> None:
     from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
     from codepilot.llm.event_stream import AssistantMessageEventStream
     from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage, UserMessage
-    from codepilot.observability import summarize_events, validate_agent_event
+    from codepilot.observability import (
+        event_to_record,
+        summarize_events,
+        validate_run_event,
+    )
     from codepilot.tools import AgentToolResult
 
     async def fake_stream(_model, context, _options):
@@ -116,19 +120,23 @@ async def _run_agent_loop_observability_case() -> None:
     assert "tool_execution_end" in event_types
     assert event_types[-1] == "agent_end"
     assert any(isinstance(message, ToolResultMessage) for message in messages)
-    assert all(validate_agent_event(event) == [] for event in events)
+    records = [record for event in events if (record := event_to_record(event))]
+    assert all(validate_run_event(record) == [] for record in records)
 
-    summary = summarize_events(events)
-    assert summary["tool_calls"] == 1
-    assert summary["tool_errors"] == 0
-    assert summary["run_count"] == 1
+    summary = summarize_events(records)
+    assert summary["event_counts"]["tool_call_finished"] == 1
+    assert summary["event_counts"]["run_finished"] == 1
 
 
 async def _run_agent_loop_tool_status_case() -> None:
     from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
     from codepilot.llm.event_stream import AssistantMessageEventStream
     from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage, UserMessage
-    from codepilot.observability import summarize_events, validate_agent_event
+    from codepilot.observability import (
+        event_to_record,
+        summarize_events,
+        validate_run_event,
+    )
     from codepilot.tools import AgentToolResult
 
     async def fake_stream(_model, context, _options):
@@ -186,18 +194,18 @@ async def _run_agent_loop_tool_status_case() -> None:
         and message.status == "denied"
         for message in messages
     )
-    assert all(validate_agent_event(event) == [] for event in events)
+    records = [record for event in events if (record := event_to_record(event))]
+    assert all(validate_run_event(record) == [] for record in records)
 
-    summary = summarize_events(events)
-    assert summary["tool_calls"] == 1
-    assert summary["tool_errors"] == 1
+    summary = summarize_events(records)
+    assert summary["event_counts"]["tool_call_finished"] == 1
 
 
 async def _run_agent_loop_after_tool_hook_error_case() -> None:
     from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
     from codepilot.llm.event_stream import AssistantMessageEventStream
     from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage, UserMessage
-    from codepilot.observability import validate_agent_event
+    from codepilot.observability import event_to_record, validate_run_event
     from codepilot.tools import AgentToolResult
 
     async def fake_stream(_model, context, _options):
@@ -250,14 +258,15 @@ async def _run_agent_loop_after_tool_hook_error_case() -> None:
     assert tool_end["errorReason"] == "after_tool_hook_error"
     result_message = next(message for message in result.messages if isinstance(message, ToolResultMessage))
     assert result_message.error_code == "after_tool_hook_error"
-    assert all(validate_agent_event(event) == [] for event in events)
+    records = [record for event in events if (record := event_to_record(event))]
+    assert all(validate_run_event(record) == [] for record in records)
 
 
 async def _run_agent_loop_max_tool_iterations_case() -> None:
     from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
     from codepilot.llm.event_stream import AssistantMessageEventStream
     from codepilot.protocols import AssistantMessage, TextContent, ToolCall, UserMessage
-    from codepilot.observability import validate_agent_event
+    from codepilot.observability import event_to_record, validate_run_event
     from codepilot.tools import AgentToolResult
 
     async def fake_stream(_model, _context, _options):
@@ -298,10 +307,11 @@ async def _run_agent_loop_max_tool_iterations_case() -> None:
     assert events[-1]["type"] == "agent_end"
     assert result.task is not None
     assert result.task.completion_satisfied is False
+    records = [record for event in events if (record := event_to_record(event))]
+    assert all(validate_run_event(record) == [] for record in records)
     assert result.task.pending_steps
     assert any(
         isinstance(message, AssistantMessage) and message.stop_reason == "max_iterations"
         for message in messages
     )
     assert len([event for event in events if event["type"] == "tool_execution_start"]) == 1
-    assert all(validate_agent_event(event) == [] for event in events)

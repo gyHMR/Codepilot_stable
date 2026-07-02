@@ -8,7 +8,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from codepilot.observability import EventRecorder, redact_artifact
+from codepilot.observability import (
+    EventRecorder,
+    build_run_trace,
+    redact_artifact,
+    write_run_trace,
+)
 from codepilot.observability.events import normalize_event_value
 from codepilot.protocols import AgentRunResult, ToolResultMessage
 from codepilot.tools.sandbox import file_state_for_path
@@ -98,6 +103,11 @@ class RunStore:
             }
         )
         self._write_json(self.layout.run_file(result.run_id), record)
+        trace = build_run_trace(
+            self.load_events(result.run_id),
+            result=record,
+        )
+        write_run_trace(run_dir / "trace.json", trace)
 
     def load_run_result(self, run_id: str) -> dict[str, Any]:
         data = self._read_json(self.layout.run_file(run_id))

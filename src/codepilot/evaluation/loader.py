@@ -1,436 +1,159 @@
 from __future__ import annotations
 
-"""Codepilot 评估定义的严格 JSON 加载器。"""
+"""Load evaluation v2 case definitions."""
 
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-from .types import (
-    AssertionSpec,
-    AssertionRole,
-    AssertionType,
-    EvalBudgets,
-    EvalCase,
-    EvalDefinition,
-    EvalDimension,
-    EvalDomain,
-    EvalRuntimeProfile,
-    EvalScenario,
-    ScenarioStep,
-)
+from .schema import EvalCase, EvalCheck, EvalStep
 
 
 class EvalCaseValidationError(ValueError):
-    """评估用例验证错误：JSON 不符合 Eval schema。"""
+    """Raised when an evaluation case does not match the v2 schema."""
 
 
-_DOMAINS = {
-    "runtime",
-    "coding",
-    "context",
-    "memory",
-    "security",
-    "planning",
-    "recovery",
-}
-_ASSERTION_DIMENSIONS: dict[str, EvalDimension] = {
-    "command": "coding_outcome",
-    "file": "coding_outcome",
-    "diff": "coding_outcome",
-    "run": "runtime_contract",
-    "trace": "runtime_contract",
-    "context": "context_governance",
-    "memory": "memory",
-    "security": "tool_security",
-    "task": "task_planning",
-    "metric": "runtime_contract",
-}
-_METRICS = {
-    "context.key_context_hit_rate",
-    "context.token_efficiency",
-    "context.stale_context_rate",
-    "memory.memory_retrieval_hit_rate",
-    "memory.redundant_read_count",
-    "memory.failed_attempt_recurrence_rate",
-    "planning.step_completion_rate",
-    "planning.evidence_coverage_rate",
-    "planning.false_completion_rate",
-    "planning.replan_success_rate",
-    "planning.repair_replan_success_rate",
-    "planning.invalid_tool_call_count",
-    "planning.invalid_tool_call_rate",
-    "security.dangerous_tool_block_rate",
-    "security.mutation_after_denial_rate",
-    "security.benign_tool_pass_rate",
-}
-_METRIC_DIMENSIONS: dict[str, EvalDimension] = {
-    "context": "context_governance",
-    "memory": "memory",
-    "planning": "task_planning",
-    "security": "tool_security",
-}
-_METRIC_OPERATORS = {">=", ">", "<=", "<", "==", "!="}
-_ASSERTION_ROLES = {"primary", "outcome", "guardrail", "diagnostic"}
+def load_eval_case(path: Path | str) -> EvalCase:
+    """Load one JSON evaluation case."""
 
-
-def load_eval_definition(path: str | Path) -> EvalDefinition:
-    """从 JSON 文件加载单个评估定义。"""
-    source = Path(path)
+    case_path = Path(path)
     try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise EvalCaseValidationError(f"Cannot load {source}: {exc}") from exc
+        payload = json.loads(case_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise EvalCaseValidationError(f"Invalid JSON in {case_path}: {exc}") from exc
+    return parse_eval_case(payload, source=case_path)
+
+
+def load_eval_suite(path: Path | str) -> list[EvalCase]:
+    """Load all v2 cases from a file or directory."""
+
+    suite_path = Path(path)
+    if suite_path.is_file():
+        return [load_eval_case(suite_path)]
+    if not suite_path.exists():
+        raise FileNotFoundError(f"Evaluation suite not found: {suite_path}")
+    cases: list[EvalCase] = []
+    for case_path in sorted(suite_path.rglob("*.json")):
+        if case_path.name.startswith("_"):
+            continue
+        cases.append(load_eval_case(case_path))
+    if not cases:
+        raise EvalCaseValidationError(f"No evaluation cases found in {suite_path}")
+    return cases
+
+
+def parse_eval_case(payload: dict[str, Any], *, source: Path | None = None) -> EvalCase:
+    """Parse a dict into an :class:`EvalCase` without legacy compatibility."""
+
     if not isinstance(payload, dict):
-        raise EvalCaseValidationError(f"{source}: root must be a JSON object")
-    return parse_eval_definition(payload, source=str(source))
-
-
-def load_eval_suite(path: str | Path) -> list[EvalDefinition]:
-    """加载评估套件：从单个 JSON 文件或目录中递归加载所有评估定义。"""
-    root = Path(path)
-    if root.is_file():
-        return [load_eval_definition(root)]
-    if not root.is_dir():
-        raise EvalCaseValidationError(f"Suite path does not exist: {root}")
-    definitions = [
-        load_eval_definition(source)
-        for source in sorted(root.rglob("*.json"))
-    ]
-    if not definitions:
-        raise EvalCaseValidationError(f"No JSON cases found under: {root}")
-    ids = [item.id for item in definitions]
-    duplicates = sorted({item for item in ids if ids.count(item) > 1})
-    if duplicates:
-        raise EvalCaseValidationError(
-            f"Duplicate case ids: {', '.join(duplicates)}"
-        )
-    return definitions
-
-
-def parse_eval_definition(
-    payload: dict[str, Any],
-    *,
-    source: str = "<memory>",
-) -> EvalDefinition:
-    """从字典解析评估定义（EvalCase 或 EvalScenario）。"""
+        raise EvalCaseValidationError("Eval case must be a JSON object")
     case_id = _required_text(payload, "id", source)
-    fixture = _required_text(payload, "fixture", source)
-    domain = payload.get("domain")
-    if domain not in _DOMAINS:
-        raise EvalCaseValidationError(
-            f"{source}.domain must be one of: {', '.join(sorted(_DOMAINS))}"
-        )
-    assertions = _parse_assertions(payload.get("assertions", []), source)
-    if not assertions:
-        raise EvalCaseValidationError(
-            f"{source}.assertions must contain at least one assertion"
-        )
-    budgets = _parse_budgets(payload.get("budgets", {}), payload, source)
-    runtime = _parse_runtime(payload.get("runtime", {}), source)
-    tags = _string_list(payload.get("tags", []), f"{source}.tags")
-    metrics = _parse_metrics(payload.get("metrics", []), source)
-    expected = payload.get("expected", {})
+    module = _literal(
+        payload,
+        "module",
+        {"planning", "context", "memory", "security", "tool"},
+        source,
+    )
+    case_type = _literal(payload, "type", {"task", "scenario"}, source)
+    prompt = str(payload.get("prompt") or "")
+    steps = [_parse_step(item, source=source) for item in _list(payload.get("steps"))]
+    setup = [_parse_step(item, source=source) for item in _list(payload.get("setup"))]
+    checks = [_parse_check(item, source=source) for item in _list(payload.get("checks"))]
+    metrics = [str(item) for item in _list(payload.get("metrics")) if str(item)]
+    tags = [str(item) for item in _list(payload.get("tags")) if str(item)]
+    expected = payload.get("expected") or {}
     if not isinstance(expected, dict):
-        raise EvalCaseValidationError(f"{source}.expected must be an object")
-
-    if "steps" in payload:
-        raw_steps = payload["steps"]
-        if not isinstance(raw_steps, list) or not raw_steps:
-            raise EvalCaseValidationError(
-                f"{source}.steps must be a non-empty array"
-            )
-        return EvalScenario(
-            id=case_id,
-            domain=cast(EvalDomain, domain),
-            fixture=fixture,
-            steps=[
-                _parse_step(item, f"{source}.steps[{index}]")
-                for index, item in enumerate(raw_steps)
-            ],
-            assertions=assertions,
-            metrics=metrics,
-            expected=dict(expected),
-            budgets=budgets,
-            runtime=runtime,
-            tags=tags,
-        )
-
+        raise EvalCaseValidationError(_where(source, "expected must be an object"))
+    if case_type == "task" and not prompt.strip():
+        raise EvalCaseValidationError(_where(source, "task case requires prompt"))
+    if case_type == "scenario" and not steps:
+        raise EvalCaseValidationError(_where(source, "scenario case requires steps"))
     return EvalCase(
         id=case_id,
-        domain=cast(EvalDomain, domain),
-        fixture=fixture,
-        prompt=_required_text(payload, "prompt", source),
-        assertions=assertions,
+        module=module,  # type: ignore[arg-type]
+        fixture=_required_text(payload, "fixture", source),
+        type=case_type,  # type: ignore[arg-type]
+        prompt=prompt,
+        steps=steps,
+        setup=setup,
+        checks=checks,
         metrics=metrics,
         expected=dict(expected),
-        budgets=budgets,
-        runtime=runtime,
         tags=tags,
+        timeout_seconds=int(payload.get("timeout_seconds") or 120),
     )
 
 
-def _parse_assertions(value: Any, source: str) -> list[AssertionSpec]:
-    if not isinstance(value, list):
-        raise EvalCaseValidationError(f"{source}.assertions must be an array")
-    return [
-        _parse_assertion(item, f"{source}.assertions[{index}]")
-        for index, item in enumerate(value)
-    ]
-
-
-def _parse_metrics(value: Any, source: str) -> list[str]:
-    metrics = _string_list(value, f"{source}.metrics")
-    unknown = sorted(set(metrics) - _METRICS)
-    if unknown:
-        raise EvalCaseValidationError(
-            f"{source}.metrics contains unsupported metrics: "
-            + ", ".join(unknown)
-        )
-    return metrics
-
-
-def _parse_assertion(value: Any, source: str) -> AssertionSpec:
-    if not isinstance(value, dict):
-        raise EvalCaseValidationError(f"{source} must be an object")
-    assertion_type = value.get("type")
-    if assertion_type not in _ASSERTION_DIMENSIONS:
-        raise EvalCaseValidationError(
-            f"{source}.type is not a supported assertion"
-        )
-    options = {
-        key: item
-        for key, item in value.items()
-        if key not in {"type", "dimension", "required", "role"}
-    }
-    _validate_assertion_options(str(assertion_type), options, source)
-    dimension = value.get("dimension")
-    if dimension is None:
-        dimension = (
-            _metric_dimension(str(options["metric"]))
-            if assertion_type == "metric"
-            else _ASSERTION_DIMENSIONS[str(assertion_type)]
-        )
-    if dimension not in {
-        "coding_outcome",
-        "runtime_contract",
-        "context_governance",
-        "memory",
-        "tool_security",
-        "task_planning",
-        "recovery",
-        "efficiency",
-    }:
-        raise EvalCaseValidationError(f"{source}.dimension is not supported")
-    role = value.get("role")
-    if role is None:
-        role = _default_assertion_role(str(assertion_type))
-    if role not in _ASSERTION_ROLES:
-        raise EvalCaseValidationError(f"{source}.role is not supported")
-    return AssertionSpec(
-        type=cast(AssertionType, assertion_type),
-        dimension=cast(EvalDimension, dimension),
-        options=options,
-        required=bool(value.get("required", True)),
-        role=cast(AssertionRole, role),
+def _parse_step(payload: Any, *, source: Path | None) -> EvalStep:
+    if not isinstance(payload, dict):
+        raise EvalCaseValidationError(_where(source, "step must be an object"))
+    kind = _literal(
+        payload,
+        "kind",
+        {"prompt", "restart", "modify_file", "verify", "inspect", "copy"},
+        source,
+    )
+    # "copy" is accepted in setup as a convenience alias for fixture material.
+    if kind == "copy":
+        kind = "modify_file"
+    return EvalStep(
+        kind=kind,  # type: ignore[arg-type]
+        text=str(payload.get("text") or ""),
+        path=str(payload.get("path") or ""),
+        source=str(payload.get("source") or ""),
+        content=payload.get("content"),
+        check=payload.get("check"),
     )
 
 
-def _validate_assertion_options(
-    assertion_type: str,
-    options: dict[str, Any],
-    source: str,
-) -> None:
-    if assertion_type == "command":
-        command = options.get("command")
-        if not isinstance(command, str) or not command.strip():
-            raise EvalCaseValidationError(
-                f"{source}.command must be a non-empty string"
-            )
-    elif assertion_type == "file":
-        path = options.get("path")
-        if not isinstance(path, str) or not path.strip():
-            raise EvalCaseValidationError(
-                f"{source}.path must be a non-empty string"
-            )
-    elif assertion_type == "diff":
-        for key in ("allowed_paths", "forbidden_paths"):
-            _string_list(options.get(key, []), f"{source}.{key}")
-    elif assertion_type == "metric":
-        metric = options.get("metric")
-        if not isinstance(metric, str) or not metric.strip():
-            raise EvalCaseValidationError(
-                f"{source}.metric must be a non-empty string"
-            )
-        if metric not in _METRICS:
-            raise EvalCaseValidationError(
-                f"{source}.metric is not a supported metric"
-            )
-        op = options.get("op", ">=")
-        if op not in _METRIC_OPERATORS:
-            raise EvalCaseValidationError(
-                f"{source}.op must be one of: {', '.join(sorted(_METRIC_OPERATORS))}"
-            )
-        value = options.get("value")
-        if (
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-        ):
-            raise EvalCaseValidationError(
-                f"{source}.value must be a number"
-            )
-        if (
-            "allow_na" in options
-            and not isinstance(options.get("allow_na"), bool)
-        ):
-            raise EvalCaseValidationError(
-                f"{source}.allow_na must be a boolean"
-            )
-    elif assertion_type == "security":
-        if "expect_error_code_any" in options:
-            values = _string_list(
-                options.get("expect_error_code_any"),
-                f"{source}.expect_error_code_any",
-            )
-            if not values:
-                raise EvalCaseValidationError(
-                    f"{source}.expect_error_code_any must not be empty"
-                )
+def _parse_check(payload: Any, *, source: Path | None) -> EvalCheck:
+    if not isinstance(payload, dict):
+        raise EvalCaseValidationError(_where(source, "check must be an object"))
+    kind = _required_text(payload, "kind", source)
+    options = {key: value for key, value in payload.items() if key != "kind"}
+    return EvalCheck(kind=kind, options=options)
 
 
-def _metric_dimension(metric: str) -> EvalDimension:
-    prefix = metric.split(".", 1)[0]
-    return _METRIC_DIMENSIONS.get(prefix, "runtime_contract")
-
-
-def _default_assertion_role(assertion_type: str) -> AssertionRole:
-    if assertion_type == "metric":
-        return "primary"
-    if assertion_type in {"command", "file", "diff"}:
-        return "outcome"
-    if assertion_type == "trace":
-        return "diagnostic"
-    return "guardrail"
-
-
-def _parse_step(value: Any, source: str) -> ScenarioStep:
-    if not isinstance(value, dict):
-        raise EvalCaseValidationError(f"{source} must be an object")
-    step_type = value.get("type")
-    if step_type not in {
-        "prompt",
-        "cancel",
-        "modify_file",
-        "restart",
-        "continue",
-        "verify",
-        "inspect",
-    }:
-        raise EvalCaseValidationError(f"{source}.type is not supported")
-    options = {key: item for key, item in value.items() if key != "type"}
-    if step_type == "prompt":
-        text = options.get("text")
-        if not isinstance(text, str) or not text.strip():
-            raise EvalCaseValidationError(
-                f"{source}.text must be a non-empty string"
-            )
-    elif step_type == "modify_file":
-        path = options.get("path")
-        if not isinstance(path, str) or not path.strip():
-            raise EvalCaseValidationError(
-                f"{source}.path must be a non-empty string"
-            )
-        if "source" not in options and "content" not in options:
-            raise EvalCaseValidationError(
-                f"{source} requires source or content"
-            )
-    elif step_type == "verify":
-        options["assertion"] = _parse_assertion(
-            options.get("assertion"),
-            f"{source}.assertion",
-        )
-    return ScenarioStep(type=step_type, options=options)
-
-
-def _parse_budgets(
-    value: Any,
+def _required_text(
     payload: dict[str, Any],
-    source: str,
-) -> EvalBudgets:
-    if not isinstance(value, dict):
-        raise EvalCaseValidationError(f"{source}.budgets must be an object")
-    timeout = value.get(
-        "timeout_seconds",
-        payload.get("timeout_seconds", 120),
-    )
-    return EvalBudgets(
-        max_model_attempts=_optional_positive_int(
-            value.get("max_model_attempts"),
-            f"{source}.budgets.max_model_attempts",
-        ),
-        max_tool_calls=_optional_positive_int(
-            value.get("max_tool_calls"),
-            f"{source}.budgets.max_tool_calls",
-        ),
-        max_replans=_optional_positive_int(
-            value.get("max_replans"),
-            f"{source}.budgets.max_replans",
-        ),
-        timeout_seconds=_positive_int(
-            timeout,
-            f"{source}.budgets.timeout_seconds",
-        ),
-    )
-
-
-def _parse_runtime(value: Any, source: str) -> EvalRuntimeProfile:
-    if not isinstance(value, dict):
-        raise EvalCaseValidationError(f"{source}.runtime must be an object")
-    permission_mode = str(value.get("permission_mode", "workspace-write"))
-    if permission_mode not in {"read-only", "workspace-write", "ask"}:
-        raise EvalCaseValidationError(
-            f"{source}.runtime.permission_mode is invalid"
-        )
-    scripted_stream = value.get("scripted_stream")
-    if scripted_stream is not None and not isinstance(scripted_stream, str):
-        raise EvalCaseValidationError(
-            f"{source}.runtime.scripted_stream must be a string"
-        )
-    return EvalRuntimeProfile(
-        memory_enabled=bool(value.get("memory_enabled", True)),
-        task_control_enabled=bool(value.get("task_control_enabled", True)),
-        permission_mode=permission_mode,
-        auto_approve=bool(value.get("auto_approve", False)),
-        scripted_stream=scripted_stream,
-    )
-
-
-def _required_text(payload: dict[str, Any], key: str, source: str) -> str:
+    key: str,
+    source: Path | None,
+) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
+        raise EvalCaseValidationError(_where(source, f"{key} is required"))
+    return value.strip()
+
+
+def _literal(
+    payload: dict[str, Any],
+    key: str,
+    allowed: set[str],
+    source: Path | None,
+) -> str:
+    value = _required_text(payload, key, source)
+    if value not in allowed:
         raise EvalCaseValidationError(
-            f"{source}.{key} must be a non-empty string"
+            _where(source, f"{key} must be one of {sorted(allowed)}")
         )
     return value
 
 
-def _string_list(value: Any, source: str) -> list[str]:
-    if not isinstance(value, list) or not all(
-        isinstance(item, str) for item in value
-    ):
-        raise EvalCaseValidationError(
-            f"{source} must be an array of strings"
-        )
-    return list(value)
-
-
-def _positive_int(value: Any, source: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise EvalCaseValidationError(f"{source} must be a positive integer")
-    return value
-
-
-def _optional_positive_int(value: Any, source: str) -> int | None:
+def _list(value: Any) -> list[Any]:
     if value is None:
-        return None
-    return _positive_int(value, source)
+        return []
+    if isinstance(value, list):
+        return value
+    raise EvalCaseValidationError("field must be a list")
+
+
+def _where(source: Path | None, message: str) -> str:
+    return f"{source}: {message}" if source else message
+
+
+__all__ = [
+    "EvalCaseValidationError",
+    "load_eval_case",
+    "load_eval_suite",
+    "parse_eval_case",
+]

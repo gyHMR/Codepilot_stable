@@ -160,30 +160,31 @@ def test_context_governor_projects_decision_view_with_checkpoint_and_memory(
     from codepilot.sessions.context.governor import ContextGovernor
     from codepilot.sessions.context.policy import ContextPressurePolicy
     from codepilot.sessions.context.state import SessionContextState
-    from codepilot.sessions.memory.records import MemoryRecord, RetrievedMemory
+    from codepilot.sessions.memory.records import MemoryRecall, MemoryRecord, RetrievedMemory
 
     class FakeMemoryRetriever:
         def validate_freshness(self) -> list[object]:
             return []
 
-        def pinned_memory(self) -> str:
-            return "Pinned: use UTF-8 and LF."
-
-        def retrieve(self, _query) -> list[RetrievedMemory]:
-            return [
-                RetrievedMemory(
-                    record=MemoryRecord(
-                        id="mem_1",
-                        kind="experience",
-                        scope="session",
-                        content={"lesson": "Previous pytest failure required cwd setup."},
-                        source="run_summary",
-                        trust="verified",
-                    ),
-                    score=90,
-                    reasons=["recent_error"],
-                )
-            ]
+        def recall(self, _query) -> MemoryRecall:
+            return MemoryRecall(
+                pinned_text="Pinned: use UTF-8 and LF.",
+                selected=[
+                    RetrievedMemory(
+                        record=MemoryRecord(
+                            id="mem_1",
+                            kind="experience",
+                            scope="session",
+                            key="experience:verification:cwd_setup",
+                            text="Previous pytest failure required cwd setup.",
+                            triggers=["error:verification_failed", "intent:debug_failure"],
+                            source="run",
+                        ),
+                        score=90,
+                        reasons=["recent_error"],
+                    )
+                ],
+            )
 
     state = SessionContextState(workspace_dir=tmp_path)
     governor = ContextGovernor(

@@ -6,14 +6,13 @@ from .experience import ExperienceExtractor, MemoryConsolidator
 from .files import load_global_memory, sanitize_memory_text, save_global_memory
 from .records import (
     MEMORY_SCHEMA_VERSION,
-    DURABLE_MEMORY_KINDS,
-    LEGACY_MEMORY_KINDS,
     MemoryKind,
     MemoryQuery,
+    MemoryRecall,
     MemoryRecord,
     MemoryScope,
+    MemorySource,
     MemoryStatus,
-    MemoryTrust,
     RetrievedMemory,
 )
 from .rendering import render_memory
@@ -24,19 +23,18 @@ from .writer import MemoryAdmissionDecision, MemoryWriter, decide_prompt_memory_
 
 __all__ = [
     "MEMORY_SCHEMA_VERSION",
-    "DURABLE_MEMORY_KINDS",
-    "LEGACY_MEMORY_KINDS",
     "ExperienceExtractor",
     "MemoryKind",
     "MemoryAdmissionDecision",
     "MemoryConsolidator",
     "MemoryQuery",
+    "MemoryRecall",
     "MemoryRecord",
     "MemoryRetriever",
     "MemoryScope",
+    "MemorySource",
     "MemoryStatus",
     "MemoryStore",
-    "MemoryTrust",
     "MemoryWriter",
     "decide_prompt_memory_admission",
     "RetrievedMemory",

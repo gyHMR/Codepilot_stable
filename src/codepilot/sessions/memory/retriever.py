@@ -1,148 +1,208 @@
 from __future__ import annotations
 
-"""检索相关结构化记忆，用于动态上下文编译。"""
+"""Layered durable memory recall."""
 
 import re
 from pathlib import Path
 
-from .files import load_global_memory
-from .records import MemoryQuery, MemoryRecord, RetrievedMemory
+from .files import load_global_memory, sanitize_memory_text
+from .records import MemoryQuery, MemoryRecall, MemoryRecord, RetrievedMemory
 from .rendering import render_memory
 from .store import MemoryStore
-from .writer import MemoryWriter
 
-PROJECT_ALWAYS_RECALL_CATEGORIES = frozenset(
-    {"project_constraint", "user_preference", "explicit_memory"}
-)
+
+PINNED_MEMORY_LIMIT = 2000
+EXPERIENCE_LIMIT = 3
 
 
 class MemoryRetriever:
-    """记忆检索器：根据查询文本和活跃文件路径检索相关记忆并评分排序。"""
+    """Recall durable memory for ContextGovernor."""
 
     def __init__(self, *, store: MemoryStore, workspace_dir: str | Path) -> None:
         self.store = store
         self.workspace_dir = Path(workspace_dir)
 
-    def retrieve(self, query: MemoryQuery) -> list[RetrievedMemory]:
-        """检索与查询相关的记忆，按评分排序返回。
+    def recall(self, query: MemoryQuery) -> MemoryRecall:
+        dropped: dict[str, str] = {}
+        active: list[MemoryRecord] = []
+        for record in self.store.all_records():
+            reason = record.retrieval_exclusion_reason()
+            if reason is not None:
+                dropped[record.id] = reason
+                continue
+            active.append(record)
 
-        评分规则（各项累加）：
-        - 关联路径匹配: +40（与当前活跃文件相关）
-        - 关键词匹配: +10/词，最高 +30
-        - 信任度 verified/observed: +20
-        - project 作用域: +10
-        - 信任度 model_claim: -20（模型自称的低可信度）
-
-        过滤规则：
-        - 跳过 status != "active" 的记录
-        - 只检索 durable memory: project / decision / experience
-        - 跳过 legacy state: task / file / failure
-
-        最终按 kind 限制数量（experience:2, decision:2, project:3）。
-        """
-        records = [*self.store.load_session(), *self.store.load_project()]
-        ranked = [
+        corrections = [
+            RetrievedMemory(record, 1000, ["layer:correction"])
+            for record in active
+            if record.kind == "correction"
+        ]
+        always_constraints = [
+            item
+            for record in active
+            if record.kind == "constraint" and "always" in record.triggers
+            if (item := score_memory_record(record, query, force_reason="layer:always_constraint"))
+            is not None
+        ]
+        selected_candidates = [
             scored
-            for record in records
+            for record in active
+            if record.kind not in {"correction"}
+            and not (record.kind == "constraint" and "always" in record.triggers)
             if (scored := score_memory_record(record, query)) is not None
         ]
-
-        ranked.sort(
-            key=lambda item: (item.score, item.record.updated_at),
+        selected_candidates.sort(
+            key=lambda item: (_kind_order(item.record.kind), item.score, item.record.updated_at),
             reverse=True,
         )
-        return _apply_kind_limits(ranked, query.limit)
+        selected = _apply_selected_limits(selected_candidates, query.limit)
+        return MemoryRecall(
+            pinned_text=self.pinned_memory(),
+            always=[*corrections, *always_constraints],
+            selected=selected,
+            dropped=dropped,
+        )
+
+    def retrieve(self, query: MemoryQuery) -> list[RetrievedMemory]:
+        """Compatibility adapter for callers that only need selected records."""
+
+        return self.recall(query).retrieved
 
     def validate_freshness(self) -> list[MemoryRecord]:
-        """校验记忆新鲜度（委托给 MemoryWriter.validate_freshness）。"""
-        return MemoryWriter(
-            store=self.store,
-            workspace_dir=self.workspace_dir,
-        ).validate_freshness()
+        return []
 
     def pinned_memory(self) -> str:
-        """加载用户固定的项目记忆（.codepilot/MEMORY.md）。"""
-        return load_global_memory(self.workspace_dir)
+        text = load_global_memory(self.workspace_dir)
+        return sanitize_memory_text(text, limit=PINNED_MEMORY_LIMIT)
 
 
 def score_memory_record(
     record: MemoryRecord,
     query: MemoryQuery,
+    *,
+    force_reason: str | None = None,
 ) -> RetrievedMemory | None:
-    """为单条记忆计算与查询的相关性；不相关或不可检索时返回 None。"""
-
     if record.retrieval_exclusion_reason() is not None:
         return None
 
-    query_terms = _terms(query.text)
-    active_paths = {Path(path).as_posix() for path in query.active_paths}
-    related_paths = {Path(path).as_posix() for path in record.related_paths}
     score = 0
     reasons: list[str] = []
+    if force_reason:
+        score += 500
+        reasons.append(force_reason)
 
-    related = active_paths.intersection(related_paths)
-    if related:
-        score += 40
-        reasons.append(f"related_path:{sorted(related)[0]}")
+    trigger_score, trigger_reasons = _trigger_score(record, query)
+    score += trigger_score
+    reasons.extend(trigger_reasons)
 
-    keyword_matches = sorted(_keyword_matches(query_terms, _terms(render_memory(record))))
+    keyword_matches = sorted(_keyword_matches(_terms(query.text), _terms(render_memory(record))))
     if keyword_matches:
-        score += min(30, len(keyword_matches) * 10)
+        score += min(40, len(keyword_matches) * 10)
         reasons.append(f"keyword:{keyword_matches[0]}")
 
-    if record.kind == "project":
-        gate_reason = _project_retrieval_gate(record, query, related, keyword_matches)
-        if gate_reason is None:
-            return None
-        reasons.append(gate_reason)
-
-    if record.trust in {"verified", "observed"}:
-        score += 20
-        reasons.append(f"trust:{record.trust}")
     if record.scope == "project":
         score += 10
-        reasons.append("project_memory")
+        reasons.append("scope:project")
 
-    if query.retrieval_mode == "qa" and record.kind in {"decision", "project"}:
-        score += 20
-        reasons.append(f"mode:qa_{record.kind}_memory")
-    elif query.retrieval_mode == "repair" and record.kind in {"experience", "failure"}:
-        score += 15
-        reasons.append(f"mode:repair_{record.kind}_memory")
-    elif query.retrieval_mode == "verify" and record.kind == "experience":
-        score += 10
-        reasons.append("mode:verify_experience_memory")
-
+    mode = query.retrieval_mode or ""
+    if record.kind == "decision" and mode in {"qa", "plan", "design"}:
+        score += 40
+        reasons.append(f"mode:{mode}_decision")
+    if record.kind == "constraint" and (mode in {"qa", "plan", "design"} or keyword_matches):
+        score += 25
+        reasons.append("constraint_relevant")
     if record.kind == "experience":
-        applies = {
-            str(item)
-            for item in record.content.get("applies_when", [])
-            if isinstance(item, str)
-        }
-        if query.task_phase and f"phase:{query.task_phase}" in applies:
-            score += 25
-            reasons.append(f"phase:{query.task_phase}")
-        if query.action_intent and f"intent:{query.action_intent}" in applies:
-            score += 20
-            reasons.append(f"intent:{query.action_intent}")
-        if query.recent_error and f"error:{query.recent_error}" in applies:
-            score += 30
+        if mode in {"repair", "verify"}:
+            score += 35
+            reasons.append(f"mode:{mode}_experience")
+        if query.recent_error and f"error:{query.recent_error}" in record.triggers:
+            score += 60
             reasons.append(f"error:{query.recent_error}")
-        maturity = str(record.content.get("maturity", "active"))
-        if maturity == "verified":
-            score += 20
-            reasons.append("maturity:verified")
-        elif maturity == "candidate":
-            score -= 30
-            reasons.append("maturity:candidate")
-
-    if record.trust == "model_claim":
-        score -= 20
-        reasons.append("model_claim_penalty")
+        if query.action_intent and f"intent:{query.action_intent}" in record.triggers:
+            score += 40
+            reasons.append(f"intent:{query.action_intent}")
+        if record.occurrences > 1:
+            score += min(30, record.occurrences * 10)
+            reasons.append(f"occurrences:{record.occurrences}")
 
     if score <= 0:
         return None
-    return RetrievedMemory(record=record, score=score, reasons=reasons)
+    return RetrievedMemory(record=record, score=score, reasons=_dedupe(reasons))
+
+
+def _trigger_score(record: MemoryRecord, query: MemoryQuery) -> tuple[int, list[str]]:
+    score = 0
+    reasons: list[str] = []
+    active_paths = {Path(path).as_posix() for path in query.active_paths}
+    for trigger in record.triggers:
+        if trigger == "always":
+            score += 100
+            reasons.append("trigger:always")
+        elif trigger.startswith("path:"):
+            path = trigger.removeprefix("path:")
+            if path in active_paths:
+                score += 50
+                reasons.append(f"path:{path}")
+        elif trigger.startswith("topic:"):
+            topic = trigger.removeprefix("topic:")
+            if topic and (topic in query.text.lower() or topic in _terms(query.text)):
+                score += 30
+                reasons.append(f"topic:{topic}")
+        elif trigger.startswith("phase:") and query.task_phase:
+            phase = trigger.removeprefix("phase:")
+            if phase == query.task_phase:
+                score += 25
+                reasons.append(f"phase:{phase}")
+        elif trigger.startswith("intent:") and query.action_intent:
+            intent = trigger.removeprefix("intent:")
+            if intent == query.action_intent:
+                score += 35
+                reasons.append(f"intent:{intent}")
+        elif trigger.startswith("error:") and query.recent_error:
+            error = trigger.removeprefix("error:")
+            if error == query.recent_error:
+                score += 50
+                reasons.append(f"error:{error}")
+    return score, reasons
+
+
+def _apply_selected_limits(
+    candidates: list[RetrievedMemory],
+    total_limit: int,
+) -> list[RetrievedMemory]:
+    limits = {
+        "constraint": 3,
+        "decision": 2,
+        "experience": EXPERIENCE_LIMIT,
+    }
+    counts: dict[str, int] = {}
+    selected: list[RetrievedMemory] = []
+    for item in candidates:
+        kind = item.record.kind
+        if counts.get(kind, 0) >= limits.get(kind, total_limit):
+            continue
+        selected.append(item)
+        counts[kind] = counts.get(kind, 0) + 1
+        if len(selected) >= total_limit:
+            break
+    selected.sort(key=lambda item: _output_order(item.record.kind))
+    return selected
+
+
+def _output_order(kind: str) -> int:
+    return {
+        "constraint": 0,
+        "decision": 1,
+        "experience": 2,
+    }.get(kind, 9)
+
+
+def _kind_order(kind: str) -> int:
+    return {
+        "constraint": 1,
+        "decision": 2,
+        "experience": 3,
+    }.get(kind, 0)
 
 
 def _terms(text: str) -> set[str]:
@@ -153,8 +213,6 @@ def _terms(text: str) -> set[str]:
 
 
 def _keyword_matches(query_terms: set[str], record_terms: set[str]) -> set[str]:
-    """匹配查询词和记录词，兼容中文短语的包含关系。"""
-
     matches = set(query_terms.intersection(record_terms))
     for query_term in query_terms:
         for record_term in record_terms:
@@ -165,48 +223,12 @@ def _keyword_matches(query_terms: set[str], record_terms: set[str]) -> set[str]:
     return matches
 
 
-def _project_retrieval_gate(
-    record: MemoryRecord,
-    query: MemoryQuery,
-    related_paths: set[str],
-    keyword_matches: list[str],
-) -> str | None:
-    """Require an explicit reason before project memory may enter context."""
-
-    category = str(record.content.get("category", ""))
-    if record.content.get("always_recall") is True:
-        return "project_gate:always_recall"
-    if category in PROJECT_ALWAYS_RECALL_CATEGORIES:
-        return f"project_gate:{category}"
-    if related_paths:
-        return "project_gate:related_path"
-    if keyword_matches:
-        return "project_gate:keyword"
-    if query.retrieval_mode == "qa" and category in PROJECT_ALWAYS_RECALL_CATEGORIES:
-        return f"project_gate:qa_{category}"
-    return None
-
-
-def _apply_kind_limits(
-    ranked: list[RetrievedMemory],
-    total_limit: int,
-) -> list[RetrievedMemory]:
-    limits = {
-        "experience": 2,
-        "decision": 2,
-        "project": 3,
-    }
-    counts: dict[str, int] = {}
-    selected: list[RetrievedMemory] = []
-    for item in ranked:
-        kind = item.record.kind
-        if counts.get(kind, 0) >= limits.get(kind, total_limit):
-            continue
-        selected.append(item)
-        counts[kind] = counts.get(kind, 0) + 1
-        if len(selected) >= total_limit:
-            break
-    return selected
+def _dedupe(items: list[str]) -> list[str]:
+    out: list[str] = []
+    for item in items:
+        if item not in out:
+            out.append(item)
+    return out
 
 
 __all__ = ["MemoryRetriever", "score_memory_record"]

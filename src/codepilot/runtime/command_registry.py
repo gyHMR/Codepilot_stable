@@ -23,7 +23,7 @@ from typing import Literal, cast
 from codepilot.extensions.types import ExtensionCommandContext, RegisteredCommand
 from codepilot.sessions.history.branching import create_fresh_session
 from codepilot.sessions.session import AgentSession
-from codepilot.sessions.memory import render_memory
+from codepilot.sessions.memory import load_global_memory, render_memory
 
 # 命令来源类型
 CommandSource = Literal["builtin", "extension", "skill", "prompt"]
@@ -343,23 +343,18 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
         if not action:
             session_records = session.memory_store.load_session()
             project_records = session.memory_store.load_project()
-            task = next(
-                (
-                    record
-                    for record in session_records
-                    if record.kind == "task" and record.status == "active"
-                ),
-                None,
-            )
+            records = [*session_records, *project_records]
+            pinned = load_global_memory(session.workspace_dir)
             return RuntimeCommandResult(
                 handled=True,
                 output_lines=[
                     "=== Memory ===",
-                    f"  Task             : {task.content.get('goal', '') if task else '(none)'}",
+                    f"  Pinned chars     : {len(pinned)}",
                     f"  Session active   : {sum(record.status == 'active' for record in session_records)}",
-                    f"  Session stale    : {sum(record.status == 'stale' for record in session_records)}",
                     f"  Project active   : {sum(record.status == 'active' for record in project_records)}",
-                    "Use /memory list [session|project|stale], /memory add <text>,",
+                    f"  Superseded       : {sum(record.status == 'superseded' for record in records)}",
+                    f"  Deleted          : {sum(record.status == 'deleted' for record in records)}",
+                    "Use /memory list [session|project|correction|experience|deleted], /memory add <text>,",
                     "    /memory promote <id>, or /memory forget <id>.",
                 ],
             )
@@ -373,8 +368,10 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
                 records = [record for record in records if record.scope == "session"]
             elif scope == "project":
                 records = [record for record in records if record.scope == "project"]
-            elif scope == "stale":
-                records = [record for record in records if record.status == "stale"]
+            elif scope in {"correction", "constraint", "decision", "experience"}:
+                records = [record for record in records if record.kind == scope]
+            elif scope in {"deleted", "superseded"}:
+                records = [record for record in records if record.status == scope]
             else:
                 records = [record for record in records if record.status != "deleted"]
             lines = ["=== Memory Records ==="]
@@ -395,8 +392,9 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
             record = session.memory_writer.add_project(value)
             session.store.append_event(
                 {
-                    "type": "memory_created",
+                    "type": "memory_updated",
                     "sessionId": session.session_id,
+                    "action": "add",
                     "memoryId": record.id,
                     "kind": record.kind,
                     "scope": record.scope,
@@ -415,8 +413,9 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
             record = session.memory_writer.promote(value)
             session.store.append_event(
                 {
-                    "type": "memory_promoted",
+                    "type": "memory_updated",
                     "sessionId": session.session_id,
+                    "action": "promote",
                     "memoryId": record.id,
                     "sourceMemoryId": value,
                 }
@@ -434,8 +433,9 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
             record = session.memory_store.mark_status(value, "deleted")
             session.store.append_event(
                 {
-                    "type": "memory_invalidated",
+                    "type": "memory_updated",
                     "sessionId": session.session_id,
+                    "action": "forget",
                     "memoryId": record.id,
                     "status": "deleted",
                 }

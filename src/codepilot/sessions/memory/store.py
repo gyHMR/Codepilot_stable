@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""结构化记忆的持久化适配器（会话级和项目级记忆）。"""
+"""Persistence adapter for Memory v2."""
 
 import json
 import logging
@@ -9,12 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .records import (
-    MEMORY_SCHEMA_VERSION,
-    MemoryRecord,
-    MemoryStatus,
-    utc_now_iso,
-)
+from .records import MEMORY_SCHEMA_VERSION, MemoryRecord, MemoryStatus, utc_now_iso
 
 if TYPE_CHECKING:
     from ..persistence.store import SessionStore
@@ -28,7 +23,7 @@ DEFAULT_PROJECT_COMPACT_AFTER_LINES = 400
 
 
 class MemoryStore:
-    """记忆持久化存储：负责读写结构化记忆，不决定应记住什么。"""
+    """Read and write durable session/project memory records."""
 
     def __init__(
         self,
@@ -55,20 +50,23 @@ class MemoryStore:
         except (OSError, json.JSONDecodeError):
             logger.warning("failed to load session memory file=%s", self.session_file)
             return []
-        records = payload.get("records", []) if isinstance(payload, dict) else []
-        return [
-            MemoryRecord.from_dict(item)
-            for item in records
-            if isinstance(item, dict)
-        ]
+        if not isinstance(payload, dict):
+            return []
+        if payload.get("schema_version") != MEMORY_SCHEMA_VERSION:
+            logger.warning("ignoring unsupported session memory schema")
+            return []
+        records = payload.get("records", [])
+        return _records_from_values(records)
 
     def save_session(self, records: list[MemoryRecord]) -> None:
         self.session_file.parent.mkdir(parents=True, exist_ok=True)
-        records = _prune_records(records, self.max_session_records)
         payload = {
             "schema_version": MEMORY_SCHEMA_VERSION,
             "session_id": self.session_id,
-            "records": [record.to_dict() for record in records],
+            "records": [
+                record.to_dict()
+                for record in _prune_records(records, self.max_session_records)
+            ],
         }
         _atomic_write_json(self.session_file, payload)
 
@@ -81,11 +79,11 @@ class MemoryStore:
                 continue
             try:
                 raw = json.loads(line)
-            except json.JSONDecodeError:
+                record = MemoryRecord.from_dict(raw) if isinstance(raw, dict) else None
+            except (json.JSONDecodeError, ValueError, TypeError):
                 logger.warning("skipping invalid project memory line")
                 continue
-            if isinstance(raw, dict):
-                record = MemoryRecord.from_dict(raw)
+            if record is not None:
                 latest[record.id] = record
         return list(latest.values())
 
@@ -97,8 +95,6 @@ class MemoryStore:
             self.compact_project()
 
     def compact_project(self) -> list[MemoryRecord]:
-        """Rewrite project memory as the latest unique records within capacity."""
-
         records = _prune_records(self.load_project(), self.max_project_records)
         self.project_file.parent.mkdir(parents=True, exist_ok=True)
         with self.project_file.open("w", encoding="utf-8", newline="\n") as handle:
@@ -137,10 +133,30 @@ class MemoryStore:
         raise ValueError(f"Memory not found: {memory_id}")
 
     def get(self, memory_id: str) -> MemoryRecord | None:
-        for record in [*self.load_session(), *self.load_project()]:
+        for record in self.all_records():
             if record.id == memory_id:
                 return record
         return None
+
+    def all_records(self) -> list[MemoryRecord]:
+        return [*self.load_session(), *self.load_project()]
+
+    def active_records(self) -> list[MemoryRecord]:
+        return [record for record in self.all_records() if record.status == "active"]
+
+
+def _records_from_values(values: object) -> list[MemoryRecord]:
+    if not isinstance(values, list):
+        return []
+    records: list[MemoryRecord] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        try:
+            records.append(MemoryRecord.from_dict(value))
+        except (TypeError, ValueError):
+            logger.warning("skipping invalid session memory record")
+    return records
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -164,16 +180,23 @@ def _prune_records(records: list[MemoryRecord], limit: int) -> list[MemoryRecord
         return list(records)
     indexed = list(enumerate(records))
     indexed.sort(key=lambda item: _record_rank(item[0], item[1]), reverse=True)
-    kept = sorted(indexed[:limit], key=lambda item: _record_rank(item[0], item[1]), reverse=True)
+    kept = indexed[:limit]
+    kept.sort(key=lambda item: _record_rank(item[0], item[1]), reverse=True)
     return [record for _index, record in kept]
 
 
-def _record_rank(index: int, record: MemoryRecord) -> tuple[int, int, int, str, int]:
-    category = str(record.content.get("category", ""))
+def _record_rank(index: int, record: MemoryRecord) -> tuple[int, int, int, int, str, int]:
+    kind_rank = {
+        "correction": 4,
+        "constraint": 3,
+        "decision": 2,
+        "experience": 1,
+    }
     return (
         1 if record.status == "active" else 0,
-        1 if category == "project_constraint" else 0,
-        1 if record.content.get("always_recall") is True else 0,
+        kind_rank.get(record.kind, 0),
+        1 if "always" in record.triggers else 0,
+        record.occurrences,
         record.updated_at,
         index,
     )

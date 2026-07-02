@@ -1,795 +1,928 @@
-# Codepilot 任务规划模块设计与实现
+# Codepilot 任务规划控制设计
 
-## 1. 为什么需要任务规划模块？
+本文档记录当前 Codepilot 的任务规划控制实现。阅读时请以代码为准，核心代码集中在：
 
-在 Coding Agent 的实际使用中，我们发现了一个核心问题：**Agent 无法知道任务进行到哪一步了**。
-
-想象这个场景：
-- 用户说："修复这个 bug 并运行测试"
-- Agent 修改了代码
-- Agent 说："已经修复完成"
-- 但实际上没有运行测试
-
-问题出在哪里？**模型停止调用工具 ≠ 任务完成**。
-
-模型可能因为以下原因停止：
-- 认为已经完成（但其实没有验证）
-- 遇到困难，不知道下一步做什么
-- 权限被拒绝，无法继续
-- 上下文太长，忘记了原始目标
-
-旧方案的问题是：**完全依赖模型自己判断是否完成**，没有外部验证机制。
-
-## 2. 旧方案的问题
-
-### 2.1 没有显式目标和步骤状态
-
-系统无法回答：
-- 用户最终想完成什么？
-- 当前正在处理哪一步？
-- 哪些步骤已经完成？
-- 哪些步骤被阻塞？
-- 下一步为什么是这个操作？
-
-### 2.2 完成判断完全依赖模型
-
-```python
-# 旧方案：模型不返回 ToolCall 时就认为完成
-if not assistant.tool_calls:
-    result.status = "completed"
-    result.stop_reason = "final_answer"
+```text
+src/codepilot/core/task_control/
+  contracts.py    # task_mode、planning budget、discovery report、planning state
+  modes.py        # read/edit/plan 的模式策略
+  discovery.py    # plan 模式的只读事实发现
+  planner.py      # 基于上下文和 discovery report 生成计划
+  bootstrap.py    # plan 模式启动编排：恢复、discovery、synthesis
+  controller.py   # 任务控制 facade：初始化、工具后更新、完成门控、摘要
+  state.py        # TaskState、TaskStep、AttemptRecord、ChangeSet、ReplanRecord
+  evidence.py     # 从工具结果提取证据、动作意图、错误信息
+  verifier.py     # 解释 verification 工具结果
+  replanner.py    # 失败后的修复和重规划辅助规则
+  stop.py         # 完成门控和 completion steering
+  tools.py        # complete_task_step 运行时管理工具
 ```
 
-但模型没有继续调用工具，可能是因为：
-- 修改代码后没有验证（最常见的问题）
-- 测试失败后直接总结
-- 权限拒绝导致关键动作未执行
-- 工作区变化使旧验证结果失效
-- 用户明确要求的某个子目标仍未完成
+任务控制不是一个庞大的 FSM。它更像一条运行期反馈控制链：
 
-### 2.3 工具结果没有统一转化为任务反馈
-
-工具结果只是作为消息返回给模型：
-
-```
-ToolResult → 进入消息历史 → 模型自行理解
-```
-
-Runtime 没有统一判断：
-- 当前步骤是否完成？
-- 是否需要修复？
-- 是否应该局部重新规划？
-- 是否可以结束任务？
-
-### 2.4 失败后没有自动恢复机制
-
-测试失败后，模型可能会：
-- 忽略失败，继续下一步
-- 重复尝试同样的失败方案
-- 放弃任务，直接报告失败
-
-没有机制确保：**失败 → 修复 → 重新验证** 的闭环。
-
-## 3. 新设计的核心思想
-
-新设计遵循一个核心原则：**模型负责语义，Runtime 负责边界**。
-
-### 3.1 分离职责
-
-```
-模型擅长：
-├── 理解用户意图
-├── 拆解任务
-├── 判断代码含义
-├── 提出修改方式
-└── 根据失败日志形成修复方案
-
-Runtime 擅长：
-├── 判断工具是否真实执行
-├── 判断权限是否允许
-├── 检查工作区是否变化
-├── 判断验证是否成功且仍然新鲜
-├── 检测重复失败和预算耗尽
-└── 执行完成门槛
-```
-
-### 3.2 证据绑定的动态计划
-
-任务步骤不是一次性 Markdown 清单，而是**随工具执行动态更新**的状态机：
-
-```
-步骤完成 ≠ 模型声称完成
-步骤完成 = 绑定工具结果、文件变化或验证证据
-```
-
-### 3.3 完成必须有证据
-
-模型准备结束时，Runtime 必须检查：
-- 修改后是否有验证？
-- 验证是否成功？
-- 验证是否对应当前工作区版本？
-- 是否有未完成的步骤？
-
-```
-模型停止调用工具 ≠ 任务自动完成
-```
-
-## 4. 架构设计
-
-### 4.1 核心组件
-
-```python
-# 数据结构
-src/codepilot/core/task_state.py
-├── TaskStep          # 单个步骤
-├── TaskState         # 任务状态
-├── ExecutionDecision # 执行决策
-└── CompletionCheck   # 完成检查
-
-# 控制器
-src/codepilot/core/task_controller.py
-└── TaskController    # 任务控制器（核心逻辑）
-```
-
-### 4.2 执行流程
-
-```
+```text
 用户请求
-    ↓
-初始化 TaskState
-    ↓
-ContextGovernor 投影任务相关上下文
-    ↓
-LLM 决定下一步动作
-    ↓
-权限检查 + 工具执行
-    ↓
-收集 ToolResult 证据
-    ↓
-TaskController 更新任务状态
-    ↓
-执行决策（继续/修复/重新规划/等待/完成/停止）
-    ↓
-CompletionGate 检查是否可以结束
-    ↓
-生成最终结果
+  -> 选择 task_mode
+  -> 初始化任务状态
+  -> 每轮模型调用前注入任务上下文
+  -> 工具执行
+  -> 工具事实 + 运行事实更新 TaskState
+  -> 得到下一步决策
+  -> 完成门控判断是否可以结束
+  -> 摘要、事件、恢复投影、审计记录
 ```
 
-## 5. 核心实现细节
+设计目标是让 Agent 仍然负责语义判断和代码行动，但 Runtime 给它提供边界、证据和完成门槛。
 
-### 5.1 TaskStep：带证据的步骤
+## 1. 总体设计理念
 
-```python
-@dataclass
-class TaskStep:
-    id: str                          # 步骤唯一标识
-    title: str                       # 步骤标题
-    status: TaskStepStatus = "pending"  # pending/in_progress/completed/blocked
-    evidence_refs: list[str] = field(default_factory=list)  # 证据引用
-    failure_count: int = 0           # 失败次数
-    note: str | None = None          # 备注信息
+### 1.1 模型负责语义，框架负责边界
+
+模型负责：
+
+- 理解用户到底想做什么。
+- 决定下一步读什么、改什么、跑什么验证。
+- 根据失败日志推理根因。
+- 判断某一步验收标准是否已经满足。
+
+框架负责：
+
+- 记录当前任务目标、步骤、阶段和证据。
+- 根据工具结果判断是否真的发生了读取、修改、验证、失败或权限阻塞。
+- 在工作区修改后要求新鲜验证。
+- 检测连续失败、重规划上限和可能需要回滚的变更。
+- 把状态写入事件、审计和恢复投影。
+
+所以任务控制的边界是：它约束 Agent，不替 Agent 写业务决策。
+
+### 1.2 唯一用户级行为口径是 task_mode
+
+当前用户可见模式只有：
+
+```text
+read | edit | plan
 ```
 
-**关键点**：
-- `evidence_refs` 绑定实际的工具调用 ID、文件路径、验证 ID
-- `failure_count` 用于触发重新规划
-- `note` 记录阻塞原因或最新发现
+`planning_budget_profile` 只是 plan discovery 的预算调优参数，不是新模式。
 
-### 5.2 TaskState：任务全局状态
+### 1.3 证据比声明更重要
 
-```python
-@dataclass
-class TaskState:
-    task_id: str                     # 任务唯一标识
-    goal: str                        # 任务目标
-    constraints: list[str]           # 约束条件
-    acceptance_criteria: list[str]   # 验收标准
-    steps: list[TaskStep]            # 任务步骤列表
-    current_step_id: str | None      # 当前正在执行的步骤 ID
-    phase: TaskPhase                 # understanding/acting/verifying/waiting/finished
-    next_action: str | None          # 下一步动作描述
-    replan_count: int = 0            # 已重新规划次数
-    max_replans_per_run: int = 2     # 单次运行最大重新规划次数
-    completion_satisfied: bool = False  # 任务是否满足完成条件
-    completion_reason: str = ""      # 完成/未完成原因
+任务状态不以“模型说完成了”为唯一依据，而是绑定到工具结果：
+
+- `ToolResultMessage.tool_call_id`
+- verification status
+- workspace changed
+- affected paths
+- change evidence
+- `complete_task_step` 的 task_control 元数据
+
+模型可以总结“我完成了”，但完成门控仍会检查是否有阻塞步骤、未完成步骤和修改后的新鲜验证。
+
+## 2. 用户请求进入后，先确定模式
+
+入口来自 CLI、RPC、Web 或 runtime service。模式最终进入 `AgentLoopConfig.task_mode`。
+
+配置来源大致是：
+
+```text
+CLI/RPC/UserInput override
+  -> CreateAgentSessionOptions.task_mode
+  -> .codepilot/settings.json task_mode
+  -> RuntimeDefaults.task_mode = "edit"
 ```
 
-**设计亮点**：
-- `TaskState` 只保存任务语义状态，不复制 `RunState` 的执行计数器
-- `phase` 跟踪任务当前阶段（理解/执行/验证/等待/完成）
-- `replan_count` 限制重新规划次数，防止无限循环
+相关实现：
 
-### 5.3 TaskController：核心控制逻辑
+- `src/codepilot/runtime/config.py`
+- `src/codepilot/runtime/types.py`
+- `src/codepilot/sessions/session.py`
+- `src/codepilot/core/types.py`
+- `src/codepilot/core/task_control/modes.py`
 
-```python
-class TaskController:
-    def initialize(
-        self,
-        prompts,
-        *,
-        proposed_steps=None,
-        task_recovery_projection=None,
-    ) -> TaskState:
-        """初始化任务状态"""
-        goal = _goal_from_prompts(prompts)  # 从用户消息提取目标
-        steps = self._normalize_steps(proposed_steps or ["完成当前请求"])
-        # 归一化：去重、截断、限制数量
-        return TaskState(goal=goal, steps=steps, ...)
-    
-    def after_tool_results(self, task, run, results) -> ExecutionDecision:
-        """工具执行后更新任务状态并返回决策"""
-        # 1. 检查取消、审批、权限拒绝
-        # 2. 检查验证失败
-        # 3. 检查是否有进展
-        # 4. 返回决策（continue/repair/replan/stop/finish）
-    
-    def check_completion(self, task, run) -> CompletionCheck:
-        """检查任务是否完成"""
-        # 1. 检查是否有阻塞步骤
-        # 2. 检查修改后是否有新鲜验证
-        # 3. 检查是否有未完成步骤
-        # 4. 返回完成检查结果
+### 2.1 read 模式
+
+`read` 表示只读分析与回答。
+
+策略来自 `policy_for_mode("read")`：
+
+- `read_only=True`
+- 不要求 planner
+- 默认步骤是“只读分析并回答当前请求”
+- task context 明确提示不要修改文件或运行有状态变化的命令
+
+runtime 还会把 `read` 映射到只读权限：
+
+- `read_only_mode=True`
+- `tool_permission_mode="read-only"`
+- 如果用户显式传入 `task_mode=read` 但又传 `workspace-write`，配置解析会报错
+
+### 2.2 edit 模式
+
+`edit` 是默认模式，适合简单开发任务。
+
+特点：
+
+- 不触发 plan discovery。
+- 不调用 `TaskPlanner`。
+- 由 `TaskController.initialize()` 创建一个轻量默认步骤。
+- 后续仍然走工具事实、验证事实、完成门控。
+
+这意味着 edit 不是“无任务控制”，而是“不预先复杂规划”。
+
+### 2.3 plan 模式
+
+`plan` 适合复杂任务。
+
+特点：
+
+- 必须经过 `PlanningBootstrap`。
+- 默认复用当前 run 的主模型，不新增独立 planning model。
+- 先做只读 discovery，再 synthesis 计划。
+- 执行期仍回到普通 ReAct 工具循环。
+
+预算由 `planning_budget_profile` 控制，默认 `balanced`：
+
+```text
+conservative: 2 model rounds, 6 read-only tool calls, 6000 estimated tokens, 30s
+balanced:     4 model rounds, 12 read-only tool calls, 12000 estimated tokens, 60s
+wide:         6 model rounds, 20 read-only tool calls, 20000 estimated tokens, 120s
 ```
 
-### 5.4 步骤归一化
+## 3. AgentLoop 初始化：决定是否规划
 
-```python
-def _normalize_steps(self, raw_steps: Iterable[str]) -> list[TaskStep]:
-    seen: set[str] = set()
-    steps: list[TaskStep] = []
-    for raw in raw_steps:
-        title = " ".join(str(raw).strip().split())
-        if not title or title in seen:  # 去重
-            continue
-        seen.add(title)
-        steps.append(TaskStep(
-            id=f"step_{len(steps) + 1}",
-            title=title[:80],  # 截断标题
-        ))
-        if len(steps) >= 6:  # 最多 6 步
-            break
-    if not steps:
-        steps.append(TaskStep(id="step_1", title="完成当前请求"))
-    return steps
+主入口在 `src/codepilot/core/agent_loop.py`。
+
+进入 `_run_loop()` 后会创建：
+
+```text
+LLMStreamRunner
+ToolCallCoordinator
+TaskController
+TaskModePolicy
 ```
 
-**关键点**：
-- 最多 6 个步骤（保持轻量）
-- 自动去重
-- 标题限长 80 字符
-- 空步骤生成默认步骤
+然后根据模式决定初始化方式：
 
-### 5.5 工具结果到任务反馈
+```text
+read/edit:
+  TaskPlanningState(phase="none", source="default")
+  TaskController.initialize(... proposed_steps=None ...)
 
-```python
-def after_tool_results(self, task, run, results) -> ExecutionDecision:
-    # 1. 取消 → 停止
-    if any(result.status == "cancelled" for result in results):
-        return ExecutionDecision("stop", "cancelled")
-    
-    # 2. 需要审批 → 等待
-    if any(result.status == "approval_required" for result in results):
-        self._block_current_step(task, "等待工具审批")
-        return ExecutionDecision("wait_approval", "approval_required")
-    
-    # 3. 权限拒绝 → 重新规划
-    if any(result.status == "denied" for result in results):
-        self._block_current_step(task, "工具权限拒绝")
-        return ExecutionDecision("replan", "permission_denied")
-    
-    # 4. 验证失败 → 修复或重新规划
-    if self._has_failed_verification(results):
-        step = self._current_step(task)
-        step.failure_count += 1
-        if step.failure_count >= 2:
-            # 连续失败 2 次 → 重新规划
-            self._replan_after_failure(task, results)
-            return ExecutionDecision("replan", "repeated_step_failure")
-        return ExecutionDecision("repair", "verification_failed")
-    
-    # 5. 有进展 → 推进步骤
-    for result in results:
-        if self._result_has_progress(result):
-            step = self._current_step(task)
-            step.status = "completed"
-            step.evidence_refs.extend(_evidence_refs([result]))
-            self._advance(task)
-    
-    # 6. 所有步骤完成 → 完成
-    if all(step.status == "completed" for step in task.steps):
-        return ExecutionDecision("finish", "all_steps_completed")
-    
-    return ExecutionDecision("continue", "next_step")
+plan:
+  PlanningBootstrap.run(...)
+  得到 TaskPlanDraft 和 TaskPlanningState
+  TaskController.initialize(... proposed_steps=plan.steps, planning=planning_state ...)
 ```
 
-### 5.6 判断工具结果是否有进展
+初始化完成后，AgentLoop 会发出：
 
-```python
-def _result_has_progress(self, result: ToolResultMessage) -> bool:
-    if result.status != "success":
-        return False
-    
-    # 验证通过 → 有进展
-    if isinstance(result.verification, dict):
-        return result.verification.get("status") == "passed"
-    
-    # 工作区变化 → 有进展
-    if result.workspace_changed is True:
-        return True
-    
-    # 只读工具成功 → 有进展（理解类步骤）
-    name = result.tool_name.lower()
-    if any(marker in name for marker in ("read", "grep", "find", "glob")):
-        return True
-    
-    # 写入工具无变化 → 无进展
-    if any(marker in name for marker in ("write", "edit")):
-        return result.workspace_changed is True
-    
-    return False
+```text
+task_plan_created
 ```
 
-**设计亮点**：
-- 不猜测代码语义，只判断执行事实
-- 不同类型工具有不同的进展判断标准
-- 验证结果是最高优先级的进展信号
+并确保工具列表里有 runtime managed 工具：
 
-### 5.7 CompletionGate：完成门槛
-
-```python
-def check_completion(self, task, run) -> CompletionCheck:
-    # 1. 有阻塞步骤 → 不能完成
-    if any(step.status == "blocked" for step in task.steps):
-        return CompletionCheck(
-            satisfied=False,
-            reason="blocked_steps",
-            missing=["unblocked_steps"],
-            can_continue=False,
-        )
-    
-    # 2. 修改后无新鲜验证 → 不能完成
-    if run.workspace_changed and not run.fresh_verification_passed:
-        can_continue = task.completion_prompt_count == 0
-        return CompletionCheck(
-            satisfied=False,
-            reason="modified_without_fresh_verification",
-            missing=["fresh_verification"],
-            can_continue=can_continue,
-            unverified=not can_continue,
-        )
-    
-    # 3. 有未完成步骤 → 不能完成
-    incomplete = [step.title for step in task.steps 
-                  if step.status not in {"completed", "blocked"}]
-    if incomplete:
-        return CompletionCheck(
-            satisfied=False,
-            reason="incomplete_steps",
-            missing=incomplete,
-            can_continue=False,
-        )
-    
-    # 4. 所有条件满足 → 可以完成
-    return CompletionCheck(satisfied=True, reason="all_steps_completed")
+```text
+complete_task_step
 ```
 
-**关键设计**：
-- 修改后必须有新鲜验证（防止"改了代码但没测试"）
-- `can_continue` 控制是否可以继续尝试
-- `completion_prompt_count` 防止重复提示
+这个工具给模型一个显式动作：当当前步骤验收标准满足时，模型可以调用它完成步骤。但它不能绕过修改后的验证要求。
 
-### 5.8 重新规划机制
+## 4. plan 模式第一阶段：只读事实发现
 
-```python
-def _replan_after_failure(self, task, results):
-    """失败后重新规划：保留已完成步骤，替换当前和后续步骤"""
-    task.replan_count += 1
-    current = self._current_step(task)
-    
-    # 保留已完成步骤，替换当前步骤
-    current.title = "根据最新失败证据调整方案"
-    current.status = "in_progress"
-    current.failure_count = 0
-    current.evidence_refs.extend(_evidence_refs(results))
-    
-    # 只保留当前步骤和新步骤
-    current_index = task.steps.index(current)
-    task.steps = [
-        *task.steps[:current_index + 1],  # 保留已完成的
-        TaskStep(id=f"step_{current_index + 2}", title="重新运行相关验证"),
-    ]
+实现位置：`task_control/discovery.py`。
+
+`PlanningDiscovery` 是一个 scratch ReAct loop：
+
+```text
+当前会话历史 + 本轮用户输入
+  -> scratch AgentContext
+  -> 只暴露 metadata.read_only=True 的工具
+  -> 使用 LLMStreamRunner 调模型
+  -> 使用 ToolCallCoordinator 执行只读工具
+  -> 得到 PlanningDiscoveryReport
 ```
 
-**设计亮点**：
-- 局部重新规划，不丢弃已完成的步骤
-- 保留失败证据，用于后续分析
-- 限制重新规划次数（默认 2 次），防止无限循环
+关键边界：
 
-### 5.9 会话恢复支持
+- discovery 的 assistant/tool messages 不写回主 `current_context.messages`。
+- 工具只取 read-only metadata；没有 read-only 元数据的工具默认不可见。
+- discovery 仍复用主模型、主 context prepare/transform、API key 和工具协调器。
+- 事件仍正常上报，所以审计能看到 discovery 做过什么。
 
-```python
-def build_task_state_from_recovery_projection(
-    prompts,
-    task_recovery_projection,
-) -> TaskState | None:
-    """从恢复的 task recovery projection 中重建 TaskState"""
-    progress = task_recovery_projection.get("task_progress")
-    if not isinstance(progress, Mapping):
-        return None
-    
-    steps: list[TaskStep] = []
-    
-    # 重建已完成步骤
-    for title in progress.get("completed_steps", []):
-        steps.append(TaskStep(id=f"step_{len(steps)+1}", title=title, status="completed"))
-    
-    # 重建阻塞步骤
-    for title in progress.get("blocked_steps", []):
-        steps.append(TaskStep(id=f"step_{len(steps)+1}", title=title, status="blocked"))
-    
-    # 重建待处理步骤
-    for title in progress.get("pending_steps", []):
-        steps.append(TaskStep(id=f"step_{len(steps)+1}", title=title, status="pending"))
-    
-    return TaskState(goal=goal, steps=steps, ...)
+discovery 的停止原因来自模型和预算共同作用：
+
+```text
+sufficient_evidence
+budget_exhausted
+model_error
+tool_error
+invalid_json
+no_read_only_tools
 ```
 
-**关键点**：
-- 从 `TaskMemory` 投影重建任务状态
-- 保留已完成步骤的证据
-- 支持跨会话恢复
-
-## 6. 与 AgentLoop 的集成
-
-### 6.1 初始化
+输出结构是 `PlanningDiscoveryReport`：
 
 ```python
-async def _run_loop(...):
-    task_controller = TaskController()
-    task = task_controller.initialize(
-        current_context.messages,
-        task_recovery_projection=current_context.task_recovery_projection,
-    )
-    # 发送任务计划创建事件
-    await emitter.emit({"type": "task_plan_created", "task": ...})
+PlanningDiscoveryReport(
+    status="completed|failed|budget_exhausted|skipped",
+    facts=(...),
+    relevant_files=(...),
+    risks=(...),
+    verification_hints=(...),
+    open_questions=(...),
+    evidence_refs=(...),
+    budget=PlanningBudgetUsage(...),
+)
 ```
 
-### 6.2 每轮模型调用前
+对应事件：
+
+```text
+planning_discovery_started
+planning_discovery_step
+planning_discovery_completed
+```
+
+## 5. plan 模式第二阶段：计划生成
+
+实现位置：
+
+- `task_control/bootstrap.py`
+- `task_control/planner.py`
+
+`PlanningBootstrap` 在 discovery 后发起 synthesis：
+
+```text
+PlanningDiscoveryReport
+  -> TaskPlanner.generate(... discovery_report=...)
+  -> TaskPlanDraft(goal, steps, source)
+  -> TaskPlanningState(phase="execution", source=..., budget=..., discovery=...)
+```
+
+`TaskPlanner` 要求模型输出 JSON，不要输出 Markdown。它会解析：
+
+```json
+{
+  "goal": "...",
+  "steps": [
+    {
+      "title": "...",
+      "kind": "investigate|edit|verify|summarize|other",
+      "acceptance": "...",
+      "verification_hint": "..."
+    }
+  ]
+}
+```
+
+计划最多保留 6 步，步骤会去重、截断和校验。
+
+计划来源：
+
+```text
+llm                 # 直接由 planner 生成
+llm_with_discovery  # discovery completed 后由 planner 生成
+fallback            # planner 失败时的降级计划
+recovered           # 从恢复投影继续执行
+default             # read/edit 的默认轻量任务
+```
+
+如果 discovery 成功但 planner 解析失败，系统不会直接失败，而是创建 fallback 单步计划，并把失败原因写入：
+
+```text
+TaskPlanningState.fallback_reason
+```
+
+对应事件：
+
+```text
+planning_synthesis_started
+planning_synthesis_completed
+task_plan_created
+```
+
+`task_plan_created.plan.planSource` 是 wire 字段，值从 `task.planning.source` 派生，不再维护第二份状态。
+
+## 6. TaskState：运行期任务状态
+
+实现位置：`task_control/state.py`。
+
+`TaskState` 是一次 run 内的任务状态：
 
 ```python
-# 注入任务上下文到系统提示词
+TaskState(
+    task_id=...,
+    goal=...,
+    steps=[TaskStep(...)],
+    mode="read|edit|plan",
+    planning=TaskPlanningState(...),
+    current_step_id=...,
+    phase="understanding|acting|verifying|waiting|finished",
+    next_action=...,
+    replan_count=...,
+    max_replans_per_run=2,
+    completion_satisfied=False,
+    completion_reason="",
+    attempts=[AttemptRecord(...)],
+    change_sets=[ChangeSet(...)],
+    replans=[ReplanRecord(...)],
+)
+```
+
+### 6.1 TaskStep
+
+每个步骤包含：
+
+```text
+id
+title
+status: pending | in_progress | completed | blocked
+kind: investigate | edit | verify | summarize | other
+acceptance
+verification_hint
+summary
+evidence_refs
+failure_count
+note
+progress_state: none | evidence_collected | changed | verified
+```
+
+步骤不是静态 Markdown 清单。它会随着工具事实更新：
+
+- 读取成功：`progress_state=evidence_collected`
+- 产生文件变更：`progress_state=changed`
+- 验证通过：`progress_state=verified`
+- 工具失败或验证失败：记录 failure_count 和 evidence_refs
+- 权限或工具不可用：进入 blocked 或 waiting
+
+### 6.2 AttemptRecord
+
+每批工具结果会记录一次 attempt：
+
+```text
+attempt_id
+step_id
+action_intent
+tool_call_ids
+evidence_refs
+status
+failure_type
+failure_reason
+```
+
+它回答“这一步为什么变成现在这样”。
+
+### 6.3 ChangeSet
+
+如果工具结果携带 `metadata.change_evidence`，TaskController 会生成 ChangeSet：
+
+```text
+affected_paths
+before_hashes
+after_hashes
+diff_summary
+status: pending | verified | failed | revert_required
+verification_refs
+```
+
+这为连续验证失败后的 `propose_revert` 提供证据。
+
+## 7. 每轮模型调用前：把任务状态注入上下文
+
+在每次调用模型前，AgentLoop 会更新：
+
+```python
 current_context.current_task = task_controller.render_context(task)
+current_context.task_signal = task_controller.control_signal(task)
 ```
 
-渲染后的上下文：
+`render_context()` 会注入：
+
+- 当前目标
+- 当前 mode
+- 当前 phase
+- mode guidance
+- planning discovery facts
+- relevant files
+- risks
+- verification hints
+- open questions
+- 步骤列表
+- 当前步骤的 acceptance 和 verification_hint
+- next_action
+- recent_error_code
+- rollback_required
+
+示例：
 
 ```markdown
 ## Current Task
-Goal: 修复配置加载失败并运行相关测试
+Goal: 实现两阶段 plan
+Mode: plan
 Phase: acting
+Mode guidance: Plan mode: follow the generated plan step by step...
+
+Planning facts:
+- TaskController renders task context
+
+Relevant files:
+- src/codepilot/core/task_control/controller.py
 
 Steps:
-- [completed] 定位配置加载调用链
-- [in_progress] 修改错误处理
-- [pending] 运行相关测试
+- [in_progress] 更新 TaskController 上下文 progress=evidence_collected evidence=tool:read_1
+  - Kind: edit; Acceptance: 上下文包含 discovery facts; Verification hint: python -m pytest ...
 
-Current step: 修改错误处理
-Next action: 检查 config.py 中异常转换逻辑
-Constraints:
-- 保持现有公共入口一致
+Current step: 更新 TaskController 上下文
+When this step's acceptance criteria are satisfied, call `complete_task_step` ...
 ```
 
-### 6.3 工具执行后
+`control_signal()` 是给上下文、恢复和审计用的轻量结构，其中包含统一 planning 节点：
+
+```json
+{
+  "mode": "plan",
+  "planning": {
+    "phase": "execution",
+    "source": "llm_with_discovery",
+    "budget": {...},
+    "discovery": {...},
+    "fallback_reason": null
+  },
+  "current_step_title": "...",
+  "next_action": "...",
+  "recent_failure_type": "...",
+  "rollback_required": false
+}
+```
+
+## 8. 模型怎么决定做什么
+
+框架不直接替模型选择业务动作。模型看到：
+
+- 用户请求
+- 历史消息
+- 系统提示词
+- 当前任务上下文
+- 可用工具
+- 上一轮工具结果
+
+然后模型按 ReAct 方式输出：
+
+```text
+普通回答
+或
+ToolCall(...)
+```
+
+任务控制影响模型决策的方式是“提示和约束”：
+
+- 当前步骤告诉模型此刻应该聚焦哪里。
+- acceptance 和 verification_hint 告诉模型怎样算完成。
+- discovery facts 降低 plan 模式瞎猜概率。
+- next_action 和 recent_failure_type 给失败后的修复方向。
+- read mode guidance 禁止修改。
+- completion steering 会在修改后缺少验证时提醒模型继续验证。
+
+真正执行工具前，仍由权限和工具层决定能否执行。
+
+## 9. 工具执行后：事实进入任务控制
+
+AgentLoop 执行工具后会做三件事：
+
+```text
+1. RunState.collect_tool_results(tool_results)
+2. TaskController.after_tool_results(task, run_state, tool_results)
+3. 发出 task_step_updated 和 task_decision 事件
+```
+
+`RunState` 负责运行事实，例如：
+
+- 工具调用次数
+- workspace 是否变化
+- 是否有新鲜验证通过
+- 重复调用情况
+
+`TaskController` 负责任务语义状态，例如：
+
+- 当前步骤是否有进展
+- 是否验证失败
+- 是否需要修复
+- 是否需要重规划
+- 是否应该等待用户
+- 是否进入完成阶段
+
+### 9.1 工具结果决策优先级
+
+`after_tool_results()` 的核心优先级是：
+
+```text
+无工具结果
+  -> continue
+
+cancelled
+  -> stop
+
+approval_required
+  -> block current step, phase=waiting, wait_approval
+
+denied
+  -> block current step, replan(permission_denied)
+
+tool unavailable
+  -> block current step, phase=waiting, stop(tool_unavailable)
+
+non-verification tool error
+  -> record failure, repair(tool_error)
+
+verification failed
+  -> record failure, mark latest changes failed
+  -> failure_count < 2: repair
+  -> failure_count >= 2 and has change sets: propose_revert
+  -> failure_count >= 2 and replan budget available: replan
+  -> replan budget exhausted: stop
+
+verification passed
+  -> complete verified step, mark change sets verified
+
+complete_task_step signal
+  -> complete current step
+
+ordinary success
+  -> update progress from read/change facts
+```
+
+最后如果所有步骤完成：
+
+```text
+finish(all_steps_completed)
+```
+
+否则：
+
+```text
+continue(next_step)
+```
+
+### 9.2 什么算进展
+
+`_result_has_progress()` 和 `_update_progress_from_result()` 只做事实判断：
+
+- `verification.status == "passed"` 是验证进展。
+- `workspace_changed is True` 是修改进展。
+- read/search/find/glob 类工具成功是调查进展。
+- write/edit 类工具只有在 workspace changed 时才算实质进展。
+
+框架不判断业务语义是否“优雅”，只判断工具事实是否支持任务推进。
+
+## 10. 验证失败后怎么重试
+
+验证解释在 `task_control/verifier.py`。
+
+如果工具结果带：
+
+```json
+{
+  "verification": {
+    "status": "failed",
+    "command": "...",
+    "exit_code": 1,
+    "summary": "..."
+  }
+}
+```
+
+TaskController 会：
+
+1. 记录当前步骤失败。
+2. 记录失败命令和摘要。
+3. 标记最近 ChangeSet 为 `failed`。
+4. 设置 `next_action`，提示模型读取失败断言和相关调用链。
+5. 返回 `repair` 或 `replan`。
+
+第一次验证失败通常是：
+
+```text
+decision=repair
+```
+
+同一步失败次数达到 2 时：
+
+- 如果已有 ChangeSet，优先 `propose_revert`。
+- 如果没有 ChangeSet 且还没到 `max_task_replans_per_run`，执行局部 replan。
+- 如果 replan 次数耗尽，当前步骤 blocked，等待用户。
+
+当前实现里的 replan 是局部的：
+
+```text
+保留已完成步骤
+把当前步骤改成“根据最新失败证据调整方案”
+追加“重新运行相关验证”
+保留失败 evidence_refs
+```
+
+这是学习项目里的轻量重规划，不是复杂的计划树。
+
+## 11. 是否继续、是否结束
+
+工具后决策只解决“这一批工具结果之后怎么走”。当一轮模型没有更多工具调用后，AgentLoop 会进入完成门控：
 
 ```python
-# 收集工具结果
-state.collect_tool_results(tool_results)
-
-# 更新任务状态并获取决策
-decision = task_controller.after_tool_results(task, state, tool_results)
-
-# 发送任务状态更新事件
-await emitter.emit({"type": "task_step_updated", "task": ...})
-await emitter.emit({"type": "task_decision", "decision": ...})
-
-# 处理决策
-if decision.action == "stop":
-    return await _stop_with_error(...)
+completion = task_controller.check_completion(task, run_state)
 ```
 
-### 6.4 模型准备结束时
+完成门控在 `task_control/stop.py`。
 
-```python
-# 检查是否可以完成
-completion = task_controller.check_completion(task, state)
+判断顺序：
 
-# 发送完成检查事件
-await emitter.emit({"type": "completion_checked", "completion": ...})
+```text
+1. 有 blocked steps
+   -> not satisfied, reason=blocked_steps, can_continue=False
 
-# 如果不能完成但可以继续，注入引导消息
-if not completion.satisfied and completion.can_continue:
-    pending_messages = [task_controller.completion_steering(completion)]
-    continue
+2. workspace changed 但没有 fresh_verification_passed
+   -> not satisfied, reason=modified_without_fresh_verification
+   -> 第一次 can_continue=True，注入 completion steering
+   -> 第二次 unverified=True，停止并返回未验证风险
+
+3. 还有 pending 或 in_progress steps
+   -> not satisfied, reason=incomplete_steps
+
+4. 无阻塞、无未完成、验证满足
+   -> satisfied=True, reason=all_steps_completed
 ```
 
-引导消息示例：
+如果缺少新鲜验证但还允许继续，AgentLoop 会注入一条用户形态的 steering message：
 
-```
+```text
 工作区已经发生修改，但当前没有与最新工作区状态一致的成功验证。
 请运行最相关的测试或检查；如果环境无法验证，请明确记录原因和剩余风险。
 ```
 
-### 6.5 Run 结束时
+这就是“完成门控”：模型可以想结束，但框架会在关键证据缺失时把它拉回验证。
 
-```python
-return await _finish_run(
-    emitter,
-    state.result(
-        ...,
-        task=task_controller.summarize(task),  # 保存任务摘要
-    ),
-)
+## 12. 任务怎么存储和恢复
+
+任务恢复在 `src/codepilot/sessions/history/task_recovery.py`。
+
+它不是长期记忆，也不会沉淀项目事实。它只保存当前 session 未完成任务的恢复投影。
+
+### 12.1 何时开始保存
+
+Session 在 run 开始前调用：
+
+```text
+TaskRecoveryStore.begin_task(text, run_id)
 ```
 
-## 7. 设计亮点总结
+如果新请求 goal 和当前投影相同，会刷新 `source_run_id` 和 `updated_at`，不丢弃已有进度。
 
-### 7.1 证据绑定的动态计划
+### 12.2 Run 结束后保存什么
 
-```
-传统方案：一次性生成计划 → 执行 → 结束
-新方案：初始计划 → 每步更新 → 绑定证据 → 动态调整
-```
+Run 结束后，`TaskRecoveryStore.update_from_result()` 会从 `TaskSummary.control_signal` 生成 projection：
 
-计划不是静态的 Markdown 清单，而是随工具执行动态更新的状态机。
-
-### 7.2 模型行动与 Harness 完成判断分离
-
-```python
-# 模型负责语义
-"我应该读取这个文件" → 模型决定
-"我应该修改这行代码" → 模型决定
-"我应该运行测试" → 模型决定
-
-# Runtime 负责边界
-"文件是否真的被读取了" → Runtime 判断
-"代码是否真的被修改了" → Runtime 判断
-"测试是否真的通过了" → Runtime 判断
-"任务是否真的完成了" → Runtime 判断
-```
-
-### 7.3 完成必须有证据
-
-```python
-# 不允许的情况：
-# 1. 修改代码后没有验证
-# 2. 验证失败后直接结束
-# 3. 有未完成步骤就报告完成
-
-# 强制要求：
-# 修改后必须有新鲜验证
-# 验证必须对应当前工作区版本
-# 所有步骤必须完成或明确阻塞
+```json
+{
+  "goal": "...",
+  "task_mode": "plan",
+  "planning": {
+    "phase": "execution",
+    "source": "llm_with_discovery",
+    "budget": {...},
+    "discovery": {...},
+    "fallback_reason": null
+  },
+  "task_progress": {
+    "completed_steps": [...],
+    "pending_steps": [...],
+    "blocked_steps": [...],
+    "completion_satisfied": false,
+    "completion_reason": "...",
+    "step_details": {...}
+  },
+  "next_action": "...",
+  "source_run_id": "...",
+  "created_at": "...",
+  "updated_at": "..."
+}
 ```
 
-### 7.4 局部重新规划
+注意：旧的顶层 `plan_source` 不再保存。计划来源只从 `planning.source` 派生。
 
-```python
-# 不是清空整个计划
-# 而是保留已完成步骤，替换当前和后续步骤
+### 12.3 下次如何恢复
 
-# 触发条件：
-# 1. 同一步连续失败 2 次
-# 2. 关键前提被工具证据否定
-# 3. 权限拒绝使原路径不可执行
+恢复规则：
 
-# 限制：
-# 最多重新规划 2 次
-# 超过后停止并报告
+```text
+有 task_progress:
+  -> TaskController.build_task_state_from_recovery_projection()
+  -> planning.phase="recovered", planning.source="recovered"
+  -> 不重新 discovery，不重新 synthesis
+
+有 planning.discovery 但无 task_progress:
+  -> PlanningBootstrap 复用 discovery report
+  -> 重新 synthesis
+
+只有 goal:
+  -> 重新 discovery
+
+projection 已完成:
+  -> active_projection() 返回 None，不恢复
 ```
 
-### 7.5 不猜测代码语义
+如果用户在恢复前显式切换 `/mode plan`，当前 session mode 优先于 projection mode。
 
-```python
-# Runtime 可以判断：
-"文件是否修改" → 检查 workspace_changed
-"命令是否成功" → 检查 exit_code
-"测试是否通过" → 检查 verification.status
+## 13. 事件和审计
 
-# Runtime 不直接判断：
-"根因是否完全正确" → 模型和测试共同判断
-"实现是否优雅" → 模型判断
-"业务逻辑是否满足" → 外部测试判断
+任务控制相关事件包括：
+
+```text
+planning_discovery_started
+planning_discovery_step
+planning_discovery_completed
+planning_synthesis_started
+planning_synthesis_completed
+task_plan_created
+task_step_updated
+task_decision
+completion_checked
+task_recovery_updated
+task_recovery_warning
 ```
 
-### 7.6 会话恢复支持
+事件 payload 里使用统一 planning 节点：
 
-```python
-# 从 TaskMemory 投影重建任务状态
-# 保留已完成步骤的证据
-# 恢复 next_action 和 blocked 原因
-# 支持跨会话继续任务
+```json
+{
+  "mode": "plan",
+  "planning": {
+    "phase": "...",
+    "source": "...",
+    "budget": {...},
+    "discovery": {...},
+    "fallback_reason": "..."
+  }
+}
 ```
 
-## 8. 决策规则详解
+审计报告在 `src/codepilot/observability/audit.py` 中汇总：
 
-### 8.1 决策优先级
+- planning phase
+- plan source
+- discovery status
+- facts count
+- relevant files
+- risks
+- verification hints
+- evidence refs
+- budget usage
+- fallback reason
 
-```python
-def decide(task, run, tool_results):
-    # 1. 最高优先级：取消
-    if has_cancelled(tool_results):
-        return stop("cancelled")
-    
-    # 2. 需要审批
-    if needs_approval(tool_results):
-        return wait_approval("approval_required")
-    
-    # 3. 预算耗尽
-    if run_budget_exhausted(run):
-        return stop("budget_exhausted")
-    
-    # 4. 验证失败
-    if verification_failed(tool_results):
-        if current_step_failed_repeatedly(task):
-            return replan("repeated_step_failure")
-        return repair("verification_failed")
-    
-    # 5. 当前步骤完成
-    if current_step_completed(task):
-        advance_to_next_step(task)
-    
-    # 6. 所有步骤完成
-    if all_steps_completed(task):
-        return finish("all_steps_completed")
-    
-    # 7. 继续执行
-    return continue_("next_step")
+这样后续可以解释“为什么生成这个计划，计划依据是什么，失败后为什么继续或停止”。
+
+## 14. 与其他模块的边界
+
+### 14.1 与 AgentLoop
+
+AgentLoop 是执行编排者：
+
+- 创建 TaskController。
+- 在 plan 模式调用 PlanningBootstrap。
+- 每轮模型调用前注入 task context。
+- 工具执行后把结果交给 TaskController。
+- 根据 TaskController 和 run_decisions 的结果继续、停止或等待。
+
+TaskController 不直接调用模型，也不直接执行工具。
+
+### 14.2 与 ToolCallCoordinator
+
+ToolCallCoordinator 负责工具执行、权限、before/after hooks 和事件。
+
+TaskController 只消费工具结果：
+
+```text
+success | error | denied | approval_required | cancelled
 ```
 
-### 8.2 各决策的含义
+它不能绕过权限，也不能因为计划需要某个动作就自动放行。
 
-| 决策 | 含义 | 触发条件 |
-|------|------|----------|
-| `continue` | 继续执行下一步 | 工具成功，还有未完成步骤 |
-| `repair` | 修复当前步骤 | 验证失败（第一次） |
-| `replan` | 重新规划 | 连续失败 2 次，或权限拒绝 |
-| `wait_approval` | 等待用户审批 | 工具需要审批 |
-| `finish` | 完成任务 | 所有步骤完成，验证通过 |
-| `stop` | 停止执行 | 预算耗尽，或重新规划超限 |
+### 14.3 与 RunState
 
-## 9. 与其他模块的边界
+RunState 记录运行事实：
 
-### 9.1 与 RunState
+- workspace 是否改变
+- 是否有新鲜验证通过
+- 工具调用计数
+- 模型尝试次数
 
-```
-RunState（执行事实）：
-├── 调用次数
-├── 文件变化
-├── 验证结果
-└── 重复调用
+TaskState 记录任务语义：
 
-TaskState（任务语义）：
-├── 目标
-├── 步骤
-├── 当前进度
-└── 下一步
-```
-
-`TaskController` 读取 `RunState`，但不复制其计数器。
-
-### 9.2 与 TaskMemory
-
-```
-TaskState（当前 Run 内的活跃状态）
-    ↓ Run 结束时投影
-TaskMemory（跨 Run 恢复所需的任务摘要）
-```
-
-投影内容：
 - goal
-- constraints
-- confirmed_findings
-- blocked_on
+- steps
+- current step
+- phase
 - next_action
+- attempts/change_sets/replans
 
-### 9.3 与 ContextGovernor
+TaskController 读取 RunState，但不复制 RunState。
 
-`ContextGovernor` 负责把任务状态投影给模型：
-- 当前任务目标
-- 当前步骤
-- 最新工具证据
-- 活跃文件
-- 相关记忆
+### 14.4 与记忆系统
 
-`TaskController` 不直接拼接 System Prompt。
+当前任务恢复投影不是长期记忆。
 
-### 9.4 与工具权限
+本轮设计暂时只支持任务恢复和审计，不自动把项目事实写入记忆。未来可以考虑沉淀失败经验、用户纠正，但不要把 discovery facts 自动当项目事实长期保存。
 
-权限层决定某个动作能否执行，`TaskController` 只消费结果：
-- `allow` 后执行成功
-- `denied`
-- `approval_required`
-- `cancelled`
+## 15. 典型流程
 
-它不能绕过权限，也不能因为计划需要某一步就自动放行。
+### 15.1 read 模式
 
-## 10. 学习建议
-
-1. **从 task_state.py 开始**：理解数据结构是理解整个系统的基础
-2. **重点阅读 task_controller.py**：这是任务规划的核心逻辑
-3. **理解决策规则**：`after_tool_results` 的决策逻辑是核心
-4. **看测试用例**：test_task_planning.py 展示了各种使用场景
-5. **查看 agent_loop.py**：理解任务规划如何与主循环集成
-
-## 11. 后续扩展方向
-
-当前设计有意保持简单，后续可以扩展：
-- 子步骤树
-- 步骤依赖图
-- 优先级队列
-- 负责人
-- 预计时间
-- 百分比进度
-- 自动回滚
-- 多 Agent 协作
-
-但核心的**证据绑定 + 完成门槛 + 局部重新规划**设计是稳定的。
-
-## 12. 实际效果示例
-
-### 12.1 正常修复流程
-
-```
-用户：修复 divide() 除零错误并运行测试
-
-TaskState:
-1. 定位 divide 实现
-2. 修改除零处理
-3. 运行相关测试
-
-read 成功 → step 1 completed
-
-edit 成功，workspace_changed=true → step 2 completed
-
-pytest passed → step 3 completed
-
-CompletionGate:
-修改存在 + 最新验证通过 + 无阻塞步骤
-→ finish
+```text
+用户: 帮我解释这个模块怎么工作
+task_mode=read
+runtime 强制 read-only 权限
+TaskController 创建默认只读步骤
+模型读取文件、搜索代码
+complete_task_step 或最终回答
+CompletionGate 检查无阻塞、无未完成步骤
+结束并生成 TaskSummary
 ```
 
-### 12.2 验证失败后修复
+### 15.2 edit 模式
 
-```
-edit 成功 → 进入验证
-
-pytest failed → 当前验证步骤 failure_count=1 → decision=repair
-
-模型读取失败日志并再次 edit → 旧验证失效
-
-pytest passed → verification fresh → finish
-```
-
-### 12.3 重复失败后重新规划
-
-```
-同一验证步骤连续失败两次
-→ decision=replan
-→ 保留已经完成的定位步骤
-→ 替换当前修改和验证步骤
-
-再次失败且达到 replan 上限
-→ stop
-→ 保存 TaskMemory.next_action 和失败证据
+```text
+用户: 修复一个小 bug
+task_mode=edit
+不调用 planner
+TaskController 创建“完成当前请求”步骤
+模型读取代码
+模型修改文件
+RunState.workspace_changed=True
+CompletionGate 要求 fresh verification
+模型运行测试
+verification passed
+TaskController 标记步骤 verified/completed
+结束
 ```
 
-### 12.4 权限阻塞
+### 15.3 plan 模式
 
+```text
+用户: 重构任务控制逻辑
+task_mode=plan
+PlanningBootstrap 检查恢复投影
+无 active recovery
+PlanningDiscovery 用只读工具收集 facts/relevant_files/risks
+TaskPlanner 基于 discovery report 生成最多 6 步计划
+TaskController 初始化 TaskState
+AgentLoop 进入普通 ReAct 执行
+每步根据工具事实更新状态
+验证失败时 repair 或 replan
+完成门控通过后结束
+恢复投影和审计记录 planning 节点
 ```
-模型请求未知 Shell 命令
-→ PermissionPolicy 返回 approval_required
-→ TaskState.phase=waiting
-→ RunStatus=waiting_approval
 
-用户批准 → 恢复原 ToolCall → 更新当前步骤
+### 15.4 验证连续失败
+
+```text
+edit 产生 ChangeSet
+pytest failed
+decision=repair
+模型修复后再跑 pytest
+pytest failed again
+failure_count >= 2 且有 ChangeSet
+decision=propose_revert
+task.phase=waiting
+next_action=报告可能需要撤销的变更并等待用户确认
 ```
+
+如果没有 ChangeSet，且未达到 replan 上限：
+
+```text
+decision=replan
+当前步骤改为“根据最新失败证据调整方案”
+追加“重新运行相关验证”
+继续执行
+```
+
+## 16. 当前实现的学习型边界
+
+当前设计故意保持轻量：
+
+- 没有复杂 FSM 框架。
+- 没有多 planner 模型。
+- 没有计划树、依赖图或优先级队列。
+- plan discovery 是 scratch，不污染主对话历史。
+- 重规划是局部替换，不重建整棵任务图。
+- 完成门控只检查关键事实，不做业务正确性判定。
+
+它的价值在于给 Coding Agent 提供一条可解释的执行证据链：
+
+```text
+为什么做这一步
+依据哪些事实生成计划
+工具实际做了什么
+验证为什么失败或通过
+失败后为什么修复、重规划或建议回滚
+为什么现在可以结束或不能结束
+```
+
+后续扩展可以围绕这个契约继续做，而不是新增第二套任务控制口径。

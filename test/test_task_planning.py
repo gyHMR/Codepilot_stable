@@ -181,12 +181,10 @@ def test_agent_session_records_task_recovery_warning_separately_from_memory(
         session._begin_task_recovery("修复任务推进", run_id="run_1")
 
         events = session.store.load_events()
-        recovery_warnings = [
-            event
+        assert not any(
+            event.get("type") == "task_recovery_warning"
             for event in events
-            if event.get("operation") == "task_recovery_begin"
-        ]
-        assert recovery_warnings[-1]["type"] == "task_recovery_warning"
+        )
         assert not any(
             event.get("type") == "memory_warning"
             and event.get("operation") == "task_recovery_begin"

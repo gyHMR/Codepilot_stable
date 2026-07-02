@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-"""结构化记忆记录和共享值类型。
+"""Memory v2 data contracts.
 
-本模块只描述“什么是记忆”，不负责决定何时写入记忆。
-写入策略在 ``MemoryWriter``，检索策略在 ``MemoryRetriever``；
-但“哪些记录属于可复用长期记忆”是数据模型自身的语义，集中放在这里，
-避免调用方用零散的字符串判断重复解释。
+Memory stores durable, reusable knowledge only.  Task progress, file
+freshness, tool logs, and transient failures live in neighboring session,
+context, and run stores.
 """
 
 from dataclasses import asdict, dataclass, field
@@ -13,28 +12,17 @@ from datetime import datetime, timezone
 from typing import Any, Literal, cast
 
 
-# 记忆类型：
-# - task/file/failure 是早期运行态记忆，仅为兼容旧存储保留，不再进入检索。
-# - experience/decision/project 是可复用的 durable memory。
-MemoryKind = Literal["task", "file", "failure", "experience", "decision", "project"]
-# 记忆作用域：会话级/项目级
-MemoryScope = Literal["session", "project"]
-# 记忆信任度：观察到/已验证/用户给出/模型声称
-MemoryTrust = Literal["observed", "verified", "user_given", "model_claim"]
-# 记忆状态：活跃/过时/已被替代/已删除
-MemoryStatus = Literal["active", "stale", "superseded", "deleted"]
+MEMORY_SCHEMA_VERSION = 2
 
-MEMORY_SCHEMA_VERSION = 1
-DURABLE_MEMORY_KINDS = frozenset({"project", "decision", "experience"})
-LEGACY_MEMORY_KINDS = frozenset({"task", "file", "failure"})
-_MEMORY_KINDS = frozenset(
-    {"task", "file", "failure", "experience", "decision", "project"}
-)
+MemoryKind = Literal["correction", "constraint", "decision", "experience"]
+MemoryScope = Literal["session", "project"]
+MemoryStatus = Literal["active", "superseded", "deleted"]
+MemorySource = Literal["user", "command", "run", "promoted"]
+
+_MEMORY_KINDS = frozenset({"correction", "constraint", "decision", "experience"})
 _MEMORY_SCOPES = frozenset({"session", "project"})
-_MEMORY_TRUST_VALUES = frozenset(
-    {"observed", "verified", "user_given", "model_claim"}
-)
-_MEMORY_STATUS_VALUES = frozenset({"active", "stale", "superseded", "deleted"})
+_MEMORY_STATUSES = frozenset({"active", "superseded", "deleted"})
+_MEMORY_SOURCES = frozenset({"user", "command", "run", "promoted"})
 
 
 def utc_now_iso() -> str:
@@ -43,107 +31,82 @@ def utc_now_iso() -> str:
 
 @dataclass
 class MemoryRecord:
-    """一条结构化记忆记录。
+    """A durable memory record suitable for future recall."""
 
-    设计边界：
-    - ``kind`` 表示这条记录的语义类型，而不是存储位置。
-    - ``scope`` 表示生命周期边界：当前会话可见，还是整个项目可见。
-    - ``trust`` 表示证据强度，检索时只影响排序，不替代新鲜度检查。
-    - ``status`` 表示当前是否仍可使用；非 active 记录不会进入上下文。
-    """
-    id: str                              # 记忆唯一标识
-    kind: MemoryKind                     # 记忆类型
-    scope: MemoryScope                   # 作用域
-    content: dict[str, Any]              # 记忆内容
-    source: str                          # 来源
-    source_run_id: str | None = None     # 来源 Run ID
-    related_paths: list[str] = field(default_factory=list)       # 关联文件路径
-    source_hashes: dict[str, str] = field(default_factory=dict)  # 文件哈希快照
-    trust: MemoryTrust = "observed"      # 信任度
-    status: MemoryStatus = "active"      # 状态
+    id: str
+    scope: MemoryScope
+    kind: MemoryKind
+    key: str
+    text: str
+    source: MemorySource
+    status: MemoryStatus = "active"
+    triggers: list[str] = field(default_factory=list)
+    related_paths: list[str] = field(default_factory=list)
+    evidence_refs: list[str] = field(default_factory=list)
+    supersedes: list[str] = field(default_factory=list)
+    occurrences: int = 1
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
 
     def __post_init__(self) -> None:
-        _ensure_memory_kind(self.kind)
-        _ensure_memory_scope(self.scope)
-        _ensure_memory_trust(self.trust)
-        _ensure_memory_status(self.status)
+        object.__setattr__(self, "scope", _ensure_memory_scope(self.scope))
+        object.__setattr__(self, "kind", _ensure_memory_kind(self.kind))
+        object.__setattr__(self, "status", _ensure_memory_status(self.status))
+        object.__setattr__(self, "source", _ensure_memory_source(self.source))
+        self.id = _require_text(self.id, "memory id")
+        self.key = _require_text(self.key, "memory key")
+        self.text = _require_text(self.text, "memory text")
+        self.triggers = _dedupe_text(self.triggers)
+        self.related_paths = _dedupe_text(self.related_paths)
+        self.evidence_refs = _dedupe_text(self.evidence_refs)
+        self.supersedes = _dedupe_text(self.supersedes)
+        if self.occurrences <= 0:
+            raise ValueError("memory occurrences must be positive")
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "MemoryRecord":
+        schema = value.get("schema_version")
+        if schema != MEMORY_SCHEMA_VERSION:
+            raise ValueError(f"Unsupported memory schema_version: {schema}")
         return cls(
             id=str(value.get("id", "")),
-            kind=_memory_kind(value.get("kind")),
-            scope=_memory_scope(value.get("scope")),
-            content=dict(value.get("content", {})) if isinstance(value.get("content"), dict) else {},
-            source=str(value.get("source", "unknown")),
-            source_run_id=value.get("source_run_id") if isinstance(value.get("source_run_id"), str) else None,
-            related_paths=[str(item) for item in value.get("related_paths", []) if isinstance(item, str)],
-            source_hashes={
-                str(key): str(item)
-                for key, item in value.get("source_hashes", {}).items()
-            } if isinstance(value.get("source_hashes"), dict) else {},
-            trust=_memory_trust(value.get("trust")),
-            status=_memory_status(value.get("status")),
+            scope=_ensure_memory_scope(value.get("scope")),
+            kind=_ensure_memory_kind(value.get("kind")),
+            status=_ensure_memory_status(value.get("status", "active")),
+            key=str(value.get("key", "")),
+            text=str(value.get("text", "")),
+            triggers=_strings(value.get("triggers")),
+            related_paths=_strings(value.get("related_paths")),
+            evidence_refs=_strings(value.get("evidence_refs")),
+            source=_ensure_memory_source(value.get("source")),
+            supersedes=_strings(value.get("supersedes")),
+            occurrences=_positive_int(value.get("occurrences", 1)),
             created_at=str(value.get("created_at", utc_now_iso())),
             updated_at=str(value.get("updated_at", utc_now_iso())),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @property
-    def is_active(self) -> bool:
-        """记录是否仍可用于后续推理。"""
-
-        return self.status == "active"
-
-    @property
-    def is_durable(self) -> bool:
-        """记录是否属于可复用长期记忆。"""
-
-        return self.kind in DURABLE_MEMORY_KINDS
-
-    @property
-    def is_legacy_state(self) -> bool:
-        """记录是否只是旧版运行态记忆，不应再被检索注入上下文。"""
-
-        return self.kind in LEGACY_MEMORY_KINDS
+        payload = asdict(self)
+        payload["schema_version"] = MEMORY_SCHEMA_VERSION
+        return payload
 
     @property
     def is_retrievable(self) -> bool:
-        """记录是否有资格参与记忆检索。"""
-
-        return self.retrieval_exclusion_reason() is None
+        return self.status == "active"
 
     def retrieval_exclusion_reason(self) -> str | None:
-        """返回记录不能参与检索的原因；可检索时返回 ``None``。
-
-        这个方法只表达数据模型层面的硬约束。相关性评分、数量限制和
-        查询模式仍由 ``MemoryRetriever`` 负责。
-        """
-
-        if not self.is_active:
+        if self.status != "active":
             return f"status:{self.status}"
-        if self.is_legacy_state:
-            return f"transient_kind:{self.kind}"
-        if not self.is_durable:
-            return f"unsupported_kind:{self.kind}"
-        if (
-            self.kind == "experience"
-            and self.content.get("maturity") == "candidate"
-        ):
-            return "candidate_experience"
         return None
 
 
 @dataclass(frozen=True)
 class MemoryQuery:
-    """记忆检索查询。"""
-    text: str                     # 查询文本
-    active_paths: list[str]       # 当前活跃文件路径
-    limit: int = 8                # 返回数量上限
+    """Query signals used to recall durable memory."""
+
+    text: str
+    active_paths: list[str]
+    limit: int = 8
     task_phase: str | None = None
     action_intent: str | None = None
     recent_error: str | None = None
@@ -152,26 +115,23 @@ class MemoryQuery:
 
 @dataclass(frozen=True)
 class RetrievedMemory:
-    """检索到的记忆（含评分和匹配原因）。"""
     record: MemoryRecord
     score: int
     reasons: list[str]
 
 
-def _memory_kind(value: object) -> MemoryKind:
-    return _ensure_memory_kind(value) if value in _MEMORY_KINDS else "project"
+@dataclass(frozen=True)
+class MemoryRecall:
+    """Layered memory recall result consumed by ContextGovernor."""
 
+    pinned_text: str = ""
+    always: list[RetrievedMemory] = field(default_factory=list)
+    selected: list[RetrievedMemory] = field(default_factory=list)
+    dropped: dict[str, str] = field(default_factory=dict)
 
-def _memory_scope(value: object) -> MemoryScope:
-    return _ensure_memory_scope(value) if value in _MEMORY_SCOPES else "session"
-
-
-def _memory_trust(value: object) -> MemoryTrust:
-    return _ensure_memory_trust(value) if value in _MEMORY_TRUST_VALUES else "observed"
-
-
-def _memory_status(value: object) -> MemoryStatus:
-    return _ensure_memory_status(value) if value in _MEMORY_STATUS_VALUES else "active"
+    @property
+    def retrieved(self) -> list[RetrievedMemory]:
+        return [*self.always, *self.selected]
 
 
 def _ensure_memory_kind(value: object) -> MemoryKind:
@@ -186,28 +146,65 @@ def _ensure_memory_scope(value: object) -> MemoryScope:
     return cast(MemoryScope, value)
 
 
-def _ensure_memory_trust(value: object) -> MemoryTrust:
-    if value not in _MEMORY_TRUST_VALUES:
-        raise ValueError(f"Unknown memory trust: {value}")
-    return cast(MemoryTrust, value)
-
-
 def _ensure_memory_status(value: object) -> MemoryStatus:
-    if value not in _MEMORY_STATUS_VALUES:
+    if value not in _MEMORY_STATUSES:
         raise ValueError(f"Unknown memory status: {value}")
     return cast(MemoryStatus, value)
 
 
+def _ensure_memory_source(value: object) -> MemorySource:
+    if value not in _MEMORY_SOURCES:
+        raise ValueError(f"Unknown memory source: {value}")
+    return cast(MemorySource, value)
+
+
+def _require_text(value: object, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{field_name} is required")
+    return text
+
+
+def _strings(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return _dedupe_text(value)
+
+
+def _dedupe_text(values: list[object]) -> list[str]:
+    out: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def _positive_int(value: object) -> int:
+    if isinstance(value, bool):
+        raise ValueError("memory occurrences must be positive")
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("memory occurrences must be positive") from exc
+    if number <= 0:
+        raise ValueError("memory occurrences must be positive")
+    return number
+
+
 __all__ = [
     "MEMORY_SCHEMA_VERSION",
-    "DURABLE_MEMORY_KINDS",
-    "LEGACY_MEMORY_KINDS",
     "MemoryKind",
     "MemoryQuery",
+    "MemoryRecall",
     "MemoryRecord",
     "MemoryScope",
+    "MemorySource",
     "MemoryStatus",
-    "MemoryTrust",
     "RetrievedMemory",
     "utc_now_iso",
 ]

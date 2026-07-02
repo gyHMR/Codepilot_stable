@@ -64,11 +64,12 @@ def test_session_store_persists_messages_forks_and_summarizes_events(tmp_path: P
     assert len(forked.load_session_messages()) == 2
 
     events = store.load_events()
-    assert events[0]["result"]["content"][0]["text"] == "ok"
+    assert events[0]["type"] == "tool_call_finished"
+    assert events[0]["tool_name"] == "echo"
     summary = store.summarize_events()
     assert summary["total_events"] == 2
-    assert summary["tool_errors"] == 0
-    assert summary["usage"]["total_tokens"] == 7
+    assert summary["event_counts"]["tool_call_finished"] == 1
+    assert summary["event_counts"]["model_call_finished"] == 1
 
 
 def test_session_store_uses_slim_layout_and_lazy_files(tmp_path: Path) -> None:
@@ -98,8 +99,12 @@ def test_session_store_uses_slim_layout_and_lazy_files(tmp_path: Path) -> None:
     assert len(store.load_session_messages()) == 1
 
 
-def test_event_recorder_builds_eval_summary(tmp_path: Path) -> None:
-    from codepilot.observability import EventRecorder, build_eval_summary
+def test_event_recorder_builds_trace_and_summary(tmp_path: Path) -> None:
+    from codepilot.observability import (
+        EventRecorder,
+        build_run_summary,
+        build_run_trace,
+    )
 
     recorder = EventRecorder(tmp_path / "events.jsonl")
     recorder.append(
@@ -130,12 +135,13 @@ def test_event_recorder_builds_eval_summary(tmp_path: Path) -> None:
         }
     )
 
-    summary = build_eval_summary(recorder.load())
+    trace = build_run_trace(recorder.load())
+    summary = build_run_summary(trace)
 
+    assert len(trace.tool_calls) == 1
+    assert trace.tool_calls[0].status == "error"
     assert summary.tool_calls == 1
     assert summary.tool_errors == 1
-    assert summary.tool_error_rate == 1.0
-    assert summary.has_errors
 
 
 def test_session_store_restores_assistant_error_info(tmp_path: Path) -> None:
@@ -218,6 +224,7 @@ def test_session_store_persists_run_results(tmp_path: Path) -> None:
     assert loaded[0]["affected_paths"] == ["a.py"]
     run_dir = tmp_path / ".codepilot" / "runs" / "run_1"
     assert (run_dir / "run.json").exists()
+    assert (run_dir / "trace.json").exists()
     assert not (run_dir / "result.json").exists()
     assert not (run_dir / "state.json").exists()
     assert not (run_dir / "report.json").exists()
@@ -290,7 +297,11 @@ def test_tool_result_message_keeps_status_and_error_flag_consistent() -> None:
 
 
 def test_observability_builds_run_summary_and_report_from_run_result() -> None:
-    from codepilot.observability import build_run_report, build_run_summary
+    from codepilot.observability import (
+        build_run_report,
+        build_run_summary,
+        build_run_trace,
+    )
     from codepilot.protocols import (
         AgentRunCounters,
         AgentRunResult,
@@ -336,15 +347,13 @@ def test_observability_builds_run_summary_and_report_from_run_result() -> None:
         {"type": "agent_end", "timestamp": 260},
     ]
 
-    summary = build_run_summary(result, events=events)
-    report = build_run_report(result, events=events, task="fix test")
+    trace = build_run_trace(events, result=result)
+    summary = build_run_summary(trace)
+    report = build_run_report(result, events=events)
 
     assert summary.status == "completed"
     assert summary.duration_ms == 160
-    assert summary.verification_count == 1
-    assert summary.verification_passed == 1
-    assert summary.token_usage["total_tokens"] == 15
-    assert summary.cost["total"] == 0.02
-    assert report["task"] == "fix test"
+    assert summary.total_tokens == 15
+    assert summary.total_cost == 0.02
     assert report["summary"]["tool_calls"] == 2
-    assert report["verification"][0]["command"] == "python -m pytest test -q"
+    assert report["summary"]["affected_paths"] == ["src/a.py"]

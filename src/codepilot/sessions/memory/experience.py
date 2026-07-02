@@ -1,50 +1,50 @@
 from __future__ import annotations
 
-"""轻量经验提炼与合并。
-
-第一版只从确定性闭环中提炼经验：工具失败、后续成功、并且验证通过。
-不让 LLM 自由总结，避免把无证据推测写入长期记忆。
-"""
+"""Deterministic experience extraction and consolidation."""
 
 import hashlib
 import uuid
 from dataclasses import dataclass
-from typing import Any
 
 from codepilot.protocols import AgentRunResult, ToolResultMessage
 
-from .records import MemoryRecord, utc_now_iso
+from .records import MemoryRecord
 from .store import MemoryStore
+
+
+PROMOTE_EXPERIENCE_OCCURRENCES = 2
 
 
 @dataclass(frozen=True)
 class ExperienceCandidate:
-    content: dict[str, Any]
+    key: str
+    text: str
+    triggers: list[str]
     related_paths: list[str]
-    trust: str
+    evidence_refs: list[str]
 
 
 class ExperienceExtractor:
-    """从一次 run 的消息中提炼可复用经验候选。"""
+    """Extract reusable experience from verified failure-repair loops."""
 
     def extract(self, result: AgentRunResult) -> list[ExperienceCandidate]:
         messages = [
             message for message in result.messages
             if isinstance(message, ToolResultMessage)
         ]
-        candidates: list[ExperienceCandidate] = []
-        candidates.extend(self._extract_edit_repair(result, messages))
-        candidates.extend(self._extract_verification_repair(result, messages))
-        return candidates
+        return [
+            *self._extract_edit_repair(messages),
+            *self._extract_verification_repair(messages),
+        ]
 
     def _extract_edit_repair(
         self,
-        result: AgentRunResult,
         messages: list[ToolResultMessage],
     ) -> list[ExperienceCandidate]:
         failed_match = next(
             (
-                (index, message) for index, message in enumerate(messages)
+                (index, message)
+                for index, message in enumerate(messages)
                 if message.tool_name == "edit"
                 and message.is_error
                 and message.error_code in {"multiple_matches", "unexpected_match_count"}
@@ -57,10 +57,7 @@ class ExperienceExtractor:
         succeeded_match = next(
             (
                 (index, message)
-                for index, message in enumerate(
-                    messages[failed_index + 1:],
-                    failed_index + 1,
-                )
+                for index, message in enumerate(messages[failed_index + 1:], failed_index + 1)
                 if message.tool_name == "edit"
                 and not message.is_error
                 and message.status == "success"
@@ -70,38 +67,39 @@ class ExperienceExtractor:
         if succeeded_match is None:
             return []
         succeeded_index, succeeded = succeeded_match
-        passed_verifications = _passed_verifications_after(messages, succeeded_index)
-        if not passed_verifications:
+        passed = _passed_verifications_after(messages, succeeded_index)
+        if not passed:
             return []
+        error = failed.error_code or "edit_error"
         paths = _paths_from([failed, succeeded])
-        content = {
-            "lesson_type": "tool_usage",
-            "situation": "edit 工具因为 old_text 不唯一或匹配数不符合预期而失败",
-            "failed_attempt": "直接使用不够唯一的 old_text 调用 edit",
-            "failure_signal": failed.error_code,
-            "better_action": "先 read 目标区域，再使用更长且唯一的 old_text 或 occurrence_index 进行编辑",
-            "applies_when": [
-                "phase:repair",
-                "intent:edit_file",
-                f"error:{failed.error_code}",
-            ],
-            "avoid_when": [],
-            "evidence_refs": _evidence_refs([failed, succeeded, *passed_verifications]),
-            "maturity": "verified" if result.status == "completed" else "active",
-            "occurrence_count": 1,
-            "last_seen_at": utc_now_iso(),
-        }
-        content["fingerprint"] = _fingerprint(content, paths)
-        return [ExperienceCandidate(content=content, related_paths=paths, trust="verified")]
+        key = f"experience:edit:{error}"
+        return [
+            ExperienceCandidate(
+                key=key,
+                text=(
+                    "When edit fails because old_text is not unique or the match "
+                    "count is unexpected, read the target area first and retry "
+                    "with a longer unique old_text or occurrence_index."
+                ),
+                triggers=[
+                    "phase:repair",
+                    "intent:edit_file",
+                    f"error:{error}",
+                    *_path_triggers(paths),
+                ],
+                related_paths=paths,
+                evidence_refs=_evidence_refs([failed, succeeded, *passed]),
+            )
+        ]
 
     def _extract_verification_repair(
         self,
-        result: AgentRunResult,
         messages: list[ToolResultMessage],
     ) -> list[ExperienceCandidate]:
         failed_match = next(
             (
-                (index, message) for index, message in enumerate(messages)
+                (index, message)
+                for index, message in enumerate(messages)
                 if isinstance(message.verification, dict)
                 and message.verification.get("status") == "failed"
             ),
@@ -110,32 +108,32 @@ class ExperienceExtractor:
         if failed_match is None:
             return []
         failed_index, failed = failed_match
-        passed_verifications = _passed_verifications_after(messages, failed_index)
-        if not passed_verifications:
+        passed = _passed_verifications_after(messages, failed_index)
+        if not passed:
             return []
-        content = {
-            "lesson_type": "verification_repair",
-            "situation": "修改后验证失败，需要基于失败日志修复",
-            "failed_attempt": "第一次修改没有满足验证期望",
-            "failure_signal": "verification_failed",
-            "better_action": "先读取失败摘要和相关文件，再做最小修复并重新运行同一验证命令",
-            "applies_when": [
-                "phase:repair",
-                "intent:debug_failure",
-                "error:verification_failed",
-            ],
-            "avoid_when": [],
-            "evidence_refs": _evidence_refs([failed, *passed_verifications]),
-            "maturity": "verified" if result.status == "completed" else "active",
-            "occurrence_count": 1,
-            "last_seen_at": utc_now_iso(),
-        }
-        content["fingerprint"] = _fingerprint(content, [])
-        return [ExperienceCandidate(content=content, related_paths=[], trust="verified")]
+        paths = _paths_from([failed, *passed])
+        return [
+            ExperienceCandidate(
+                key="experience:verification:failed_then_passed",
+                text=(
+                    "When verification fails after a change, inspect the failure "
+                    "summary and related files, make the smallest repair, then "
+                    "rerun the same verification command."
+                ),
+                triggers=[
+                    "phase:repair",
+                    "intent:debug_failure",
+                    "error:verification_failed",
+                    *_path_triggers(paths),
+                ],
+                related_paths=paths,
+                evidence_refs=_evidence_refs([failed, *passed]),
+            )
+        ]
 
 
 class MemoryConsolidator:
-    """将经验候选写入记忆，并按 fingerprint 合并重复经验。"""
+    """Merge duplicate memories and promote repeated verified experience."""
 
     def __init__(self, store: MemoryStore) -> None:
         self.store = store
@@ -146,38 +144,147 @@ class MemoryConsolidator:
         *,
         run_id: str | None,
     ) -> MemoryRecord:
-        fingerprint = str(candidate.content.get("fingerprint", ""))
-        for record in self.store.load_session():
-            if (
-                record.kind == "experience"
-                and record.content.get("fingerprint") == fingerprint
-            ):
-                record.content["occurrence_count"] = int(
-                    record.content.get("occurrence_count", 1)
-                ) + 1
-                record.content["last_seen_at"] = utc_now_iso()
-                evidence = record.content.setdefault("evidence_refs", [])
-                if isinstance(evidence, list):
-                    for item in candidate.content.get("evidence_refs", []):
-                        if item not in evidence:
-                            evidence.append(item)
-                if candidate.content.get("maturity") == "verified":
-                    record.content["maturity"] = "verified"
-                    record.trust = "verified"
-                record.source_run_id = run_id
-                return self.store.update(record)
-        return self.store.update(
-            MemoryRecord(
-                id=f"mem_{uuid.uuid4().hex[:12]}",
-                kind="experience",
-                scope="session",
-                content=dict(candidate.content),
-                source="experience_extractor",
-                source_run_id=run_id,
-                related_paths=list(candidate.related_paths),
-                trust="verified" if candidate.trust == "verified" else "observed",
-            )
+        existing = _active_by_key(
+            self.store.load_session(),
+            key=candidate.key,
+            kind="experience",
         )
+        if existing is None:
+            record = MemoryRecord(
+                id=_new_memory_id(),
+                scope="session",
+                kind="experience",
+                key=candidate.key,
+                text=candidate.text,
+                triggers=list(candidate.triggers),
+                related_paths=list(candidate.related_paths),
+                evidence_refs=list(candidate.evidence_refs),
+                source="run",
+            )
+        else:
+            record = _merge_record(existing, candidate)
+        record = self.store.update(record)
+        if record.occurrences >= PROMOTE_EXPERIENCE_OCCURRENCES:
+            self._promote_experience(record, run_id=run_id)
+        return record
+
+    def upsert_project_record(self, record: MemoryRecord) -> MemoryRecord:
+        existing = _active_by_key(
+            self.store.load_project(),
+            key=record.key,
+            kind=record.kind,
+        )
+        if existing is not None:
+            existing.text = record.text
+            existing.triggers = _dedupe([*existing.triggers, *record.triggers])
+            existing.related_paths = _dedupe(
+                [*existing.related_paths, *record.related_paths]
+            )
+            existing.evidence_refs = _dedupe(
+                [*existing.evidence_refs, *record.evidence_refs]
+            )
+            existing.supersedes = _dedupe([*existing.supersedes, *record.supersedes])
+            existing.occurrences += max(record.occurrences, 1)
+            return self.store.update(existing)
+        superseded = _active_conflicts(self.store.load_project(), record.key, record.kind)
+        for old in superseded:
+            old.status = "superseded"
+            self.store.update(old)
+            if old.id not in record.supersedes:
+                record.supersedes.append(old.id)
+        return self.store.update(record)
+
+    def _promote_experience(self, session_record: MemoryRecord, *, run_id: str | None) -> MemoryRecord:
+        existing = _active_by_key(
+            self.store.load_project(),
+            key=session_record.key,
+            kind="experience",
+        )
+        if existing is not None:
+            existing.occurrences = max(existing.occurrences, session_record.occurrences)
+            existing.triggers = _dedupe([*existing.triggers, *session_record.triggers])
+            existing.related_paths = _dedupe([*existing.related_paths, *session_record.related_paths])
+            existing.evidence_refs = _dedupe([*existing.evidence_refs, *session_record.evidence_refs])
+            return self.store.update(existing)
+        promoted = MemoryRecord(
+            id=_new_memory_id(),
+            scope="project",
+            kind="experience",
+            key=session_record.key,
+            text=session_record.text,
+            triggers=list(session_record.triggers),
+            related_paths=list(session_record.related_paths),
+            evidence_refs=[
+                *session_record.evidence_refs,
+                *([f"run:{run_id}"] if run_id else []),
+            ],
+            source="promoted",
+            occurrences=session_record.occurrences,
+            supersedes=[session_record.id],
+        )
+        return self.store.update(promoted)
+
+
+def memory_key_for_text(kind: str, text: str) -> str:
+    lowered = text.lower()
+    if "context" in lowered or "上下文" in text:
+        topic = "context_design"
+    elif "memory" in lowered or "记忆" in text:
+        topic = "memory_contract"
+    elif "生产级" in text or "学习" in text or "求职" in text:
+        topic = "project_boundary"
+    else:
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+        topic = digest
+    return f"{kind}:{topic}"
+
+
+def _active_by_key(
+    records: list[MemoryRecord],
+    *,
+    key: str,
+    kind: str,
+) -> MemoryRecord | None:
+    return next(
+        (
+            record
+            for record in records
+            if record.status == "active"
+            and record.key == key
+            and record.kind == kind
+        ),
+        None,
+    )
+
+
+def _active_conflicts(
+    records: list[MemoryRecord],
+    key: str,
+    kind: str,
+) -> list[MemoryRecord]:
+    if kind == "correction":
+        return [
+            record
+            for record in records
+            if record.status == "active"
+            and record.key == key
+            and record.kind != "correction"
+        ]
+    return [
+        record
+        for record in records
+        if record.status == "active"
+        and record.key == key
+        and record.kind == kind
+    ]
+
+
+def _merge_record(record: MemoryRecord, candidate: ExperienceCandidate) -> MemoryRecord:
+    record.occurrences += 1
+    record.triggers = _dedupe([*record.triggers, *candidate.triggers])
+    record.related_paths = _dedupe([*record.related_paths, *candidate.related_paths])
+    record.evidence_refs = _dedupe([*record.evidence_refs, *candidate.evidence_refs])
+    return record
 
 
 def _passed_verifications_after(
@@ -185,7 +292,8 @@ def _passed_verifications_after(
     index: int,
 ) -> list[ToolResultMessage]:
     return [
-        message for message in messages[index + 1:]
+        message
+        for message in messages[index + 1:]
         if isinstance(message.verification, dict)
         and message.verification.get("status") == "passed"
     ]
@@ -200,6 +308,10 @@ def _paths_from(messages: list[ToolResultMessage]) -> list[str]:
     return paths
 
 
+def _path_triggers(paths: list[str]) -> list[str]:
+    return [f"path:{path}" for path in paths]
+
+
 def _evidence_refs(messages: list[ToolResultMessage]) -> list[str]:
     refs: list[str] = []
     for message in messages:
@@ -207,20 +319,23 @@ def _evidence_refs(messages: list[ToolResultMessage]) -> list[str]:
             refs.append(f"tool:{message.tool_call_id}")
             if isinstance(message.verification, dict):
                 refs.append(f"verification:{message.tool_call_id}")
-    return refs
+    return _dedupe(refs)
 
 
-def _fingerprint(content: dict[str, Any], paths: list[str]) -> str:
-    raw = "|".join(
-        [
-            str(content.get("lesson_type", "")),
-            str(content.get("failure_signal", "")),
-            str(content.get("better_action", "")),
-            ",".join(str(item) for item in content.get("applies_when", [])),
-            ",".join(paths),
-        ]
-    )
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+def _dedupe(items: list[str]) -> list[str]:
+    out: list[str] = []
+    for item in items:
+        if item and item not in out:
+            out.append(item)
+    return out
 
 
-__all__ = ["ExperienceExtractor", "MemoryConsolidator"]
+def _new_memory_id() -> str:
+    return f"mem_{uuid.uuid4().hex[:12]}"
+
+
+__all__ = [
+    "ExperienceExtractor",
+    "MemoryConsolidator",
+    "memory_key_for_text",
+]

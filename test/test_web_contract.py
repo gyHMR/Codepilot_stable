@@ -324,7 +324,7 @@ def test_runtime_service_exposes_run_result_events_and_report(tmp_path: Path) ->
 
     assert runtime.list_runs("session_runtime")[0]["run_id"] == "run_runtime"
     assert runtime.get_run_result("session_runtime", "run_runtime")["status"] == "completed"
-    assert runtime.get_run_events("session_runtime", "run_runtime")[0]["type"] == "agent_start"
+    assert runtime.get_run_events("session_runtime", "run_runtime")[0]["type"] == "run_started"
     report = runtime.get_run_report("session_runtime", "run_runtime")
     assert report["summary"]["run_id"] == "run_runtime"
     assert report["summary"]["status"] == "completed"
