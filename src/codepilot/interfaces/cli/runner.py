@@ -226,8 +226,7 @@ async def run_interactive(
         if text.startswith("/"):
             try:
                 command_result = await handle_cli_command(runtime, current_session_id, text)
-                for line in command_result.output_lines:
-                    renderer.print(line)
+                renderer.render_command_output(command_result.output_lines)
                 # 如果命令导致会话切换（如 /fork, /clear）
                 if command_result.switched_session_id is not None:
                     # 关闭旧 Session

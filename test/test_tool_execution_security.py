@@ -1107,6 +1107,7 @@ async def _cli_approval_case() -> None:
 
     assert decision.approved is True
     assert decision.approval_id
+    assert any("CP // TOOL APPROVAL REQUIRED" in line for line in outputs)
     assert any("python script.py" in line for line in outputs)
 
 

@@ -16,6 +16,8 @@ from codepilot.tools.approval import (
 from codepilot.tools.policy import ToolDecision
 from codepilot.tools.contracts import ToolMetadata, ToolRuntimeRequest
 
+from .ui import format_plain_panel
+
 
 class CliApprovalProvider:
     """CLI 工具审批提供者：在终端显示审批提示并等待用户输入 y/N。"""
@@ -44,7 +46,7 @@ class CliApprovalProvider:
         self._render(approval)
         answer = await asyncio.to_thread(
             self.input_fn,
-            "Approve once? [y/N] ",
+            "CP approve once? [y/N] ",
         )
         approved = answer.strip().lower() in {"y", "yes"}
         return ApprovalDecision(
@@ -55,15 +57,18 @@ class CliApprovalProvider:
 
     def _render(self, approval: ApprovalRequest) -> None:
         """渲染审批提示信息：工具名、原因、风险等级、能力要求和参数预览。"""
-        self.output_fn("")
-        self.output_fn("Tool approval required")
-        self.output_fn(f"  Tool: {approval.tool_name}")
-        self.output_fn(f"  Reason: {approval.reason}")
-        self.output_fn(f"  Risk: {approval.risk_level}")
+        rows: list[tuple[str, object]] = [
+            ("Tool", approval.tool_name),
+            ("Reason", approval.reason),
+            ("Risk", approval.risk_level),
+        ]
         if approval.capabilities:
-            self.output_fn(f"  Capabilities: {', '.join(approval.capabilities)}")
+            rows.append(("Capabilities", ", ".join(approval.capabilities)))
         for key, value in approval.params_preview.items():
-            self.output_fn(f"  {key}: {value}")
+            rows.append((key, value))
+        self.output_fn("")
+        for line in format_plain_panel("Tool approval required", rows):
+            self.output_fn(line)
 
 
 __all__ = ["CliApprovalProvider"]

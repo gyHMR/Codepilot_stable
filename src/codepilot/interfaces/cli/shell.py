@@ -31,13 +31,14 @@ from codepilot.interfaces.cli.commands import RuntimeCommand, builtin_commands
 
 # 自定义样式
 CODEPILOT_STYLE = Style.from_dict({
-    "prompt": "bold #67e8f9",
+    "prompt": "bold #22d3ee",
     "continuation": "#64748b",
-    "bottom-toolbar": "bg:#0b0f10 #94a3b8",
-    "completion-menu.completion": "bg:#111827 #cbd5e1",
-    "completion-menu.completion.current": "bg:#164e63 #ecfeff bold",
-    "completion-menu.meta.completion": "bg:#111827 #64748b",
-    "completion-menu.meta.completion.current": "bg:#164e63 #a5f3fc",
+    "bottom-toolbar": "bg:#061014 #94a3b8",
+    "bottom-toolbar.text": "bg:#061014 #94a3b8",
+    "completion-menu.completion": "bg:#0f172a #cbd5e1",
+    "completion-menu.completion.current": "bg:#155e75 #ecfeff bold",
+    "completion-menu.meta.completion": "bg:#0f172a #64748b",
+    "completion-menu.meta.completion.current": "bg:#155e75 #a5f3fc",
 })
 
 class CommandCompleter(Completer):
