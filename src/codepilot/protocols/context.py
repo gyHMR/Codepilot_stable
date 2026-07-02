@@ -17,7 +17,10 @@ DroppedContextReason = Literal[
     "over_budget",     # 超出预算
     "superseded",      # 被替代
     "missing_source",  # 来源丢失
+    "ledgered",        # 原文已转入 artifact/ledger
+    "checkpointed",    # 已被结构化 checkpoint 覆盖
 ]
+ContextPressureLevel = Literal["normal", "tight", "critical"]
 _CONTEXT_FRESHNESS_VALUES = frozenset({"fresh", "stale", "missing", "unknown"})
 _CONTEXT_TRUST_VALUES = frozenset(
     {"observed", "derived", "user_given", "model_claim"}
@@ -30,8 +33,11 @@ _DROPPED_CONTEXT_REASONS = frozenset(
         "over_budget",
         "superseded",
         "missing_source",
+        "ledgered",
+        "checkpointed",
     }
 )
+_CONTEXT_PRESSURE_LEVELS = frozenset({"normal", "tight", "critical"})
 
 
 @dataclass(frozen=True)
@@ -116,6 +122,69 @@ class DroppedContextItem:
         _ensure_dropped_context_reason(self.reason)
 
 
+@dataclass(frozen=True)
+class ContextPressure:
+    """一次上下文准备的压力判断。"""
+
+    level: ContextPressureLevel
+    effective_budget: int
+    estimated_tokens: int
+    reasons: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        _ensure_context_pressure_level(self.level)
+        if self.effective_budget < 0:
+            raise ValueError("effective_budget must be non-negative")
+        if self.estimated_tokens < 0:
+            raise ValueError("estimated_tokens must be non-negative")
+
+
+@dataclass(frozen=True)
+class ContextArtifactRef:
+    """上下文中被 artifact/ledger 引用的大块内容。"""
+
+    kind: str
+    path: str
+    source_hash: str | None = None
+    summary: str = ""
+    original_tokens: int = 0
+    visible_tokens: int = 0
+
+    def __post_init__(self) -> None:
+        if not str(self.kind).strip():
+            raise ValueError("artifact kind cannot be empty")
+        if not str(self.path).strip():
+            raise ValueError("artifact path cannot be empty")
+        if self.original_tokens < 0 or self.visible_tokens < 0:
+            raise ValueError("artifact token counts must be non-negative")
+
+
+@dataclass(frozen=True)
+class ContextCheckpoint:
+    """Critical 压力下用于恢复工作态的结构化 checkpoint。"""
+
+    goal: str
+    active_files: list[str] = field(default_factory=list)
+    changed_files: list[str] = field(default_factory=list)
+    key_evidence: list[str] = field(default_factory=list)
+    verification_state: str = "unknown"
+    open_questions: list[str] = field(default_factory=list)
+    next_actions: list[str] = field(default_factory=list)
+    source_refs: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ContextView:
+    """本轮模型调用实际消费的分层上下文视图。"""
+
+    stable_rules: list[str] = field(default_factory=list)
+    working_state: list[str] = field(default_factory=list)
+    recalled_memory: list[str] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
+    recent_messages: list[str] = field(default_factory=list)
+    tools: list[str] = field(default_factory=list)
+
+
 @dataclass
 class ContextReport:
     """上下文编译报告：记录一次上下文编译的完整裁剪和选择结果。"""
@@ -135,6 +204,14 @@ class ContextReport:
     budget_profile: dict[str, float] = field(default_factory=dict)
     relevance_reasons: dict[str, list[str]] = field(default_factory=dict)
     sanitization: dict[str, int] = field(default_factory=dict)
+    pressure: ContextPressure | None = None
+    context_view: ContextView | None = None
+    checkpoint_used: ContextCheckpoint | None = None
+    checkpoint_created: ContextCheckpoint | None = None
+    artifact_refs: list[ContextArtifactRef] = field(default_factory=list)
+    tokens_by_layer: dict[str, int] = field(default_factory=dict)
+    prefix_hash: str | None = None
+    dynamic_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -158,12 +235,23 @@ def _ensure_dropped_context_reason(value: object) -> DroppedContextReason:
     return cast(DroppedContextReason, value)
 
 
+def _ensure_context_pressure_level(value: object) -> ContextPressureLevel:
+    if value not in _CONTEXT_PRESSURE_LEVELS:
+        raise ValueError(f"Unknown context pressure level: {value}")
+    return cast(ContextPressureLevel, value)
+
+
 __all__ = [
+    "ContextArtifactRef",
+    "ContextCheckpoint",
     "ContextFreshness",
     "ContextItem",
+    "ContextPressure",
+    "ContextPressureLevel",
     "ContextReport",
     "ContextSectionReport",
     "ContextTrust",
+    "ContextView",
     "DroppedContextItem",
     "DroppedContextReason",
     "RepositoryDelta",

@@ -29,6 +29,8 @@ def build_session_options_from_existing(
         thinking_level=session.agent.state.thinking_level,
         tool_execution=session.tool_execution,
         max_tool_calls_per_turn=session.max_tool_calls_per_turn,
+        context_governance_enabled=session.context_governance_enabled,
+        memory_enabled=session.memory_enabled,
         get_api_key=session.get_api_key,
         max_context_messages=session.max_context_messages,
         max_context_tokens=session.max_context_tokens,
