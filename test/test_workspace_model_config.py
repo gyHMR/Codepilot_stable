@@ -99,6 +99,7 @@ def test_cli_defaults_leave_runtime_config_unspecified() -> None:
     assert args.prompt == "hello"
     assert args.model is None
     assert args.permission_mode is None
+    assert args.task_mode is None
 
 
 def test_cli_rejects_removed_legacy_options() -> None:
@@ -200,6 +201,52 @@ def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
     assert config.sources["retain_recent_messages"] == "workspace"
     assert config.sources["tool_execution"] == "workspace"
     assert config.sources["max_retries"] == "default"
+
+
+def test_workspace_settings_can_select_task_mode(tmp_path) -> None:
+    from codepilot.runtime.config import resolve_runtime_config
+
+    root = tmp_path / ".codepilot"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "settings.json").write_text(
+        json.dumps({"task_mode": "plan"}),
+        encoding="utf-8",
+    )
+
+    config = resolve_runtime_config(
+        CreateAgentSessionOptions(workspace_dir=tmp_path),
+        inputs=_runtime_inputs(tmp_path),
+    )
+
+    assert config.task_mode == "plan"
+    assert config.sources["task_mode"] == "workspace"
+
+
+def test_read_task_mode_forces_read_only_permission(tmp_path) -> None:
+    from codepilot.runtime.config import resolve_runtime_config
+
+    config = resolve_runtime_config(
+        CreateAgentSessionOptions(workspace_dir=tmp_path, task_mode="read"),
+        inputs=_runtime_inputs(tmp_path),
+    )
+
+    assert config.task_mode == "read"
+    assert config.read_only_mode is True
+    assert config.tool_permission_mode == "read-only"
+
+
+def test_read_task_mode_rejects_workspace_write_override(tmp_path) -> None:
+    from codepilot.runtime.config import resolve_runtime_config
+
+    with pytest.raises(ValueError, match="task_mode=read"):
+        resolve_runtime_config(
+            CreateAgentSessionOptions(
+                workspace_dir=tmp_path,
+                task_mode="read",
+                tool_permission_mode="workspace-write",
+            ),
+            inputs=_runtime_inputs(tmp_path),
+        )
 
 
 def _runtime_inputs(tmp_path, *, session_id: str | None = None):

@@ -24,7 +24,14 @@ from codepilot.protocols import (
     ToolCall,
     ToolResultMessage,
 )
-from codepilot.core import Agent, AgentMessage, AgentOptions, new_run_id
+from codepilot.core import (
+    Agent,
+    AgentMessage,
+    AgentOptions,
+    TaskMode,
+    ensure_task_mode,
+    new_run_id,
+)
 
 from codepilot.extensions.types import ExtensionLifecycleContext
 from codepilot.tools import AgentTool
@@ -102,6 +109,7 @@ class AgentSession:
         self.task_recovery = TaskRecoveryStore(self.store)
         self.memory_enabled = options.memory_enabled
         self.context_governance_enabled = options.context_governance_enabled
+        self.task_mode = ensure_task_mode(options.task_mode)
         self._base_prepare_context = options.prepare_context
         self.context_governor: ContextGovernor | None = None
         prepare_context = self._build_context_preparer()
@@ -132,7 +140,7 @@ class AgentSession:
             stream_fn=options.stream_fn,
             prepare_context=prepare_context,
             task_control_enabled=options.task_control_enabled,
-            task_planner_enabled=options.task_planner_enabled,
+            task_mode=self.task_mode,
             max_task_replans_per_run=options.max_task_replans_per_run,
         )
         if options.convert_to_llm is not None:
@@ -228,6 +236,26 @@ class AgentSession:
             "total_cost": total_cost,
         }
 
+    def set_task_mode(self, mode: TaskMode | str) -> TaskMode:
+        """Set the task mode used by future runs in this session."""
+        normalized = ensure_task_mode(mode)
+        changed = normalized != self.task_mode
+        if changed:
+            self.task_mode = normalized
+            self.agent.set_task_mode(normalized)
+            self.store.append_event(
+                {
+                    "type": "task_mode_changed",
+                    "sessionId": self.session_id,
+                    "taskMode": normalized,
+                }
+            )
+        projection = self.task_recovery.load_projection()
+        if projection is not None and projection.get("task_mode") != normalized:
+            projection["task_mode"] = normalized
+            self.task_recovery.save_projection(projection)
+        return normalized
+
     async def continue_run(
         self,
         *,
@@ -311,6 +339,7 @@ class AgentSession:
         *,
         images: list[str] | None = None,
         run_id: str | None = None,
+        task_mode: TaskMode | str | None = None,
     ) -> AgentRunResult:
         """执行一次用户任务并持久化结构化结果。
 
@@ -334,6 +363,8 @@ class AgentSession:
         Returns:
             结构化的 Run 结果。
         """
+        if task_mode is not None:
+            self.set_task_mode(task_mode)
         run_id = run_id or new_run_id()
         rollback_baseline = await self._start_run_lifecycle(
             text=text,

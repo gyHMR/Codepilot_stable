@@ -246,6 +246,12 @@ Examples:
         help="Permission mode (default: workspace-write)",
     )
     parser.add_argument(
+        "--task-mode",
+        default=None,
+        choices=["read", "edit", "plan"],
+        help="Task mode for this session (default: edit)",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         default=False,
@@ -358,6 +364,7 @@ async def _run_from_args(args: argparse.Namespace) -> int:
                         else None
                     ),
                     tool_permission_mode=args.permission_mode,
+                    task_mode=args.task_mode,
                 ),
                 args.config_key,
             )
@@ -382,6 +389,7 @@ async def _run_from_args(args: argparse.Namespace) -> int:
             else None
         ),
         tool_permission_mode=permission_mode,
+        task_mode=args.task_mode,
     )
     if run_mode == "interactive":
         from .approval import CliApprovalProvider

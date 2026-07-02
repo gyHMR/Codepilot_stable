@@ -166,8 +166,13 @@ class RuntimeService:
             source.session_options,
             session_id=session.session_id,
             messages=[],
+            task_mode=session.task_mode,
         )
-        assembly = replace(source, session_options=session_options)
+        assembly = replace(
+            source,
+            session_options=session_options,
+            profile=replace(source.profile, task_mode=session.task_mode),
+        )
         self._sessions[session.session_id] = session
         self._assemblies[session.session_id] = assembly
         self._restored_sessions.discard(session.session_id)
@@ -237,6 +242,7 @@ class RuntimeService:
             model_id=model_id,
             workspace=str(session.workspace_dir),
             permission_mode=assembly.profile.permission_mode,
+            task_mode=session.task_mode,
             message_count=len(session.messages),
             leaf_id=session.get_leaf_id() or "N/A",
             is_running=self._current_active_run(session_id) is not None,
@@ -278,6 +284,7 @@ class RuntimeService:
             "message_count": len(session.messages),
             "entry_ids": session.list_entry_ids(),
             "leaf_id": session.get_leaf_id(),
+            "task_mode": session.task_mode,
         }
 
     def get_session_freshness(self, session_id: str) -> dict[str, Any]:
@@ -331,6 +338,10 @@ class RuntimeService:
     def switch_entry(self, session_id: str, entry_id: str) -> None:
         self.get_session(session_id).switch_to_entry(entry_id)
 
+    def set_task_mode(self, session_id: str, mode: str) -> str:
+        """Set the user-facing task mode for future runs in a session."""
+        return self.get_session(session_id).set_task_mode(mode)
+
     def fork_session(self, session_id: str, entry_id: str) -> str:
         forked = self.get_session(session_id).fork_from_entry(entry_id)
         self._register_derived_session(
@@ -365,10 +376,10 @@ class RuntimeService:
 
         return await self._run_active_session_call(
             session_id,
-            lambda session, active_run: session.run(
-                message.text,
-                images=_session_images(message),
-                run_id=active_run.run_id,
+            lambda session, active_run: self._run_prompt(
+                session,
+                active_run,
+                message,
             ),
         )
 
@@ -392,13 +403,27 @@ class RuntimeService:
 
         async for event in self._stream_active_session_call(
             session_id,
-            lambda session, active_run: session.run(
-                message.text,
-                images=_session_images(message),
-                run_id=active_run.run_id,
+            lambda session, active_run: self._run_prompt(
+                session,
+                active_run,
+                message,
             ),
         ):
             yield event
+
+    async def _run_prompt(
+        self,
+        session: AgentSession,
+        active_run: _ActiveRun,
+        message: _UserInput,
+    ) -> AgentRunResult:
+        run_kwargs: dict[str, Any] = {
+            "images": _session_images(message),
+            "run_id": active_run.run_id,
+        }
+        if message.task_mode is not None:
+            run_kwargs["task_mode"] = message.task_mode
+        return await session.run(message.text, **run_kwargs)
 
     async def continue_session(self, session_id: str) -> AsyncIterator[AgentEvent]:
         """继续上一次未完成的会话运行，流式返回事件。
@@ -440,6 +465,7 @@ class RuntimeService:
                     f"  Leaf       : {status.leaf_id}",
                     f"  Messages   : {status.message_count}",
                     f"  Permission : {status.permission_mode}",
+                    f"  Mode       : {status.task_mode}",
                 ],
             )
 

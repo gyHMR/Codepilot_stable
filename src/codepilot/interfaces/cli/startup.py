@@ -13,6 +13,7 @@ from codepilot.runtime.types import SessionStatus
 
 
 _CLI_PERMISSION_MODES = frozenset({"read-only", "workspace-write", "ask"})
+_CLI_TASK_MODES = frozenset({"read", "edit", "plan"})
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class CliStartupState:
     workspace: str
     session_id: str
     permission_mode: str = "workspace-write"
+    task_mode: str = "edit"
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -54,6 +56,11 @@ class CliStartupState:
         )
         object.__setattr__(
             self,
+            "task_mode",
+            _ensure_cli_task_mode(self.task_mode),
+        )
+        object.__setattr__(
+            self,
             "warnings",
             _normalize_warning_texts(self.warnings),
         )
@@ -71,6 +78,7 @@ def build_startup_state(
         workspace=status.workspace,
         session_id=status.session_id,
         permission_mode=status.permission_mode,
+        task_mode=status.task_mode,
         warnings=tuple(warnings) if warnings is not None else tuple(status.warnings or ()),
     )
 
@@ -88,6 +96,13 @@ def _ensure_cli_permission_mode(value: object) -> str:
     text = _require_cli_startup_text(value, field_name="permission_mode")
     if text not in _CLI_PERMISSION_MODES:
         raise ValueError(f"Unknown CLI permission_mode: {value}")
+    return text
+
+
+def _ensure_cli_task_mode(value: object) -> str:
+    text = _require_cli_startup_text(value, field_name="task_mode")
+    if text not in _CLI_TASK_MODES:
+        raise ValueError(f"Unknown CLI task_mode: {value}")
     return text
 
 

@@ -67,6 +67,7 @@ from .run_decisions import (
 )
 from .run_state import RunState, new_run_id
 from .task_controller import TaskController
+from .task_modes import policy_for_mode
 from .task_planner import TaskPlanner, TaskPlanDraft
 from .task_state import TaskState
 from .task_tools import complete_task_step_tool, has_complete_task_step_tool
@@ -438,10 +439,11 @@ async def _run_loop(
 
     # 任务控制器（可选）：负责任务规划和完成度检查
     task_controller = TaskController() if config.task_control_enabled else None
+    task_policy = policy_for_mode(config.task_mode)
     planned_task: TaskPlanDraft | None = None
     if (
         task_controller is not None
-        and config.task_planner_enabled
+        and task_policy.planner_required
         and current_context.task_recovery_projection is None
         and current_context.messages
     ):
@@ -466,6 +468,9 @@ async def _run_loop(
             current_context.messages,
             goal=planned_task.goal if planned_task is not None else None,
             proposed_steps=planned_task.steps if planned_task is not None else None,
+            mode=task_policy.mode,
+            plan_source=planned_task.source if planned_task is not None else None,
+            mode_policy=task_policy.to_signal(),
             max_replans_per_run=config.max_task_replans_per_run,
             task_recovery_projection=current_context.task_recovery_projection,
         )
@@ -482,8 +487,8 @@ async def _run_loop(
                 "type": "task_plan_created",
                 "plan": _task_plan_event_payload(
                     planned_task,
+                    mode=task.mode,
                     task_step_count=len(task.steps),
-                    planner_enabled=config.task_planner_enabled,
                     recovered=current_context.task_recovery_projection is not None,
                 ),
                 "task": task_controller.event_payload(task),
@@ -1009,13 +1014,15 @@ def _latest_user_goal(messages: list[AgentMessage]) -> str:
 def _task_plan_event_payload(
     planned_task: TaskPlanDraft | None,
     *,
+    mode: str,
     task_step_count: int,
-    planner_enabled: bool,
     recovered: bool,
 ) -> dict[str, object]:
     if planned_task is not None:
         payload: dict[str, object] = {
+            "mode": mode,
             "source": planned_task.source,
+            "planSource": planned_task.source,
             "step_count": len(planned_task.steps),
         }
         if planned_task.fallback_reason:
@@ -1026,10 +1033,10 @@ def _task_plan_event_payload(
             payload["fallback_parsed_keys"] = list(planned_task.fallback_parsed_keys)
         return payload
     source = "recovered" if recovered else "default"
-    if not planner_enabled:
-        source = "planner_disabled"
     return {
+        "mode": mode,
         "source": source,
+        "planSource": source,
         "step_count": task_step_count,
     }
 

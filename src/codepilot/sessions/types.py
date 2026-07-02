@@ -24,6 +24,7 @@ from codepilot.core import (
     AfterToolCallContext,
     AfterToolCallResult,
     AgentMessage,
+    TaskMode,
     BeforeToolCallContext,
     BeforeToolCallResult,
     PrepareContextFn,
@@ -113,7 +114,7 @@ class AgentSessionOptions:
     context_governance_enabled: bool = True
     memory_enabled: bool = True
     task_control_enabled: bool = True
-    task_planner_enabled: bool = True
+    task_mode: TaskMode = "edit"
     max_task_replans_per_run: int = 2
 
     # 消息转换函数

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from codepilot.core import ToolExecutionMode
+from codepilot.core import TaskMode, ToolExecutionMode
 from codepilot.protocols import Model, ModelCapabilities
 
 
@@ -137,6 +137,7 @@ class WorkspaceSettings:
     system_prompt: Optional[str] = None
     thinking_level: Optional[str] = None
     tool_execution: Optional[ToolExecutionMode] = None
+    task_mode: Optional[TaskMode] = None
     max_tool_calls_per_turn: Optional[int] = None
     max_context_messages: Optional[int] = None
     retain_recent_messages: Optional[int] = None
@@ -224,6 +225,13 @@ class WorkspaceResourceLoader:
         tool_execution = raw.get("tool_execution")
         if tool_execution not in {"parallel", "sequential"}:
             tool_execution = None
+        raw_task_mode = raw.get("task_mode")
+        task_mode = (
+            raw_task_mode
+            if isinstance(raw_task_mode, str)
+            and raw_task_mode in {"read", "edit", "plan"}
+            else None
+        )
         permission_mode = raw.get("tool_permission_mode")
         if permission_mode not in {"read-only", "workspace-write", "ask"}:
             permission_mode = None
@@ -234,6 +242,7 @@ class WorkspaceResourceLoader:
             system_prompt=raw.get("system_prompt") if isinstance(raw.get("system_prompt"), str) else None,
             thinking_level=raw.get("thinking_level") if isinstance(raw.get("thinking_level"), str) else None,
             tool_execution=tool_execution,
+            task_mode=task_mode,
             max_tool_calls_per_turn=self._to_positive_int(raw.get("max_tool_calls_per_turn")),
             max_context_messages=self._to_positive_int(raw.get("max_context_messages")),
             retain_recent_messages=self._to_positive_int(raw.get("retain_recent_messages")),

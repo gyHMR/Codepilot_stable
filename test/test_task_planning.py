@@ -769,7 +769,7 @@ def test_task_controller_exports_control_signal_and_attempts() -> None:
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
     controller = TaskController()
-    task = controller.initialize([UserMessage(content="读取文件")])
+    task = controller.initialize([UserMessage(content="读取文件")], mode="read")
     run = RunState(run_id="run_1", session_id="session_1")
     result = ToolResultMessage(
         tool_call_id="read_1",
@@ -784,10 +784,13 @@ def test_task_controller_exports_control_signal_and_attempts() -> None:
     summary = controller.summarize(task)
 
     assert signal["task_id"] == task.task_id
+    assert signal["mode"] == "read"
+    assert "Read mode" in controller.render_context(task)
     assert signal["action_intent"] == "read_context"
     assert signal["last_decision"] == "continue"
     assert task.attempts[-1].tool_call_ids == ["read_1"]
     assert summary.control_signal["action_intent"] == "read_context"
+    assert summary.control_signal["mode"] == "read"
     assert summary.attempts[-1]["attempt_id"].startswith("attempt_")
 
 
@@ -800,6 +803,8 @@ def test_task_controller_rebuilds_task_state_from_memory_projection() -> None:
         [UserMessage(content="继续修复失败测试")],
         task_recovery_projection={
             "goal": "修复失败测试",
+            "task_mode": "plan",
+            "plan_source": "recovered",
             "task_progress": {
                 "completed_steps": ["定位失败"],
                 "pending_steps": ["重新运行相关验证"],
@@ -819,6 +824,8 @@ def test_task_controller_rebuilds_task_state_from_memory_projection() -> None:
     )
 
     assert task.goal == "修复失败测试"
+    assert task.mode == "plan"
+    assert task.plan_source == "recovered"
     assert [step.status for step in task.steps] == [
         "completed",
         "blocked",
@@ -845,6 +852,7 @@ def test_task_recovery_projection_mapping_builds_task_state() -> None:
         [UserMessage(content="继续修复")],
         {
             "goal": "恢复任务",
+            "task_mode": "read",
             "task_progress": {
                 "completed_steps": ["定位失败"],
                 "blocked_steps": ["等待审批"],
@@ -865,6 +873,7 @@ def test_task_recovery_projection_mapping_builds_task_state() -> None:
 
     assert task is not None
     assert task.goal == "恢复任务"
+    assert task.mode == "read"
     assert [(step.title, step.status) for step in task.steps] == [
         ("定位失败", "completed"),
         ("等待审批", "blocked"),
@@ -911,6 +920,10 @@ def test_agent_loop_emits_task_events_and_result_summary() -> None:
 
 def test_agent_loop_can_plan_before_react_execution() -> None:
     asyncio.run(_agent_loop_llm_planner_case())
+
+
+def test_agent_loop_edit_mode_skips_planner() -> None:
+    asyncio.run(_agent_loop_edit_mode_skips_planner_case())
 
 
 def test_agent_loop_exposes_planner_fallback_reason_in_task_event() -> None:
@@ -1046,7 +1059,7 @@ async def _agent_loop_complete_step_advances_case() -> None:
             ),
             convert_to_llm=lambda items: items,
             allow_unmanaged_tools=True,
-            task_planner_enabled=True,
+            task_mode="plan",
             repeated_tool_call_limit=20,
         ),
         emit=lambda _event: None,
@@ -1089,7 +1102,7 @@ async def _agent_loop_planner_fallback_event_case() -> None:
                 max_tokens=500,
             ),
             convert_to_llm=lambda items: items,
-            task_planner_enabled=True,
+            task_mode="plan",
         ),
         emit=events.append,
         stream_fn=fake_stream,
@@ -1097,7 +1110,9 @@ async def _agent_loop_planner_fallback_event_case() -> None:
 
     created = next(event for event in events if event.get("type") == "task_plan_created")
     assert result.status == "completed"
+    assert created["plan"]["mode"] == "plan"
     assert created["plan"]["source"] == "fallback"
+    assert created["plan"]["planSource"] == "fallback"
     assert created["plan"]["fallback_reason"] == "RuntimeError: planner unavailable"
 
 
@@ -1274,7 +1289,7 @@ async def _agent_loop_llm_planner_case() -> None:
             ),
             convert_to_llm=lambda items: items,
             allow_unmanaged_tools=True,
-            task_planner_enabled=True,
+            task_mode="plan",
         ),
         emit=lambda _event: None,
         stream_fn=fake_stream,
@@ -1282,8 +1297,47 @@ async def _agent_loop_llm_planner_case() -> None:
 
     assert calls[:2] == ["plan", "execute"]
     assert result.task is not None
+    assert result.task.control_signal["mode"] == "plan"
     assert result.task.goal == "实现 planner"
     assert result.task.step_details["定位任务模块"]["acceptance"] == "找到 TaskController"
+
+
+async def _agent_loop_edit_mode_skips_planner_case() -> None:
+    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
+    from codepilot.llm.event_stream import AssistantMessageEventStream
+    from codepilot.protocols import AssistantMessage, TextContent, UserMessage
+
+    calls: list[str] = []
+
+    async def fake_stream(_model, context, _options):
+        stream = AssistantMessageEventStream()
+        system_prompt = context.system_prompt or ""
+        if "Task Planner" in system_prompt:
+            calls.append("plan")
+            stream.end(AssistantMessage(content=[TextContent(text="{}")]))
+            return stream
+        calls.append("execute")
+        stream.end(AssistantMessage(content=[TextContent(text="done")]))
+        return stream
+
+    events: list[dict[str, Any]] = []
+    result = await run_agent_loop(
+        prompts=[UserMessage(content="解释当前项目")],
+        context=AgentContext(system_prompt="rules", messages=[]),
+        config=AgentLoopConfig(
+            model=_task_test_model(),
+            convert_to_llm=lambda items: items,
+        ),
+        emit=events.append,
+        stream_fn=fake_stream,
+    )
+
+    created = next(event for event in events if event.get("type") == "task_plan_created")
+    assert calls == ["execute"]
+    assert result.task is not None
+    assert result.task.control_signal["mode"] == "edit"
+    assert created["plan"]["mode"] == "edit"
+    assert created["plan"]["planSource"] == "default"
 
 
 async def _agent_loop_recovered_task_context_case() -> None:

@@ -110,6 +110,8 @@ def build_task_recovery_projection(
         return None
     return {
         "goal": sanitize_memory_text(summary.goal, limit=1200),
+        "task_mode": str(summary.control_signal.get("mode") or "edit"),
+        "plan_source": str(summary.control_signal.get("plan_source") or "default"),
         "task_progress": {
             "completed_steps": list(summary.completed_steps),
             "pending_steps": list(summary.pending_steps),

@@ -148,6 +148,7 @@ class TerminalRenderer:
                 style="#fbbf24" if state.permission_mode == "read-only" else "#86efac",
             ),
         )
+        status.add_row("Mode", Text(state.task_mode, style="#67e8f9"))
         status.add_row("Session", Text(session_display, style="#94a3b8"))
 
         quickstart = Table.grid(expand=True)
@@ -191,6 +192,7 @@ class TerminalRenderer:
         self._print(f"| Model      {model_display}")
         self._print(f"| Workspace  {workspace}")
         self._print(f"| Permission {state.permission_mode}")
+        self._print(f"| Mode       {state.task_mode}")
         self._print(f"| Session    {session_display}")
         self._print("|")
         self._print("| /help commands   Ctrl+C exit/cancel   Alt+Enter newline")
@@ -205,9 +207,10 @@ class TerminalRenderer:
 
         model = escape(self._shorten_tail(state.model_id, 28))
         permission = escape(state.permission_mode)
+        task_mode = escape(state.task_mode)
         session = escape(self._short_session(state.session_id))
         return (
-            f"<b>{model}</b>  ·  {permission}  ·  {session}"
+            f"<b>{model}</b>  ·  {permission}  ·  {task_mode}  ·  {session}"
             "  ·  <b>/help</b>  ·  <b>Ctrl+C</b> cancel  ·  <b>Alt+Enter</b> newline"
         )
 

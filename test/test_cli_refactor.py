@@ -180,6 +180,7 @@ class TestTerminalRenderer:
         assert "local coding agent" in rendered
         assert "deepseek/deepseek-chat" in rendered
         assert "workspace-write" in rendered
+        assert "edit" in rendered
         assert "session-1.." in rendered
         assert "╭─" not in rendered
         assert "│ Model" not in rendered
@@ -198,6 +199,7 @@ class TestTerminalRenderer:
 
         assert "<b>deepseek/deepseek-chat</b>" in toolbar
         assert "workspace-write" in toolbar
+        assert "edit" in toolbar
         assert "/help" in toolbar
         assert "Ctrl+C" in toolbar
 
@@ -350,16 +352,23 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
     class FakeRuntime:
         def __init__(self):
             self.prompt_calls = 0
+            self.task_mode = "edit"
 
         async def send_message(self, session_id, message):
             assert session_id == "session_1"
             self.prompt_calls += 1
             if self.prompt_calls == 1:
                 assert message.text == "hello"
+                assert message.task_mode == "plan"
             else:
                 assert message.text == "busy"
                 raise SessionBusyError("Session is already running")
             yield {"type": "message_update", "delta": "hi"}
+
+        def set_task_mode(self, session_id, mode):
+            assert session_id == "session_1"
+            self.task_mode = mode
+            return mode
 
         def get_session_state(self, session_id):
             assert session_id == "session_1"
@@ -368,13 +377,15 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
                 "message_count": 2,
                 "entry_ids": ["entry_1"],
                 "leaf_id": "entry_1",
+                "task_mode": self.task_mode,
             }
 
     stdin = io.StringIO(
         "\n".join(
             [
                 json.dumps({"type": "state", "id": "state_1"}),
-                json.dumps({"type": "prompt", "id": "prompt_1", "text": "hello"}),
+                json.dumps({"type": "set_task_mode", "id": "mode_1", "task_mode": "read"}),
+                json.dumps({"type": "prompt", "id": "prompt_1", "text": "hello", "task_mode": "plan"}),
                 json.dumps({"type": "prompt", "id": "prompt_2", "text": "busy"}),
                 "{not-json",
                 json.dumps({"type": "shutdown", "id": "shutdown_1"}),
@@ -398,26 +409,37 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
         "id": "state_1",
         "command": "state",
         "status": "ok",
+            "data": {
+                "session_id": "session_1",
+                "message_count": 2,
+                "entry_ids": ["entry_1"],
+                "leaf_id": "entry_1",
+                "task_mode": "edit",
+            },
+        }
+    assert messages[2] == {
+        "type": "response",
+        "id": "mode_1",
+        "command": "set_task_mode",
+        "status": "ok",
         "data": {
             "session_id": "session_1",
-            "message_count": 2,
-            "entry_ids": ["entry_1"],
-            "leaf_id": "entry_1",
+            "task_mode": "read",
         },
     }
-    assert messages[2] == {
+    assert messages[3] == {
         "type": "event",
         "event": {"type": "message_update", "delta": "hi"},
     }
-    assert messages[3]["command"] == "prompt"
-    assert messages[3]["status"] == "ok"
-    assert messages[4]["status"] == "error"
     assert messages[4]["command"] == "prompt"
-    assert messages[4]["error"]["code"] == "runtime.session_busy"
+    assert messages[4]["status"] == "ok"
     assert messages[5]["status"] == "error"
-    assert messages[5]["error"]["code"] == "invalid_json"
-    assert messages[6]["command"] == "shutdown"
-    assert messages[6]["status"] == "ok"
+    assert messages[5]["command"] == "prompt"
+    assert messages[5]["error"]["code"] == "runtime.session_busy"
+    assert messages[6]["status"] == "error"
+    assert messages[6]["error"]["code"] == "invalid_json"
+    assert messages[7]["command"] == "shutdown"
+    assert messages[7]["status"] == "ok"
 
 
 def test_rpc_ready_signal_uses_named_protocol_version() -> None:
@@ -555,6 +577,7 @@ class TestCliStartupState:
         assert state.workspace == "/path/to/workspace"
         assert state.session_id == "test_session_123"
         assert state.permission_mode == "read-only"
+        assert state.task_mode == "edit"
         assert state.warnings == ("Test warning",)
 
     def test_build_startup_state_defaults(self):
@@ -605,6 +628,7 @@ class TestCliStartupState:
         assert state.workspace == "/workspace"
         assert state.session_id == "session_1"
         assert state.permission_mode == "read-only"
+        assert state.task_mode == "edit"
         assert state.warnings == ("Runtime warning",)
 
         with pytest.raises(ValueError, match="model_id"):
@@ -622,6 +646,15 @@ class TestCliStartupState:
                 workspace="/workspace",
                 session_id="session_1",
                 permission_mode="admin",
+            )
+
+        with pytest.raises(ValueError, match="task_mode"):
+            CliStartupState(
+                version="0.3",
+                model_id="model",
+                workspace="/workspace",
+                session_id="session_1",
+                task_mode="auto",
             )
 
         with pytest.raises(TypeError, match="warnings"):
@@ -655,6 +688,7 @@ class TestSessionStatus:
         assert status.model_id == "deepseek/deepseek-chat"
         assert status.workspace == "/workspace"
         assert status.permission_mode == "read-only"
+        assert status.task_mode == "edit"
         assert status.message_count == 42
         assert status.leaf_id == "leaf_456"
         assert status.is_running is True
@@ -671,6 +705,7 @@ class TestSessionStatus:
         )
 
         assert status.is_running is False
+        assert status.task_mode == "edit"
 
 
 # ── 配置脱敏测试 ─────────────────────────────────────────────────
