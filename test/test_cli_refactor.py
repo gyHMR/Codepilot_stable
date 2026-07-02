@@ -177,7 +177,8 @@ class TestTerminalRenderer:
 
         rendered = "\n".join(call.args[0] for call in output.call_args_list)
         assert "Codepilot 0.3" in rendered
-        assert "local coding agent" in rendered
+        assert "cyber engineering console" in rendered
+        assert "+- C P -+" in rendered
         assert "deepseek/deepseek-chat" in rendered
         assert "workspace-write" in rendered
         assert "edit" in rendered
@@ -206,10 +207,10 @@ class TestTerminalRenderer:
     @pytest.mark.parametrize(
         ("kind", "expected"),
         [
-            ("info", "• Working"),
-            ("success", "✓ Working"),
-            ("warning", "! Working"),
-            ("error", "× Working"),
+            ("info", "◇ Working"),
+            ("success", "◆ Working"),
+            ("warning", "▲ Working"),
+            ("error", "✕ Working"),
             ("cancelled", "■ Working"),
         ],
     )

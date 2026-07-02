@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -35,6 +36,13 @@ from codepilot.runtime.service import RuntimeService
 from codepilot.runtime.contracts import ConfigValueSource, CreateAgentSessionOptions
 
 from .runner import RunOptions, run
+from .ui import (
+    create_console,
+    format_config_help_text,
+    format_error_text,
+    format_help_text,
+    render_key_value_panel,
+)
 
 
 _MODEL_CONFIG_TEMPLATE = {
@@ -53,6 +61,10 @@ _MODEL_CONFIG_TEMPLATE = {
 
 def _init_model_config(workspace: str | Path) -> None:
     """初始化模型配置文件。"""
+    from rich import box
+    from rich.panel import Panel
+    from rich.text import Text
+
     config_file = Path(workspace) / ".codepilot" / "model.local.json"
     if config_file.exists():
         raise ValueError(f"Model config already exists: {config_file}")
@@ -62,9 +74,20 @@ def _init_model_config(workspace: str | Path) -> None:
         encoding="utf-8",
         newline="\n",
     )
-    print(f"Created {config_file}")
-    print("Edit this file, replace api_key (or configure api_key_env), then run `codepilot`.")
-    print("Warning: Do not commit this file to version control.")
+    content = Text()
+    content.append("Created ", style="success")
+    content.append(str(config_file), style="path")
+    content.append("\nEdit api_key or configure api_key_env, then run `codepilot`.", style="value")
+    content.append("\nDo not commit this file to version control.", style="warning")
+    create_console().print(
+        Panel(
+            content,
+            title="[panel.title]CP // CONFIG INIT[/panel.title]",
+            border_style="success",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
 
 
 def _check_model_config(workspace: str | Path) -> None:
@@ -79,26 +102,29 @@ def _check_model_config(workspace: str | Path) -> None:
         credential_source = "local-file (do not commit)"
     else:
         credential_source = "missing"
-    print(f"config    = {loader.model_file}")
-    print(f"api       = {model.api}")
-    print(f"provider  = {model.provider}")
-    print(f"model_id  = {model.model_id}")
-    print(f"base_url  = {model.base_url}")
-    print(f"credential = {credential_source}")
+    rows: list[tuple[str, object]] = [
+        ("config", loader.model_file),
+        ("api", model.api),
+        ("provider", model.provider),
+        ("model_id", model.model_id),
+        ("base_url", model.base_url),
+        ("credential", credential_source),
+    ]
     if credential_source == "missing":
-        print("status    = MISSING_CREDENTIAL")
-        print(f"Set environment variable {model.api_key_env} or add api_key to {loader.model_file}")
+        rows.append(("status", "MISSING_CREDENTIAL"))
+        rows.append(("next", f"Set {model.api_key_env} or add api_key to {loader.model_file}"))
+        render_key_value_panel("Config Check", rows, border_style="warning")
     else:
-        print("status    = valid")
+        rows.append(("status", "valid"))
+        render_key_value_panel("Config Check", rows, border_style="success")
 
 
 def _show_config(workspace: str | Path) -> None:
     """显示当前配置（脱敏）。"""
-    from rich.console import Console
     from rich.table import Table
     from rich.panel import Panel
 
-    console = Console()
+    console = create_console()
     loader = WorkspaceResourceLoader(workspace)
     loaded = loader.load()
     model = loaded.model
@@ -106,8 +132,8 @@ def _show_config(workspace: str | Path) -> None:
 
     # 模型配置表格
     model_table = Table(show_header=True, box=None, padding=(0, 2))
-    model_table.add_column("Key", style="bold cyan", width=12)
-    model_table.add_column("Value")
+    model_table.add_column("Key", style="label", width=12)
+    model_table.add_column("Value", style="value")
 
     if model:
         model_table.add_row("provider", model.provider)
@@ -119,16 +145,16 @@ def _show_config(workspace: str | Path) -> None:
         elif model.api_key:
             model_table.add_row("credential", "local-file (do not commit)")
         else:
-            model_table.add_row("credential", "[red]MISSING[/red]")
+            model_table.add_row("credential", "[warning]MISSING[/warning]")
     else:
         model_table.add_row("status", "[dim](not configured)[/dim]")
 
-    console.print(Panel(model_table, title="[bold]Model Config[/bold]", border_style="blue"))
+    console.print(Panel(model_table, title="[panel.title]CP // MODEL CONFIG[/panel.title]", border_style="panel.border"))
 
     # 设置表格（只显示非 None 的配置）
     settings_table = Table(show_header=True, box=None, padding=(0, 2))
-    settings_table.add_column("Key", style="bold cyan", width=25)
-    settings_table.add_column("Value")
+    settings_table.add_column("Key", style="label", width=25)
+    settings_table.add_column("Value", style="value")
 
     if settings:
         import dataclasses
@@ -145,7 +171,7 @@ def _show_config(workspace: str | Path) -> None:
     if settings_table.row_count == 0:
         settings_table.add_row("status", "[dim](using defaults)[/dim]")
 
-    console.print(Panel(settings_table, title="[bold]Settings[/bold]", border_style="blue"))
+    console.print(Panel(settings_table, title="[panel.title]CP // SETTINGS[/panel.title]", border_style="panel.border"))
 
 
 def _explain_config(options: CreateAgentSessionOptions, key: str | None) -> None:
@@ -153,31 +179,30 @@ def _explain_config(options: CreateAgentSessionOptions, key: str | None) -> None
 
     使用 RuntimeConfigResolver 追踪每个配置项的最终值和来源。
     """
-    from rich.console import Console
     from rich.table import Table
-    from rich.panel import Panel
 
-    console = Console()
-
+    console = create_console()
     if not key:
-        console.print("[red]Usage: codepilot config explain <key>[/red]")
-        console.print("Available keys: model, provider, model_id, thinking_level, tool_execution, etc.")
+        console.print("[error]Usage: codepilot config explain <key>[/error]")
+        console.print("[muted2]Available keys: model, provider, model_id, thinking_level, tool_execution, etc.[/muted2]")
         return
 
     try:
         resolved = explain_runtime_config(options, key)
     except UnknownRuntimeConfigKeyError:
-        console.print(f"[red]Unknown config key: {key}[/red]")
+        console.print(f"[error]Unknown config key: {key}[/error]")
     except KeyError as exc:
         raise ValueError(str(exc).strip("'")) from exc
     else:
         table = Table(show_header=False, box=None, padding=(0, 2))
-        table.add_column("Field", style="bold", width=12)
-        table.add_column("Value")
+        table.add_column("Field", style="label", width=12)
+        table.add_column("Value", style="value")
         table.add_row("Key", key)
         table.add_row("Value", str(resolved.value))
         table.add_row("Source", _format_source(resolved.source))
-        console.print(Panel(table, title=f"[bold]Config: {key}[/bold]", border_style="blue"))
+        from rich.panel import Panel
+
+        console.print(Panel(table, title=f"[panel.title]CP // CONFIG: {key}[/panel.title]", border_style="panel.border"))
 
 
 def _format_source(source: ConfigValueSource) -> str:
@@ -192,13 +217,31 @@ def _format_source(source: ConfigValueSource) -> str:
     return f"{label}:{source.location}" if source.location else label
 
 
+class CodepilotArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser with branded human-facing help and errors."""
+
+    def __init__(self, *args: object, help_kind: str = "main", **kwargs: object) -> None:
+        self.help_kind = help_kind
+        super().__init__(*args, **kwargs)
+
+    def format_help(self) -> str:
+        if self.help_kind == "config":
+            return format_config_help_text(prog=self.prog)
+        return format_help_text(prog=self.prog)
+
+    def error(self, message: str) -> None:
+        self.print_usage()
+        self._print_message(format_error_text(message), sys.stderr)
+        self.exit(2)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器。
 
     一级参数只保留高频、启动时需要的配置。
     低频配置通过配置文件或未来的 --set 机制覆盖。
     """
-    parser = argparse.ArgumentParser(
+    parser = CodepilotArgumentParser(
         description="Codepilot - Local AI Coding Agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
@@ -278,10 +321,14 @@ Examples:
 
     # ── 子命令 ──────────────────────────────────────────────────
 
-    subparsers = parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(dest="command", parser_class=CodepilotArgumentParser)
 
     # config 子命令
-    config_parser = subparsers.add_parser("config", help="Configuration management")
+    config_parser = subparsers.add_parser(
+        "config",
+        help="Configuration management",
+        help_kind="config",
+    )
     config_parser.add_argument(
         "config_action",
         choices=["init", "show", "check", "explain"],

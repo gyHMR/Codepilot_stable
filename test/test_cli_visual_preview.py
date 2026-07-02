@@ -73,16 +73,17 @@ def test_rich_cli_preview_has_compact_coding_agent_hierarchy(monkeypatch) -> Non
 
     preview = output.getvalue()
 
-    assert "Codepilot 0.3  local coding agent" in preview
+    assert "Codepilot 0.3  cyber engineering console" in preview
+    assert "C P" in preview
     assert "deepseek/deepseek-chat" in preview
-    assert "[tool] read  src/codepilot/core/agent_loop.py" in preview
-    assert "[ok]  614ms" in preview
-    assert "Permission required" in preview
+    assert "↯ tool read  src/codepilot/core/agent_loop.py" in preview
+    assert "◆ ok  614ms" in preview
+    assert "CP // PERMISSION REQUIRED" in preview
     assert "bash git status --short" in preview
-    assert "Error · llm.provider_response" in preview
+    assert "CP // ERROR · llm.provider_response" in preview
     assert 'Provider response: {"error":{"message":"Invalid request"}}' in preview
-    assert "Local engineering console" in preview
-    assert "Quick start" in preview
+    assert "Neural workspace online" in preview
+    assert "Command uplink" in preview
 
 
 def test_rich_error_title_treats_error_code_as_plain_text() -> None:
@@ -101,4 +102,4 @@ def test_rich_error_title_treats_error_code_as_plain_text() -> None:
         "message": "Request failed",
     })
 
-    assert "Error · provider[invalid]" in output.getvalue()
+    assert "CP // ERROR · provider[invalid]" in output.getvalue()

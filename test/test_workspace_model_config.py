@@ -4,7 +4,12 @@ import json
 
 import pytest
 
-from codepilot.interfaces.cli.main import _init_model_config, build_parser
+from codepilot.interfaces.cli.main import (
+    _check_model_config,
+    _show_config,
+    _init_model_config,
+    build_parser,
+)
 from codepilot.runtime.assembly import create_agent_session
 from codepilot.runtime.bootstrap.model_resolver import resolve_model
 from codepilot.runtime.bootstrap.resources import WorkspaceResourceLoader
@@ -105,6 +110,43 @@ def test_cli_defaults_leave_runtime_config_unspecified() -> None:
 def test_cli_rejects_removed_legacy_options() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--mode", "print", "--prompt", "hello"])
+
+
+def test_cli_help_uses_cyber_command_deck(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["--help"])
+
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    assert "CP // COMMAND DECK" in output
+    assert "C P" in output
+    assert "rpc" in output
+    assert "--prompt" in output
+
+
+def test_cli_config_help_uses_cyber_config_deck(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["config", "--help"])
+
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    assert "CP // CONFIG DECK" in output
+    assert "explain <key>" in output
+    assert "check" in output
+
+
+def test_config_check_and_show_use_sanitized_human_output(tmp_path, capsys) -> None:
+    _write_model_config(tmp_path, api_key="secret-value")
+
+    _check_model_config(tmp_path)
+    _show_config(tmp_path)
+
+    output = capsys.readouterr().out
+    assert "CP // CONFIG CHECK" in output
+    assert "CP // MODEL CONFIG" in output
+    assert "deepseek-chat" in output
+    assert "local-file (do not commit)" in output
+    assert "secret-value" not in output
 
 
 def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> None:
