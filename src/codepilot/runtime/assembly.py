@@ -23,8 +23,6 @@ import os
 
 from codepilot.core.message_conversion import convert_to_llm
 from codepilot.llm.env_api_keys import get_env_api_key_name
-from codepilot.sessions.context.compiler import ContextCompiler
-from codepilot.sessions.context.state import SessionContextState
 from codepilot.sessions.session import AgentSession
 
 from .config import RuntimeInputs, load_runtime_inputs, resolve_runtime_config
@@ -152,11 +150,6 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
     )
 
     # 步骤 8：构造最终的 AgentSessionOptions
-    context_state = SessionContextState(workspace_dir=inputs.workspace)
-    context_compiler = ContextCompiler(
-        workspace=str(inputs.workspace),
-        state=context_state,
-    )
     session_options = AgentSessionOptions(
         model=resolved_model.model,
         workspace_dir=inputs.workspace,
@@ -191,11 +184,7 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
         before_tool_call=before_tool_call,
         after_tool_call=after_tool_call,
         stream_fn=options.stream_fn,
-        prepare_context=(
-            context_compiler.compile
-            if options.context_governance_enabled
-            else None
-        ),
+        prepare_context=None,
     )
 
     # 步骤 9：构建能力目录和装配产物

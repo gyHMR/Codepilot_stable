@@ -225,6 +225,7 @@ async def _run_continue_pre_compaction_case(tmp_path: Path) -> None:
             max_context_messages=3,
             retain_recent_messages=2,
             summary_builder=lambda older: f"summary-count={len(older)}",
+            context_governance_enabled=False,
             memory_enabled=False,
         )
     )

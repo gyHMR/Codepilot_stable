@@ -35,6 +35,8 @@ from .context.compaction import (
     fallback_summary,
 )
 from .context.freshness import build_context_freshness_notice
+from .context.governor import ContextGovernor
+from .context.state import SessionContextState
 from .history.branching import fork_session as branch_fork_session
 from .history.branching import switch_session as branch_switch_session
 from .history.branching import switch_to_entry as branch_switch_to_entry
@@ -99,7 +101,10 @@ class AgentSession:
         )
         self.task_recovery = TaskRecoveryStore(self.store)
         self.memory_enabled = options.memory_enabled
-        prepare_context = self._prepare_context_for_session(options.prepare_context)
+        self.context_governance_enabled = options.context_governance_enabled
+        self._base_prepare_context = options.prepare_context
+        self.context_governor: ContextGovernor | None = None
+        prepare_context = self._build_context_preparer()
 
         # 加载已持久化的历史消息；优先读取会话消息，若无则读取上下文消息
         persisted_messages = self.store.load_session_messages()
@@ -430,8 +435,8 @@ class AgentSession:
             workspace_dir=self.workspace_dir,
         )
         self.task_recovery = TaskRecoveryStore(store)
-        # 重新编译上下文准备函数（绑定新的 memory_retriever）
-        self.prepare_context = self._prepare_context_for_session(self.prepare_context)
+        # 重新编译上下文准备函数（绑定新的 session_id / memory_retriever）
+        self.prepare_context = self._build_context_preparer()
         self.agent.set_prepare_context(self.prepare_context)
 
     def record_checkpoint(self, label: str, details: dict | None = None) -> SessionCheckpoint:
@@ -540,7 +545,8 @@ class AgentSession:
             self._begin_task_recovery(text, run_id=run_id)
         self.agent.set_task_recovery_projection(self._active_task_recovery_projection())
         self._check_context_freshness()
-        await self._check_and_compact_before_prompt()
+        if self.context_governor is None:
+            await self._check_and_compact_before_prompt()
         return rollback_baseline
 
     async def _complete_run_lifecycle(
@@ -562,7 +568,10 @@ class AgentSession:
         self._finalize_task_recovery(result)
         if self.memory_enabled:
             self._finalize_memory(result)
-        await self._compact_context_if_needed()
+        if self.context_governor is not None:
+            self.context_governor.finalize_run(result)
+        else:
+            await self._compact_context_if_needed()
         await self._run_lifecycle_hooks(
             text=hook_text,
             is_continue=is_continue,
@@ -626,6 +635,21 @@ class AgentSession:
                     message,
                     run_id=event.get("runId"),
                 )
+
+    def _build_context_preparer(self):
+        """构建当前会话的上下文准备入口。"""
+        if self.context_governance_enabled:
+            self.context_governor = ContextGovernor(
+                workspace_dir=self.workspace_dir,
+                session_id=self.session_id,
+                state=SessionContextState(workspace_dir=self.workspace_dir),
+                memory_retriever=(
+                    self.memory_retriever if self.memory_enabled else None
+                ),
+            )
+            return self.context_governor.prepare
+        self.context_governor = None
+        return self._prepare_context_for_session(self._base_prepare_context)
 
     def _prepare_context_for_session(self, prepare_context):
         """为当前会话准备上下文编译函数。

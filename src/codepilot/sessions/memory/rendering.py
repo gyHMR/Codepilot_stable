@@ -39,6 +39,8 @@ def render_memory(record: MemoryRecord) -> str:
             f"resolution={content.get('resolution') or 'not confirmed'}"
         )
     if record.kind == "experience":
+        if content.get("lesson"):
+            return f"Experience: {content['lesson']}"
         maturity = content.get("maturity", "active")
         applies = content.get("applies_when", [])
         applies_text = ", ".join(str(item) for item in applies[:4]) if isinstance(applies, list) else ""

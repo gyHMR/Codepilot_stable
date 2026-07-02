@@ -64,6 +64,11 @@ from .compaction import (
     format_messages_for_summary,
 )
 from .compiler import ContextCompiler, ContextPolicy
+from .governor import ContextGovernor
+from .checkpoint import ContextCheckpointManager
+from .ledger import ToolArtifactLedger, ToolLedgerEntry
+from .policy import ContextPressurePolicy
+from .projector import ContextProjection, ContextProjector
 from .repository_context import (
     GitInfo,
     RepositoryBootstrap,
@@ -75,6 +80,7 @@ from .repository_tracker import (
     compare_snapshots,
     render_repository_snapshot,
 )
+from .snapshot import SessionSnapshot, SessionSnapshotBuilder
 from .state import (
     ActiveFile,
     ContextEvidence,
@@ -95,8 +101,17 @@ __all__ = [
     "SessionContextState",  # 会话上下文状态
 
     # 上下文编译
+    "ContextGovernor",      # 统一上下文治理入口
     "ContextCompiler",      # 上下文编译器
     "ContextPolicy",        # 上下文策略
+    "ContextPressurePolicy",  # 上下文压力策略
+    "ContextProjection",    # 本轮 prompt 投影结果
+    "ContextProjector",     # 分层上下文投影器
+    "SessionSnapshot",      # Session 事实快照
+    "SessionSnapshotBuilder",  # Session 快照构建器
+    "ContextCheckpointManager",  # 结构化 checkpoint 管理
+    "ToolArtifactLedger",   # 工具输出 ledger
+    "ToolLedgerEntry",      # 工具输出 ledger 记录
 
     # 上下文压缩
     "COMPACTION_SYSTEM_PROMPT",  # 压缩用系统提示词
