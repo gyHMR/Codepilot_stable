@@ -8,8 +8,8 @@ import pytest
 from prompt_toolkit.document import Document
 
 from codepilot.interfaces.cli.shell import CODEPILOT_STYLE, InteractiveShell
-from codepilot.runtime.command_registry import builtin_commands
-from codepilot.runtime.types import SessionStatus
+from codepilot.interfaces.cli.commands import builtin_commands
+from codepilot.runtime.contracts import SessionStatus
 
 
 def test_shell_uses_coding_agent_prompt_and_visual_styles() -> None:

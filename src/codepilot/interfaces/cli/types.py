@@ -4,7 +4,7 @@ from __future__ import annotations
 
 These aliases describe how the command-line interface reads user input,
 writes terminal output, and selects an interaction mode.  They intentionally
-live in the interface layer rather than ``codepilot.runtime.types`` because
+live in the interface layer rather than ``codepilot.runtime.contracts`` because
 runtime services should not know about terminal concerns.
 """
 

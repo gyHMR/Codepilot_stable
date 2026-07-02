@@ -27,7 +27,7 @@ from codepilot.core import (
 from codepilot.sessions.persistence.store import SessionStore
 
 from .resources import WorkspaceResourceLoader, WorkspaceResources
-from .types import CreateAgentSessionOptions
+from codepilot.runtime.contracts import CreateAgentSessionOptions
 
 # 配置来源标识
 ConfigSource = str

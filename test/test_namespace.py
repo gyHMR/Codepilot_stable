@@ -143,16 +143,26 @@ def test_tools_layer_does_not_import_core() -> None:
 
 def test_removed_runtime_compat_modules_are_gone() -> None:
     removed_names = (
+        "approval_flow",
         "agent_session",
+        "command_registry",
+        "config",
+        "context",
         "builtin_tools",
         "cli",
         "context_compiler",
         "factory",
+        "hook_pipeline",
+        "model_resolver",
+        "prompt",
         "repository_tracker",
+        "resources",
         "runner",
         "session_store",
         "serde",
         "memory",
+        "tool_assembler",
+        "types",
         "__main__",
     )
     removed_modules = tuple(f"codepilot.runtime.{name}" for name in removed_names)
@@ -160,6 +170,18 @@ def test_removed_runtime_compat_modules_are_gone() -> None:
     existing = [module for module in removed_modules if find_spec(module) is not None]
 
     assert existing == []
+
+
+def test_runtime_public_contract_uses_contracts_module() -> None:
+    import codepilot.runtime as runtime
+    import codepilot.runtime.contracts as contracts
+
+    assert hasattr(contracts, "CreateAgentSessionOptions")
+    assert hasattr(contracts, "UserInput")
+    assert not hasattr(runtime, "WorkspaceResourceLoader")
+    assert not hasattr(runtime, "build_default_system_prompt")
+    assert not hasattr(runtime, "format_commands_for_help")
+    assert not hasattr(runtime, "list_runtime_commands")
 
 
 def test_removed_sessions_compat_modules_are_gone() -> None:
@@ -286,7 +308,7 @@ def test_cli_runner_exports_only_run_mode_entrypoints() -> None:
 
 
 def test_cli_run_mode_types_stay_out_of_runtime_contracts() -> None:
-    import codepilot.runtime.types as runtime_types
+    import codepilot.runtime.contracts as runtime_types
     import codepilot.interfaces.cli.runner as runner
 
     assert hasattr(runner, "RunMode")

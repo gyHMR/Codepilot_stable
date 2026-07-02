@@ -34,7 +34,7 @@ from codepilot.tools.shell_policy import ShellExecutionPolicy
 from codepilot.tools.types import AgentTool
 
 from .config import RuntimeConfig
-from .types import CreateAgentSessionOptions, RegisteredTool, RuntimeDiagnostic
+from codepilot.runtime.contracts import CreateAgentSessionOptions, RegisteredTool, RuntimeDiagnostic
 
 
 @dataclass(frozen=True)

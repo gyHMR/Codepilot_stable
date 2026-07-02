@@ -20,7 +20,7 @@ from codepilot.interfaces.cli.renderer import (
     SimpleRenderer,
 )
 from codepilot.interfaces.cli.startup import CliStartupState, build_startup_state
-from codepilot.runtime.types import SessionStatus
+from codepilot.runtime.contracts import SessionStatus
 from codepilot.protocols import AssistantMessage, LLMErrorInfo, TextContent, Usage, Cost
 
 

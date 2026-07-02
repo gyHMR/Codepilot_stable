@@ -6,9 +6,9 @@ import pytest
 
 from codepilot.interfaces.cli.main import _init_model_config, build_parser
 from codepilot.runtime.assembly import create_agent_session
-from codepilot.runtime.model_resolver import resolve_model
-from codepilot.runtime.resources import WorkspaceResourceLoader
-from codepilot.runtime.types import CreateAgentSessionOptions
+from codepilot.runtime.bootstrap.model_resolver import resolve_model
+from codepilot.runtime.bootstrap.resources import WorkspaceResourceLoader
+from codepilot.runtime.contracts import CreateAgentSessionOptions
 
 
 def _write_model_config(workspace, *, api_key: str = "local-key") -> None:
@@ -108,7 +108,7 @@ def test_cli_rejects_removed_legacy_options() -> None:
 
 
 def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> None:
-    from codepilot.runtime.config import read_restored_session_meta, resolve_runtime_config
+    from codepilot.runtime.bootstrap.config import read_restored_session_meta, resolve_runtime_config
     from codepilot.sessions.persistence.store import SessionStore
 
     root = tmp_path / ".codepilot"
@@ -139,7 +139,7 @@ def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> Non
 
 
 def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> None:
-    from codepilot.runtime.config import resolve_runtime_config
+    from codepilot.runtime.bootstrap.config import resolve_runtime_config
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -181,7 +181,7 @@ def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> 
 
 
 def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
-    from codepilot.runtime.config import resolve_runtime_config
+    from codepilot.runtime.bootstrap.config import resolve_runtime_config
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -204,7 +204,7 @@ def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
 
 
 def test_workspace_settings_can_select_task_mode(tmp_path) -> None:
-    from codepilot.runtime.config import resolve_runtime_config
+    from codepilot.runtime.bootstrap.config import resolve_runtime_config
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -223,7 +223,7 @@ def test_workspace_settings_can_select_task_mode(tmp_path) -> None:
 
 
 def test_workspace_settings_can_select_planning_budget_profile(tmp_path) -> None:
-    from codepilot.runtime.config import resolve_runtime_config
+    from codepilot.runtime.bootstrap.config import resolve_runtime_config
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -243,7 +243,7 @@ def test_workspace_settings_can_select_planning_budget_profile(tmp_path) -> None
 
 
 def test_read_task_mode_forces_read_only_permission(tmp_path) -> None:
-    from codepilot.runtime.config import resolve_runtime_config
+    from codepilot.runtime.bootstrap.config import resolve_runtime_config
 
     config = resolve_runtime_config(
         CreateAgentSessionOptions(workspace_dir=tmp_path, task_mode="read"),
@@ -256,7 +256,7 @@ def test_read_task_mode_forces_read_only_permission(tmp_path) -> None:
 
 
 def test_read_task_mode_rejects_workspace_write_override(tmp_path) -> None:
-    from codepilot.runtime.config import resolve_runtime_config
+    from codepilot.runtime.bootstrap.config import resolve_runtime_config
 
     with pytest.raises(ValueError, match="task_mode=read"):
         resolve_runtime_config(
@@ -270,7 +270,7 @@ def test_read_task_mode_rejects_workspace_write_override(tmp_path) -> None:
 
 
 def _runtime_inputs(tmp_path, *, session_id: str | None = None):
-    from codepilot.runtime.config import RuntimeInputs
+    from codepilot.runtime.bootstrap.config import RuntimeInputs
 
     return RuntimeInputs(
         workspace=tmp_path,

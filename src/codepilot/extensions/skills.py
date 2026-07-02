@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """技能加载器：发现并加载工作区中的 .md 技能文件，将其内容注入系统提示词。"""
 

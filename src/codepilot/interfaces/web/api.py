@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from codepilot.runtime.service import RuntimeService
-from codepilot.runtime.types import CreateAgentSessionOptions, UserInput
+from codepilot.runtime.contracts import CreateAgentSessionOptions, UserInput
 
 from .event_adapter import agent_event_to_web
 from .schemas import (

@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 
 from codepilot.runtime import WorkspaceResourceLoader
-from codepilot.runtime.types import CreateAgentSessionOptions
+from codepilot.runtime.contracts import CreateAgentSessionOptions
 
 from .artifacts import EvaluationArtifacts
 from .experiments import (

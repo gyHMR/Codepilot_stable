@@ -9,7 +9,7 @@ into the exact, stable fields the CLI startup banner and toolbar need.
 
 from dataclasses import dataclass, field
 
-from codepilot.runtime.types import SessionStatus
+from codepilot.runtime.contracts import SessionStatus
 
 
 _CLI_PERMISSION_MODES = frozenset({"read-only", "workspace-write", "ask"})

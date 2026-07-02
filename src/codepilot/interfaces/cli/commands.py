@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-运行时命令注册与处理模块。
+CLI 斜杠命令注册与处理模块。
 
 管理 CLI/IM 中的斜杠命令（如 /help、/session、/fork 等），
 支持内置命令和扩展注册的自定义命令。
@@ -16,14 +16,16 @@ from __future__ import annotations
 - /clear: 清空上下文（等价于 /new）
 """
 
-from dataclasses import dataclass, field
 import inspect
-from typing import Literal, cast
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal, cast
 
 from codepilot.extensions.types import ExtensionCommandContext, RegisteredCommand
-from codepilot.sessions.history.branching import create_fresh_session
 from codepilot.sessions.session import AgentSession
 from codepilot.sessions.memory import load_global_memory, render_memory
+
+if TYPE_CHECKING:
+    from codepilot.runtime.service import RuntimeService
 
 # 命令来源类型
 CommandSource = Literal["builtin", "extension", "skill", "prompt"]
@@ -94,13 +96,11 @@ class RuntimeCommandResult:
     Attributes:
         handled: 是否已处理（True 表示匹配到命令，False 表示未匹配）。
         output_lines: 命令输出的文本行列表。
-        switched_session: 命令处理器内部创建的新 AgentSession。
-        switched_session_id: RuntimeService 注册后的新会话 ID。
+        switched_session_id: 命令导致切换到的新会话 ID。
     """
 
     handled: bool
     output_lines: list[str] = field(default_factory=list)
-    switched_session: AgentSession | None = None
     switched_session_id: str | None = None
 
 
@@ -174,18 +174,24 @@ def resolve_registered_command(session: AgentSession, name: str) -> RegisteredCo
     return session.extension_commands.get(name.strip().lstrip("/"))
 
 
-async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCommandResult:
-    """处理斜杠命令（独立于任何接口实现）。
+async def handle_cli_command(
+    runtime: "RuntimeService",
+    session_id: str,
+    text: str,
+) -> RuntimeCommandResult:
+    """处理 CLI 斜杠命令。
 
     解析用户输入的斜杠命令并执行对应逻辑。
 
     Args:
-        session: 当前 AgentSession 实例。
+        runtime: RuntimeService 门面。
+        session_id: 当前会话 ID。
         text: 用户输入的完整文本（如 "/fork entry_123"）。
 
     Returns:
         RuntimeCommandResult，包含是否已处理、输出文本和可能的会话切换。
     """
+    session = runtime.get_session(session_id)
     cmd, _, rest = text.partition(" ")
     arg = rest.strip()
 
@@ -195,21 +201,16 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
 
     # /status: 显示当前状态（模型、工作区、会话、权限）
     if cmd == "/status":
-        model = session.agent.state.model
-        model_id = f"{model.provider}/{model.id}" if model.provider else model.id
-        workspace = str(session.workspace_dir)
-        session_id = session.session_id
-        leaf_id = session.get_leaf_id() or "N/A"
-        message_count = len(session.messages)
-
+        status = runtime.get_session_status(session_id)
         lines = [
             "=== Status ===",
-            f"  Model      : {model_id}",
-            f"  Workspace  : {workspace}",
-            f"  Session    : {session_id}",
-            f"  Leaf       : {leaf_id}",
-            f"  Messages   : {message_count}",
-            f"  Mode       : {session.task_mode}",
+            f"  Model      : {status.model_id}",
+            f"  Workspace  : {status.workspace}",
+            f"  Session    : {status.session_id}",
+            f"  Leaf       : {status.leaf_id}",
+            f"  Messages   : {status.message_count}",
+            f"  Permission : {status.permission_mode}",
+            f"  Mode       : {status.task_mode}",
         ]
         return RuntimeCommandResult(handled=True, output_lines=lines)
 
@@ -221,7 +222,7 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
                 output_lines=[f"task_mode={session.task_mode}"],
             )
         try:
-            mode = session.set_task_mode(arg)
+            mode = runtime.set_task_mode(session_id, arg)
         except ValueError as exc:
             return RuntimeCommandResult(
                 handled=True,
@@ -254,11 +255,11 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
 
     # /clear: 清空上下文，创建全新会话
     if cmd == "/clear":
-        fresh = create_fresh_session(session)
+        new_session_id = runtime.clear_session(session_id)
         return RuntimeCommandResult(
             handled=True,
-            output_lines=[f"context cleared -> new session_id={fresh.session_id}"],
-            switched_session=fresh,
+            output_lines=[f"context cleared -> new session_id={new_session_id}"],
+            switched_session_id=new_session_id,
         )
 
     # /new 或 /fork: 从指定节点分叉新会话
@@ -266,18 +267,18 @@ async def handle_runtime_command(session: AgentSession, text: str) -> RuntimeCom
         from_entry = arg or session.get_leaf_id() or ""
         if not from_entry:
             return RuntimeCommandResult(handled=True, output_lines=["cannot resolve source entry"])
-        forked = session.fork_from_entry(from_entry)
+        new_session_id = runtime.fork_session(session_id, from_entry)
         return RuntimeCommandResult(
             handled=True,
-            output_lines=[f"forked to session_id={forked.session_id}"],
-            switched_session=forked,
+            output_lines=[f"forked to session_id={new_session_id}"],
+            switched_session_id=new_session_id,
         )
 
     # /switch: 切换到指定的叶子节点
     if cmd == "/switch":
         if not arg:
             return RuntimeCommandResult(handled=True, output_lines=["usage: /switch <entry_id>"])
-        session.switch_to_entry(arg)
+        runtime.switch_entry(session_id, arg)
         return RuntimeCommandResult(
             handled=True,
             output_lines=[

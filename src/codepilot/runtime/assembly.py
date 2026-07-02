@@ -25,13 +25,13 @@ from codepilot.core.message_conversion import convert_to_llm
 from codepilot.llm.env_api_keys import get_env_api_key_name
 from codepilot.sessions.session import AgentSession
 
-from .config import RuntimeInputs, load_runtime_inputs, resolve_runtime_config
-from .context import build_runtime_context, build_repository_bootstrap
-from .hook_pipeline import compose_after_tool_call, compose_before_tool_call, compose_lifecycle_hooks
-from .model_resolver import ResolvedModel, resolve_model
-from .prompt import build_runtime_system_prompt
-from .tool_assembler import assemble_tools
-from .types import (
+from .bootstrap.config import RuntimeInputs, load_runtime_inputs, resolve_runtime_config
+from .bootstrap.context import build_runtime_context, build_repository_bootstrap
+from .bootstrap.hook_pipeline import compose_after_tool_call, compose_before_tool_call, compose_lifecycle_hooks
+from .bootstrap.model_resolver import ResolvedModel, resolve_model
+from .bootstrap.prompt import build_runtime_system_prompt
+from .bootstrap.tool_assembler import assemble_tools
+from .contracts import (
     AgentSessionOptions,
     CapabilityCatalog,
     ConfigValueSource,

@@ -8,8 +8,6 @@ RuntimeService 是面向用户接口（CLI、Web）的统一门面，
 """
 
 import asyncio
-import time
-import uuid
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
@@ -31,21 +29,17 @@ from codepilot.sessions.memory import load_global_memory
 from codepilot.sessions.session import AgentSession
 from codepilot.tools import AgentTool, AgentToolResult
 
-from .approval_flow import (
+from .execution.approval import (
     PendingApproval,
     build_pending_approvals,
     denied_tool_result,
     normalize_approval_decision,
     to_tool_result_message,
 )
-from .command_registry import (
-    RuntimeCommandResult,
-    handle_runtime_command,
-    list_runtime_commands,
-)
+from .execution.runs import ActiveRun as _ActiveRun
+from .execution.runs import ActiveRunTracker
 from .assembly import assemble_runtime
-from .types import (
-    ActiveRun as _ActiveRun,
+from .contracts import (
     CreateAgentSessionOptions as _CreateAgentSessionOptions,
     RuntimeAssembly as _RuntimeAssembly,
     SessionHandle as _SessionHandle,
@@ -116,8 +110,7 @@ class RuntimeService:
         self._sessions: dict[str, AgentSession] = {}
         # 装配产物注册表：session_id -> RuntimeAssembly
         self._assemblies: dict[str, _RuntimeAssembly] = {}
-        # 活跃运行：session_id -> ActiveRun（单 Session 单 Run）
-        self._active_runs: dict[str, _ActiveRun] = {}
+        self._active_runs = ActiveRunTracker()
         # 本 Runtime 实例中由持久化数据恢复的 Session。
         self._restored_sessions: set[str] = set()
         # 轻量 MVP：同进程内保存等待用户审批的工具调用。
@@ -376,11 +369,17 @@ class RuntimeService:
         )
         return forked.session_id
 
-    def list_commands(self, session_id: str) -> list[dict[str, str]]:
-        return [
-            command.to_dict()
-            for command in list_runtime_commands(self.get_session(session_id))
-        ]
+    def clear_session(self, session_id: str) -> str:
+        """Create and register a fresh session derived from the current one."""
+
+        from codepilot.sessions.history.branching import create_fresh_session
+
+        fresh = create_fresh_session(self.get_session(session_id))
+        self._register_derived_session(
+            fresh,
+            source_session_id=session_id,
+        )
+        return fresh.session_id
 
     async def run_message(self, session_id: str, message: _UserInput) -> AgentRunResult:
         """发送消息并等待完整结果返回（非流式）。
@@ -469,44 +468,6 @@ class RuntimeService:
         ):
             yield event
 
-    async def execute_command(self, session_id: str, text: str) -> RuntimeCommandResult:
-        """执行斜杠命令。
-
-        Args:
-            session_id: 目标会话 ID。
-            text: 命令文本（如 "/status"）。
-
-        Returns:
-            RuntimeCommandResult 命令执行结果。
-        """
-        if text.strip() == "/status":
-            status = self.get_session_status(session_id)
-            return RuntimeCommandResult(
-                handled=True,
-                output_lines=[
-                    "=== Status ===",
-                    f"  Model      : {status.model_id}",
-                    f"  Workspace  : {status.workspace}",
-                    f"  Session    : {status.session_id}",
-                    f"  Leaf       : {status.leaf_id}",
-                    f"  Messages   : {status.message_count}",
-                    f"  Permission : {status.permission_mode}",
-                    f"  Mode       : {status.task_mode}",
-                ],
-            )
-
-        session = self.get_session(session_id)
-        result = await handle_runtime_command(session, text)
-        if result.switched_session is not None:
-            replacement = result.switched_session
-            self._register_derived_session(
-                replacement,
-                source_session_id=session_id,
-            )
-            result.switched_session_id = replacement.session_id
-            result.switched_session = None
-        return result
-
     async def cancel_run(self, session_id: str) -> bool:
         """取消当前正在运行的任务。
 
@@ -516,25 +477,7 @@ class RuntimeService:
         Returns:
             是否成功取消（True 表示取消，False 表示没有运行中的任务）。
         """
-        active_run = self._current_active_run(session_id)
-        if active_run is None:
-            return False
-
-        if active_run.task is None:
-            active_run.status = "aborted"
-            self._active_runs.pop(session_id, None)
-            return True
-
-        if active_run.task is not None:
-            active_run.task.cancel()
-            try:
-                await active_run.task
-            except asyncio.CancelledError:
-                pass
-            finally:
-                active_run.status = "aborted"
-                self._active_runs.pop(session_id, None)
-        return True
+        return await self._active_runs.cancel(session_id)
 
     def list_runs(self, session_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
         """列出会话的运行记录。
@@ -622,13 +565,7 @@ class RuntimeService:
     def _current_active_run(self, session_id: str) -> _ActiveRun | None:
         """Return the still-running ActiveRun and discard completed leftovers."""
 
-        active_run = self._active_runs.get(session_id)
-        if active_run is None:
-            return None
-        if active_run.task is not None and active_run.task.done():
-            self._active_runs.pop(session_id, None)
-            return None
-        return active_run
+        return self._active_runs.get(session_id)
 
     def _require_session_idle(self, session_id: str) -> None:
         """Raise when a session already has an active run in this Runtime."""
@@ -645,14 +582,7 @@ class RuntimeService:
         Returns:
             ActiveRun 实例。
         """
-        run_id = uuid.uuid4().hex
-        active_run = _ActiveRun(
-            run_id=run_id,
-            session_id=session_id,
-            started_at=time.time(),
-        )
-        self._active_runs[session_id] = active_run
-        return active_run
+        return self._active_runs.create(session_id)
 
     async def _run_active_session_call(
         self,
@@ -677,7 +607,7 @@ class RuntimeService:
             active_run.status = "failed"
             raise
         finally:
-            self._active_runs.pop(session_id, None)
+            self._active_runs.discard(session_id)
 
     async def _stream_active_session_call(
         self,
@@ -707,7 +637,7 @@ class RuntimeService:
             active_run.status = "failed"
             raise
         finally:
-            self._active_runs.pop(session_id, None)
+            self._active_runs.discard(session_id)
 
     async def _stream_session_events(
         self,
@@ -798,7 +728,7 @@ class RuntimeService:
             raise SessionBusyError(
                 f"Cannot close running session: {session_id}"
             )
-        self._active_runs.pop(session_id, None)
+        self._active_runs.discard(session_id)
         self._restored_sessions.discard(session_id)
 
         # 移除装配产物
@@ -825,7 +755,7 @@ class RuntimeService:
 
         running_session_ids = [
             session_id
-            for session_id in list(self._active_runs)
+            for session_id in self._active_runs.session_ids()
             if self._current_active_run(session_id) is not None
         ]
         if running_session_ids:
@@ -1024,7 +954,7 @@ class RuntimeService:
     async def aclose_all(self) -> None:
         """取消并等待全部运行任务结束，然后关闭所有会话。"""
 
-        for session_id in list(self._active_runs):
+        for session_id in self._active_runs.session_ids():
             await self.cancel_run(session_id)
         for session_id in list(self._sessions):
             self.close_session(session_id)
