@@ -13,8 +13,8 @@ from codepilot.tools.approval import (
     ApprovalRequest,
     build_approval_request,
 )
-from codepilot.tools.permissions import ToolDecision
-from codepilot.tools.types import ToolMetadata, ToolRuntimeRequest
+from codepilot.tools.policy import ToolDecision
+from codepilot.tools.contracts import ToolMetadata, ToolRuntimeRequest
 
 
 class CliApprovalProvider:

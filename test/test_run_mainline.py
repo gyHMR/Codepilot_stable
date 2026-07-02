@@ -522,10 +522,10 @@ def test_builtin_file_and_shell_results_are_structured(tmp_path: Path, monkeypat
 
 
 async def _run_builtin_result_case(tmp_path: Path, monkeypatch) -> None:
-    from codepilot.tools.builtin import create_builtin_tools, get_builtin_tool_metadata
+    from codepilot.tools.builtins import create_builtin_tools, get_builtin_tool_metadata
     from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.runtime import ToolRuntime
-    from codepilot.tools.permissions import PermissionPolicy
+    from codepilot.tools.execution import ToolRuntime
+    from codepilot.tools.policy import PermissionPolicy
 
     return_codes = iter([3, 0])
 

@@ -32,7 +32,7 @@ def _metadata(
 
 
 def test_permission_policy_uses_mode_and_shell_classification() -> None:
-    from codepilot.tools.permissions import PermissionPolicy, ToolRequest
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
 
     bash = _metadata("bash", read_only=False, exclusive=True)
     read = _metadata("read", read_only=True, exclusive=False)
@@ -61,7 +61,7 @@ def test_permission_policy_uses_mode_and_shell_classification() -> None:
 
 
 def test_permission_policy_owns_mode_invariants() -> None:
-    from codepilot.tools.permissions import PermissionPolicy, ToolRequest
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
 
     policy = PermissionPolicy(mode=" ask ")
     decision = policy.decide(
@@ -81,7 +81,7 @@ def test_permission_policy_owns_mode_invariants() -> None:
 
 
 def test_shell_verification_classification_requires_token_boundary() -> None:
-    from codepilot.tools.permissions import PermissionPolicy, ToolRequest
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
 
     bash = _metadata("bash", read_only=False, exclusive=True)
     policy = PermissionPolicy(mode="workspace-write")
@@ -106,7 +106,7 @@ def test_shell_verification_classification_requires_token_boundary() -> None:
 
 
 def test_shell_verification_allows_pythonpath_setup_prefix() -> None:
-    from codepilot.tools.permissions import PermissionPolicy, ToolRequest
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
 
     bash = _metadata("bash", read_only=False, exclusive=True)
     policy = PermissionPolicy(mode="workspace-write")
@@ -129,7 +129,7 @@ def test_shell_verification_allows_pythonpath_setup_prefix() -> None:
 
 
 def test_tool_permission_request_and_decision_own_policy_boundary_invariants() -> None:
-    from codepilot.tools.permissions import ToolDecision, ToolRequest
+    from codepilot.tools.policy import ToolDecision, ToolRequest
 
     params = {"path": "a.txt"}
     request = ToolRequest(
@@ -169,7 +169,7 @@ def test_tool_permission_request_and_decision_own_policy_boundary_invariants() -
 
 
 def test_model_cannot_authorize_dangerous_shell() -> None:
-    from codepilot.tools.permissions import PermissionPolicy, ToolRequest
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
 
     decision = PermissionPolicy().decide(
         ToolRequest(
@@ -187,7 +187,7 @@ def test_model_cannot_authorize_dangerous_shell() -> None:
 
 
 def test_invalid_permission_regex_is_reported() -> None:
-    from codepilot.tools.permissions import PermissionPolicy
+    from codepilot.tools.policy import PermissionPolicy
 
     with pytest.raises(ValueError, match="Invalid permission regex"):
         PermissionPolicy(bash_block_patterns=["["])
@@ -407,8 +407,8 @@ def test_tool_registry_owns_tool_metadata_identity_invariants() -> None:
 
 async def _deferred_approval_provider_case() -> None:
     from codepilot.tools.approval import DeferredApprovalProvider
-    from codepilot.tools.permissions import ToolDecision
-    from codepilot.tools.types import ToolRuntimeRequest
+    from codepilot.tools.policy import ToolDecision
+    from codepilot.tools.contracts import ToolRuntimeRequest
 
     provider = DeferredApprovalProvider()
     decision = ToolDecision(kind="approval_required", reason="workspace_write")
@@ -433,8 +433,8 @@ async def _approval_case() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry, ToolRuntime
     from codepilot.tools.approval import ApprovalDecision
-    from codepilot.tools.permissions import PermissionPolicy
-    from codepilot.tools.types import ToolRuntimeRequest
+    from codepilot.tools.policy import PermissionPolicy
+    from codepilot.tools.contracts import ToolRuntimeRequest
 
     calls = []
     approved_request = None
@@ -487,7 +487,7 @@ async def _approval_case() -> None:
 
 
 def test_shell_policy_filters_environment_and_truncates_output(monkeypatch) -> None:
-    from codepilot.tools.shell_policy import build_shell_environment, truncate_output
+    from codepilot.tools.shell_safety import build_shell_environment, truncate_output
 
     monkeypatch.setenv("PATH", "safe-path")
     monkeypatch.setenv("CODEPILOT_TEST_SECRET", "must-not-leak")
@@ -509,7 +509,7 @@ def test_shell_tool_rejects_invalid_timeout_and_hides_dangerous_parameter(tmp_pa
 
 
 async def _shell_limits_case(tmp_path: Path) -> None:
-    from codepilot.tools.builtin import create_builtin_tools
+    from codepilot.tools.builtins import create_builtin_tools
 
     tools = {tool.name: tool for tool in create_builtin_tools(tmp_path)}
     bash = tools["bash"]
@@ -527,7 +527,7 @@ def test_shell_tool_reports_workspace_alias_misuse(tmp_path: Path) -> None:
 
 
 async def _shell_workspace_alias_case(tmp_path: Path) -> None:
-    from codepilot.tools.builtin import create_builtin_tools
+    from codepilot.tools.builtins import create_builtin_tools
 
     tools = {tool.name: tool for tool in create_builtin_tools(tmp_path)}
     result = await tools["bash"].execute(
@@ -549,9 +549,9 @@ def test_shell_tool_applies_env_allowlist_and_output_limits(
 
 
 async def _shell_runtime_limits_case(tmp_path: Path, monkeypatch) -> None:
-    from codepilot.tools.builtin.shell_tools import create_shell_tools
-    from codepilot.tools.sandbox import WorkspaceSandbox
-    from codepilot.tools.shell_policy import ShellExecutionPolicy
+    from codepilot.tools.builtins.shell import create_shell_tools
+    from codepilot.tools.workspace_safety import WorkspaceSandbox
+    from codepilot.tools.shell_safety import ShellExecutionPolicy
 
     captured = {}
 
@@ -598,7 +598,7 @@ def test_workspace_status_returns_structured_git_evidence(tmp_path: Path) -> Non
 async def _workspace_status_case(tmp_path: Path) -> None:
     import subprocess
 
-    from codepilot.tools.builtin import create_builtin_tools
+    from codepilot.tools.builtins import create_builtin_tools
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
@@ -728,7 +728,7 @@ def test_read_supports_line_ranges_and_search_skips_ignored_dirs(tmp_path: Path)
 
 
 async def _bounded_read_search_case(tmp_path: Path) -> None:
-    from codepilot.tools.builtin import create_builtin_tools
+    from codepilot.tools.builtins import create_builtin_tools
 
     target = tmp_path / "app.py"
     target.write_text(
@@ -768,7 +768,7 @@ def test_read_invalid_utf8_reports_output_quality_and_recovery_hint(
 
 
 async def _invalid_utf8_quality_case(tmp_path: Path) -> None:
-    from codepilot.tools.builtin import create_builtin_tools
+    from codepilot.tools.builtins import create_builtin_tools
 
     target = tmp_path / "binary.dat"
     target.write_bytes(b"\xff\xfe\x00")
@@ -791,7 +791,7 @@ def test_file_tools_emit_recovery_hints_and_change_evidence(tmp_path: Path) -> N
 
 
 async def _file_tool_evidence_case(tmp_path: Path) -> None:
-    from codepilot.tools.builtin import create_builtin_tools
+    from codepilot.tools.builtins import create_builtin_tools
 
     target = tmp_path / "app.py"
     target.write_text("value = 1\nvalue = 1\n", encoding="utf-8", newline="\n")
@@ -837,7 +837,7 @@ def test_builtin_tools_return_structured_errors_for_invalid_args_and_path_escape
 
 
 async def _builtin_tool_structured_error_case(tmp_path: Path) -> None:
-    from codepilot.tools.builtin import create_builtin_tools
+    from codepilot.tools.builtins import create_builtin_tools
 
     target = tmp_path / "app.py"
     target.write_text("print('hello')\n", encoding="utf-8", newline="\n")
@@ -878,9 +878,9 @@ def test_shell_reports_output_quality_and_git_change_evidence(
 async def _shell_quality_and_change_evidence_case(tmp_path: Path, monkeypatch) -> None:
     import subprocess
 
-    from codepilot.tools.builtin.shell_tools import create_shell_tools
-    from codepilot.tools.sandbox import WorkspaceSandbox
-    from codepilot.tools.shell_policy import ShellExecutionPolicy
+    from codepilot.tools.builtins.shell import create_shell_tools
+    from codepilot.tools.workspace_safety import WorkspaceSandbox
+    from codepilot.tools.shell_safety import ShellExecutionPolicy
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
@@ -933,7 +933,7 @@ async def _shell_clean_tracked_before_hash_case(tmp_path: Path) -> None:
     import subprocess
     import sys
 
-    from codepilot.tools.builtin import create_builtin_tools
+    from codepilot.tools.builtins import create_builtin_tools
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
@@ -988,9 +988,9 @@ def test_runtime_exception_preserves_permission_duration_and_approval() -> None:
 async def _runtime_exception_evidence_case() -> None:
     from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry
     from codepilot.tools.approval import ApprovalDecision
-    from codepilot.tools.permissions import PermissionPolicy
-    from codepilot.tools.runtime import ToolRuntime
-    from codepilot.tools.types import ToolRuntimeRequest
+    from codepilot.tools.policy import PermissionPolicy
+    from codepilot.tools.execution import ToolRuntime
+    from codepilot.tools.contracts import ToolRuntimeRequest
 
     async def execute(*_args) -> AgentToolResult:
         raise RuntimeError("boom")
@@ -1044,7 +1044,7 @@ async def _shell_side_effect_case(tmp_path: Path) -> None:
     import subprocess
     import sys
 
-    from codepilot.tools.builtin import create_builtin_tools
+    from codepilot.tools.builtins import create_builtin_tools
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
@@ -1083,8 +1083,8 @@ def test_cli_approval_provider_requires_callable_io() -> None:
 
 async def _cli_approval_case() -> None:
     from codepilot.interfaces.cli.approval import CliApprovalProvider
-    from codepilot.tools.permissions import ToolDecision
-    from codepilot.tools.types import ToolRuntimeRequest
+    from codepilot.tools.policy import ToolDecision
+    from codepilot.tools.contracts import ToolRuntimeRequest
 
     outputs = []
     provider = CliApprovalProvider(
@@ -1150,7 +1150,7 @@ def test_tool_runtime_rejects_arguments_that_do_not_match_schema() -> None:
 async def _schema_validation_case() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry, ToolRuntime
-    from codepilot.tools.types import ToolRuntimeRequest
+    from codepilot.tools.contracts import ToolRuntimeRequest
 
     calls = []
 
@@ -1217,10 +1217,68 @@ def test_tool_result_guard_redacts_secrets_and_marks_prompt_injection() -> None:
     asyncio.run(_tool_result_guard_case())
 
 
+def test_tool_runtime_accepts_injected_schema_validator_and_result_guard() -> None:
+    asyncio.run(_tool_runtime_injected_guards_case())
+
+
+async def _tool_runtime_injected_guards_case() -> None:
+    from codepilot.protocols import TextContent
+    from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry, ToolRuntime
+    from codepilot.tools.argument_schema import SchemaValidationResult
+    from codepilot.tools.contracts import ToolRuntimeRequest
+
+    class Validator:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def validate(self, schema, params):
+            self.calls.append((schema, params))
+            return SchemaValidationResult(valid=True)
+
+    class Guard:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def apply(self, result, *, metadata=None):
+            self.calls.append((result, metadata))
+            result.metadata["custom_guard"] = True
+            return result
+
+    async def execute(*_args):
+        return AgentToolResult(content=[TextContent(text="done")])
+
+    registry = ToolRegistry()
+    registry.register(
+        AgentTool(
+            name="guarded_runtime",
+            label="Guarded Runtime",
+            description="runtime with injected guards",
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            execute=execute,
+        ),
+        metadata=_metadata("guarded_runtime", read_only=True, exclusive=False),
+    )
+    validator = Validator()
+    guard = Guard()
+    runtime = ToolRuntime(registry, schema_validator=validator, result_guard=guard)
+
+    result = await runtime.execute(
+        ToolRuntimeRequest(
+            tool_call_id="guarded_runtime_1",
+            name="guarded_runtime",
+            params={},
+        )
+    )
+
+    assert validator.calls
+    assert guard.calls
+    assert result.result.metadata["custom_guard"] is True
+
+
 async def _tool_result_guard_case() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry, ToolRuntime
-    from codepilot.tools.types import ToolRuntimeRequest
+    from codepilot.tools.contracts import ToolRuntimeRequest
 
     async def execute(*_args):
         return AgentToolResult(

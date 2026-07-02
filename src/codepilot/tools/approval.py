@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from typing import Protocol
 import uuid
 
-from .permissions import ToolDecision
-from .types import ToolMetadata, ToolRuntimeRequest
+from .policy import ToolDecision
+from .contracts import ToolMetadata, ToolRuntimeRequest
 
 
 @dataclass(frozen=True)

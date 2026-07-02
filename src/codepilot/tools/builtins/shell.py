@@ -11,14 +11,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from codepilot.protocols import TextContent
-from codepilot.tools.sandbox import WorkspaceSandbox
-from codepilot.tools.shell_policy import (
+from codepilot.tools.workspace_safety import WorkspaceSandbox
+from codepilot.tools.shell_safety import (
     ShellExecutionPolicy,
     build_shell_environment,
     classify_shell_command,
     truncate_output,
 )
-from codepilot.tools.types import AgentTool, AgentToolResult
+from codepilot.tools.contracts import AgentTool, AgentToolResult
 
 
 @dataclass(frozen=True)

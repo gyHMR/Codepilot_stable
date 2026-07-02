@@ -9,12 +9,9 @@ from typing import Any
 
 from codepilot.protocols import TextContent
 
+from .argument_schema import SchemaValidator
 from .approval import ApprovalProvider, DeferredApprovalProvider
-from .permissions import PermissionPolicy, ToolDecision, ToolRequest
-from .registry import ToolRegistry
-from .result_guard import apply_result_guard
-from .schema_validation import validate_tool_arguments
-from .types import (
+from .contracts import (
     AgentTool,
     AgentToolResult,
     AgentToolUpdateCallback,
@@ -22,6 +19,9 @@ from .types import (
     ToolRuntimeRequest,
     ToolRuntimeResult,
 )
+from .policy import PermissionPolicy, ToolDecision, ToolRequest
+from .registry import ToolRegistry
+from .result_safety import ToolResultGuard
 
 
 def _tool_result(
@@ -76,6 +76,8 @@ class ToolRuntime:
     registry: ToolRegistry                                      # 工具注册表
     permission_policy: PermissionPolicy = field(default_factory=PermissionPolicy)  # 权限策略
     approval_provider: ApprovalProvider = field(default_factory=DeferredApprovalProvider)  # 审批提供者
+    schema_validator: SchemaValidator = field(default_factory=SchemaValidator)  # 参数校验器
+    result_guard: ToolResultGuard = field(default_factory=ToolResultGuard)  # 结果防护器
 
     def as_agent_tools(self) -> list[AgentTool]:
         """将注册表中的工具转换为 Agent 可用的工具列表（包装权限检查逻辑）。"""
@@ -158,7 +160,7 @@ class ToolRuntime:
         if decision.denied:
             return self._blocked_result(request, decision)
 
-        validation = validate_tool_arguments(tool.parameters, request.params)
+        validation = self.schema_validator.validate(tool.parameters, request.params)
         if not validation.valid:
             result = _tool_result(
                 "Tool arguments failed schema validation: "
@@ -258,7 +260,7 @@ class ToolRuntime:
                 "duration_ms",
                 int((time.monotonic() - started_at) * 1000),
             )
-            result = apply_result_guard(result, metadata=metadata)
+            result = self.result_guard.apply(result, metadata=metadata)
             status: ToolResultStatus = result.status
             if status == "success" and result.is_error:
                 status = "error"
@@ -297,7 +299,7 @@ class ToolRuntime:
                 "duration_ms",
                 int((time.monotonic() - started_at) * 1000),
             )
-            result = apply_result_guard(result, metadata=metadata)
+            result = self.result_guard.apply(result, metadata=metadata)
             result.tool_call_id = request.tool_call_id
             result.tool_name = request.name
             return ToolRuntimeResult(
