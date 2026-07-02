@@ -159,7 +159,7 @@ def test_task_state_owns_step_navigation_and_status_projections() -> None:
 def test_agent_session_records_task_recovery_warning_separately_from_memory(
     tmp_path: Path,
 ) -> None:
-    from codepilot.runtime.types import AgentSessionOptions
+    from codepilot.runtime.contracts import AgentSessionOptions
     from codepilot.sessions.session import AgentSession
 
     class BrokenTaskRecovery:

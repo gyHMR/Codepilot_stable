@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from codepilot.runtime.types import CreateAgentSessionOptions
+from codepilot.runtime.contracts import CreateAgentSessionOptions
 
 
 EvalModule = Literal["planning", "context", "memory", "security", "tool"]

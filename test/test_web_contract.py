@@ -425,7 +425,7 @@ def test_websocket_stream_normalizes_session_identity() -> None:
 
 async def _run_runtime_service_send_message_streaming_case() -> None:
     from codepilot.runtime.service import RuntimeService
-    from codepilot.runtime.types import UserInput
+    from codepilot.runtime.contracts import UserInput
 
     class FakeSession:
         session_id = "s1"

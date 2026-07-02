@@ -26,7 +26,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import HTML
 
-from codepilot.runtime.command_registry import RuntimeCommand, builtin_commands
+from codepilot.interfaces.cli.commands import RuntimeCommand, builtin_commands
 
 
 # 自定义样式

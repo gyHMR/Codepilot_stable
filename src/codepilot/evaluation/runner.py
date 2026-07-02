@@ -18,7 +18,7 @@ from typing import Callable
 
 from codepilot.observability import build_run_trace
 from codepilot.runtime import RuntimeService
-from codepilot.runtime.types import UserInput
+from codepilot.runtime.contracts import UserInput
 
 from .artifacts import EvaluationArtifacts
 from .evidence import (

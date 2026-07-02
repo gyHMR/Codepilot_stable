@@ -13,7 +13,6 @@ Runtime 对外类型定义模块。
 - RuntimeAssembly: 完整装配产物
 """
 
-import asyncio
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from pathlib import Path
@@ -170,12 +169,10 @@ class CreateAgentSessionOptions:
 RuntimePermissionMode = Literal["read-only", "workspace-write", "ask"]
 RuntimeDiagnosticSeverity = Literal["info", "warning", "error"]
 ConfigSourceKind = Literal["cli", "session", "project", "user", "default"]
-ActiveRunStatus = Literal["running", "completed", "failed", "aborted"]
 RegisteredToolSource = Literal["builtin", "caller", "extension", "mcp"]
 _RUNTIME_PERMISSION_MODES = frozenset({"read-only", "workspace-write", "ask"})
 _RUNTIME_DIAGNOSTIC_SEVERITIES = frozenset({"info", "warning", "error"})
 _CONFIG_SOURCE_KINDS = frozenset({"cli", "session", "project", "user", "default"})
-_ACTIVE_RUN_STATUSES = frozenset({"running", "completed", "failed", "aborted"})
 _REGISTERED_TOOL_SOURCES = frozenset({"builtin", "caller", "extension", "mcp"})
 
 
@@ -547,26 +544,6 @@ class SessionStatus:
             "warnings",
             _clean_runtime_warnings(self.warnings),
         )
-
-
-@dataclass
-class ActiveRun:
-    """RuntimeService 内部的活动运行记录。"""
-
-    run_id: str
-    session_id: str
-    task: asyncio.Task[Any] | None = None
-    started_at: float = 0
-    status: ActiveRunStatus = "running"
-
-    def __post_init__(self) -> None:
-        _ensure_active_run_status(self.status)
-
-
-def _ensure_active_run_status(value: object) -> ActiveRunStatus:
-    if value not in _ACTIVE_RUN_STATUSES:
-        raise ValueError(f"Unknown active run status: {value}")
-    return cast(ActiveRunStatus, value)
 
 
 def _ensure_registered_tool_source(value: object) -> RegisteredToolSource:

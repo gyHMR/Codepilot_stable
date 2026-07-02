@@ -20,8 +20,9 @@ import sys
 from typing import Any
 
 from codepilot.runtime.service import RuntimeService
-from codepilot.runtime.types import UserInput
+from codepilot.runtime.contracts import UserInput
 
+from .commands import handle_cli_command, list_runtime_commands
 from .renderer import SimpleRenderer, TerminalRenderer
 from .rpc_protocol import (
     RpcEmit,
@@ -224,7 +225,7 @@ async def run_interactive(
         # "/" 开头的命令通过 RuntimeService 执行
         if text.startswith("/"):
             try:
-                command_result = await runtime.execute_command(current_session_id, text)
+                command_result = await handle_cli_command(runtime, current_session_id, text)
                 for line in command_result.output_lines:
                     renderer.print(line)
                 # 如果命令导致会话切换（如 /fork, /clear）
@@ -440,7 +441,10 @@ async def _handle_rpc_request(
                 command="get_commands",
                 data={
                     "session_id": session_id,
-                    "commands": runtime.list_commands(session_id),
+                    "commands": [
+                        command.to_dict()
+                        for command in list_runtime_commands(runtime.get_session(session_id))
+                    ],
                 },
             )
 

@@ -6,19 +6,19 @@ from pathlib import Path
 import pytest
 
 from codepilot.protocols import Model
-from codepilot.runtime.approval_flow import PendingApproval
+from codepilot.runtime.execution.approval import PendingApproval
 from codepilot.runtime.assembly import explain_runtime_config
 from codepilot.runtime.service import (
     ApprovalNotFoundError,
     RuntimeService,
     SessionBusyError,
 )
-from codepilot.runtime.types import CreateAgentSessionOptions, UserInput
+from codepilot.runtime.contracts import CreateAgentSessionOptions, UserInput
 from codepilot.tools import AgentTool
 
 
 def test_approval_flow_normalizes_user_decision_aliases() -> None:
-    from codepilot.runtime.approval_flow import normalize_approval_decision
+    from codepilot.runtime.execution.approval import normalize_approval_decision
 
     assert normalize_approval_decision(" YES ") == "approve"
     assert normalize_approval_decision("approved") == "approve"
@@ -67,7 +67,7 @@ def _options(tmp_path: Path, **overrides) -> CreateAgentSessionOptions:
 
 def test_runtime_service_does_not_reexport_runtime_data_contracts() -> None:
     import codepilot.runtime.service as service_module
-    from codepilot.runtime.types import SessionStatus, UserInput as RuntimeUserInput
+    from codepilot.runtime.contracts import SessionStatus, UserInput as RuntimeUserInput
 
     assert RuntimeUserInput(text="hello").text == "hello"
     assert SessionStatus(
@@ -91,7 +91,7 @@ def test_runtime_service_does_not_reexport_runtime_data_contracts() -> None:
 
 def test_runtime_package_does_not_reexport_runtime_data_contracts() -> None:
     import codepilot.runtime as runtime_package
-    from codepilot.runtime.types import CreateAgentSessionOptions, UserInput
+    from codepilot.runtime.contracts import CreateAgentSessionOptions, UserInput
 
     assert UserInput(text="hello").text == "hello"
     assert (
@@ -110,7 +110,7 @@ def test_runtime_package_does_not_reexport_runtime_data_contracts() -> None:
 
 
 def test_user_input_normalizes_text_and_freezes_images() -> None:
-    from codepilot.runtime.types import UserInput
+    from codepilot.runtime.contracts import UserInput
 
     images = ["screen.png"]
     value = UserInput(text="  hello  ", images=images, task_mode=" plan ")
@@ -132,7 +132,7 @@ def test_user_input_normalizes_text_and_freezes_images() -> None:
 
 def test_runtime_passes_user_input_images_to_session_as_list() -> None:
     async def run_case() -> None:
-        from codepilot.runtime.types import UserInput
+        from codepilot.runtime.contracts import UserInput
 
         class FakeSession:
             session_id = "s1"
@@ -180,7 +180,7 @@ def test_runtime_passes_user_input_images_to_session_as_list() -> None:
 
 
 def test_session_status_normalizes_and_freezes_display_snapshot() -> None:
-    from codepilot.runtime.types import SessionStatus
+    from codepilot.runtime.contracts import SessionStatus
 
     warnings = ["  config missing  ", " "]
     status = SessionStatus(
@@ -248,7 +248,7 @@ def test_session_status_normalizes_and_freezes_display_snapshot() -> None:
 
 
 def test_runtime_diagnostic_normalizes_and_validates_public_fields() -> None:
-    from codepilot.runtime.types import RuntimeDiagnostic
+    from codepilot.runtime.contracts import RuntimeDiagnostic
 
     diagnostic = RuntimeDiagnostic(
         severity=" warning ",
@@ -285,7 +285,7 @@ def test_runtime_diagnostic_normalizes_and_validates_public_fields() -> None:
 
 
 def test_runtime_command_normalizes_metadata_and_serializes_public_contract() -> None:
-    from codepilot.runtime.command_registry import RuntimeCommand
+    from codepilot.interfaces.cli.commands import RuntimeCommand
 
     command = RuntimeCommand(
         name=" /memory ",
@@ -318,7 +318,7 @@ def test_runtime_command_normalizes_metadata_and_serializes_public_contract() ->
 
 def test_list_runtime_commands_deduplicates_after_command_name_normalization() -> None:
     from codepilot.extensions.types import RegisteredCommand
-    from codepilot.runtime.command_registry import list_runtime_commands
+    from codepilot.interfaces.cli.commands import list_runtime_commands
 
     class FakeSession:
         extension_commands = {
@@ -342,7 +342,7 @@ def test_list_runtime_commands_deduplicates_after_command_name_normalization() -
 
 
 def test_config_value_source_normalizes_known_sources() -> None:
-    from codepilot.runtime.types import ConfigValueSource
+    from codepilot.runtime.contracts import ConfigValueSource
 
     source = ConfigValueSource(kind=" cli ", location="  --model  ")
 
@@ -357,7 +357,7 @@ def test_config_value_source_normalizes_known_sources() -> None:
 
 
 def test_resolved_runtime_profile_copies_config_sources() -> None:
-    from codepilot.runtime.types import (
+    from codepilot.runtime.contracts import (
         ConfigValueSource,
         ResolvedRuntimeProfile,
     )
@@ -385,7 +385,7 @@ def test_resolved_runtime_profile_copies_config_sources() -> None:
 
 
 def test_resolved_config_value_requires_clean_key_and_source() -> None:
-    from codepilot.runtime.types import ConfigValueSource, ResolvedConfigValue
+    from codepilot.runtime.contracts import ConfigValueSource, ResolvedConfigValue
 
     resolved = ResolvedConfigValue(
         key=" model ",
@@ -412,7 +412,7 @@ def test_resolved_config_value_requires_clean_key_and_source() -> None:
 
 def test_capability_catalog_copies_and_freezes_registered_capabilities() -> None:
     from codepilot.extensions.types import RegisteredCommand
-    from codepilot.runtime.types import CapabilityCatalog, RegisteredTool
+    from codepilot.runtime.contracts import CapabilityCatalog, RegisteredTool
 
     tool = AgentTool(
         name="demo",
@@ -510,7 +510,7 @@ def test_runtime_assembly_freezes_diagnostics_snapshot(tmp_path: Path) -> None:
 
 
 def test_session_handle_requires_matching_runtime_identity(tmp_path: Path) -> None:
-    from codepilot.runtime.types import SessionHandle
+    from codepilot.runtime.contracts import SessionHandle
 
     runtime = RuntimeService()
     handle = runtime.create_session(_options(tmp_path))
@@ -543,7 +543,7 @@ def test_session_handle_requires_matching_runtime_identity(tmp_path: Path) -> No
 
 
 def test_runtime_context_normalizes_and_freezes_prompt_inputs() -> None:
-    from codepilot.runtime.context import RuntimeContext
+    from codepilot.runtime.bootstrap.context import RuntimeContext
 
     tool_snippets = {"read": "  Read files  "}
     context = RuntimeContext(
@@ -569,7 +569,7 @@ def test_runtime_context_normalizes_and_freezes_prompt_inputs() -> None:
 
 
 def test_prompt_plan_owns_section_normalization_and_unique_names() -> None:
-    from codepilot.runtime.prompt import PromptPlan, PromptSection
+    from codepilot.runtime.bootstrap.prompt import PromptPlan, PromptSection
 
     plan = PromptPlan()
 
@@ -684,7 +684,7 @@ def test_runtime_read_task_mode_creates_read_only_session(tmp_path: Path) -> Non
 
 
 def test_default_prompt_guides_shell_to_current_workspace() -> None:
-    from codepilot.runtime.prompt import build_default_system_prompt
+    from codepilot.runtime.bootstrap.prompt import build_default_system_prompt
 
     prompt = build_default_system_prompt(["bash"])
 
@@ -720,11 +720,12 @@ def test_runtime_command_registers_replacement_session(
     tmp_path: Path,
 ) -> None:
     async def run_case() -> None:
+        from codepilot.interfaces.cli.commands import handle_cli_command
+
         runtime = RuntimeService()
         handle = runtime.create_session(_options(tmp_path))
         try:
-            result = await runtime.execute_command(handle.session_id, "/clear")
-            assert result.switched_session is None
+            result = await handle_cli_command(runtime, handle.session_id, "/clear")
             assert result.switched_session_id is not None
             replacement = result.switched_session_id
             assert runtime.get_assembly(replacement).profile.model.id == "test-model"
@@ -929,7 +930,7 @@ def test_runtime_rejects_second_run_for_same_session() -> None:
 
 def test_runtime_discards_finished_active_run_before_busy_check() -> None:
     async def run_case() -> None:
-        from codepilot.runtime.types import ActiveRun
+        from codepilot.runtime.execution.runs import ActiveRun
 
         class FakeSession:
             session_id = "s1"
@@ -956,7 +957,7 @@ def test_runtime_discards_finished_active_run_before_busy_check() -> None:
 
         completed_task = asyncio.create_task(asyncio.sleep(0))
         await completed_task
-        runtime._active_runs[fake.session_id] = ActiveRun(
+        runtime._active_runs._runs[fake.session_id] = ActiveRun(
             run_id="finished_run",
             session_id=fake.session_id,
             task=completed_task,
@@ -973,7 +974,7 @@ def test_runtime_discards_finished_active_run_before_busy_check() -> None:
 
         assert events == []
         assert fake.calls == 1
-        assert fake.session_id not in runtime._active_runs
+        assert runtime._active_runs.get(fake.session_id) is None
 
     asyncio.run(run_case())
 
@@ -982,14 +983,14 @@ def test_runtime_status_ignores_finished_active_run(
     tmp_path: Path,
 ) -> None:
     async def run_case() -> None:
-        from codepilot.runtime.types import ActiveRun
+        from codepilot.runtime.execution.runs import ActiveRun
 
         runtime = RuntimeService()
         handle = runtime.create_session(_options(tmp_path))
         try:
             completed_task = asyncio.create_task(asyncio.sleep(0))
             await completed_task
-            runtime._active_runs[handle.session_id] = ActiveRun(
+            runtime._active_runs._runs[handle.session_id] = ActiveRun(
                 run_id="finished_run",
                 session_id=handle.session_id,
                 task=completed_task,
@@ -999,7 +1000,7 @@ def test_runtime_status_ignores_finished_active_run(
             status = runtime.get_session_status(handle.session_id)
 
             assert status.is_running is False
-            assert handle.session_id not in runtime._active_runs
+            assert runtime._active_runs.get(handle.session_id) is None
         finally:
             runtime.close_all()
 
@@ -1007,7 +1008,7 @@ def test_runtime_status_ignores_finished_active_run(
 
 
 def test_active_run_rejects_unknown_status() -> None:
-    from codepilot.runtime.types import ActiveRun
+    from codepilot.runtime.execution.runs import ActiveRun
 
     with pytest.raises(ValueError, match="Unknown active run status"):
         ActiveRun(run_id="run_1", session_id="s1", status="paused")  # type: ignore[arg-type]
@@ -1015,17 +1016,17 @@ def test_active_run_rejects_unknown_status() -> None:
 
 def test_cancel_run_clears_active_run_without_bound_task() -> None:
     async def run_case() -> None:
-        from codepilot.runtime.types import ActiveRun
+        from codepilot.runtime.execution.runs import ActiveRun
 
         runtime = RuntimeService()
-        runtime._active_runs["s1"] = ActiveRun(
+        runtime._active_runs._runs["s1"] = ActiveRun(
             run_id="created_but_not_bound",
             session_id="s1",
             task=None,
         )
 
         assert await runtime.cancel_run("s1") is True
-        assert "s1" not in runtime._active_runs
+        assert runtime._active_runs.get("s1") is None
 
     asyncio.run(run_case())
 
@@ -1068,7 +1069,7 @@ def test_cancel_run_cancels_stream_task() -> None:
         assert await runtime.cancel_run("s1") is True
         with pytest.raises(asyncio.CancelledError):
             await consumer
-        assert "s1" not in runtime._active_runs
+        assert runtime._active_runs.get("s1") is None
 
     asyncio.run(run_case())
 
@@ -1127,7 +1128,7 @@ def test_build_pending_approvals_extracts_only_matched_approval_results() -> Non
         ToolCall,
         ToolResultMessage,
     )
-    from codepilot.runtime.approval_flow import build_pending_approvals
+    from codepilot.runtime.execution.approval import build_pending_approvals
 
     matched_call = ToolCall(
         id="tool_1",
@@ -1200,7 +1201,7 @@ def test_pending_approval_rejects_missing_identity_fields() -> None:
 
 def test_denied_approval_result_preserves_recovery_metadata() -> None:
     from codepilot.protocols import AssistantMessage, TextContent, ToolCall
-    from codepilot.runtime.approval_flow import denied_tool_result
+    from codepilot.runtime.execution.approval import denied_tool_result
 
     tool_call = ToolCall(id="call_1", name="custom_mutate", arguments={})
     approval = PendingApproval(

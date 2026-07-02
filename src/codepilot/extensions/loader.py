@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """Python 扩展加载器：发现并加载工作区中的 .py 扩展文件。"""
 

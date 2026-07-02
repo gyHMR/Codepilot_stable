@@ -26,13 +26,13 @@ import os
 from pathlib import Path
 from typing import Sequence
 
-from codepilot.runtime.resources import WorkspaceResourceLoader
+from codepilot.runtime.bootstrap.resources import WorkspaceResourceLoader
 from codepilot.runtime.assembly import (
     UnknownRuntimeConfigKeyError,
     explain_runtime_config,
 )
 from codepilot.runtime.service import RuntimeService
-from codepilot.runtime.types import ConfigValueSource, CreateAgentSessionOptions
+from codepilot.runtime.contracts import ConfigValueSource, CreateAgentSessionOptions
 
 from .runner import RunOptions, run
 

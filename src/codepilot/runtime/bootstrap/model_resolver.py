@@ -20,7 +20,7 @@ from codepilot.llm.models import get_model
 from codepilot.protocols import Model
 
 from .config import RuntimeInputs
-from .types import ConfigValueSource, CreateAgentSessionOptions
+from codepilot.runtime.contracts import ConfigValueSource, CreateAgentSessionOptions
 
 
 @dataclass(frozen=True)
