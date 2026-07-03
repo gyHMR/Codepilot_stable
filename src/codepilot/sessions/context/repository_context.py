@@ -28,6 +28,7 @@ _MANIFEST_PROJECT_TYPES = {
 _TEST_DIR_NAMES = {"test", "tests", "spec", "specs"}
 _TOP_LEVEL_LIMIT = 30
 _INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md", "COPILOT.md", "INSTRUCTIONS.md"]
+_INTERNAL_TOP_LEVEL_NAMES = {".git", ".codepilot", ".pytest_cache", "__pycache__"}
 
 
 @dataclass(frozen=True)
@@ -163,7 +164,11 @@ def _build_git_info(root: Path) -> GitInfo | None:
             timeout=2,
             check=False,
         )
-        is_dirty = bool(status_result.stdout.strip())
+        is_dirty = any(
+            not _is_internal_status_line(line)
+            for line in status_result.stdout.splitlines()
+            if line.strip()
+        )
 
         remote_result = subprocess.run(
             ["git", "remote", "get-url", "origin"],
@@ -191,11 +196,27 @@ def _top_level_entries(root: Path) -> list[str]:
 
     if not root.exists() or not root.is_dir():
         return []
-    items = sorted(root.iterdir(), key=lambda item: item.name.lower())
+    items = sorted(
+        (
+            item
+            for item in root.iterdir()
+            if item.name not in _INTERNAL_TOP_LEVEL_NAMES
+        ),
+        key=lambda item: item.name.lower(),
+    )
     entries = []
     for item in items[:_TOP_LEVEL_LIMIT]:
         entries.append(f"{item.name}/" if item.is_dir() else item.name)
     return entries
+
+
+def _is_internal_status_line(line: str) -> bool:
+    if len(line) < 4:
+        return False
+    path = line[3:].split(" -> ")[-1].replace("\\", "/").strip("/")
+    if not path:
+        return False
+    return path.split("/", 1)[0] in _INTERNAL_TOP_LEVEL_NAMES
 
 
 def _project_type(manifest_files: list[str]) -> str | None:

@@ -27,6 +27,37 @@ def test_repository_tracker_detects_external_dirty_file_changes(tmp_path: Path) 
     assert "app.py" in second_delta.modified_paths
 
 
+def test_repository_tracker_ignores_codepilot_internal_artifacts(tmp_path: Path) -> None:
+    from codepilot.sessions.context.repository_tracker import RepositoryTracker
+
+    tracked = tmp_path / "app.py"
+    tracked.write_text("value = 1\n", encoding="utf-8", newline="\n")
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "Test")
+    _git(tmp_path, "add", "app.py")
+    _git(tmp_path, "commit", "-m", "initial")
+
+    tracker = RepositoryTracker(tmp_path)
+    first = tracker.snapshot()
+    artifact = (
+        tmp_path
+        / ".codepilot"
+        / "sessions"
+        / "session_1"
+        / "artifacts"
+        / "tool_outputs"
+        / "call_1.txt"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("tool output\n", encoding="utf-8")
+    second, delta = tracker.refresh(first)
+
+    assert first.fingerprint == second.fingerprint
+    assert not delta.changed
+    assert ".codepilot/" not in second.top_level_entries
+
+
 def test_context_state_records_reject_unknown_enum_values() -> None:
     import pytest
     from codepilot.sessions.context.state import ActiveFile, ContextEvidence, FileSummary

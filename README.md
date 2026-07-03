@@ -1,127 +1,45 @@
 # Codepilot
 
-> 本地 AI 编程智能体 —— 适合 Agent 方向实习/求职的工程项目
+> 面向真实代码仓库的本地 Coding Agent，聚焦工具安全、任务控制、上下文治理、结构化记忆和证据化评测。
 
 ![Python](https://img.shields.io/badge/Python-%3E%3D3.10-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Version](https://img.shields.io/badge/Version-0.3.0-orange)
 
----
+Codepilot 是一个基于 Python 构建的本地编程智能体。它围绕一次真实开发任务的主线展开：理解仓库、调用工具、修改代码、运行验证、记录证据，并在多轮任务中维护上下文、记忆和恢复状态。
 
-## 项目介绍
+这个项目不是要做一个复杂的生产级 Agent 平台，而是把 Coding Agent 的核心工程问题拆开实现清楚：模型如何安全使用工具，长上下文里该看什么，失败后如何继续推进，哪些经验值得长期记住，以及这些能力如何被评测验证。
+## 项目定位
 
-Codepilot 是一个基于 Python 构建的本地编程智能体（Coding Agent），参考了 Claude Code 的设计理念：理解代码仓库、编辑代码、运行验证，并保留结构化的运行结果。
+Codepilot 面向学生学习和 AI 应用开发求职展示，优先保证代码清晰、链路可解释、功能可演示。项目保留真实 Coding Agent 所需的主链路.
 
-**本项目可作为 Agent 开发岗位的实习/求职项目：**
+## 核心能力
 
-- 项目覆盖 LLM Agent 的完整技术栈——工具调用、会话管理、上下文治理、记忆系统、任务规划、安全控制、评估框架
-- 代码结构清晰、分层明确，每一层都可以独立阅读和修改，适合逐模块学习
-- 内置完整的评估体系（4 模块、12 指标），可以在简历/面试中展示你对 Agent 质量度量的理解
-- 通过扩展机制（Python 扩展 / Markdown 技能 / MCP 桥接）可以快速做出个人亮点
-
-**适用人群：** 计算机/AI 相关专业学生、希望转型 Agent 方向的开发者、需要实习项目作品的求职者。
-
----
-
-## 项目特色
-
-### 上下文投影治理
-
-> 设计文档：[docs/design/2context-design.md](docs/design/2context-design.md)
-
-传统 Agent 直接将所有历史消息和工具输出塞进 prompt，容易造成 token 浪费、上下文污染和过期证据误用。Codepilot 当前采用 `ContextGovernor` 作为唯一入口，在每轮模型调用前从会话事实源投影一个轻量 `ContextView`：
-
-- **事实源保留**：完整 transcript、run 记录、task recovery、tool artifact 和 memory 仍由 `sessions/` 持久化
-- **分层投影**：按 stable rules、working state、recalled memory、fresh evidence、recent messages 生成本轮上下文
-- **压力感知**：normal/tight/critical 三档影响最近消息数量、工具输出摘要和 checkpoint 生成
-- **新鲜度追踪**：仓库变更会让路径证据和验证结果失效，避免旧上下文污染下一轮决策
-
-### 结构化记忆
-
-> 设计文档：[docs/design/3memory-design.md](docs/design/3memory-design.md)
-
-抛弃传统的 `MEMORY.md` 纯文本记忆方式，采用证据驱动的结构化记忆：
-
-- **三级信任体系**：每条记忆标注来源可信度——`observed`（工具返回） > `verified`（多次验证） > `user_given`（用户告知） > `model_claim`（模型推断）
-- **五种记忆类型**：`task`（任务）、`file`（文件）、`failure`（失败）、`decision`（决策）、`project`（项目），覆盖 Agent 工作中的主要信息类型
-- **新鲜度校验**：通过文件哈希检测记忆关联的文件是否已变更，过期记忆自动降级
-- **保守写入策略**：`MemoryWriter` 只在有明确证据时才写入，避免幻觉污染记忆
-
-### 任务规划
-
-> 设计文档：[docs/design/1task-design.md](docs/design/1task-design.md)
-
-将模型的语义理解与运行时的任务边界分离：
-
-- **证据绑定**：每个任务步骤必须关联执行证据（工具输出、文件变更），无证据的步骤不能标记为完成
-- **动态计划**：执行过程中可根据工具返回结果动态调整计划，而非死板执行预设步骤
-- **CompletionGate**：完成门控机制，防止模型过早声明任务完成
-- **重规划机制**：当某步骤失败时，自动触发重规划而非直接放弃
-- **会话恢复**：支持从持久化的任务状态恢复中断的会话
-
-### 工具安全
-
-> 设计文档：[docs/design/4tool-design.md](docs/design/4tool-design.md)
-
-解决传统 Agent 中模型可以自行授权工具调用的安全隐患：
-
-- **模型不可自我授权**：权限判断在运行时层完成，模型只能"请求"，不能"决定"
-- **Decide-then-Execute**：先决策再执行，决策阶段不产生副作用
-- **Shell 命令分类**：自动将 Shell 命令分为 `verification`（只读验证）、`mutation`（写入变更）、`high_risk`（高风险）、`unknown` 四类，分别执行不同策略
-- **工作区沙箱**：文件操作限制在工作区目录内，防止路径逃逸
-- **权限审批**：`ask` 模式下，敏感操作需要用户交互确认
-
-### 评估框架
-
-> 设计文档：[docs/design/5eval-design.md](docs/design/5eval-design.md)
-
-内置完整的 Agent 质量评估体系：
-
-- **证据驱动**：所有断言都基于实际运行证据（工具调用记录、上下文快照、文件变更），而非简单的输入/输出匹配
-- **4 模块 12 指标**：覆盖上下文治理、记忆、任务规划、工具安全四大维度
-- **确定性检查 + 消融实验**：`check` 命令用于快速验证（无需调用模型），`experiment` 命令用于 on/off 消融对比
-- **JSON Benchmark**：每个测试用例是独立的 JSON 文件，支持场景化多步测试
-
-### 多模型支持
-
-支持多种 LLM 提供商，通过统一的 Provider 抽象屏蔽 API 差异：
-
-| 协议 | 支持的提供商 |
-|------|-------------|
-| `anthropic-messages` | Anthropic Claude |
-| `openai-compatible` | OpenAI、DeepSeek、及任意兼容 API |
-
-### 扩展机制
-
-三种扩展方式，从简单到复杂逐步深入：
-
-- **Markdown 技能**：用 `.md` 文件定义提示词模板，零代码扩展 Agent 能力
-- **Python 扩展**：编写 Python 模块注册自定义工具和钩子
-- **MCP 桥接**：通过 Model Context Protocol 接入外部工具服务
-
----
+- **本地代码任务执行**：支持读取仓库、搜索文件、编辑代码、运行 shell 验证，并返回结构化 `AgentRunResult`。
+- **受控工具运行时**：工具调用统一经过权限决策、参数校验、用户审批、执行和结果防护。
+- **任务规划控制**：支持 `read / edit / plan` 三种任务模式；复杂任务可先进行只读 discovery，再生成带验收标准的执行步骤。
+- **上下文投影治理**：每次模型调用前重新整理仓库状态、任务状态、工具证据、记忆和最近对话，按 token 压力生成本轮 prompt。
+- **结构化长期记忆**：只沉淀用户显式规则、纠正、项目决策和经失败-修复-验证闭环确认的经验。
+- **会话恢复与回滚**：持久化 session/run 记录，支持任务恢复、会话分支，以及基于 Git clean worktree 的 run 级回滚。
+- **证据化评测**：通过真实运行 trace、工具调用、上下文报告、记忆召回和文件 diff 计算评测指标。
 
 ## 快速开始
 
 ### 安装
 
 ```bash
-# 克隆仓库
 git clone https://github.com/your-username/Codepilot.git
 cd Codepilot
-
-# 以可编辑模式安装（开发用）
 pip install -e ".[dev]"
 ```
 
 ### 配置模型
 
 ```bash
-# 生成配置模板
 codepilot config init
 ```
 
-编辑 `.codepilot/model.local.json`，填入你的 API Key：
+编辑 `.codepilot/model.local.json`：
 
 ```json
 {
@@ -137,211 +55,350 @@ codepilot config init
 }
 ```
 
-- `api_key_env`：优先从环境变量读取 Key，比明文 `api_key` 更安全
-- 支持的 API 协议：`openai-compatible`、`anthropic-messages`
-
-验证配置：
+建议使用 `api_key_env` 从环境变量读取密钥，避免把 API Key 写入项目文件。
 
 ```bash
 codepilot config check
 ```
 
-### 启动
+### 运行
 
 ```bash
-# 交互式模式（默认）
+# 交互式模式
 codepilot
 
-# 单次输出模式
-codepilot -p "解释 main 函数的作用"
+# 单次任务
+codepilot -p "解释这个项目的主调用链"
 
-# 指定工作区目录
+# 指定工作区
 codepilot --workspace /path/to/project
+
+# 只读分析
+codepilot --task-mode read -p "分析当前仓库结构"
+
+# 复杂任务规划模式
+codepilot --task-mode plan -p "修复失败测试并说明验证方式"
+
+# 高风险操作走审批
+codepilot --permission-mode ask
 ```
 
----
+## 运行主线
 
-## 架构概览
+一次请求大致经过下面这条链路：
 
+```text
+CLI/Web/Eval
+  -> RuntimeService
+  -> assemble_runtime()
+  -> AgentSession
+  -> Agent.run()
+  -> run_agent_loop()
+  -> ContextGovernor.prepare()
+  -> LLMStreamRunner
+  -> ToolCallCoordinator
+  -> ToolRuntime
+  -> ToolResultMessage
+  -> TaskController / ContextGovernor / RunStore / MemoryWriter
 ```
+
+对应的关键文件：
+
+| 阶段 | 代码位置 | 说明 |
+|---|---|---|
+| 接口入口 | `src/codepilot/interfaces/` | CLI、Web、RPC 适配 |
+| 应用门面 | `src/codepilot/runtime/service.py` | session 管理、消息发送、审批恢复、运行查询 |
+| 运行时装配 | `src/codepilot/runtime/assembly.py` | 解析模型、配置、工具、扩展、prompt 和 session options |
+| 会话事实源 | `src/codepilot/sessions/session.py` | run 生命周期、持久化、记忆、上下文、任务恢复 |
+| Agent 主循环 | `src/codepilot/core/agent_loop.py` | 模型调用、工具循环、停止语义、任务完成检查 |
+| 任务控制 | `src/codepilot/core/task_control/` | task mode、discovery、planner、controller、completion gate |
+| 工具安全 | `src/codepilot/tools/` | 工具契约、注册、权限、schema、审批、执行、结果防护 |
+| 上下文治理 | `src/codepilot/sessions/context/` | snapshot、pressure policy、projection、checkpoint、artifact ledger |
+| 结构化记忆 | `src/codepilot/sessions/memory/` | memory record、准入、召回、经验提取、合并和提升 |
+| 观测与评测 | `src/codepilot/observability/`, `src/codepilot/evaluation/` | trace、报告、benchmark、指标计算 |
+
+更完整的主线导读见 [docs/design/0Guide.md](docs/design/0Guide.md)。
+
+## 架构分层
+
+```text
 src/codepilot/
-├── protocols/      # Layer 0: 类型定义与接口协议
-├── llm/            # Layer 1: LLM Provider 抽象
-├── tools/          # Layer 1: 工具系统、权限、安全
-├── core/           # Layer 2: Agent 循环引擎
-├── sessions/       # Layer 3: 会话事实源、记忆、上下文、历史
-├── observability/  # Layer 3: 事件记录与运行摘要
-├── extensions/     # Layer 4: 扩展系统（Python/Markdown/MCP）
-├── runtime/        # Layer 5: 运行时组装与服务门面
-├── interfaces/     # Layer 6: CLI 和 Web 接口
-└── evaluation/     # 横切: 评估框架
+├── protocols/      # 跨层数据协议和类型契约
+├── llm/            # LLM provider 抽象和流式事件适配
+├── tools/          # 工具注册、权限、安全执行和内置工具
+├── core/           # Agent 循环、模型调用协调、任务控制
+├── sessions/       # 会话事实源、持久化、上下文、记忆、历史恢复
+├── observability/  # 运行 trace、事件归一化、审计报告
+├── extensions/     # Python 扩展、Markdown skill、MCP 桥接
+├── runtime/        # 配置解析、模型/工具/prompt/session 装配、服务门面
+├── interfaces/     # CLI 和 Web 接口
+└── evaluation/     # Benchmark、runner、evidence、scorer、report
 ```
 
-### 分层职责
+依赖方向保持为：
 
-| 层 | 职责 | 关键文件 |
-|----|------|---------|
-| **protocols** | 共享类型定义，所有层的公共契约 | `types.py`, `events.py` |
-| **core** | Agent 循环：消息编排、工具调度、重试与停止语义 | `agent_loop.py` |
-| **llm** | 模型调用抽象，Provider 注册与流式响应处理 | `registry.py`, `provider/` |
-| **tools** | 工具契约、注册、权限、参数校验、审批、执行和结果防护 | `contracts.py`, `execution.py`, `policy.py`, `builtins/` |
-| **sessions** | 会话事实源、分支管理、上下文投影治理、记忆和任务恢复 | `session.py`, `persistence/`, `memory/`, `context/` |
-| **runtime** | 9 步组装流水线：配置→模型→工具→提示词→钩子→命令→会话 | `service.py`, `assembly.py` |
-| **extensions** | Python 扩展、Markdown 技能、MCP 工具桥接 | `python_ext/`, `skill.py`, `mcp/` |
-| **interfaces** | CLI（交互式/打印/RPC）和 Web 接口 | `cli/cli.py`, `cli/runner.py` |
-| **evaluation** | 评估框架：加载、执行、断言、指标、报告 | `service.py`, `executor.py`, `metrics.py` |
-| **observability** | JSONL 事件归一化、运行摘要生成 | `recorder.py`, `summary.py` |
+```text
+protocols -> llm/tools -> core -> sessions/observability -> extensions -> runtime -> interfaces
+```
 
-**依赖方向：** `protocols → llm/tools → core → sessions/observability → extensions → runtime → interfaces`
+`evaluation/` 是横切模块，通过公开的 `RuntimeService` 运行 Agent，不直接修改 core/sessions 内部状态。
 
----
+## 任务规划控制
 
-## 每层任务速览
+设计文档：[docs/design/1task-design.md](docs/design/1task-design.md)
 
-### Layer 0 — protocols（类型定义）
-定义所有层共享的数据类型和接口协议，是整个项目的公共契约。
+任务控制的目标不是替模型做语义决策，而是把模型的自由执行约束在可观察、可恢复、可验证的边界内。
 
-### Layer 1 — llm/tools（模型与工具能力）
-模型层通过 Provider 注册机制屏蔽不同 LLM API 的差异；工具层作为执行安全边界，负责工具契约、注册、权限、参数校验、审批、执行和结果防护。
+当前用户可见任务模式：
 
-### Layer 2 — core（Agent 循环）
-实现 Agent 的核心执行循环：接收用户消息 → 调用 LLM → 解析工具调用 → 执行工具 → 将结果反馈给 LLM → 循环直到完成。
+| 模式 | 适用场景 | 行为 |
+|---|---|---|
+| `read` | 只读分析、解释代码 | 只暴露只读能力，不允许修改工作区 |
+| `edit` | 默认开发任务 | 不做复杂预规划，但仍跟踪工具证据、变更和验证 |
+| `plan` | 复杂或多步骤任务 | 先进行只读 discovery，再合成结构化执行计划 |
 
-### Layer 3 — sessions/observability（会话事实源与观测）
-会话生命周期管理、持久化存储、上下文投影治理、结构化记忆读写和任务恢复。
+`plan` 模式的主流程：
 
-### Layer 4 — extensions（扩展接入）
-支持 Python 模块扩展、Markdown 技能模板、MCP 工具桥接三种扩展方式。
+```text
+PlanningDiscovery
+  -> 只读工具收集 facts / relevant_files / risks / verification_hints
+  -> TaskPlanner 生成 goal + steps
+  -> TaskController 初始化 TaskState
+  -> 每次工具结果更新步骤、证据、失败次数和下一步决策
+  -> CompletionGate 判断是否允许结束
+```
 
-### Layer 5 — runtime（运行时组装）
-9 步组装流水线将配置、模型、工具、提示词、钩子、命令和会话选项组装为完整的 Agent 会话，是连接底层能力与上层接口的桥梁。
+关键实现：
 
-### Layer 6 — interfaces（用户接口）
-CLI 接口支持交互式（REPL）、单次输出（print）、JSONL 协议（rpc）三种运行模式。
+- `discovery.py`：只读 scratch ReAct loop，不把探索消息污染主上下文。
+- `planner.py`：解析和规范化 LLM JSON 计划，失败时降级为安全单步计划。
+- `controller.py`：根据工具结果、验证状态、审批/拒绝和连续失败做确定性决策。
+- `rules.py`：集中放置完成门控、验证失败摘要、重规划和回滚提示规则。
+- `tools.py`：提供 runtime-managed `complete_task_step` 工具，允许模型显式完成非修改步骤。
 
-### 横切 — evaluation（评估框架）
-提供证据驱动的 Agent 质量评估，支持确定性检查、真实模型 benchmark、消融实验。
+代码变更后，如果没有与最新工作区状态一致的成功验证，任务不会被正常标记为完成。
 
-### 横切 — observability（可观测性）
-记录 Agent 运行过程中的所有事件（JSONL 格式），生成运行摘要供评估和调试使用。
+## 上下文治理
 
----
+设计文档：[docs/design/2context-design.md](docs/design/2context-design.md)
 
-## CLI 参数速查
+Codepilot 不把全部历史消息和工具输出直接塞进 prompt。每次模型调用前，`ContextGovernor.prepare()` 会从 session 事实源投影出一个新的上下文视图。
 
-### 顶层参数
+治理链路：
 
-| 参数 | 说明 |
-|------|------|
-| `-p`, `--prompt` | 单次输出模式的输入提示词 |
-| `--cwd`, `--workspace` | 工作区目录（默认 `.`） |
-| `--resume` | 恢复已有会话（传入会话 ID） |
-| `--model` | 模型标识（如 `deepseek/deepseek-chat`） |
-| `--permission-mode` | 权限模式：`read-only` / `workspace-write` / `ask` |
-| `--verbose` | 详细输出模式 |
-| `--no-color` | 禁用彩色输出 |
-| `--version` | 显示版本号 |
+```text
+SessionSnapshotBuilder
+  -> RepositoryTracker 刷新仓库快照和 delta
+  -> SessionContextState 记录 active files、evidence、verification
+  -> ToolArtifactLedger 归档工具输出
+  -> MemoryRetriever 召回长期记忆
+  -> ContextPressurePolicy 判断 normal / tight / critical
+  -> ContextProjector 组装 prompt
+  -> ContextReport 记录选择结果和 token 分布
+```
 
-### config 子命令
+最终进入模型的内容按层组织：
+
+- `Stable Rules`：稳定规则和项目约束。
+- `Working State`：当前任务、checkpoint、active files、changed files。
+- `Memory Recall`：召回的 correction、constraint、decision、experience。
+- `Evidence`：新鲜工具证据、验证结果、artifact 引用和 stale 提醒。
+- `Recent Turns`：少量最近对话摘要。
+
+当上下文压力达到 `critical` 时，系统会创建结构化 checkpoint；长工具输出会写入 artifact，再以摘要和引用进入 prompt。
+
+## 结构化记忆
+
+设计文档：[docs/design/3memory-design.md](docs/design/3memory-design.md)
+
+Memory v2 的边界很严格：只保存跨任务可复用的长期知识，不保存当前任务进度、文件摘要、工具原始日志或单次失败输出。
+
+自动写入的 `MemoryRecord` 类型：
+
+| 类型 | 来源 | 用途 |
+|---|---|---|
+| `correction` | 用户纠正 | 最高优先级召回，修正 Agent 的错误认知 |
+| `constraint` | 用户显式记忆、项目边界 | 长期规则和偏好 |
+| `decision` | `/memory add` 等命令 | 项目设计决策 |
+| `experience` | 失败-修复-验证闭环 | 可复用修复经验 |
+
+记忆参与三个时机：
+
+1. **run 开始前**：`MemoryWriter.admit_prompt_memory()` 只接收明确的长期记忆意图。
+2. **每次模型调用前**：`MemoryRetriever.recall()` 根据任务文本、active paths、action intent、recent error 和 retrieval mode 召回。
+3. **run 结束后**：`ExperienceExtractor` 只从已验证的失败-修复-验证闭环中提炼经验，并通过 `MemoryConsolidator` 合并重复经验、提升高频经验。
+
+当前任务恢复由 `TaskRecoveryStore` 维护，和长期 Memory 分离。
+
+## 工具安全
+
+设计文档：[docs/design/4tool-design.md](docs/design/4tool-design.md)
+
+工具模块是 Codepilot 的执行安全边界。模型只能请求工具调用，不能直接执行工具，也不能通过参数给自己授权。
+
+工具来源：
+
+```text
+内置工具 -> 调用方工具 -> Python 扩展工具 -> MCP 代理工具
+```
+
+装配阶段由 `assemble_tools()` 合并工具、校验定义、绑定 metadata、过滤 read-only 工具，并创建统一 `ToolRuntime`。
+
+`ToolRuntime.execute()` 的执行顺序：
+
+```text
+ToolRegistry 查找
+  -> PermissionPolicy 权限决策
+  -> SchemaValidator 参数校验
+  -> ApprovalProvider 用户审批
+  -> 真实工具执行
+  -> ToolResultGuard 结果防护
+  -> ToolRuntimeResult / ToolResultMessage
+```
+
+主要安全策略：
+
+- 拦截 `allow_dangerous`、`bypass_approval`、`ignore_workspace_boundary`、`trusted` 等自授权参数。
+- shell 命令分类为 `verification / mutation / high_risk / unknown`，不同类别走允许、审批或拒绝。
+- 文件工具通过 `WorkspaceSandbox` 做工作区边界校验，防止路径逃逸。
+- shell 执行过滤敏感环境变量，控制超时和输出长度。
+- 工具结果经过 `ToolResultGuard` 脱敏、prompt injection 检测和输出可信度标注。
+
+注意：这里的“沙箱”是工作区路径边界和受控执行策略，不是容器或操作系统级强隔离。
+
+## 会话恢复与回滚
+
+Codepilot 会持久化 session 消息、事件、run 结果、context ledger、tool artifacts 和任务恢复投影。中断后可以用同一个 session id 恢复上下文。
+
+Git 回滚采用一个很小但可解释的安全子集：
+
+- run 开始前必须是 Git clean worktree；
+- 只处理该 run 记录的 `affected_paths`；
+- 如果 run 结束后相关文件又被修改，自动回滚会被阻塞；
+- `.codepilot/` 内部文件不会参与回滚。
+
+常用命令：
+
+```text
+/rollback            预览最近一次 run 的回滚计划
+/rollback <run_id>   预览指定 run
+/rollback apply      执行最近一次 run 的回滚
+```
+
+实现位置：[src/codepilot/sessions/history/git_rollback.py](src/codepilot/sessions/history/git_rollback.py)。
+
+## 评测体系
+
+设计文档：[docs/design/5eval-design.md](docs/design/5eval-design.md)
+
+Evaluation v2 的核心边界是：
+
+```text
+Benchmark 描述任务、预期和指标
+Runner 通过 RuntimeService 真实运行 Agent
+Evidence 从 run trace 和 workspace diff 提取结构化证据
+Scorer 只根据 EvalEvidence 计算指标
+```
+
+默认 benchmark 目录：
+
+```text
+benchmarks/evaluation_v2/
+├── context/
+├── memory/
+├── planning/
+└── security/
+```
+
+常用命令：
+
+```bash
+# 确定性检查
+python -m codepilot.evaluation check
+
+# 运行全部 v2 benchmark
+python -m codepilot.evaluation run all
+
+# 运行单个模块
+python -m codepilot.evaluation run context
+python -m codepilot.evaluation run memory
+python -m codepilot.evaluation run planning
+python -m codepilot.evaluation run security
+
+# 消融实验
+python -m codepilot.evaluation experiment memory --repeat 3
+python -m codepilot.evaluation experiment planning --repeat 3
+
+# 静态 A/B
+python -m codepilot.evaluation ab context
+python -m codepilot.evaluation ab security
+
+# 查看报告
+python -m codepilot.evaluation report .codepilot/evals/<eval_id>
+```
+
+当前 scorer 覆盖：
+
+- task：任务通过率。
+- planning：步骤完成率、误完成率、修复/重规划成功率、恢复率、证据覆盖率等。
+- context：关键上下文命中率、token efficiency、过期上下文率、噪声率。
+- memory：记忆召回命中率、冗余读取、失败方案复发等。
+- tool/security：工具成功率、非法调用率、危险调用拦截、良性调用放行、拒绝后副作用。
+
+评测产物会写入 `.codepilot/evals/<eval_id>`，包含 summary、report、case evidence 和 workspace diff。
+
+## 常用斜杠命令
+
+交互式模式下可使用：
 
 | 命令 | 说明 |
-|------|------|
-| `codepilot config init` | 生成模型配置模板 |
-| `codepilot config show` | 显示当前配置 |
-| `codepilot config check` | 校验模型配置 |
-| `codepilot config explain` | 解释配置项含义 |
-
-### 交互式斜杠命令
-
-| 命令 | 说明 |
-|------|------|
-| `/help` | 显示帮助信息 |
-| `/status` | 显示当前会话状态 |
-| `/session` | 会话管理 |
-| `/tree` | 显示工作区目录树 |
-| `/fork` | 分叉当前会话 |
-| `/new` | 创建新会话 |
-| `/switch` | 切换会话 |
-| `/clear` | 清空当前对话 |
-| `/context` | 查看最近一次上下文投影治理报告 |
-| `/tools` | 列出可用工具 |
-| `/model` | 切换模型 |
-| `/usage` | 显示 token 用量 |
+|---|---|
+| `/help` | 查看帮助 |
+| `/status` | 查看当前 session、模型、权限和任务模式 |
+| `/tools` | 查看当前可用工具 |
+| `/context` | 查看最近一次上下文治理报告 |
+| `/context items` | 查看本轮上下文选择了哪些条目 |
+| `/context stale` | 查看过期上下文提示 |
+| `/memory` | 查看结构化记忆概览 |
+| `/memory add <text>` | 添加项目级记忆 |
+| `/memory promote <id>` | 将 session experience 提升为 project memory |
+| `/memory forget <id>` | 标记删除某条记忆 |
+| `/rollback` | 预览 run 级回滚 |
+| `/rollback apply` | 执行 run 级回滚 |
+| `/model` | 查看或切换模型 |
+| `/usage` | 查看 token 用量 |
 | `/exit` | 退出 |
 
----
-
-## 验证
+## 开发验证
 
 ```bash
 # 编译检查
 python -m compileall -q src/codepilot
 
-# 运行测试
+# 全量测试
 python -m pytest test -q
 
-# CLI 可用性
-codepilot --help
+# 重点模块测试
+python -m pytest test/test_task_planning.py -q
+python -m pytest test/test_context_governor_refactor.py -q
+python -m pytest test/test_memory_v2_contract.py -q
+python -m pytest test/test_tool_execution_security.py -q
+python -m pytest test/test_evaluation_v2.py -q
 ```
 
----
+## 设计文档
 
-## 评估模块
+| 文档 | 内容 |
+|---|---|
+| [docs/design/0Guide.md](docs/design/0Guide.md) | 运行主线导读 |
+| [docs/design/1task-design.md](docs/design/1task-design.md) | 任务规划控制 |
+| [docs/design/2context-design.md](docs/design/2context-design.md) | 上下文治理 |
+| [docs/design/3memory-design.md](docs/design/3memory-design.md) | 结构化记忆 |
+| [docs/design/4tool-design.md](docs/design/4tool-design.md) | 工具安全 |
+| [docs/design/5eval-design.md](docs/design/5eval-design.md) | Evaluation v2 |
 
-### 命令速查
 
-评估模块通过 `python -m codepilot.evaluation` 调用：
 
-| 命令 | 说明 | 是否需要模型 |
-|------|------|-------------|
-| `check` | 确定性检查，快速验证 Agent 行为是否符合预期 | 否 |
-| `run` | 真实模型 benchmark，运行完整的评估套件 | 是 |
-| `experiment` | 消融实验，对比开启/关闭某模块的效果 | 是 |
-| `report` | 显示已有的评估报告 | 否 |
+## License
 
-### 示例
-
-```bash
-# 快速确定性检查（无需模型，几秒完成）
-python -m codepilot.evaluation check
-
-# 运行完整 benchmark（需要模型 API）
-python -m codepilot.evaluation run
-
-# 消融实验：对比开启/关闭记忆模块
-python -m codepilot.evaluation experiment --module memory
-
-# 查看已有报告
-python -m codepilot.evaluation report
-```
-
-### 4 模块 12 指标
-
-| 模块 | 指标 | 说明 |
-|------|------|------|
-| **上下文治理** | key_context_hit_rate | 关键上下文命中率 |
-| | token_efficiency | Token 使用效率 |
-| | stale_context_rate | 过期上下文占比 |
-| **记忆** | memory_retrieval_hit_rate | 记忆检索命中率 |
-| | redundant_read_count | 冗余读取次数 |
-| | failed_attempt_recurrence_rate | 失败尝试复发率 |
-| **任务规划** | evidence_coverage_rate | 证据覆盖率 |
-| | false_completion_rate | 误完成率 |
-| | repair_replan_success_rate | 修复/重规划成功率 |
-| **工具安全** | dangerous_tool_block_rate | 危险工具拦截率 |
-| | mutation_after_denial_rate | 拒绝后仍尝试写入率 |
-| | benign_tool_pass_rate | 安全工具放行率 |
-
-### Benchmark 规模
-
-- **上下文治理**：15 个 benchmark 用例
-- **记忆**：15 个 benchmark 用例
-- **任务规划**：16 个 benchmark 用例
-- **工具安全**：17 个 benchmark 用例
-- **总计**：63 个 JSON benchmark 文件
-
----
-
-## 许可证
-
-MIT License — 详见 [LICENSE](LICENSE)
+MIT License，详见 [LICENSE](LICENSE)。

@@ -18,6 +18,8 @@ from codepilot.protocols import RepositoryDelta, RepositorySnapshot
 
 from .repository_context import build_repository_bootstrap
 
+_INTERNAL_DIR_NAMES = {".git", ".codepilot", ".pytest_cache", "__pycache__"}
+
 
 class RepositoryTracker:
     """仓库追踪器：生成低成本的仓库快照并计算前后差异。"""
@@ -84,6 +86,7 @@ def compare_snapshots(
         path
         for path, status in new_status.items()
         if status != "??"
+        and not _is_internal_path(path)
         and (
             old_status.get(path) != status
             or previous.dirty_path_hashes.get(path) != current.dirty_path_hashes.get(path)
@@ -91,8 +94,12 @@ def compare_snapshots(
     )
     deleted = sorted(
         {
-            *[path for path, status in new_status.items() if "D" in status],
-            *(old_paths - new_paths),
+            *[
+                path
+                for path, status in new_status.items()
+                if "D" in status and not _is_internal_path(path)
+            ],
+            *(path for path in (old_paths - new_paths) if not _is_internal_path(path)),
         }
     )
     return RepositoryDelta(
@@ -153,7 +160,14 @@ def _git_lines(root: Path, args: list[str]) -> list[str]:
         return []
     if result.returncode != 0:
         return []
-    return [line for line in result.stdout.splitlines() if line.strip()]
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if args == ["status", "--porcelain"]:
+        return [
+            line
+            for line in lines
+            if len(line) < 4 or not _is_internal_path(line[3:].split(" -> ")[-1])
+        ]
+    return lines
 
 
 def _status_map(lines: list[str]) -> dict[str, str]:
@@ -163,6 +177,8 @@ def _status_map(lines: list[str]) -> dict[str, str]:
             continue
         status = line[:2]
         path = line[3:].split(" -> ")[-1]
+        if _is_internal_path(path):
+            continue
         result[path] = status
     return result
 
@@ -173,6 +189,14 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_internal_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").strip("/")
+    if not normalized:
+        return False
+    first = normalized.split("/", 1)[0]
+    return first in _INTERNAL_DIR_NAMES
 
 
 def _dirty_path_hashes(root: Path, status_lines: list[str]) -> dict[str, str]:
@@ -195,13 +219,21 @@ def _dirty_path_hashes(root: Path, status_lines: list[str]) -> dict[str, str]:
 def _directory_fingerprint(path: Path, *, limit: int = 100) -> str:
     digest = hashlib.sha256()
     files = sorted(
-        (item for item in path.rglob("*") if item.is_file()),
+        (
+            item
+            for item in path.rglob("*")
+            if item.is_file()
+            and not any(part in _INTERNAL_DIR_NAMES for part in item.relative_to(path).parts)
+        ),
         key=lambda item: item.as_posix(),
     )
     for item in files[:limit]:
         relative = item.relative_to(path).as_posix()
         digest.update(relative.encode("utf-8"))
-        digest.update(_sha256(item).encode("ascii"))
+        try:
+            digest.update(_sha256(item).encode("ascii"))
+        except FileNotFoundError:
+            continue
     digest.update(f"count:{len(files)}".encode("ascii"))
     return digest.hexdigest()
 
