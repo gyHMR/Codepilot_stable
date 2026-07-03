@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：Anthropic provider 把内部消息和工具规范转换为 Anthropic Messages API 请求。
+# 关注点：对照 openai_compatible.py 可以学习不同 API 适配方式。
+
 """
 Anthropic Messages API 流式 provider。
 

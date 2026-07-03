@@ -131,6 +131,22 @@ def test_runtime_does_not_import_interfaces() -> None:
     assert offenders == []
 
 
+def test_sessions_layer_does_not_import_extensions() -> None:
+    forbidden_patterns = (
+        "codepilot.extensions",
+        "from ..extensions",
+        "from extensions",
+    )
+
+    offenders: list[str] = []
+    for path in (SRC / "codepilot" / "sessions").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if any(pattern in text for pattern in forbidden_patterns):
+            offenders.append(str(path.relative_to(ROOT)))
+
+    assert offenders == []
+
+
 def test_tools_layer_does_not_import_core() -> None:
     offenders: list[str] = []
     for path in (SRC / "codepilot" / "tools").rglob("*.py"):
@@ -283,6 +299,19 @@ def test_removed_tools_compat_modules_are_gone() -> None:
         "codepilot.tools.result_guard",
         "codepilot.tools.builtin",
     )
+    existing = [module for module in removed_modules if find_spec(module) is not None]
+
+    assert existing == []
+
+
+def test_removed_task_control_helper_modules_are_gone() -> None:
+    removed_modules = (
+        "codepilot.core.task_control.evidence",
+        "codepilot.core.task_control.verifier",
+        "codepilot.core.task_control.replanner",
+        "codepilot.core.task_control.stop",
+    )
+
     existing = [module for module in removed_modules if find_spec(module) is not None]
 
     assert existing == []

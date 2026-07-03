@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：MemoryStore 负责 session/project memory 的读写和状态维护。
+# 关注点：它是记忆事实源，检索和写入策略分别在 retriever/writer。
+
 """Persistence adapter for Memory v2."""
 
 import json

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：AgentSession 是会话主类，串联消息持久化、生命周期 hook、上下文投影、记忆和任务恢复。
+# 关注点：读它时可以按 run() 的前置准备、Agent 执行、结果落盘三个阶段理解。
+
 """AgentSession 负责编排一次应用级别的 Agent 对话。
 
 主要职责：
@@ -31,7 +34,6 @@ from codepilot.core import (
     new_run_id,
 )
 
-from codepilot.extensions.types import ExtensionLifecycleContext
 from codepilot.tools import AgentTool
 from .context.freshness import build_context_freshness_notice
 from .context.governor import ContextGovernor
@@ -42,9 +44,11 @@ from .history.branching import switch_to_entry as branch_switch_to_entry
 from .history.checkpoint import SessionCheckpoint, record_checkpoint
 from .history.git_rollback import (
     GitRollbackBaseline,
+    GitRollbackPlan,
     GitRollbackResult,
     build_rollback_metadata,
     capture_git_baseline,
+    plan_run_rollback,
     revert_run_changes,
 )
 from .history.task_recovery import TaskRecoveryStore
@@ -54,7 +58,7 @@ from .run_reconciliation import (
     merge_approved_tool_result,
     replace_pending_tool_result,
 )
-from .types import AgentSessionOptions
+from .types import AgentSessionOptions, SessionLifecycleContext
 
 logger = logging.getLogger("codepilot.sessions.session")
 
@@ -477,21 +481,46 @@ class AgentSession:
     def revert_last_run(self) -> GitRollbackResult:
         """撤销当前会话最近一次支持 Git clean-worktree 回退的 Run。"""
 
+        plan = self.preview_last_run_rollback()
+        if not plan.run_id:
+            return GitRollbackResult(
+                status="not_eligible",
+                run_id="",
+                reason=plan.reason or "missing_run_id",
+            )
+        return self.revert_run(plan.run_id)
+
+    def preview_last_run_rollback(self) -> GitRollbackPlan:
+        """预览当前会话最近一次 Run 的 Git 回退计划。"""
+
         runs = self.store.load_run_results(limit=1)
         if not runs:
-            return GitRollbackResult(
+            return GitRollbackPlan(
                 status="not_eligible",
                 run_id="",
                 reason="no_run_results",
             )
         run_id = runs[-1].get("run_id")
         if not isinstance(run_id, str) or not run_id:
-            return GitRollbackResult(
+            return GitRollbackPlan(
                 status="not_eligible",
                 run_id="",
                 reason="missing_run_id",
             )
-        return self.revert_run(run_id)
+        return self.preview_run_rollback(run_id)
+
+    def preview_run_rollback(self, run_id: str) -> GitRollbackPlan:
+        """按 run_id 预览该 Run 记录的工作区文件回退计划。"""
+
+        try:
+            state = self.store.run_store.load_run_state(run_id)
+        except FileNotFoundError:
+            return GitRollbackPlan(
+                status="not_eligible",
+                run_id=run_id,
+                reason="missing_run_state",
+            )
+        return plan_run_rollback(self.workspace_dir, state)
 
     def revert_run(self, run_id: str) -> GitRollbackResult:
         """按 run_id 撤销该 Run 记录的工作区文件修改。"""
@@ -855,7 +884,7 @@ class AgentSession:
         """
         if not hooks:
             return
-        ctx = ExtensionLifecycleContext(
+        ctx = SessionLifecycleContext(
             session=self,
             text=text,
             is_continue=is_continue,
@@ -865,4 +894,3 @@ class AgentSession:
             value = hook(ctx)
             if inspect.isawaitable(value):
                 await value
-

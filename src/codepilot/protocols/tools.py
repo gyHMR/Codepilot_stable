@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：tools.py 定义模型可见工具 spec、工具调用和工具结果的跨层协议。
+# 关注点：注意这里没有 execute 函数；可执行工具属于 tools/contracts.py。
+
 """
 工具相关类型定义。
 

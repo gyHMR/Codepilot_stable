@@ -1,3 +1,6 @@
+# 新手导读：包门面文件：集中导出本层最常用的类型和入口，降低学习时的导入成本。
+# 关注点：evaluation 层是项目的评估与展示入口，用运行证据衡量 Agent 行为质量。
+
 """Codepilot evaluation v2."""
 
 from .artifacts import EvaluationArtifacts

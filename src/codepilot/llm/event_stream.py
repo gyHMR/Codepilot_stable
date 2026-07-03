@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：AssistantMessageEventStream 统一封装 provider 的流式响应。
+# 关注点：上层可以 async for 消费事件，也可以 await result() 获取最终消息。
+
 """
 统一事件流容器模块。
 

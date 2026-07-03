@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：loader.py 负责读取 benchmark JSON 文件并校验基础结构。
+# 关注点：新增 benchmark 格式时先看这里。
+
 """Load evaluation v2 case definitions."""
 
 import json

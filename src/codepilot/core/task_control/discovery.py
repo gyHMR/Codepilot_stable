@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：discovery 负责从消息和上下文中整理计划前的事实、风险、文件和验证线索。
+# 关注点：它服务于任务规划，不直接执行工具。
+
 """Read-only planning discovery for plan mode."""
 
 import json

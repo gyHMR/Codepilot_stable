@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：ContextGovernor 是上下文投影治理唯一入口，每轮模型调用前生成 PreparedAgentContext。
+# 关注点：它串联 snapshot、memory、pressure policy、projector、checkpoint 和 context ledger。
+
 """统一上下文治理入口。"""
 
 import hashlib
@@ -154,7 +157,15 @@ class ContextGovernor:
             estimated_tokens_before=before_tokens,
             estimated_tokens_after=after_tokens,
             sections=section_reports(view, pressure.effective_budget),
-            selected_items=selected_item_summaries(view),
+            selected_items=selected_item_summaries(
+                view,
+                active_files=snapshot.active_files,
+                changed_files=snapshot.changed_files,
+                active_file_records=list(self.state.active_files.values()),
+                evidence=self.state.evidence,
+                artifacts=snapshot.artifact_refs,
+                memory_ids=[item.record.id for item in memory_recall.retrieved],
+            ),
             stale_items=snapshot.stale_items,
             repository_delta=snapshot.repository_delta,
             retrieved_memory_ids=[item.record.id for item in memory_recall.retrieved],

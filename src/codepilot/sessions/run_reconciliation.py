@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：run reconciliation 负责把运行结果、事件和会话事实源对齐。
+# 关注点：它帮助恢复或审计时判断哪些 run 已经完整落盘。
+
 """Reconcile session-owned evidence into core Agent run results.
 
 The core Agent loop reports what happened while it was actively running.  Some

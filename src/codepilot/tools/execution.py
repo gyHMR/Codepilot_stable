@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：ToolRuntime 是所有工具调用的统一安全管线：查找、权限、schema、审批、执行、结果防护。
+# 关注点：理解工具安全策略时，优先从 execute()/execute_approved() 顺序读。
+
 """统一工具执行运行时：集成权限检查、审批流程和工具执行。"""
 
 import asyncio
@@ -70,6 +73,27 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+def _permission_record(
+    decision: ToolDecision,
+    *,
+    granted_approval_id: str | None,
+) -> dict[str, Any]:
+    if granted_approval_id is None:
+        return {
+            "decision": decision.kind,
+            "reason": decision.reason,
+            **decision.details,
+        }
+    return {
+        "decision": "allow",
+        "reason": "approved_by_user",
+        "approval_id": granted_approval_id,
+        "policy_decision": decision.kind,
+        "policy_reason": decision.reason,
+        **decision.details,
+    }
+
+
 @dataclass
 class ToolRuntime:
     """工具运行时：将注册表、权限策略和审批提供者组合为统一的执行引擎。"""
@@ -130,6 +154,37 @@ class ToolRuntime:
         on_update: AgentToolUpdateCallback | None = None,
     ) -> ToolRuntimeResult:
         """执行工具调用：权限检查 → 参数校验 → 审批 → 执行 → 结果防护。"""
+        return await self._execute(
+            request,
+            signal=signal,
+            on_update=on_update,
+            granted_approval_id=None,
+        )
+
+    async def execute_approved(
+        self,
+        request: ToolRuntimeRequest,
+        *,
+        approval_id: str,
+        signal: Any | None = None,
+        on_update: AgentToolUpdateCallback | None = None,
+    ) -> ToolRuntimeResult:
+        """Execute a user-approved pending tool call through the normal guard path."""
+        return await self._execute(
+            request,
+            signal=signal,
+            on_update=on_update,
+            granted_approval_id=approval_id,
+        )
+
+    async def _execute(
+        self,
+        request: ToolRuntimeRequest,
+        *,
+        signal: Any | None,
+        on_update: AgentToolUpdateCallback | None,
+        granted_approval_id: str | None,
+    ) -> ToolRuntimeResult:
         tool = self.registry.get(request.name)
         if tool is None:
             result = _tool_result(
@@ -160,6 +215,11 @@ class ToolRuntime:
         if decision.denied:
             return self._blocked_result(request, decision)
 
+        permission_record = _permission_record(
+            decision,
+            granted_approval_id=granted_approval_id,
+        )
+
         validation = self.schema_validator.validate(tool.parameters, request.params)
         if not validation.valid:
             result = _tool_result(
@@ -176,11 +236,7 @@ class ToolRuntime:
             result.tool_call_id = request.tool_call_id
             result.tool_name = request.name
             result.approved = False
-            result.metadata["permission_decision"] = {
-                "decision": decision.kind,
-                "reason": decision.reason,
-                **decision.details,
-            }
+            result.metadata["permission_decision"] = permission_record
             result.metadata["schema_validation"] = {
                 "valid": False,
                 "errors": list(validation.errors),
@@ -194,42 +250,41 @@ class ToolRuntime:
 
         approval_id: str | None = None
         if decision.requires_approval:
-            approval = await self.approval_provider.request_approval(
-                request,
-                metadata,
-                decision,
-            )
-            approval_id = approval.approval_id
-            if not approval.approved:
-                result = _tool_result(
-                    approval.reason or "Tool execution requires approval",
-                    status="approval_required",
-                    error_code="approval_required",
-                    details={
-                        "tool": request.name,
-                        "reason": decision.reason,
-                        "approval_id": approval.approval_id,
-                        "policy_reason": decision.reason,
-                        "decision": decision.kind,
-                        **decision.details,
-                    },
+            if granted_approval_id is not None:
+                approval_id = granted_approval_id
+            else:
+                approval = await self.approval_provider.request_approval(
+                    request,
+                    metadata,
+                    decision,
                 )
-                result.tool_call_id = request.tool_call_id
-                result.tool_name = request.name
-                result.approved = False
-                result.approval_id = approval.approval_id
-                result.metadata["permission_decision"] = {
-                    "decision": decision.kind,
-                    "reason": decision.reason,
-                    **decision.details,
-                }
-                return ToolRuntimeResult(
-                    result=result,
-                    status="approval_required",
-                    is_error=True,
-                    approved=False,
-                    approval_id=approval.approval_id,
-                )
+                approval_id = approval.approval_id
+                if not approval.approved:
+                    result = _tool_result(
+                        approval.reason or "Tool execution requires approval",
+                        status="approval_required",
+                        error_code="approval_required",
+                        details={
+                            "tool": request.name,
+                            "reason": decision.reason,
+                            "approval_id": approval.approval_id,
+                            "policy_reason": decision.reason,
+                            "decision": decision.kind,
+                            **decision.details,
+                        },
+                    )
+                    result.tool_call_id = request.tool_call_id
+                    result.tool_name = request.name
+                    result.approved = False
+                    result.approval_id = approval.approval_id
+                    result.metadata["permission_decision"] = permission_record
+                    return ToolRuntimeResult(
+                        result=result,
+                        status="approval_required",
+                        is_error=True,
+                        approved=False,
+                        approval_id=approval.approval_id,
+                    )
 
         try:
             started_at = time.monotonic()
@@ -242,19 +297,11 @@ class ToolRuntime:
                 result.details = {"tool_details": result.details}
             result.details.setdefault(
                 "permission",
-                {
-                    "decision": decision.kind,
-                    "reason": decision.reason,
-                    **decision.details,
-                },
+                permission_record,
             )
             result.metadata.setdefault(
                 "permission_decision",
-                {
-                    "decision": decision.kind,
-                    "reason": decision.reason,
-                    **decision.details,
-                },
+                permission_record,
             )
             result.metadata.setdefault(
                 "duration_ms",
@@ -289,11 +336,7 @@ class ToolRuntime:
             result.approval_id = approval_id
             result.metadata.setdefault(
                 "permission_decision",
-                {
-                    "decision": decision.kind,
-                    "reason": decision.reason,
-                    **decision.details,
-                },
+                permission_record,
             )
             result.metadata.setdefault(
                 "duration_ms",

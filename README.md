@@ -25,20 +25,20 @@ Codepilot 是一个基于 Python 构建的本地编程智能体（Coding Agent�
 
 ## 项目特色
 
-### 上下文治理
+### 上下文投影治理
 
-> 设计文档：[docs/design/context-design.md](docs/design/context-design.md)
+> 设计文档：[docs/design/2context-design.md](docs/design/2context-design.md)
 
-传统 Agent 直接将所有文件内容塞进 prompt，导致 token 浪费、上下文污染。Codepilot 采用两层架构解决这一问题：
+传统 Agent 直接将所有历史消息和工具输出塞进 prompt，容易造成 token 浪费、上下文污染和过期证据误用。Codepilot 当前采用 `ContextGovernor` 作为唯一入口，在每轮模型调用前从会话事实源投影一个轻量 `ContextView`：
 
-- **Bootstrap 阶段**：首次启动时生成仓库快照（`RepositorySnapshot`），快速建立全局认知
-- **Compile 阶段**：每次对话前执行 7 步编译流水线，按需组装上下文
-- **预算分配**：将 token 预算按比例分配给仓库状态（10%）、活跃文件（15%）、近期证据（17%）、记忆（15%）、历史（28%）、当前任务（15%），确保关键信息优先
-- **新鲜度追踪**：三层失效机制（文件哈希 → 时间戳 → 会话状态），避免使用过期上下文
+- **事实源保留**：完整 transcript、run 记录、task recovery、tool artifact 和 memory 仍由 `sessions/` 持久化
+- **分层投影**：按 stable rules、working state、recalled memory、fresh evidence、recent messages 生成本轮上下文
+- **压力感知**：normal/tight/critical 三档影响最近消息数量、工具输出摘要和 checkpoint 生成
+- **新鲜度追踪**：仓库变更会让路径证据和验证结果失效，避免旧上下文污染下一轮决策
 
 ### 结构化记忆
 
-> 设计文档：[docs/design/memory-design.md](docs/design/memory-design.md)
+> 设计文档：[docs/design/3memory-design.md](docs/design/3memory-design.md)
 
 抛弃传统的 `MEMORY.md` 纯文本记忆方式，采用证据驱动的结构化记忆：
 
@@ -49,7 +49,7 @@ Codepilot 是一个基于 Python 构建的本地编程智能体（Coding Agent�
 
 ### 任务规划
 
-> 设计文档：[docs/design/task-design.md](docs/design/task-design.md)
+> 设计文档：[docs/design/1task-design.md](docs/design/1task-design.md)
 
 将模型的语义理解与运行时的任务边界分离：
 
@@ -61,7 +61,7 @@ Codepilot 是一个基于 Python 构建的本地编程智能体（Coding Agent�
 
 ### 工具安全
 
-> 设计文档：[docs/design/tool-design.md](docs/design/tool-design.md)
+> 设计文档：[docs/design/4tool-design.md](docs/design/4tool-design.md)
 
 解决传统 Agent 中模型可以自行授权工具调用的安全隐患：
 
@@ -73,7 +73,7 @@ Codepilot 是一个基于 Python 构建的本地编程智能体（Coding Agent�
 
 ### 评估框架
 
-> 设计文档：[docs/design/eval-design.md](docs/design/eval-design.md)
+> 设计文档：[docs/design/5eval-design.md](docs/design/5eval-design.md)
 
 内置完整的 Agent 质量评估体系：
 
@@ -166,15 +166,15 @@ codepilot --workspace /path/to/project
 ```
 src/codepilot/
 ├── protocols/      # Layer 0: 类型定义与接口协议
-├── core/           # Layer 1: Agent 循环引擎
-├── llm/            # Layer 2: LLM Provider 抽象
-├── tools/          # Layer 3: 工具系统、权限、安全
-├── sessions/       # Layer 4: 会话管理、记忆、上下文、历史
+├── llm/            # Layer 1: LLM Provider 抽象
+├── tools/          # Layer 1: 工具系统、权限、安全
+├── core/           # Layer 2: Agent 循环引擎
+├── sessions/       # Layer 3: 会话事实源、记忆、上下文、历史
+├── observability/  # Layer 3: 事件记录与运行摘要
+├── extensions/     # Layer 4: 扩展系统（Python/Markdown/MCP）
 ├── runtime/        # Layer 5: 运行时组装与服务门面
-├── extensions/     # Layer 6: 扩展系统（Python/Markdown/MCP）
-├── interfaces/     # Layer 7: CLI 和 Web 接口
-├── evaluation/     # 横切: 评估框架
-└── observability/  # 横切: 事件记录与运行摘要
+├── interfaces/     # Layer 6: CLI 和 Web 接口
+└── evaluation/     # 横切: 评估框架
 ```
 
 ### 分层职责
@@ -184,8 +184,8 @@ src/codepilot/
 | **protocols** | 共享类型定义，所有层的公共契约 | `types.py`, `events.py` |
 | **core** | Agent 循环：消息编排、工具调度、重试与停止语义 | `agent_loop.py` |
 | **llm** | 模型调用抽象，Provider 注册与流式响应处理 | `registry.py`, `provider/` |
-| **tools** | 工具注册、执行、权限控制和沙箱隔离 | `registry.py`, `runtime.py`, `builtin/` |
-| **sessions** | 会话持久化、分支管理、上下文压缩、记忆 | `session.py`, `store.py`, `memory/`, `context/` |
+| **tools** | 工具契约、注册、权限、参数校验、审批、执行和结果防护 | `contracts.py`, `execution.py`, `policy.py`, `builtins/` |
+| **sessions** | 会话事实源、分支管理、上下文投影治理、记忆和任务恢复 | `session.py`, `persistence/`, `memory/`, `context/` |
 | **runtime** | 9 步组装流水线：配置→模型→工具→提示词→钩子→命令→会话 | `service.py`, `assembly.py` |
 | **extensions** | Python 扩展、Markdown 技能、MCP 工具桥接 | `python_ext/`, `skill.py`, `mcp/` |
 | **interfaces** | CLI（交互式/打印/RPC）和 Web 接口 | `cli/cli.py`, `cli/runner.py` |
@@ -201,25 +201,22 @@ src/codepilot/
 ### Layer 0 — protocols（类型定义）
 定义所有层共享的数据类型和接口协议，是整个项目的公共契约。
 
-### Layer 1 — core（Agent 循环）
+### Layer 1 — llm/tools（模型与工具能力）
+模型层通过 Provider 注册机制屏蔽不同 LLM API 的差异；工具层作为执行安全边界，负责工具契约、注册、权限、参数校验、审批、执行和结果防护。
+
+### Layer 2 — core（Agent 循环）
 实现 Agent 的核心执行循环：接收用户消息 → 调用 LLM → 解析工具调用 → 执行工具 → 将结果反馈给 LLM → 循环直到完成。
 
-### Layer 2 — llm（模型抽象）
-通过 Provider 注册机制屏蔽不同 LLM API 的差异，支持流式响应和统一的错误处理。
+### Layer 3 — sessions/observability（会话事实源与观测）
+会话生命周期管理、持久化存储、上下文投影治理、结构化记忆读写和任务恢复。
 
-### Layer 3 — tools（工具系统）
-工具注册与元数据管理、权限策略（read-only / workspace-write / ask）、Shell 命令分类、工作区沙箱、并发调度。
-
-### Layer 4 — sessions（会话管理）
-会话生命周期管理、持久化存储、上下文压缩（token/消息数阈值触发）、结构化记忆读写、上下文编译。
+### Layer 4 — extensions（扩展接入）
+支持 Python 模块扩展、Markdown 技能模板、MCP 工具桥接三种扩展方式。
 
 ### Layer 5 — runtime（运行时组装）
 9 步组装流水线将配置、模型、工具、提示词、钩子、命令和会话选项组装为完整的 Agent 会话，是连接底层能力与上层接口的桥梁。
 
-### Layer 6 — extensions（扩展系统）
-支持 Python 模块扩展、Markdown 技能模板、MCP 工具桥接三种扩展方式。
-
-### Layer 7 — interfaces（用户接口）
+### Layer 6 — interfaces（用户接口）
 CLI 接口支持交互式（REPL）、单次输出（print）、JSONL 协议（rpc）三种运行模式。
 
 ### 横切 — evaluation（评估框架）
@@ -266,7 +263,7 @@ CLI 接口支持交互式（REPL）、单次输出（print）、JSONL 协议（r
 | `/new` | 创建新会话 |
 | `/switch` | 切换会话 |
 | `/clear` | 清空当前对话 |
-| `/compact` | 手动触发上下文压缩 |
+| `/context` | 查看最近一次上下文投影治理报告 |
 | `/tools` | 列出可用工具 |
 | `/model` | 切换模型 |
 | `/usage` | 显示 token 用量 |

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：SessionLayout 统一定义 session/run/memory/context/artifact 的文件路径。
+# 关注点：新增持久化文件前先看这里，避免路径拼接散落各处。
+
 """Canonical filesystem layout for session-owned state."""
 
 from dataclasses import dataclass

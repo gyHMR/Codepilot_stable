@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：SessionSnapshotBuilder 收集仓库、工具结果、artifact、checkpoint 和上下文状态快照。
+# 关注点：它是 projector 之前的事实整理阶段。
+
 """SessionSnapshotBuilder：从完整 session 状态读取本轮投影事实源。"""
 
 from dataclasses import dataclass

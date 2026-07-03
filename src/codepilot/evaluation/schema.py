@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：schema.py 定义 benchmark、断言、实验配置等评估数据结构。
+# 关注点：它是 evaluation 层的协议中心。
+
 """Evaluation v2 schema."""
 
 from dataclasses import dataclass, field

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：包门面文件：集中导出本层最常用的类型和入口，降低学习时的导入成本。
+# 关注点：tools 层是工具执行安全边界，统一处理契约、权限、校验、审批和结果防护。
+
 """内置工具包：提供文件操作、搜索、shell 和工作区状态等基础工具。"""
 
 from pathlib import Path

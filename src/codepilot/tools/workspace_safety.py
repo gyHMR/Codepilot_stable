@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：WorkspaceSandbox 负责路径解析和工作区边界检查，是文件工具的安全底座。
+# 关注点：所有文件读写都应通过它确认路径没有逃逸 workspace。
+
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path

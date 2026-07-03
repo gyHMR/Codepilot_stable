@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+# 新手导读：trace.py 组织一次 run 的 trace/report/audit bundle。
+# 关注点：它把分散事件串成可追踪的执行故事。
+
 """Typed trace projection built from canonical run events."""
 
 import json
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from .events import RUN_EVENT_TYPES, event_to_record
+from .events import event_to_record
 from .redact import redact_artifact
 
 
@@ -49,6 +52,7 @@ class ToolCallTrace:
     permission: str | None = None
     duration_ms: int | None = None
     affected_paths: list[str] = field(default_factory=list)
+    args: dict[str, Any] = field(default_factory=dict)
     workspace_changed: bool | None = None
     verification_status: str = "none"
     output_truncated: bool = False
@@ -133,6 +137,8 @@ def build_run_trace(
     tasks: list[TaskTrace] = []
     memories: list[MemoryTrace] = []
     errors: list[dict[str, Any]] = []
+    pending_tool_args: dict[str, dict[str, Any]] = {}
+    pending_tool_names: dict[str, str] = {}
 
     for event in events:
         event_type = event.get("type")
@@ -147,8 +153,25 @@ def build_run_trace(
             model_calls.append(_model_call(event))
         elif event_type == "context_built":
             contexts.append(_context(event))
+        elif event_type == "tool_call_started":
+            tool_call_id = str(event.get("tool_call_id") or "")
+            if tool_call_id:
+                pending_tool_args[tool_call_id] = _dict(event.get("args"))
+                pending_tool_names[tool_call_id] = str(event.get("tool_name") or "")
         elif event_type == "tool_call_finished":
-            tool_calls.append(_tool_call(event))
+            tool_call = _tool_call(event)
+            started_args = pending_tool_args.get(tool_call.tool_call_id, {})
+            started_name = pending_tool_names.get(tool_call.tool_call_id, "")
+            if started_args or started_name:
+                args = tool_call.args or started_args
+                affected_paths = tool_call.affected_paths or _paths_from_args(args)
+                tool_call = replace(
+                    tool_call,
+                    tool_name=tool_call.tool_name or started_name,
+                    args=args,
+                    affected_paths=affected_paths,
+                )
+            tool_calls.append(tool_call)
         elif event_type in {
             "task_plan_created",
             "task_step_updated",
@@ -205,9 +228,6 @@ def build_run_trace(
 def _canonical_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for event in events:
-        if event.get("type") in RUN_EVENT_TYPES:
-            records.append(dict(event))
-            continue
         record = event_to_record(event)
         if record:
             records.append(record)
@@ -276,6 +296,7 @@ def _tool_calls_from_result(result: dict[str, Any]) -> list[ToolCallTrace]:
                     for path in message.get("affected_paths", [])
                     if isinstance(path, str)
                 ],
+                args={},
                 workspace_changed=_optional_bool(message.get("workspace_changed")),
                 verification_status=str(verification.get("status") or "none"),
                 output_truncated=False,
@@ -402,6 +423,12 @@ def _context(event: dict[str, Any]) -> ContextTrace:
 
 
 def _tool_call(event: dict[str, Any]) -> ToolCallTrace:
+    args = _dict(event.get("args"))
+    affected_paths = [
+        str(path)
+        for path in event.get("affected_paths", [])
+        if isinstance(path, str)
+    ]
     return ToolCallTrace(
         tool_call_id=str(event.get("tool_call_id", "")),
         tool_name=str(event.get("tool_name", "")),
@@ -411,11 +438,8 @@ def _tool_call(event: dict[str, Any]) -> ToolCallTrace:
         approved=bool(event.get("approved", True)),
         permission=_optional_str(event.get("permission")),
         duration_ms=_optional_int(event.get("duration_ms")),
-        affected_paths=[
-            str(path)
-            for path in event.get("affected_paths", [])
-            if isinstance(path, str)
-        ],
+        affected_paths=affected_paths or _paths_from_args(args),
+        args=args,
         workspace_changed=_optional_bool(event.get("workspace_changed")),
         verification_status=str(event.get("verification_status") or "none"),
         output_truncated=bool(event.get("output_truncated", False)),
@@ -454,6 +478,15 @@ def _memory(event: dict[str, Any]) -> MemoryTrace:
             if isinstance(value, list)
         },
     )
+
+
+def _paths_from_args(args: dict[str, Any]) -> list[str]:
+    paths: list[str] = []
+    for key in ("path", "file_path", "target"):
+        value = args.get(key)
+        if isinstance(value, str) and value:
+            paths.append(value)
+    return paths
 
 
 def _first_text(events: list[dict[str, Any]], key: str) -> str | None:

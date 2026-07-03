@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：scorers.py 把证据转换成指标分数。
+# 关注点：这里体现项目如何衡量上下文、记忆、任务和工具安全效果。
+
 """Metric scorers for evaluation v2.
 
 Scorers intentionally consume only :class:`EvalEvidence`.  They should not read
@@ -125,6 +128,13 @@ def _planning_replan_success_rate(evidence: EvalEvidence) -> MetricScore:
     return _ratio("planning.replan_success_rate", 1 if evidence.task_passed else 0, 1)
 
 
+def _planning_abort_recovery_rate(evidence: EvalEvidence) -> MetricScore:
+    if not evidence.expected.get("recovery_after_abort"):
+        return _na("planning.abort_recovery_rate")
+    recovered = 1 if evidence.task_passed and len(evidence.run_ids) >= 2 else 0
+    return _ratio("planning.abort_recovery_rate", recovered, 1)
+
+
 def _planning_invalid_tool_call_rate(evidence: EvalEvidence) -> MetricScore:
     invalid = sum(1 for tool in evidence.tools if _is_invalid_tool(tool))
     return _ratio("planning.invalid_tool_call_rate", invalid, len(evidence.tools))
@@ -239,6 +249,23 @@ def _memory_failed_attempt_recurrence_rate(evidence: EvalEvidence) -> MetricScor
         for item in evidence.expected.get("failed_attempt_tools", [])
         if str(item).strip()
     }
+    failed_paths = {
+        str(item).replace("\\", "/")
+        for item in evidence.expected.get("failed_attempt_paths", [])
+        if str(item).strip()
+    }
+    if failed_paths:
+        recurred_paths = {
+            path.replace("\\", "/")
+            for tool in evidence.tools
+            for path in tool.affected_paths
+            if path.replace("\\", "/") in failed_paths
+        }
+        return _ratio(
+            "memory.failed_attempt_recurrence_rate",
+            len(recurred_paths),
+            len(failed_paths),
+        )
     if not failed:
         return _na("memory.failed_attempt_recurrence_rate")
     recurred = sum(1 for tool in evidence.tools if tool.tool_name.lower() in failed)
@@ -291,6 +318,7 @@ SCORERS: dict[str, Scorer] = {
     "planning.false_completion_rate": _planning_false_completion_rate,
     "planning.repair_success_rate": _planning_repair_success_rate,
     "planning.replan_success_rate": _planning_replan_success_rate,
+    "planning.abort_recovery_rate": _planning_abort_recovery_rate,
     "planning.invalid_tool_call_rate": _planning_invalid_tool_call_rate,
     "planning.evidence_coverage_rate": _planning_evidence_coverage_rate,
     "context.key_context_hit_rate": _context_key_context_hit_rate,

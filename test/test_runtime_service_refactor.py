@@ -317,7 +317,7 @@ def test_runtime_command_normalizes_metadata_and_serializes_public_contract() ->
 
 
 def test_list_runtime_commands_deduplicates_after_command_name_normalization() -> None:
-    from codepilot.extensions.types import RegisteredCommand
+    from codepilot.sessions.types import RegisteredCommand
     from codepilot.interfaces.cli.commands import list_runtime_commands
 
     class FakeSession:
@@ -411,7 +411,7 @@ def test_resolved_config_value_requires_clean_key_and_source() -> None:
 
 
 def test_capability_catalog_copies_and_freezes_registered_capabilities() -> None:
-    from codepilot.extensions.types import RegisteredCommand
+    from codepilot.sessions.types import RegisteredCommand
     from codepilot.runtime.contracts import CapabilityCatalog, RegisteredTool
 
     tool = AgentTool(
@@ -1279,7 +1279,7 @@ def test_runtime_approval_resume_executes_pending_tool_and_continues(
             executed.append(dict(params))
             (tmp_path / "approved.txt").write_text("approved", encoding="utf-8")
             return AgentToolResult(
-                content=[TextContent(text="mutated")],
+                content=[TextContent(text="mutated api_key=approval-secret-123")],
                 affected_paths=["approved.txt"],
                 workspace_changed=True,
                 verification={
@@ -1375,6 +1375,14 @@ def test_runtime_approval_resume_executes_pending_tool_and_continues(
             ]
             assert len(tool_results) == 1
             assert tool_results[0].status == "success"
+            assert any(
+                isinstance(block, TextContent)
+                and block.text == "mutated api_key=[REDACTED_SECRET]"
+                for block in tool_results[0].content
+            )
+            assert tool_results[0].metadata["result_guard"]["redacted"] is True
+            assert tool_results[0].metadata["permission_decision"]["decision"] == "allow"
+            assert "duration_ms" in tool_results[0].metadata
             final = runtime.get_latest_assistant_message(handle.session_id)
             assert final is not None
             assert any(

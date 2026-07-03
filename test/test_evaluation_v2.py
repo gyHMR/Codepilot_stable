@@ -9,7 +9,10 @@ from codepilot.evaluation.evidence import (
     EvalEvidence,
     ToolCallEvidence,
 )
-from codepilot.evaluation.experiments import run_context_ab
+from codepilot.evaluation.experiments import (
+    aggregate_experiment_comparison,
+    run_context_ab,
+)
 from codepilot.evaluation.loader import load_eval_case
 from codepilot.evaluation.reports import build_summary, render_markdown
 from codepilot.evaluation.schema import EvalCase, EvalResult, MetricScore
@@ -114,6 +117,38 @@ def test_score_metrics_reads_only_eval_evidence() -> None:
     assert scores["security.mutation_after_denial_rate"].value == 0.0
 
 
+def test_score_metrics_supports_recovery_and_failed_attempt_paths() -> None:
+    evidence = EvalEvidence(
+        case_id="case-recovery",
+        module="planning",
+        task_passed=True,
+        run_ids=["run-1", "run-2"],
+        tools=[
+            ToolCallEvidence(
+                tool_call_id="read-current",
+                tool_name="read",
+                status="success",
+                affected_paths=["docs/api-contract-v2.md"],
+            )
+        ],
+        expected={
+            "recovery_after_abort": True,
+            "failed_attempt_paths": ["docs/api-contract-v1.md"],
+        },
+    )
+
+    scores = score_metrics(
+        evidence,
+        [
+            "planning.abort_recovery_rate",
+            "memory.failed_attempt_recurrence_rate",
+        ],
+    )
+
+    assert scores["planning.abort_recovery_rate"].value == 1.0
+    assert scores["memory.failed_attempt_recurrence_rate"].value == 0.0
+
+
 def test_artifacts_and_report_use_fixed_v2_layout(tmp_path: Path) -> None:
     artifacts = EvaluationArtifacts(tmp_path, "eval-smoke")
     case = EvalCase(
@@ -180,3 +215,48 @@ def test_context_ab_compares_naive_and_builder() -> None:
     assert comparison["module"] == "context"
     assert comparison["metrics"]["context.key_context_hit_rate"]["off"] == 0.0
     assert comparison["metrics"]["context.key_context_hit_rate"]["on"] == 1.0
+
+
+def test_experiment_comparison_aggregates_repeat_summaries(tmp_path: Path) -> None:
+    off_dir = tmp_path / "variants" / "off" / "repeat-1"
+    on_dir = tmp_path / "variants" / "on" / "repeat-1"
+    off_dir.mkdir(parents=True)
+    on_dir.mkdir(parents=True)
+    (off_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "pass_rate": 0.5,
+                "metrics": {
+                    "memory.retrieval_hit_rate": {"avg": 0.25, "count": 2},
+                    "tool.success_rate": {"avg": 0.75, "count": 2},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (on_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "pass_rate": 1.0,
+                "metrics": {
+                    "memory.retrieval_hit_rate": {"avg": 0.75, "count": 2},
+                    "tool.success_rate": {"avg": 1.0, "count": 2},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    comparison = aggregate_experiment_comparison(
+        module="memory",
+        variants=("off", "on"),
+        variant_dirs={
+            "off": [off_dir],
+            "on": [on_dir],
+        },
+    )
+
+    assert comparison["metrics"]["task.pass_rate"]["off"] == 0.5
+    assert comparison["metrics"]["task.pass_rate"]["on"] == 1.0
+    assert comparison["metrics"]["task.pass_rate"]["delta"] == 0.5
+    assert comparison["metrics"]["memory.retrieval_hit_rate"]["delta"] == 0.5

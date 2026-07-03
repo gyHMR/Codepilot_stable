@@ -1,3 +1,6 @@
+# 新手导读：SessionContextState 保存 active files、tool evidence 和验证新鲜度等会话上下文状态。
+# 关注点：这是上下文治理的轻量状态账本。
+
 """
 会话级别的工作上下文状态模块。
 

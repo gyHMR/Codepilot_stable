@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：ContextCheckpointManager 在高压力下保存结构化 checkpoint。
+# 关注点：checkpoint 不是完整历史压缩，而是给下一轮保留目标和下一步动作。
+
 """结构化上下文 checkpoint。"""
 
 import json

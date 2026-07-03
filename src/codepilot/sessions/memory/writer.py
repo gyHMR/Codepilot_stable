@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：MemoryWriter 根据运行结果和证据生成 durable memory。
+# 关注点：它需要保守写入，避免把模型猜测直接写成事实。
+
 """Admission and consolidation rules for durable memory."""
 
 import uuid

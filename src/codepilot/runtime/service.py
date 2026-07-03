@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：RuntimeService 是 CLI/Web 面向的应用服务门面，管理 session、发送消息、恢复审批和取消运行。
+# 关注点：interfaces 层基本只应该调用这里，而不是直接摸 core/sessions 内部。
+
 """
 运行时应用服务层。
 
@@ -27,7 +30,7 @@ from codepilot.protocols import (
 )
 from codepilot.sessions.memory import load_global_memory
 from codepilot.sessions.session import AgentSession
-from codepilot.tools import AgentTool, AgentToolResult
+from codepilot.tools import AgentTool, AgentToolResult, ToolRuntimeRequest
 
 from .execution.approval import (
     PendingApproval,
@@ -878,10 +881,11 @@ class RuntimeService:
         *,
         run_id: str,
     ) -> ToolResultMessage:
+        assembly = self.get_assembly(approval.session_id)
         registered = next(
             (
                 item
-                for item in self.get_assembly(approval.session_id).capabilities.tools
+                for item in assembly.capabilities.tools
                 if item.name == approval.tool_call.name
             ),
             None,
@@ -909,12 +913,39 @@ class RuntimeService:
             return to_tool_result_message(result)
 
         session = self.get_session(approval.session_id)
+
+        async def _execute_approved(
+            tool_call_id: str,
+            params: dict[str, Any],
+            signal: Any | None = None,
+            on_update: Any | None = None,
+        ) -> AgentToolResult:
+            runtime_result = await assembly.tool_runtime.execute_approved(
+                ToolRuntimeRequest(
+                    tool_call_id=tool_call_id,
+                    name=approval.tool_call.name,
+                    params=params,
+                    source="approval_resume",
+                ),
+                approval_id=approval.approval_id,
+                signal=signal,
+                on_update=on_update,
+            )
+            result = runtime_result.result
+            result.is_error = runtime_result.is_error
+            result.status = runtime_result.status
+            result.approved = runtime_result.approved
+            result.approval_id = runtime_result.approval_id
+            if isinstance(result.details, dict):
+                result.details.setdefault("status", runtime_result.status)
+            return result
+
         direct_tool = AgentTool(
             name=registered.tool.name,
             label=registered.tool.label,
             description=registered.tool.description,
             parameters=registered.tool.parameters,
-            execute=registered.tool.execute,
+            execute=_execute_approved,
             runtime_managed=True,
             metadata=registered.metadata,
         )

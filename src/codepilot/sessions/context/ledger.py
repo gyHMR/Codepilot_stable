@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：ToolArtifactLedger 把大工具输出记录为 artifact，并在 prompt 中只放摘要引用。
+# 关注点：这是防止长日志污染上下文的关键位置。
+
 """工具输出 ledger：保存大输出并为 prompt 生成轻量引用。"""
 
 import hashlib

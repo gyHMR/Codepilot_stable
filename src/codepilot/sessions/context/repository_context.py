@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：repository_context 定义仓库上下文相关的数据结构和渲染辅助。
+# 关注点：它服务于上下文投影，不直接扫描全部源码塞进 prompt。
+
 """
 Repository bootstrap helpers shared by runtime prompt assembly and session
 context governance.

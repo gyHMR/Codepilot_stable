@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：ToolResultGuard 在工具执行后做二次防护：脱敏、PII 检测、prompt injection 标记和可信度标记。
+# 关注点：它保护下一轮 Agent 不被工具输出里的敏感信息或指令污染。
+
 """Post-execution guard for tool result content."""
 
 import re

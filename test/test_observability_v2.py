@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from codepilot.evaluation.evidence import evidence_from_traces
 from codepilot.observability import EventRecorder, build_run_summary, build_run_trace
 from codepilot.observability.events import validate_run_event
 
@@ -175,3 +176,96 @@ def test_run_trace_and_summary_are_built_from_canonical_events() -> None:
     assert summary.tool_calls == 1
     assert summary.total_tokens == 15
     assert summary.total_cost == 0.01
+
+
+def test_trace_normalizes_legacy_shapes_even_when_event_names_are_canonical() -> None:
+    events = [
+        {
+            "type": "memory_retrieved",
+            "runId": "run-1",
+            "sessionId": "session-1",
+            "turnId": 1,
+            "eventId": "mem-evt",
+            "timestamp": 100,
+            "memoryIds": ["mem_api_contract_v2"],
+            "reasons": {"mem_api_contract_v2": ["path_match"]},
+        },
+        {
+            "type": "task_plan_created",
+            "runId": "run-1",
+            "sessionId": "session-1",
+            "turnId": 1,
+            "eventId": "task-evt",
+            "timestamp": 110,
+            "task": {
+                "task_id": "task-1",
+                "mode": "repair",
+                "phase": "acting",
+                "steps": [
+                    {
+                        "id": "step-1",
+                        "title": "Repair failing pytest",
+                        "status": "completed",
+                    }
+                ],
+            },
+            "evidence_refs": ["pytest.log"],
+        },
+    ]
+
+    trace = build_run_trace(events)
+    evidence = evidence_from_traces(
+        case_id="case-1",
+        module="memory",
+        traces=[trace],
+        expected={"memory_ids": ["mem_api_contract_v2"]},
+        task_passed=True,
+    )
+
+    assert evidence.memory_ids == ["mem_api_contract_v2"]
+    assert evidence.steps[0].step_id == "step-1"
+    assert evidence.steps[0].status == "completed"
+    assert evidence.steps[0].evidence_refs == ["pytest.log"]
+
+
+def test_trace_joins_tool_start_args_into_finished_tool_evidence() -> None:
+    events = [
+        {
+            "schema_version": 1,
+            "event_id": "tool-start",
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "turn": 1,
+            "type": "tool_call_started",
+            "timestamp_ms": 100,
+            "tool_call_id": "tool-1",
+            "tool_name": "read",
+            "args": {"path": "docs/api-contract-v1.md"},
+        },
+        {
+            "schema_version": 1,
+            "event_id": "tool-end",
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "turn": 1,
+            "type": "tool_call_finished",
+            "timestamp_ms": 120,
+            "tool_call_id": "tool-1",
+            "tool_name": "read",
+            "status": "success",
+            "affected_paths": [],
+            "workspace_changed": False,
+        },
+    ]
+
+    trace = build_run_trace(events)
+    evidence = evidence_from_traces(
+        case_id="case-1",
+        module="memory",
+        traces=[trace],
+        expected={"failed_attempt_paths": ["docs/api-contract-v1.md"]},
+        task_passed=True,
+    )
+
+    assert evidence.tools[0].args == {"path": "docs/api-contract-v1.md"}
+    assert evidence.tools[0].affected_paths == ["docs/api-contract-v1.md"]

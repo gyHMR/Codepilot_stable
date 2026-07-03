@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：RunStore 管理 run.json/events.jsonl，并评估 run 与工作区状态的新鲜度。
+# 关注点：它关注一次运行的证据，而不是整个会话的所有消息。
+
 """Run-level persistence with a single canonical run.json file."""
 
 import json

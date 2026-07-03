@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：reports.py 把评估结果渲染成可读报告。
+# 关注点：报告服务于简历/面试展示和回归分析。
+
 """Human-readable reports for evaluation v2."""
 
 from collections import defaultdict

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：包门面文件：集中导出本层最常用的类型和入口，降低学习时的导入成本。
+# 关注点：observability 层只做事件归一化、脱敏、trace 和报告，不参与执行决策。
+
 """Passive observability primitives for Codepilot runs."""
 
 from .events import (

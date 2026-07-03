@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：TaskRecoveryStore 保存当前任务恢复投影，支持中断后继续任务控制状态。
+# 关注点：恢复的是任务进度和证据，不是重新运行历史工具。
+
 """Session-scoped task recovery state.
 
 This module stores the current task projection separately from durable memory.

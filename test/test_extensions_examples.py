@@ -10,7 +10,7 @@ EXAMPLES = ROOT / "docs" / "examples" / "extensions"
 
 
 def test_demo_skill_loads_as_command_and_prompt() -> None:
-    from codepilot.extensions import ExtensionCommandContext, load_skills
+    from codepilot.extensions import SessionCommandContext, load_skills
 
     loaded = load_skills(ROOT, configured_paths=[str(EXAMPLES / "demo_skill.md")])
 
@@ -22,7 +22,7 @@ def test_demo_skill_loads_as_command_and_prompt() -> None:
 
     command = loaded.commands["demo-review"]
     rendered = command.handler(
-        ExtensionCommandContext(
+        SessionCommandContext(
             name="demo-review",
             args=[],
             raw_text="/demo-review check this change",
@@ -39,7 +39,7 @@ def test_demo_skill_loads_as_command_and_prompt() -> None:
 
 def test_demo_extension_registers_command_tool_prompt_and_hook() -> None:
     from codepilot.core import AfterToolCallContext, AgentContext
-    from codepilot.extensions import ExtensionCommandContext, load_extensions
+    from codepilot.extensions import SessionCommandContext, load_extensions
     from codepilot.protocols import AssistantMessage, ToolCall
 
     loaded = load_extensions(ROOT, configured_paths=[str(EXAMPLES / "demo_extension.py")])
@@ -52,7 +52,7 @@ def test_demo_extension_registers_command_tool_prompt_and_hook() -> None:
     assert len(loaded.after_tool_hooks) == 1
 
     command_output = loaded.commands["demo-extension"].handler(
-        ExtensionCommandContext(
+        SessionCommandContext(
             name="demo-extension",
             args=[],
             raw_text="/demo-extension",

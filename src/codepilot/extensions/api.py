@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+# 新手导读：ExtensionAPI 是 Python 扩展 register(api) 能拿到的注册入口。
+# 关注点：扩展通过它登记工具、hook、命令和提示文本。
+
 """扩展 API：供扩展的 register(api) 函数调用，注册工具、钩子、命令和提示词。"""
 
 from codepilot.tools import AgentTool
+from codepilot.sessions.types import CommandHandler, LifecycleHook, RegisteredCommand
 
-from .types import AfterHook, BeforeHook, CommandHandler, LifecycleHook, LoadedExtensions, RegisteredCommand
+from .types import AfterHook, BeforeHook, LoadedExtensions
 
 
 class ExtensionAPI:

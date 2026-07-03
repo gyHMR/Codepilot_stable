@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：本文件把用户输入、规划器输出和恢复投影整理成 TaskController 可用的初始状态。
+# 关注点：关注它如何在新任务和恢复任务之间选择初始化路径。
+
 """Plan-mode bootstrap: discovery followed by plan synthesis."""
 
 from dataclasses import dataclass

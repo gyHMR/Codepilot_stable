@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：llm/errors.py 定义模型调用相关的稳定错误类型。
+# 关注点：统一错误类型能让 runtime 和 interfaces 给出一致提示。
+
 """LLM 错误分类：将 provider/http 异常转换为结构化的 LLMErrorInfo。"""
 
 from typing import Any

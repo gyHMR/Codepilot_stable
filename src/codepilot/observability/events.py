@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：events.py 把原始 Agent 事件归一化成更适合审计和统计的形态。
+# 关注点：它不改变执行，只整理已经发生的事实。
+
 """Stable, slim run event contract.
 
 The agent may still emit richer internal events.  Persistence normalizes those
@@ -35,7 +38,6 @@ _LOW_VALUE_EVENTS = {
     "message_update",
     "tool_execution_update",
     "tool_execution_grace",
-    "context_compacted",
     "task_recovery_updated",
     "task_recovery_warning",
     "planning_discovery_started",
@@ -77,8 +79,6 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
     event_type = str(raw.get("type", ""))
     if event_type in _LOW_VALUE_EVENTS:
         return {}
-    if event_type in RUN_EVENT_TYPES:
-        return _canonical_existing(raw)
     if event_type == "agent_start":
         return {**_base(raw, "run_started")}
     if event_type == "agent_end":
@@ -91,39 +91,28 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
         return {**_base(raw, "model_call_started")}
     if event_type == "message_end" and _message_role(raw) == "assistant":
         return _model_finished(raw)
-    if event_type == "context_prepared":
+    if event_type in {"context_prepared", "context_built"}:
         return _context_built(raw)
     if event_type == "memory_retrieved":
-        return {
-            **_base(raw, "memory_retrieved"),
-            "memory_ids": [str(item) for item in _list(raw.get("memoryIds"))],
-            "reasons": _dict(raw.get("reasons")),
-        }
-    if event_type in {"memory_updated", "memory_created", "memory_promoted"}:
-        return {
-            **_base(raw, "memory_written"),
-            "memory_ids": [str(item) for item in _list(raw.get("memoryIds"))],
-            "action": event_type,
-        }
-    if event_type == "tool_execution_start":
+        return _memory_retrieved(raw)
+    if event_type in {
+        "memory_written",
+        "memory_updated",
+        "memory_created",
+        "memory_promoted",
+    }:
+        return _memory_written(raw, event_type)
+    if event_type in {"tool_call_started", "tool_execution_start"}:
         return {
             **_base(raw, "tool_call_started"),
             "tool_call_id": str(raw.get("toolCallId") or raw.get("tool_call_id") or ""),
             "tool_name": str(raw.get("toolName") or raw.get("tool_name") or ""),
             "args": _slim_args(_dict(raw.get("args"))),
         }
-    if event_type == "tool_execution_end":
+    if event_type in {"tool_call_finished", "tool_execution_end"}:
         return _tool_finished(raw)
-    if event_type == "task_decision":
-        decision = _dict(raw.get("decision"))
-        return {
-            **_base(raw, "task_decision_made"),
-            "task_id": _task_field(raw, "task_id"),
-            "mode": _task_field(raw, "mode"),
-            "phase": _task_field(raw, "phase"),
-            "decision": str(decision.get("action") or raw.get("action") or ""),
-            "reason": str(decision.get("reason") or raw.get("reason") or ""),
-        }
+    if event_type in {"task_decision", "task_decision_made"}:
+        return _task_decision(raw)
     if event_type in {"task_plan_created", "task_step_updated", "completion_checked"}:
         return _task_event(raw, event_type)
     if event_type == "file_diff":
@@ -141,6 +130,8 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
                 if key not in _COMMON_LEGACY_FIELDS
             },
         }
+    if event_type in RUN_EVENT_TYPES:
+        return _canonical_existing(raw)
     return {}
 
 
@@ -237,7 +228,7 @@ def _model_finished(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _context_built(raw: dict[str, Any]) -> dict[str, Any]:
-    report = _dict(raw.get("report"))
+    report = _dict(raw.get("report")) or raw
     return {
         **_base(raw, "context_built"),
         "context_id": str(report.get("context_id", "")),
@@ -298,30 +289,85 @@ def _tool_finished(raw: dict[str, Any]) -> dict[str, Any]:
     verification = _dict(result.get("verification"))
     affected = raw.get("affectedPaths")
     if not isinstance(affected, list):
+        affected = raw.get("affected_paths")
+    if not isinstance(affected, list):
         affected = result.get("affected_paths")
-    is_error = bool(raw.get("isError", result.get("is_error", False)))
+    is_error = bool(
+        raw.get("isError", raw.get("is_error", result.get("is_error", False)))
+    )
     status = str(raw.get("status") or result.get("status") or "")
     if not status:
         status = "error" if is_error else "success"
     return {
         **_base(raw, "tool_call_finished"),
-        "tool_call_id": str(raw.get("toolCallId") or result.get("tool_call_id") or ""),
-        "tool_name": str(raw.get("toolName") or result.get("tool_name") or ""),
+        "tool_call_id": str(
+            raw.get("toolCallId")
+            or raw.get("tool_call_id")
+            or result.get("tool_call_id")
+            or ""
+        ),
+        "tool_name": str(
+            raw.get("toolName")
+            or raw.get("tool_name")
+            or result.get("tool_name")
+            or ""
+        ),
         "status": status,
         "is_error": is_error,
-        "error_reason": raw.get("errorReason") or result.get("error_code") or result.get("error_reason"),
+        "error_reason": raw.get("errorReason")
+        or result.get("error_code")
+        or result.get("error_reason"),
         "approved": bool(raw.get("approved", result.get("approved", True))),
         "permission": permission,
-        "duration_ms": _optional_int(raw.get("durationMs")),
+        "duration_ms": _optional_int(raw.get("durationMs", raw.get("duration_ms"))),
         "affected_paths": [str(path) for path in affected or [] if isinstance(path, str)],
-        "workspace_changed": _optional_bool(raw.get("workspaceChanged", result.get("workspace_changed"))),
+        "workspace_changed": _optional_bool(
+            raw.get("workspaceChanged", result.get("workspace_changed"))
+        ),
         "verification_status": str(verification.get("status") or "none"),
-        "output_truncated": bool(raw.get("outputTruncated", False)),
+        "output_truncated": bool(raw.get("outputTruncated", raw.get("output_truncated", False))),
+    }
+
+
+def _memory_retrieved(raw: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **_base(raw, "memory_retrieved"),
+        "memory_ids": [
+            str(item)
+            for item in _list(raw.get("memory_ids") or raw.get("memoryIds"))
+        ],
+        "reasons": _dict(raw.get("reasons")),
+    }
+
+
+def _memory_written(raw: dict[str, Any], action: str) -> dict[str, Any]:
+    return {
+        **_base(raw, "memory_written"),
+        "memory_ids": [
+            str(item)
+            for item in _list(raw.get("memory_ids") or raw.get("memoryIds"))
+        ],
+        "action": str(raw.get("action") or action),
+    }
+
+
+def _task_decision(raw: dict[str, Any]) -> dict[str, Any]:
+    decision = _dict(raw.get("decision"))
+    return {
+        **_base(raw, "task_decision_made"),
+        "task_id": _task_field(raw, "task_id"),
+        "mode": _task_field(raw, "mode"),
+        "phase": _task_field(raw, "phase"),
+        "decision": str(
+            decision.get("action") or raw.get("decision") or raw.get("action") or ""
+        ),
+        "reason": str(decision.get("reason") or raw.get("reason") or ""),
     }
 
 
 def _task_event(raw: dict[str, Any], legacy_type: str) -> dict[str, Any]:
     task = _dict(raw.get("task"))
+    step = _dict(raw.get("step")) or _current_step(task)
     completion = _dict(raw.get("completion"))
     if legacy_type == "completion_checked":
         event_type = "completion_checked"
@@ -332,12 +378,21 @@ def _task_event(raw: dict[str, Any], legacy_type: str) -> dict[str, Any]:
         "task_id": str(task.get("task_id") or raw.get("task_id") or ""),
         "mode": str(task.get("mode") or raw.get("mode") or ""),
         "phase": str(task.get("phase") or raw.get("phase") or ""),
-        "step_id": str(raw.get("step_id") or _current_step(task).get("id", "")),
-        "step_title": str(raw.get("step_title") or _current_step(task).get("title", "")),
-        "step_status": str(raw.get("step_status") or _current_step(task).get("status", "")),
-        "evidence_refs": [str(item) for item in _list(raw.get("evidence_refs"))],
-        "completion_satisfied": completion.get("satisfied", task.get("completion_satisfied")),
-        "completion_reason": completion.get("reason", task.get("completion_reason")),
+        "step_id": str(raw.get("step_id") or step.get("id", "")),
+        "step_title": str(raw.get("step_title") or step.get("title", "")),
+        "step_status": str(raw.get("step_status") or step.get("status", "")),
+        "evidence_refs": [
+            str(item)
+            for item in _list(raw.get("evidence_refs") or task.get("evidence_refs"))
+        ],
+        "completion_satisfied": raw.get(
+            "completion_satisfied",
+            completion.get("satisfied", task.get("completion_satisfied")),
+        ),
+        "completion_reason": raw.get(
+            "completion_reason",
+            completion.get("reason", task.get("completion_reason")),
+        ),
     }
 
 

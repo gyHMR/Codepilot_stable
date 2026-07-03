@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：MemoryRetriever 根据当前任务和模式召回相关记忆进入上下文。
+# 关注点：它只负责找记忆，不负责决定是否写入新记忆。
+
 """Layered durable memory recall."""
 
 import re

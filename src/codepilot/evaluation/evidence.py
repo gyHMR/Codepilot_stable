@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：evidence.py 从运行结果中提取工具调用、上下文和文件变更证据。
+# 关注点：评估尽量基于事实证据，而不是只看最终文本。
+
 """Typed evidence consumed by metric scorers."""
 
 from collections import Counter
@@ -26,6 +29,7 @@ class ToolCallEvidence:
     error_reason: str | None = None
     workspace_changed: bool | None = None
     affected_paths: list[str] = field(default_factory=list)
+    args: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -79,6 +83,7 @@ def evidence_from_traces(
             error_reason=tool.error_reason,
             workspace_changed=tool.workspace_changed,
             affected_paths=list(tool.affected_paths),
+            args=dict(tool.args),
         )
         for trace in traces
         for tool in trace.tool_calls

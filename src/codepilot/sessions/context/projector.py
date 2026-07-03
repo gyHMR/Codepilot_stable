@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：ContextProjector 把会话事实投影成 stable rules、working state、memory、evidence 和 recent messages。
+# 关注点：它决定最终进入模型 prompt 的信息结构。
+
 """ContextProjector：把 SessionSnapshot 投影成本轮 prompt 视图。"""
 
 from dataclasses import dataclass
@@ -20,7 +23,7 @@ from codepilot.protocols import (
 )
 
 from .ledger import ToolArtifactLedger
-from .state import ContextEvidence
+from .state import ActiveFile, ContextEvidence
 
 
 @dataclass(frozen=True)
@@ -215,8 +218,115 @@ def estimate_lines(lines: list[str]) -> int:
     return max(0, sum(max(1, len(line) // 4) for line in lines))
 
 
-def selected_item_summaries(view: ContextView) -> list[dict[str, object]]:
+def selected_item_summaries(
+    view: ContextView,
+    *,
+    active_files: list[str] | None = None,
+    changed_files: list[str] | None = None,
+    active_file_records: list[ActiveFile] | None = None,
+    evidence: list[ContextEvidence] | None = None,
+    artifacts: list[ContextArtifactRef] | None = None,
+    memory_ids: list[str] | None = None,
+) -> list[dict[str, object]]:
     out: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(item: dict[str, object]) -> None:
+        key = (
+            str(item.get("id", "")),
+            str(item.get("path", "")),
+            str(item.get("source", "")),
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(item)
+
+    for index, item in enumerate(evidence or []):
+        path = item.path or ""
+        kind = "test" if item.kind == "verification" else ("file" if path else "log")
+        add(
+            {
+                "id": f"{kind}:{path}" if path else f"evidence:{index}",
+                "kind": kind,
+                "path": path,
+                "source": item.source or "context_state",
+                "estimated_tokens": max(1, len(item.content) // 4),
+                "freshness": item.freshness,
+                "reason": "recent_error"
+                if item.kind == "verification"
+                else "task_related",
+            }
+        )
+
+    for item in active_file_records or []:
+        add(
+            {
+                "id": f"file:{item.path}",
+                "kind": "file",
+                "path": item.path,
+                "source": item.reason,
+                "estimated_tokens": max(1, item.access_count),
+                "freshness": item.freshness,
+                "reason": "active_file",
+            }
+        )
+
+    for path in changed_files or []:
+        add(
+            {
+                "id": f"file:{path}",
+                "kind": "file",
+                "path": path,
+                "source": path,
+                "estimated_tokens": 1,
+                "freshness": "fresh",
+                "reason": "changed_file",
+            }
+        )
+
+    for path in active_files or []:
+        add(
+            {
+                "id": f"file:{path}",
+                "kind": "file",
+                "path": path,
+                "source": path,
+                "estimated_tokens": 1,
+                "freshness": "unknown",
+                "reason": "active_file",
+            }
+        )
+
+    for index, artifact in enumerate(artifacts or []):
+        add(
+            {
+                "id": f"artifact:{index}:{artifact.path}",
+                "kind": "log" if artifact.kind == "tool_output" else artifact.kind,
+                "path": artifact.path,
+                "source": artifact.summary or artifact.path,
+                "estimated_tokens": artifact.visible_tokens or artifact.original_tokens,
+                "freshness": "fresh",
+                "reason": "recent_error",
+            }
+        )
+
+    for memory_id in memory_ids or []:
+        add(
+            {
+                "id": memory_id,
+                "kind": "memory",
+                "path": "",
+                "source": "memory_recall",
+                "estimated_tokens": 1,
+                "freshness": "fresh",
+                "reason": "memory_recall",
+            }
+        )
+
+    if out:
+        return out
+
     for section in [
         "stable_rules",
         "working_state",
@@ -229,9 +339,11 @@ def selected_item_summaries(view: ContextView) -> list[dict[str, object]]:
                 {
                     "id": f"{section}:{index}",
                     "kind": section,
+                    "path": "",
                     "source": "context_governor",
                     "estimated_tokens": max(1, len(value) // 4),
                     "freshness": "fresh",
+                    "reason": "task_related",
                 }
             )
     return out

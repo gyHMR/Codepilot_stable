@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：event_adapter.py 把内部 AgentEvent 转换成 Web 前端友好的事件格式。
+# 关注点：新增前端事件字段时，先在这里找映射关系。
+
 """运行时/核心事件到 Web Console 事件信封的适配器。"""
 
 from dataclasses import asdict, is_dataclass

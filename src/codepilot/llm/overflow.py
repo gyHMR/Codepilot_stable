@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：overflow.py 识别 provider 返回的上下文溢出错误。
+# 关注点：它帮助上层区分普通模型错误和需要上下文治理介入的问题。
+
 """
 上下文溢出检测。
 

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+# 新手导读：skills.py 负责加载 Markdown skill，并把它们变成命令和 prompt 片段。
+# 关注点：skill 是轻量扩展方式，不需要写 Python 代码。
+
 """技能加载器：发现并加载工作区中的 .md 技能文件，将其内容注入系统提示词。"""
 
 import re
 from pathlib import Path
 
-from .types import LoadedExtensions, RegisteredCommand, SkillSpec
+from codepilot.sessions.types import RegisteredCommand
+
+from .types import LoadedExtensions, SkillSpec
 
 
 def discover_skill_paths(workspace_dir: str | Path, configured_paths: list[str] | None = None) -> list[Path]:

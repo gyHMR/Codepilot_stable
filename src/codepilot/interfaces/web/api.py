@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：WebConsoleBackend 是 Web 接口的框架无关后端，委托 RuntimeService 完成真实工作。
+# 关注点：将来替换 Web 框架时，优先保持这里的服务边界稳定。
+
 """Web Console 后端 API 骨架。
 
 提供 WebConsoleBackend 类，将 Web 请求适配到 RuntimeService，

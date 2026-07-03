@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：schemas.py 定义 Web API 请求和响应的数据结构。
+# 关注点：它稳定 Web 层和 RuntimeService 之间的输入输出边界。
+
 """Web Console 的数据模式定义（请求、响应、事件信封等）。"""
 
 from copy import deepcopy

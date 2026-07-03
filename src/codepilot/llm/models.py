@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：models.py 是内置模型目录，描述 provider、api、上下文窗口和能力。
+# 关注点：它只描述模型能力，不读取 API Key 或发送请求。
+
 """
 内置模型目录模块。
 

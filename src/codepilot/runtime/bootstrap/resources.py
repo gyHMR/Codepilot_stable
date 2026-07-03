@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：resources 负责加载工作区资源、会话元数据和项目配置文件。
+# 关注点：它让 runtime 装配阶段不直接散落文件路径读取逻辑。
+
 """
 工作区资源加载模块。
 

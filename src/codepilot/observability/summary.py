@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：summary.py 根据事件和指标生成可读运行摘要。
+# 关注点：它服务于学习展示和调试复盘。
+
 """Run summary/report projection built from :mod:`observability.trace`."""
 
 from dataclasses import asdict, dataclass, field

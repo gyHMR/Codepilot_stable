@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：runtime context 汇总工作区、扩展加载结果和组装时诊断，供后续 session 创建使用。
+# 关注点：它是装配过程里的共享信息包，不是 sessions/context 的上下文投影。
+
 """
 Runtime 系统提示词启动上下文。
 

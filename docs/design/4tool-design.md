@@ -69,7 +69,7 @@
 模型生成的任何参数都只能表达"希望做什么"，不能表达"允许我绕过安全限制"。
 
 ```python
-# permissions.py 中的实现
+# policy.py 中的实现
 forbidden_keys = {
     "allow_dangerous",
     "bypass_approval",
@@ -86,7 +86,7 @@ if attempted:
 未知工具、参数错误、越界路径、危险命令，以及尚未获得用户确认的审批请求，必须在产生副作用前被拦截。
 
 ```python
-# runtime.py 中的执行流程
+# execution.py 中的执行流程
 async def execute(self, request: ToolRuntimeRequest, ...) -> ToolRuntimeResult:
     # 1. 查找工具
     tool = self.registry.get(request.name)
@@ -121,18 +121,22 @@ Codepilot 工具系统由以下核心模块组成：
 
 ```text
 src/codepilot/tools/
-├── types.py           # 工具类型定义
+├── contracts.py       # 工具契约：AgentTool、ToolRuntimeRequest/Result
 ├── registry.py        # 工具注册表
-├── permissions.py     # 权限策略
+├── metadata.py        # 内置/外部工具元数据
+├── policy.py          # 权限策略
+├── argument_schema.py # JSON Schema 参数校验
 ├── approval.py        # 审批抽象
-├── runtime.py         # 统一执行运行时
-├── sandbox.py         # 工作区路径边界
-├── shell_policy.py    # Shell 命令分类与策略
-└── builtin/
+├── execution.py       # ToolRuntime 统一执行管线
+├── result_safety.py   # secret/PII/prompt injection 结果防护
+├── workspace_safety.py# 工作区路径边界
+├── shell_safety.py    # Shell 命令分类与策略
+└── builtins/
     ├── __init__.py    # 工具装配
-    ├── file_tools.py  # ls, read, write, edit
-    ├── search_tools.py # grep, find
-    └── shell_tools.py # bash
+    ├── files.py       # ls, read, write, edit
+    ├── search.py      # grep, find
+    ├── shell.py       # bash
+    └── workspace_status.py
 ```
 
 ### 4.1 执行流程
@@ -143,12 +147,14 @@ flowchart TD
     Coordinator --> Runtime["ToolRuntime"]
     Runtime --> Registry["ToolRegistry 查找工具"]
     Registry --> Policy["PermissionPolicy 权限决策"]
-    Policy -->|allow| Execute["执行工具"]
+    Policy -->|allow| Schema["SchemaValidator 参数校验"]
     Policy -->|deny| Denied["返回拒绝结果"]
     Policy -->|ask| Approval["ApprovalProvider"]
-    Approval -->|approved| Execute
+    Approval -->|approved| Execute["执行工具"]
     Approval -->|deferred| Deferred["返回 approval_required"]
-    Execute --> Result["ToolResult 结构化结果"]
+    Schema --> Execute
+    Execute --> Guard["ToolResultGuard 脱敏和不可信标记"]
+    Guard --> Result["ToolResult 结构化结果"]
     Result --> Context["上下文/记忆/观测消费结果"]
 ```
 
@@ -160,7 +166,7 @@ flowchart TD
 |------|----------|------------|
 | `ToolCallCoordinator._prepare()` | 当前上下文是否可见该工具、unmanaged 工具是否允许、`before_tool_call` 是否拦截 | 不做具体权限策略、审批、路径和业务参数语义 |
 | `before_tool_call` hook | 用户或扩展提供的项目规则、临时禁用、额外策略拦截 | 不作为唯一安全边界，不替代 Runtime 和工具自身校验 |
-| `ToolRuntime.execute()` | Registry 真实工具查找、`PermissionPolicy` 决策、用户审批、统一结果状态补齐 | 不理解每个工具的业务参数细节 |
+| `ToolRuntime.execute()` | Registry 真实工具查找、`PermissionPolicy` 决策、`SchemaValidator` 参数校验、用户审批、`ToolResultGuard` 结果防护、统一结果状态补齐 | 不理解每个工具的业务参数语义 |
 | 具体工具 `execute()` | 参数语义、路径边界、文件状态、shell cwd/timeout、输出解码和副作用证据 | 不决定模型是否有权绕过权限策略 |
 
 这种分层看起来像“重复检查”，但在 Agent 项目里是必要的防御深度：Coordinator 保证 agent loop 编排正确，Runtime 保证即使被直接调用也不会绕过权限，具体工具保证运行时状态变化后仍能安全执行。
@@ -202,7 +208,7 @@ class ToolRegistry:
         self._metadata[tool.name] = metadata or infer_tool_metadata(tool)
 ```
 
-**设计亮点**：对于非内置工具，`infer_tool_metadata()` 函数可以根据工具名称自动推断元数据，避免每个工具都需要显式声明。
+**设计亮点**：`registry.py` 只保存工具和 metadata；metadata 推断集中在 `metadata.py`，避免注册表同时承担命名推断职责。对于非内置工具，`infer_tool_metadata()` 可以根据工具名称自动推断元数据，避免每个工具都需要显式声明。
 
 ```python
 def infer_tool_metadata(tool: AgentTool) -> ToolMetadata:

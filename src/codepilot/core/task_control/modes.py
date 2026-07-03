@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：这里定义 read/edit/plan 等任务模式对应的默认行为和提示。
+# 关注点：当 CLI 切换任务模式时，最终会影响这些策略。
+
 """Task mode policy for Codepilot's user-facing run behavior."""
 
 from dataclasses import asdict, dataclass

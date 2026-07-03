@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：SchemaValidator 在执行前校验模型传入的 JSON 参数是否符合工具 schema。
+# 关注点：这是轻量 JSON Schema 子集实现，保持学习项目可读性而不是引入完整依赖。
+
 """Lightweight JSON Schema validation for tool arguments."""
 
 from dataclasses import dataclass

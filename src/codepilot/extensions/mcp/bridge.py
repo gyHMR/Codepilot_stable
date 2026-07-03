@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：MCP bridge 把 MCP server/tool 配置转换成 Codepilot 可执行的代理工具。
+# 关注点：MCP 风险和 scope 在这里解析，最终仍交给 tools 主链执行。
+
 """MCP 桥接：解析 MCP 服务器配置并创建代理工具。"""
 
 from dataclasses import dataclass

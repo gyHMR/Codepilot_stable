@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：memory/files.py 负责记忆文件路径和 JSONL 读写细节。
+# 关注点：业务判断不放这里，避免文件 IO 和策略混在一起。
+
 """固定 MEMORY.md 辅助工具和记忆文本脱敏。"""
 
 import logging

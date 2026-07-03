@@ -1,3 +1,6 @@
+# 新手导读：sessions/types.py 放会话层公共契约，包括命令上下文、生命周期 hook 和会话状态。
+# 关注点：这些类型下沉到 sessions 后，sessions 不再反向依赖 extensions。
+
 """
 Session 层的类型定义模块。
 
@@ -18,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Literal, Optional, cast
 
 from codepilot.core import (
     AfterToolCallContext,
@@ -32,7 +35,6 @@ from codepilot.core import (
     TaskMode,
     ToolExecutionMode,
 )
-from codepilot.extensions.types import LifecycleHook, RegisteredCommand
 from codepilot.protocols import Message, Model
 from codepilot.tools import AgentTool
 
@@ -41,6 +43,82 @@ from codepilot.tools import AgentTool
 # 支持同步和异步两种调用方式
 # 使用场景: 在发送消息给 LLM 之前，对消息进行格式转换或预处理
 ConvertToLlmFn = Callable[[list[AgentMessage]], list[Message] | Awaitable[list[Message]]]
+
+CommandSource = Literal["extension", "skill", "builtin", "prompt"]
+_COMMAND_SOURCES = frozenset({"extension", "skill", "builtin", "prompt"})
+
+
+@dataclass
+class SessionLifecycleContext:
+    """Session lifecycle hook context passed to before/after prompt hooks."""
+
+    session: Any
+    text: str
+    is_continue: bool
+    message_count: int
+
+
+LifecycleHook = Callable[[SessionLifecycleContext], None | Awaitable[None]]
+
+
+@dataclass
+class SessionCommandContext:
+    """Slash-command execution context shared by extensions, skills, and interfaces."""
+
+    name: str
+    args: list[str]
+    raw_text: str
+    session: Any
+    message: Any
+
+
+CommandHandler = Callable[[SessionCommandContext], str | None | Awaitable[str | None]]
+
+
+@dataclass
+class RegisteredCommand:
+    """Registered slash command exposed through runtime/interface command routing."""
+
+    name: str
+    handler: CommandHandler
+    description: str | None = None
+    source: CommandSource = "extension"
+
+    def __post_init__(self) -> None:
+        self.name = _require_session_text(self.name, field_name="command name").lstrip("/")
+        if not self.name:
+            raise ValueError("command name cannot be empty")
+        if any(char.isspace() for char in self.name):
+            raise ValueError("command name cannot contain whitespace")
+        if not callable(self.handler):
+            raise TypeError("RegisteredCommand.handler must be callable")
+        self.description = _optional_session_text(
+            self.description,
+            field_name="command description",
+        )
+        self.source = _ensure_command_source(self.source)
+
+
+def _require_session_text(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{field_name} cannot be empty")
+    return text
+
+
+def _optional_session_text(value: object, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _require_session_text(value, field_name=field_name)
+
+
+def _ensure_command_source(value: object) -> CommandSource:
+    text = _require_session_text(value, field_name="command source")
+    if text not in _COMMAND_SOURCES:
+        raise ValueError(f"Unknown command source: {value}")
+    return cast(CommandSource, text)
 
 
 @dataclass

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：runtime/contracts.py 定义创建会话、运行状态、用户输入和组装结果等服务层契约。
+# 关注点：这些类型稳定住 interfaces 与 runtime 之间的边界。
+
 """
 Runtime 对外类型定义模块。
 
@@ -32,10 +35,14 @@ from codepilot.core import (
     ensure_planning_budget_profile,
     ensure_task_mode,
 )
-from codepilot.extensions.types import LifecycleHook, RegisteredCommand
 from codepilot.sessions.context.repository_context import RepositoryBootstrap
-from codepilot.sessions.types import AgentSessionOptions, ConvertToLlmFn
-from codepilot.tools import AgentTool, ToolMetadata
+from codepilot.sessions.types import (
+    AgentSessionOptions,
+    ConvertToLlmFn,
+    LifecycleHook,
+    RegisteredCommand,
+)
+from codepilot.tools import AgentTool, ToolMetadata, ToolRuntime
 from codepilot.tools.approval import ApprovalProvider
 
 if TYPE_CHECKING:
@@ -400,6 +407,7 @@ class RuntimeAssembly:
     profile: ResolvedRuntimeProfile
     repository: RepositoryBootstrap
     capabilities: CapabilityCatalog
+    tool_runtime: ToolRuntime
     diagnostics: tuple[RuntimeDiagnostic, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -411,6 +419,8 @@ class RuntimeAssembly:
             raise TypeError("RuntimeAssembly.repository must be RepositoryBootstrap")
         if not isinstance(self.capabilities, CapabilityCatalog):
             raise TypeError("RuntimeAssembly.capabilities must be CapabilityCatalog")
+        if not isinstance(self.tool_runtime, ToolRuntime):
+            raise TypeError("RuntimeAssembly.tool_runtime must be ToolRuntime")
         object.__setattr__(
             self,
             "diagnostics",

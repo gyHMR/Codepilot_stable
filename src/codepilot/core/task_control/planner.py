@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：planner 负责把目标整理成可执行步骤，保持轻量而不是引入复杂计划系统。
+# 关注点：读它可以理解 Codepilot 如何把用户请求变成任务步骤。
+
 """
 轻量级 LLM 任务规划器模块。
 

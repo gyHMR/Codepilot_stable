@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：shell.py 封装 prompt_toolkit 交互输入、历史和命令补全。
+# 关注点：它只负责读取用户输入，真正命令执行在 commands/runner。
+
 """
 交互式 Shell 模块。
 

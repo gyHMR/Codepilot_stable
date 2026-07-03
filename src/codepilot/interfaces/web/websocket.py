@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：websocket.py 把 Agent 事件流推送给浏览器端。
+# 关注点：它关注连接生命周期和事件转发，不处理工具或模型策略。
+
 """框架无关的 WebSocket 事件流辅助工具。"""
 
 from dataclasses import dataclass

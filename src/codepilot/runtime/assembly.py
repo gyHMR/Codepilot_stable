@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：runtime 组装主入口：把配置、模型、工具、扩展、prompt 和 session 选项串成 RuntimeAssembly。
+# 关注点：想理解项目启动流程，先从 create_agent_session() 的步骤读起。
+
 """
 Runtime 装配模块。
 
@@ -203,6 +206,7 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
         profile=profile,
         repository=build_repository_bootstrap(inputs.workspace),
         capabilities=capability_catalog,
+        tool_runtime=assembled_tools.tool_runtime,
         diagnostics=diagnostics,
     )
 

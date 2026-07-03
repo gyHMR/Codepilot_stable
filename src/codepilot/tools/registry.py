@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：ToolRegistry 是工具表，只保存工具实例和对应 metadata。
+# 关注点：它故意不做执行决策，避免注册表变成“大杂烩”。
+
 """
 工具注册表模块。
 

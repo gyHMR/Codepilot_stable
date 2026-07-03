@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：CLI 审批 provider 在终端展示工具风险并等待用户确认。
+# 关注点：审批结果会回到 tools/runtime，而不是在 CLI 里直接执行工具。
+
 """CLI 会话的交互式工具审批提供者。
 
 当工具执行需要用户审批时，在终端显示工具信息并等待用户确认。

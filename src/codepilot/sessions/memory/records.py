@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：records.py 定义 MemoryRecord、RetrievedMemory 等记忆数据结构。
+# 关注点：读这里能快速理解一条记忆有哪些可信度、scope 和状态字段。
+
 """Memory v2 data contracts.
 
 Memory stores durable, reusable knowledge only.  Task progress, file

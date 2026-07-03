@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：shell_safety 负责 shell 命令分类、环境变量过滤和输出截断。
+# 关注点：它不是完整操作系统沙箱，而是学习项目里清晰可讲的第一层保护。
+
 """保守的 shell 命令分类、环境变量过滤和输出截断控制。"""
 
 import os

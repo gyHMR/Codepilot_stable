@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：RepositoryTracker 跟踪工作区文件指纹和变更 delta。
+# 关注点：它为上下文新鲜度和 changed files 提供基础证据。
+
 """每次模型调用前的低成本动态仓库快照。
 
 仓库快照是动态会话上下文，而非一次性运行时装配状态。

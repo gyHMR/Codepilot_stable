@@ -791,7 +791,7 @@ AgentLoop 是执行编排者：
 - 工具执行后把结果交给 TaskController。
 - 根据 TaskController 和 run_decisions 的结果继续、停止或等待。
 
-TaskController 不直接调用模型，也不直接执行工具。
+TaskController 不直接调用模型，也不直接执行工具。python -m codepilot.evaluation experiment planning --eval-id exp-planning --repeat 2
 
 ### 14.2 与 ToolCallCoordinator
 

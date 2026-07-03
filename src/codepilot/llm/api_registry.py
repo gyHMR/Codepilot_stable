@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：Provider registry 根据 model.api 分发到具体模型适配器。
+# 关注点：新增模型协议时通常先注册新的 provider，再扩展 models 目录。
+
 """
 api -> provider 实现的注册中心。
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：rpc_protocol.py 定义 JSONL RPC 模式的响应格式和错误结构。
+# 关注点：它方便外部程序用稳定协议驱动 Codepilot。
+
 """JSONL RPC response helpers for the CLI interface.
 
 The runner owns command dispatch and stdin/stdout loops.  This module owns the
