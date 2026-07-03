@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：provider 公共工具负责消息转换、工具 schema 转换和响应解析辅助。
+# 关注点：多个 provider 共用的格式逻辑尽量放这里。
+
 """
 provider 共享工具函数：
 1) 通用消息转换（Context -> provider payload）

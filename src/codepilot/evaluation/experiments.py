@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：experiments.py 负责消融实验和多配置对比。
+# 关注点：它适合展示某个模块开启/关闭后的效果差异。
+
 """Lightweight experiment helpers for evaluation v2."""
 
 from statistics import mean

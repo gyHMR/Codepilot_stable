@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：工具装配器负责合并内置、调用者、扩展和 MCP 工具，并创建 ToolRuntime。
+# 关注点：read-only 模式下模型可见工具和注册表里的有效工具也在这里保持一致。
+
 """
 工具组装模块。
 
@@ -45,12 +48,14 @@ class AssembledTools:
     Attributes:
         tools: 最终的 AgentTool 列表（已注册到 ToolRuntime 并应用权限策略）。
         registered_tools: 已注册的工具详细信息列表。
+        tool_runtime: 统一工具运行时。
         loaded_extensions: 已加载的扩展信息（包含钩子、命令等）。
         loaded_skills: 已加载的技能信息（包含钩子、命令等）。
         diagnostics: 装配诊断列表。
     """
     tools: list[AgentTool]
     registered_tools: list[RegisteredTool]
+    tool_runtime: ToolRuntime
     loaded_extensions: LoadedExtensions
     loaded_skills: LoadedExtensions
     diagnostics: list[RuntimeDiagnostic] = field(default_factory=list)
@@ -285,6 +290,12 @@ def assemble_tools(
     if config.read_only_mode:
         registry = _read_only_registry(registry)
 
+    effective_registered_tools = [
+        reg_tool
+        for reg_tool in registered_tools
+        if registry.get(reg_tool.name) is not None
+    ]
+
     # 创建 ToolRuntime 并应用权限策略
     runtime = ToolRuntime(
         registry=registry,
@@ -299,7 +310,8 @@ def assemble_tools(
 
     return AssembledTools(
         tools=runtime.as_agent_tools(),
-        registered_tools=registered_tools,
+        registered_tools=effective_registered_tools,
+        tool_runtime=runtime,
         loaded_extensions=loaded_extensions,
         loaded_skills=loaded_skills,
         diagnostics=diagnostics,

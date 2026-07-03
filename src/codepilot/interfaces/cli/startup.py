@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：startup.py 把 runtime session 状态转换成 CLI 启动页需要的视图模型。
+# 关注点：它是界面适配层，不直接访问复杂业务对象。
+
 """CLI startup view model.
 
 The runtime owns live session state.  The renderer owns terminal formatting.

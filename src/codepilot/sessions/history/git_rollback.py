@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：git_rollback 生成轻量回退元数据，帮助用户理解哪些文件可能需要撤销。
+# 关注点：它不做隐藏分支或事务快照，只保留学习项目可解释的安全边界。
+
 """Git clean-worktree 回退。
 
 这个模块刻意只支持一个很小的安全子集：

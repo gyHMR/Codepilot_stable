@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：LLMStreamRunner 负责把 AgentContext 变成 provider 可消费的请求并消费流式响应。
+# 关注点：上下文准备、API Key 获取、模型能力校验这些模型调用前动作都在这里串起来。
+
 """
 LLM 能力感知运行器模块
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：配置解析把 CLI、会话恢复、工作区配置和默认值合并成 RuntimeConfig。
+# 关注点：排查某个配置为什么生效时，要看 sources 如何记录来源。
+
 """
 运行时配置解析模块。
 

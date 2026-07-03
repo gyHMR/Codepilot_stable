@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：evaluation CLI 提供 check/run/experiment/report 等评估命令。
+# 关注点：它面向项目展示和 benchmark，不参与普通 Agent 运行。
+
 """Command line interface for evaluation v2."""
 
 import argparse

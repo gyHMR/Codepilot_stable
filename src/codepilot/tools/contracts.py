@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+# 新手导读：工具层契约文件：定义可执行 AgentTool、运行时请求和运行时结果。
+# 关注点：protocols 只描述跨层数据，这里才包含 execute 函数等工具层内部概念。
+
 """
 工具层类型定义模块。
 
 定义了工具层拥有的核心类型，与 protocols/tools.py 的区别：
 - protocols/tools.py: 定义跨层共享的稳定协议（Tool、ToolResult 等）
-- tools/types.py: 定义工具层内部的可执行类型（AgentTool、ToolRuntimeRequest 等）
+- tools/contracts.py: 定义工具层内部的可执行类型（AgentTool、ToolRuntimeRequest 等）
 
 主要类型：
     - AgentTool: 可执行的工具定义（包含 execute 函数）

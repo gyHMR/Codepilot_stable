@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：AgentSession 是会话主类，串联消息持久化、生命周期 hook、上下文投影、记忆和任务恢复。
+# 关注点：读它时可以按 run() 的前置准备、Agent 执行、结果落盘三个阶段理解。
+
 """AgentSession 负责编排一次应用级别的 Agent 对话。
 
 主要职责：
@@ -31,7 +34,6 @@ from codepilot.core import (
     new_run_id,
 )
 
-from codepilot.extensions.types import ExtensionLifecycleContext
 from codepilot.tools import AgentTool
 from .context.freshness import build_context_freshness_notice
 from .context.governor import ContextGovernor
@@ -54,7 +56,7 @@ from .run_reconciliation import (
     merge_approved_tool_result,
     replace_pending_tool_result,
 )
-from .types import AgentSessionOptions
+from .types import AgentSessionOptions, SessionLifecycleContext
 
 logger = logging.getLogger("codepilot.sessions.session")
 
@@ -855,7 +857,7 @@ class AgentSession:
         """
         if not hooks:
             return
-        ctx = ExtensionLifecycleContext(
+        ctx = SessionLifecycleContext(
             session=self,
             text=text,
             is_continue=is_continue,

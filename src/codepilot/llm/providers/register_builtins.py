@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：register_builtins.py 在导入时注册内置 provider。
+# 关注点：应用启动时确保这里被加载，api_registry 才知道可用模型协议。
+
 """
 内置 provider 注册入口。
 """

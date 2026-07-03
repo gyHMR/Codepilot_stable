@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：审批执行服务负责保存、恢复和继续用户批准后的工具调用。
+# 关注点：批准后的调用仍应回到 ToolRuntime 主链，而不是直接执行原始工具函数。
+
 """Pure rules for Runtime tool-approval recovery.
 
 RuntimeService owns the in-memory approval table and the user-facing

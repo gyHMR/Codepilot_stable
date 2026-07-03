@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：freshness 负责判断上下文证据是否仍然新鲜，避免文件变化后继续信任旧结果。
+# 关注点：新鲜度问题通常和 repository_tracker、snapshot 一起排查。
+
 """Helpers for turning context freshness checks into Agent steering messages."""
 
 from codepilot.protocols import TextContent, UserMessage

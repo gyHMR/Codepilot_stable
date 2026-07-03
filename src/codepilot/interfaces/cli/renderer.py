@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：renderer.py 把 Agent 事件渲染成人类可读的终端输出。
+# 关注点：这里关心显示体验，不改变运行结果。
+
 """
 CLI 终端渲染。
 

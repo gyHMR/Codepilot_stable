@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：events.py 定义运行时事件类型和事件 payload 的公共契约。
+# 关注点：删除或新增事件类型时要同步 observability、interfaces 和测试。
+
 """
 运行时事件类型定义。
 
@@ -43,7 +46,6 @@ RuntimeEventType = Literal[
     "tool_execution_end",        # 工具执行结束
     "context_prepared",          # 模型调用前上下文已编译
     "context_freshness_checked", # 上下文新鲜度已检查
-    "context_compacted",         # 会话上下文已压缩
     "memory_retrieved",          # 长期记忆已检索
     "memory_created",            # 用户命令创建了记忆
     "memory_promoted",           # 用户命令提升了记忆
@@ -84,7 +86,6 @@ _RUNTIME_EVENT_TYPES = frozenset(
         "tool_execution_end",
         "context_prepared",
         "context_freshness_checked",
-        "context_compacted",
         "memory_retrieved",
         "memory_created",
         "memory_promoted",

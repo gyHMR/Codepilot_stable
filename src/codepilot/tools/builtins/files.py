@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：内置文件工具实现 ls/read/write/edit，并把路径边界和文件状态证据写入结果。
+# 关注点：重点看写入前后如何记录 affected_paths、workspace_changed 和 file_state。
+
 """内置文件工具：ls（列目录）、read（读文件）、write（写文件）、edit（精确替换）。"""
 
 from typing import Any, Callable

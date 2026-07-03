@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：RunState 保存一次 Agent run 中的计数器、工作区变化和验证状态。
+# 关注点：它不是持久化存储，只是主循环运行时判断重复调用和完成条件的轻量状态。
+
 """一次 Agent Run 执行期间收集的机械性执行事实。
 
 RunState 刻意保持"机械性"：它只记录本次运行中发生了什么，

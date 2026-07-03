@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：ContextProjector 把会话事实投影成 stable rules、working state、memory、evidence 和 recent messages。
+# 关注点：它决定最终进入模型 prompt 的信息结构。
+
 """ContextProjector：把 SessionSnapshot 投影成本轮 prompt 视图。"""
 
 from dataclasses import dataclass

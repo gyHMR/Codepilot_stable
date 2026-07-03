@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：EvaluationService 编排 benchmark 加载、执行和报告生成。
+# 关注点：想看评估主流程，先从这里开始。
+
 """Small service facade for evaluation v2."""
 
 from pathlib import Path

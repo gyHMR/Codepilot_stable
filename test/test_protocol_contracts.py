@@ -454,4 +454,7 @@ def test_runtime_event_type_contract_rejects_unknown_events() -> None:
     assert ensure_runtime_event_type("tool_approval_result_replaced") == "tool_approval_result_replaced"
 
     with pytest.raises(ValueError, match="runtime event type"):
+        ensure_runtime_event_type("context_compacted")
+
+    with pytest.raises(ValueError, match="runtime event type"):
         ensure_runtime_event_type("tool_finished")

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：artifacts.py 管理评估产物路径和输出文件。
+# 关注点：它让 benchmark 结果可复查，而不是只停留在终端输出。
+
 """Persistent artifact writer for evaluation v2."""
 
 import csv

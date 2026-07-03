@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：env_api_keys.py 负责从环境变量读取模型 API Key。
+# 关注点：把密钥读取集中在这里，避免 provider 里散落环境变量逻辑。
+
 """
 统一读取环境变量中的 API Key。
 """

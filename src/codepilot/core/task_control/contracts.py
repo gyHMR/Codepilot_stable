@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：任务模式、计划状态和规划预算属于 task_control 的公共契约。
+# 关注点：这些值会被 runtime/CLI 传入 core，但具体执行规则仍在 controller/rules。
+
 """Stable task planning control contracts."""
 
 from dataclasses import asdict, dataclass, field

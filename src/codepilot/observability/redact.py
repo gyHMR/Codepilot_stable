@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：redact.py 集中做敏感字段脱敏，避免日志和报告泄露 token/key。
+# 关注点：新增审计输出前，应先确认是否需要经过这里。
+
 """Small, shared redaction helper for run artifacts."""
 
 import os

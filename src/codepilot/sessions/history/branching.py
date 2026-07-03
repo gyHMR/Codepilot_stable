@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：会话分支模块实现 fork/switch 等历史树操作。
+# 关注点：它操作的是 session transcript 节点，不是 git 分支。
+
 """会话分支与切换辅助函数。"""
 
 from typing import TYPE_CHECKING

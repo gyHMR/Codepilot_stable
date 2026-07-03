@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：这里定义任务步骤、尝试记录、变更集、重规划记录等任务控制状态。
+# 关注点：新手阅读 controller 前，先看这些 dataclass 字段会更顺。
+
 """
 一次 Agent Run 的轻量级任务规划状态模块。
 

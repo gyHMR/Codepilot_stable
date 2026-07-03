@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：scorers.py 把证据转换成指标分数。
+# 关注点：这里体现项目如何衡量上下文、记忆、任务和工具安全效果。
+
 """Metric scorers for evaluation v2.
 
 Scorers intentionally consume only :class:`EvalEvidence`.  They should not read

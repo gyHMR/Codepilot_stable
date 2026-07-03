@@ -1,6 +1,6 @@
 # Codepilot 上下文管理机制设计
 
-本文只描述当前代码中的上下文治理实现。旧版 `ContextCompiler`、旧 compaction、旧 `context.jsonl/runs.jsonl` 等路径已经不再是运行时能力；代码中没有兼容读取旧 session layout 的主路径。
+本文只描述当前代码中的上下文投影治理实现。旧的手动压缩入口、旧上下文编译路径和旧 `context.jsonl/runs.jsonl` 布局已经不再是运行时能力；代码中没有兼容读取旧 session layout 的主路径。
 
 ## 0. 机制概述
 
@@ -30,7 +30,7 @@ Codepilot 当前的上下文治理不是“把历史消息列表裁短后发给�
 | `src/codepilot/sessions/history/task_recovery.py` | `TaskRecoveryStore` | 保存/读取当前任务恢复投影，实际落在 `session.json.task_recovery`。 | `load_projection()`：`src/codepilot/sessions/history/task_recovery.py:46-47`；`save_projection()`：`src/codepilot/sessions/history/task_recovery.py:64-73`。 |
 | `src/codepilot/sessions/history/git_rollback.py` | `build_rollback_metadata()` | 维持轻量 git 回退元数据，不做复杂快照事务。 | `build_rollback_metadata()`：`src/codepilot/sessions/history/git_rollback.py:79`；session 写 rollback metadata：`src/codepilot/sessions/session.py:524-532`。 |
 
-公共导出也只暴露新主线：`src/codepilot/sessions/context/__init__.py:32-48` 导出 `ContextGovernor`、`ContextProjector`、`ContextPressurePolicy`、`SessionSnapshotBuilder`、`ToolArtifactLedger` 等；代码中未发现 `ContextCompiler` 或 `ContextPolicy` 仍作为 sessions public API 导出。
+公共导出也只暴露新主线：`src/codepilot/sessions/context/__init__.py:32-48` 导出 `ContextGovernor`、`ContextProjector`、`ContextPressurePolicy`、`SessionSnapshotBuilder`、`ToolArtifactLedger` 等；sessions public API 不再导出旧上下文编译入口。
 
 ## 2. 用户请求进入后的上下文构建数据流
 
@@ -94,7 +94,7 @@ Token 估算由 `estimate_context_tokens()` 完成，governor 分别估算：
 - tight：recent messages 降低到 6 条，tool result 默认投影为 artifact 摘要。证据：`src/codepilot/sessions/context/projector.py:92-112`。
 - critical：recent messages 降到 4 条，并创建 `ContextCheckpoint`，后续轮次优先读取 latest checkpoint。证据：`src/codepilot/sessions/context/governor.py:114-126`、`src/codepilot/sessions/context/snapshot.py:77`。
 
-代码中未发现明确实现：当前没有 LLM summary builder、后台 collapse agent、旧历史消息替换成 summary message 的 runtime 路径；`/compact` 命令也只返回“Manual compaction has been removed”。证据：`src/codepilot/runtime/command_registry.py:289-298`。
+代码中未发现明确实现：当前没有 LLM summary builder、后台 collapse agent、旧历史消息替换成 summary message 的 runtime 路径；CLI 只保留 `/context` 查看最近一次上下文投影治理报告，不再提供手动压缩命令。证据：`src/codepilot/interfaces/cli/commands.py`。
 
 ## 6. 更新与失效机制
 
@@ -139,7 +139,7 @@ git 回退：
 
 优点：
 
-1. 主线清晰：上下文只有 `ContextGovernor.prepare()` 一个入口，避免旧 compiler/compaction 并存。证据：`src/codepilot/sessions/session.py:652-665`、`src/codepilot/sessions/context/__init__.py:32-48`。
+1. 主线清晰：上下文只有 `ContextGovernor.prepare()` 一个入口，避免多套上下文处理路径并存。证据：`src/codepilot/sessions/session.py:652-665`、`src/codepilot/sessions/context/__init__.py:32-48`。
 2. 文件契约更瘦：新 session 默认只创建 `session.json/messages.jsonl`，其他 ledger/event/memory 按需懒创建。证据：`src/codepilot/sessions/persistence/store.py:52-75`。
 3. 工具输出不再线性污染 prompt：工具输出可 artifact 化，prompt 中放摘要和路径引用。证据：`src/codepilot/sessions/context/ledger.py:79-161`。
 4. 有压力感知：normal/tight/critical 三档影响 recent history、tool result 投影和 critical checkpoint。证据：`src/codepilot/sessions/context/policy.py:17-52`、`src/codepilot/sessions/context/projector.py:92-112`、`src/codepilot/sessions/context/governor.py:114-126`。

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：events.py 把原始 Agent 事件归一化成更适合审计和统计的形态。
+# 关注点：它不改变执行，只整理已经发生的事实。
+
 """Stable, slim run event contract.
 
 The agent may still emit richer internal events.  Persistence normalizes those
@@ -35,7 +38,6 @@ _LOW_VALUE_EVENTS = {
     "message_update",
     "tool_execution_update",
     "tool_execution_grace",
-    "context_compacted",
     "task_recovery_updated",
     "task_recovery_warning",
     "planning_discovery_started",

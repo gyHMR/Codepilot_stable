@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：包门面文件：集中导出本层最常用的类型和入口，降低学习时的导入成本。
+# 关注点：sessions 层是会话事实源，负责消息、run、记忆、上下文投影和任务恢复。
+
 """结构化会话记忆和项目记忆。"""
 
 from .experience import ExperienceExtractor, MemoryConsolidator

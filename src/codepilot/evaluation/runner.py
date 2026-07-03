@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：runner.py 执行单个或一组 benchmark，并收集运行证据。
+# 关注点：它把 runtime 运行结果转换成可评分材料。
+
 """Evaluation v2 runner.
 
 The runner is deliberately an adapter around the public RuntimeService API.  It

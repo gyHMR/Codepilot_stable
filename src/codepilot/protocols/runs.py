@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：runs.py 定义 AgentRunResult、停止原因和任务摘要。
+# 关注点：一次 run 的最终输出会沿着这些类型返回给上层。
+
 """
 Agent 运行结果与状态类型定义。
 

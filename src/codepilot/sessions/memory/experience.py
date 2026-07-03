@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：experience 负责从失败、修复和验证闭环里提炼经验型记忆。
+# 关注点：这是项目展示“Agent 会从过程学习”的关键模块之一。
+
 """Deterministic experience extraction and consolidation."""
 
 import hashlib

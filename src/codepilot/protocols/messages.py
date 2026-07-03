@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：messages.py 定义 User/Assistant/ToolResult 等跨层消息结构。
+# 关注点：理解 Agent 对话历史，先从这些消息类型开始。
+
 """
 消息类型定义。
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：ToolCallCoordinator 负责执行模型返回的一批工具调用，并处理 before/after hook。
+# 关注点：重点看它如何区分并行安全工具和独占工具，以及如何把结果转成 ToolResultMessage。
+
 """
 工具调用协调器模块。
 

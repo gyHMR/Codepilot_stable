@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：history checkpoint 记录会话历史节点，用于恢复和分叉。
+# 关注点：注意它和 context checkpoint 名字相近，但职责不同。
+
 """会话检查点辅助工具。
 
 检查点目前刻意采用基于事件的方式实现；后续阶段可以附加文件快照和 diff 记录，

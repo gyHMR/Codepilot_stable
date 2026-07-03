@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：这里把项目内部 Message 转成 LLM provider 可以接收的消息结构。
+# 关注点：当某个 provider 报消息格式错误时，通常从本文件和 llm/providers/_common.py 一起看。
+
 """
 消息转换模块：将 AgentMessage 列表转换为 LLM 可直接消费的 Message 列表。
 

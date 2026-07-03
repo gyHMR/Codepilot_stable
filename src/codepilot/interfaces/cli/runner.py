@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：runner.py 分发 print/interactive/rpc 三种运行模式。
+# 关注点：它只调用 RuntimeService，不直接改 core 或 session 内部状态。
+
 """
 运行模式入口。
 
@@ -241,6 +244,15 @@ async def run_interactive(
                     )
                 if command_result.handled:
                     continue
+                # "/" 输入未匹配任何命令时仍停留在命令系统，不转发给模型。
+                unknown_cmd = text.partition(" ")[0]
+                renderer.render_command_output(
+                    [
+                        f"Unknown command: {unknown_cmd}",
+                        "Type /help to see available commands.",
+                    ]
+                )
+                continue
             except Exception as exc:
                 renderer.render_status(f"Command error: {exc}", kind="error")
                 continue

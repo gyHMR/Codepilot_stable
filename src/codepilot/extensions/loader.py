@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：loader.py 负责发现并安全加载 .codepilot/extensions 下的 Python 扩展。
+# 关注点：它只做加载和归一化，不直接执行工具安全策略。
+
 """Python 扩展加载器：发现并加载工作区中的 .py 扩展文件。"""
 
 import importlib.util

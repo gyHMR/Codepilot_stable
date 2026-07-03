@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：content.py 定义文本、图片等消息内容块，是消息协议的最小积木。
+# 关注点：所有层传内容时都应优先使用这些稳定结构。
+
 """
 内容块（Content Block）类型定义。
 

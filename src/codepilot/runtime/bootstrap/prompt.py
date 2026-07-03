@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：prompt 组装把系统提示、工具/扩展指南和项目规则合成运行时 system prompt。
+# 关注点：这里适合看 Agent 的初始行为约束从哪里来。
+
 """
 系统提示词渲染模块。
 

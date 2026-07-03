@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：workspace_status 提供轻量工作区状态，帮助 Agent 判断是否已有文件变更。
+# 关注点：它通常用于验证前后确认当前 git/workspace 状态。
+
 """内置工作区工具：workspace_status（Git 分支、HEAD、变更路径和 diff 统计）。"""
 
 import json

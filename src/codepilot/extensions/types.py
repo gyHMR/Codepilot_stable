@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+# 新手导读：extensions/types.py 描述扩展加载后的统一能力集合。
+# 关注点：命令和生命周期契约已经下沉到 sessions.types，避免 sessions 依赖 extensions。
+
 """扩展层类型定义：钩子、命令、技能规格和加载结果。"""
 
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from codepilot.core.types import (
     AfterToolCallContext,
@@ -13,46 +16,13 @@ from codepilot.core.types import (
 )
 from codepilot.tools import AgentTool
 
+if TYPE_CHECKING:
+    from codepilot.sessions.types import LifecycleHook, RegisteredCommand
+
 # 工具调用前钩子类型
 BeforeHook = Callable[[BeforeToolCallContext, Any | None], BeforeToolCallResult | None | Awaitable[BeforeToolCallResult | None]]
 # 工具调用后钩子类型
 AfterHook = Callable[[AfterToolCallContext, Any | None], AfterToolCallResult | None | Awaitable[AfterToolCallResult | None]]
-
-
-@dataclass
-class ExtensionLifecycleContext:
-    """扩展生命周期钩子上下文。"""
-    session: Any          # 当前会话实例
-    text: str             # 用户输入文本
-    is_continue: bool     # 是否为继续运行
-    message_count: int    # 当前消息数
-
-
-# 生命周期钩子类型（before_prompt / after_prompt）
-LifecycleHook = Callable[[ExtensionLifecycleContext], None | Awaitable[None]]
-
-
-@dataclass
-class ExtensionCommandContext:
-    """扩展命令执行上下文。"""
-    name: str             # 命令名称
-    args: list[str]       # 命令参数
-    raw_text: str         # 原始输入文本
-    session: Any          # 当前会话实例
-    message: Any          # 当前消息
-
-
-# 命令处理器类型
-CommandHandler = Callable[[ExtensionCommandContext], str | None | Awaitable[str | None]]
-
-
-@dataclass
-class RegisteredCommand:
-    """已注册的命令。"""
-    name: str                                            # 命令名称
-    handler: CommandHandler                              # 处理函数
-    description: str | None = None                       # 命令描述
-    source: Literal["extension", "skill", "builtin", "prompt"] = "extension"  # 来源
 
 
 @dataclass
@@ -81,9 +51,9 @@ class LoadedExtensions:
     after_tool_hooks: list[AfterHook] = field(default_factory=list)
     prompt_guidelines: list[str] = field(default_factory=list)
     append_prompts: list[str] = field(default_factory=list)
-    commands: dict[str, RegisteredCommand] = field(default_factory=dict)
-    before_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
-    after_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
+    commands: dict[str, "RegisteredCommand"] = field(default_factory=dict)
+    before_prompt_hooks: list["LifecycleHook"] = field(default_factory=list)
+    after_prompt_hooks: list["LifecycleHook"] = field(default_factory=list)
     skills: list[SkillSpec] = field(default_factory=list)
     diagnostics: list[str] = field(default_factory=list)
     loaded_paths: list[str] = field(default_factory=list)

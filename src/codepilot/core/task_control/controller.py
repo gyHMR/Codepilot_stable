@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：TaskController 用确定性规则跟踪任务步骤、失败、验证和重规划。
+# 关注点：它不替模型做语义判断，而是把工具证据转成“继续/修复/停止/完成”等控制信号。
+
 """
 Agent 循环使用的确定性任务反馈控制器。
 
@@ -30,13 +33,6 @@ from typing import Iterable, Mapping, cast
 from codepilot.protocols import TaskSummary, TextContent, ToolResultMessage, UserMessage
 
 from ..run_state import RunState
-from .evidence import (
-    complete_step_payload,
-    evidence_refs,
-    first_error_code,
-    infer_action_intent,
-    is_tool_unavailable,
-)
 from .contracts import (
     TaskMode,
     TaskPlanningState,
@@ -45,12 +41,26 @@ from .contracts import (
 )
 from .modes import policy_for_mode
 from .planner import PlannedTaskStep
-from .replanner import (
+from .rules import (
+    READ_TOOL_MARKERS,
+    WRITE_TOOL_MARKERS,
+    build_completion_check,
+    complete_step_payload,
+    completion_steering_message,
+    evidence_refs,
+    first_error_code,
+    has_failed_verification,
+    has_non_verification_error,
+    has_passed_verification,
+    infer_action_intent,
+    is_tool_unavailable,
+    is_verification_step,
     repair_next_action,
     should_propose_revert_after_repeated_failure,
+    verification_command,
+    verification_failure_note,
 )
 from .tools import COMPLETE_TASK_STEP_TOOL
-from .stop import build_completion_check, completion_steering_message
 from .state import (
     AttemptRecord,
     ChangeSet,
@@ -62,21 +72,11 @@ from .state import (
     TaskStep,
     TaskStepKind,
 )
-from .verifier import (
-    has_failed_verification,
-    has_non_verification_error,
-    has_passed_verification,
-    is_verification_step,
-    verification_command,
-    verification_failure_note,
-)
 from ..types import AgentMessage
 
 
 _MAX_STEPS = 6                   # 单个任务最大步骤数
 _MAX_STEP_TITLE_CHARS = 80       # 步骤标题最大字符数
-_READ_TOOL_MARKERS = ("read", "grep", "find", "glob", "ls", "search", "status", "codegraph")  # 只读工具名称标记
-_WRITE_TOOL_MARKERS = ("write", "edit", "patch", "apply")  # 写入工具名称标记
 
 
 class TaskController:
@@ -694,7 +694,7 @@ class TaskController:
             task.recent_failure_type = None
             return
         name = result.tool_name.lower()
-        if any(marker in name for marker in _READ_TOOL_MARKERS):
+        if any(marker in name for marker in READ_TOOL_MARKERS):
             step.mark_in_progress()
             step.progress_state = "evidence_collected"
             task.action_intent = "read_context"
@@ -840,9 +840,9 @@ class TaskController:
         if result.workspace_changed is True:
             return True
         name = result.tool_name.lower()
-        if any(marker in name for marker in _READ_TOOL_MARKERS):
+        if any(marker in name for marker in READ_TOOL_MARKERS):
             return True
-        if any(marker in name for marker in _WRITE_TOOL_MARKERS):
+        if any(marker in name for marker in WRITE_TOOL_MARKERS):
             return result.workspace_changed is True
         return False
 

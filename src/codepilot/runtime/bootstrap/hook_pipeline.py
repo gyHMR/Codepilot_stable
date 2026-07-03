@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：hook_pipeline 把调用者 hook、扩展 hook 和 session hook 按顺序组合。
+# 关注点：如果 before/after 行为看起来重复，先看这里的组合顺序。
+
 """
 钩子组合（Hook Composition）模块。
 

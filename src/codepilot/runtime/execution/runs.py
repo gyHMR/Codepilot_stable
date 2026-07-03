@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：active run 管理跟踪正在运行的任务，支持取消、恢复和状态查询。
+# 关注点：它是 RuntimeService 管理并发运行的轻量状态表。
+
 """Active run tracking for RuntimeService."""
 
 import asyncio

@@ -315,7 +315,9 @@ def test_read_only_tool_assembly_filters_by_metadata(tmp_path: Path) -> None:
     )
 
     names = {tool.name for tool in assembled.tools}
+    registered_names = {tool.name for tool in assembled.registered_tools}
 
     assert "read" in names
     assert "grep" in names
     assert "calendar.create_event" not in names
+    assert "calendar.create_event" not in registered_names

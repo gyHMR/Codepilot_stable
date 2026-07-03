@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：CLI main.py 负责解析命令行参数并创建 RuntimeService。
+# 关注点：它是用户从命令行进入项目的第一站。
+
 """
 Codepilot CLI 命令行入口。
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：PermissionPolicy 在工具执行前做硬权限决策，防止模型用参数给自己授权。
+# 关注点：重点看 read-only、ask、bash 分类和 forbidden_keys 的处理顺序。
+
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast

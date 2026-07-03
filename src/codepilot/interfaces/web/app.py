@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：app.py 创建 Web 应用实例，是 Web 入口的装配点。
+# 关注点：这里应保持薄适配，不复制 CLI/runtime 逻辑。
+
 """Web Console 后端应用工厂。
 
 本模块刻意保持框架无关性。未来的 FastAPI/aiohttp 适配器可以包装

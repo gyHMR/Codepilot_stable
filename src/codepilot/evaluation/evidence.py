@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：evidence.py 从运行结果中提取工具调用、上下文和文件变更证据。
+# 关注点：评估尽量基于事实证据，而不是只看最终文本。
+
 """Typed evidence consumed by metric scorers."""
 
 from collections import Counter

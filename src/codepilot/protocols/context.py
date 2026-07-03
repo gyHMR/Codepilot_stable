@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：context.py 定义上下文治理报告等跨层上下文协议。
+# 关注点：它描述报告形状，不实现具体投影逻辑。
+
 """跨层共享的上下文治理数据契约。"""
 
 from dataclasses import asdict, dataclass, field

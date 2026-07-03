@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：Agent 对象是 core 层的外观，持有模型、工具、消息状态并委托 agent_loop 执行。
+# 关注点：新手可把它理解成“单个智能体实例”，session/runtime 会围绕它做装配和持久化。
+
 """
 对外 Agent 封装：
 提供 run/continue、状态管理、事件订阅、串行调度入口。

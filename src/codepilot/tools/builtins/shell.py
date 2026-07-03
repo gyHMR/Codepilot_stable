@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：内置 bash 工具封装命令执行、超时、环境过滤和副作用检测。
+# 关注点：不要只看 subprocess 调用，重点看执行前后如何采集工作区变化。
+
 """内置 shell 工具：bash（受限命令执行，含超时、环境过滤和工作区变更检测）。"""
 
 import asyncio

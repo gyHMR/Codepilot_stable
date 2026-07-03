@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：ContextGovernor 是上下文投影治理唯一入口，每轮模型调用前生成 PreparedAgentContext。
+# 关注点：它串联 snapshot、memory、pressure policy、projector、checkpoint 和 context ledger。
+
 """统一上下文治理入口。"""
 
 import hashlib

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：ui.py 放终端格式化的小工具，帮助渲染 panel、表格和提示文本。
+# 关注点：它只处理展示，不参与 Agent 决策。
+
 """Shared terminal UI helpers for the Codepilot CLI."""
 
 import os

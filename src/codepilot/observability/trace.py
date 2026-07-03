@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：trace.py 组织一次 run 的 trace/report/audit bundle。
+# 关注点：它把分散事件串成可追踪的执行故事。
+
 """Typed trace projection built from canonical run events."""
 
 import json

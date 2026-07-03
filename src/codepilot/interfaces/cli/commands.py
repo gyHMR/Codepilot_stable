@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：commands.py 定义交互式斜杠命令的展示和执行逻辑。
+# 关注点：命令没有匹配时应交还界面层提示，不伪装成有效运行时命令。
+
 """
 CLI 斜杠命令注册与处理模块。
 
@@ -20,9 +23,9 @@ import inspect
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 
-from codepilot.extensions.types import ExtensionCommandContext, RegisteredCommand
 from codepilot.sessions.session import AgentSession
 from codepilot.sessions.memory import load_global_memory, render_memory
+from codepilot.sessions.types import RegisteredCommand, SessionCommandContext
 
 if TYPE_CHECKING:
     from codepilot.runtime.service import RuntimeService
@@ -116,8 +119,7 @@ def builtin_commands() -> list[RuntimeCommand]:
         RuntimeCommand(name="new", description="等价于从当前叶子分叉新会话", source="builtin"),
         RuntimeCommand(name="switch", description="切换到指定叶子节点", source="builtin"),
         RuntimeCommand(name="clear", description="清空上下文，创建新会话", source="builtin"),
-        RuntimeCommand(name="compact", description="手动触发上下文压缩", source="builtin"),
-        RuntimeCommand(name="context", description="查看最近一次上下文编译报告", source="builtin"),
+        RuntimeCommand(name="context", description="查看最近一次上下文投影治理报告", source="builtin"),
         RuntimeCommand(name="memory", description="查看、添加、提升或删除结构化记忆", source="builtin"),
         RuntimeCommand(name="tools", description="查看当前可用工具", source="builtin"),
         RuntimeCommand(name="model", description="查看当前模型信息", source="builtin"),
@@ -284,16 +286,6 @@ async def handle_cli_command(
             output_lines=[
                 f"switched leaf -> {session.get_leaf_id()}",
                 "Note: message history was restored; Session Memory is not rolled back in V1.",
-            ],
-        )
-
-    # /compact: legacy command; context is now governed before every model call.
-    if cmd == "/compact":
-        return RuntimeCommandResult(
-            handled=True,
-            output_lines=[
-                "Manual compaction has been removed.",
-                "ContextGovernor now projects a fresh ContextView before every model call.",
             ],
         )
 
@@ -500,7 +492,7 @@ async def handle_cli_command(
     reg = resolve_registered_command(session, cmd)
     if reg:
         value = reg.handler(
-            ExtensionCommandContext(
+            SessionCommandContext(
                 name=reg.name,
                 args=[p for p in arg.split(" ") if p],
                 raw_text=text,
@@ -515,8 +507,5 @@ async def handle_cli_command(
             output_lines=[str(value)] if value else [],
         )
 
-    # 未匹配任何命令：返回明确错误，不发送给模型
-    return RuntimeCommandResult(
-        handled=True,
-        output_lines=[f"Unknown command: {cmd}", "Type /help to see available commands."],
-    )
+    # 未匹配任何命令：交还给界面层决定如何提示。
+    return RuntimeCommandResult(handled=False)

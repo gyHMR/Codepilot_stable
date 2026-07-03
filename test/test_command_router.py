@@ -68,6 +68,10 @@ def test_cli_command_router_shows_context_report(tmp_path: Path) -> None:
     asyncio.run(_run_context_command_case(tmp_path))
 
 
+def test_cli_command_router_does_not_expose_removed_compact_command(tmp_path: Path) -> None:
+    asyncio.run(_run_removed_compact_command_case(tmp_path))
+
+
 def test_cli_command_router_manages_project_memory(tmp_path: Path) -> None:
     asyncio.run(_run_memory_command_case(tmp_path))
 
@@ -115,6 +119,27 @@ async def _run_context_command_case(tmp_path: Path) -> None:
         assert result.handled
         assert any("ctx_1" in line for line in result.output_lines)
         assert any("Dropped items" in line for line in result.output_lines)
+    finally:
+        runtime.close_all()
+
+
+async def _run_removed_compact_command_case(tmp_path: Path) -> None:
+    from codepilot.interfaces.cli.commands import (
+        builtin_commands,
+        handle_cli_command,
+        list_runtime_commands,
+    )
+
+    runtime, session_id = _create_runtime_session(tmp_path)
+    session = runtime.get_session(session_id)
+    try:
+        assert "compact" not in {command.name for command in builtin_commands()}
+        assert "compact" not in {command.name for command in list_runtime_commands(session)}
+
+        result = await handle_cli_command(runtime, session_id, "/compact")
+
+        assert result.handled is False
+        assert result.output_lines == []
     finally:
         runtime.close_all()
 

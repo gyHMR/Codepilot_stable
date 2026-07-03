@@ -21,22 +21,22 @@ Codepilot 采用严格的分层架构，每一层职责清晰，依赖关系单�
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Layer 7: interfaces/                      │
+│                    Layer 6: interfaces/                      │
 │                      (用户接口层)                            │
-├─────────────────────────────────────────────────────────────┤
-│                    Layer 6: extensions/                      │
-│                      (扩展系统层)                            │
 ├─────────────────────────────────────────────────────────────┤
 │                    Layer 5: runtime/                         │
 │                      (运行时组装层)                          │
 ├─────────────────────────────────────────────────────────────┤
-│                    Layer 4: sessions/                        │
-│                      (会话管理层)                            │
+│                    Layer 4: extensions/                      │
+│                      (扩展接入层)                            │
 ├─────────────────────────────────────────────────────────────┤
-│                    Layer 1: core/                            │
+│          Layer 3: sessions/ + observability/                 │
+│          (会话事实源 / 上下文治理 / 观测记录)                  │
+├─────────────────────────────────────────────────────────────┤
+│                    Layer 2: core/                            │
 │                      (Agent 循环引擎)                        │
 ├──────────────────────┬──────────────────────────────────────┤
-│   Layer 2: llm/      │      Layer 3: tools/                 │
+│   Layer 1: llm/      │      Layer 1: tools/                 │
 │   (LLM 提供者层)     │      (工具系统层)                     │
 ├──────────────────────┴──────────────────────────────────────┤
 │                    Layer 0: protocols/                       │
@@ -49,17 +49,15 @@ Codepilot 采用严格的分层架构，每一层职责清晰，依赖关系单�
 | 层级 | 包名 | 依赖项 |
 |------|------|--------|
 | Layer 0 | `protocols/` | 无内部依赖 (纯类型定义) |
-| Layer 1 | `core/` | 仅依赖 `protocols/` |
-| Layer 2 | `llm/` | 依赖 `protocols/` |
-| Layer 3 | `tools/` | 依赖 `protocols/` |
-| Layer 4 | `sessions/` | 依赖 `protocols/`, `core/`, `observability/` |
+| Layer 1 | `llm/`, `tools/` | 依赖 `protocols/` |
+| Layer 2 | `core/` | 依赖 `protocols/`, `llm/`, `tools/` |
+| Layer 3 | `sessions/`, `observability/` | 依赖 `protocols/`, `core/`；`sessions/` 不依赖 `extensions/` |
+| Layer 4 | `extensions/` | 依赖 `protocols/`, `tools/`, `sessions` 中的公共命令/生命周期契约 |
 | Layer 5 | `runtime/` | 依赖 `protocols/`, `core/`, `llm/`, `tools/`, `sessions/`, `extensions/`, `observability/` |
-| Layer 6 | `extensions/` | 依赖 `protocols/`, `core/`, `tools/` |
-| Layer 7 | `interfaces/` | 依赖 `runtime/` (传递性依赖所有层) |
+| Layer 6 | `interfaces/` | 依赖 `runtime/` |
 
 **横切关注点**:
 - `evaluation/` - 评估框架，依赖 `runtime/`, `observability/`
-- `observability/` - 可观测性，依赖 `protocols/`
 
 ---
 
@@ -89,7 +87,7 @@ Codepilot 采用严格的分层架构，每一层职责清晰，依赖关系单�
 
 ---
 
-### 3.2 Layer 1: `core/` — Agent 循环引擎
+### 3.2 Layer 2: `core/` — Agent 循环引擎
 
 **职责**: 实现核心 Agent 执行循环：用户提示 → LLM 推理 → 工具执行 → 循环直到完成。
 
@@ -101,7 +99,7 @@ Codepilot 采用严格的分层架构，每一层职责清晰，依赖关系单�
 | `agent.py` | `Agent` | 封装 Agent 循环，管理状态、事件订阅、引导消息、上下文准备 |
 | `llm_runner.py` | `LLMStreamRunner` | 桥接 Agent 循环与 LLM 提供者，处理上下文准备、能力验证、流式响应 |
 | `tool_coordinator.py` | `ToolCallCoordinator` | 执行工具调用批次（顺序或并行） |
-| `task_controller.py` | `TaskController` | 任务规划、步骤跟踪、完成检查、重规划决策 |
+| `task_control/controller.py` | `TaskController` | 任务规划、步骤跟踪、完成检查、重规划决策 |
 | `events.py` | `AgentEventEmitter` | 封装事件发射，带 runId/turnId/eventId 和序列号 |
 | `run_state.py` | `RunState` | 跟踪运行计数器、重复调用检测、结果组装 |
 | `message_conversion.py` | `convert_to_llm()` | 内部消息格式转换为 LLM 提供者兼容格式 |
@@ -125,7 +123,7 @@ Codepilot 采用严格的分层架构，每一层职责清晰，依赖关系单�
 
 ---
 
-### 3.3 Layer 2: `llm/` — LLM 提供者层
+### 3.3 Layer 1: `llm/` — LLM 提供者层
 
 **职责**: 提供 LLM 提供者抽象，支持多模型切换。
 
@@ -159,21 +157,24 @@ stream = await stream(model, messages, tools, options)
 
 ---
 
-### 3.4 Layer 3: `tools/` — 工具系统层
+### 3.4 Layer 1: `tools/` — 工具系统层
 
-**职责**: 管理工具注册、执行、权限和沙箱。
+**职责**: 作为工具执行安全边界，管理工具契约、注册、权限、参数校验、审批、执行和结果防护。
 
 **核心组件**:
 
 | 文件 | 类/函数 | 职责 |
 |------|---------|------|
-| `types.py` | `AgentTool` | 可执行工具，包含 `execute` 函数 |
-| `registry.py` | `ToolRegistry` | 工具存储和元数据，`infer_tool_metadata()` 自动推断元数据 |
-| `runtime.py` | `ToolRuntime` | 执行引擎：权限检查 → 审批 → 执行 → 结果 |
-| `permissions.py` | `PermissionPolicy`, `ToolDecision` | 权限模式：read-only, workspace-write, ask |
+| `contracts.py` | `AgentTool`, `ToolRuntimeRequest/Result` | 工具层契约和可执行工具定义 |
+| `registry.py` | `ToolRegistry` | 只保存工具实例和对应 `ToolMetadata` |
+| `metadata.py` | `infer_tool_metadata()` | 内置工具 metadata、外部工具默认 metadata 推断 |
+| `execution.py` | `ToolRuntime` | 编排执行管线：权限 → schema → 审批 → 执行 → result guard |
+| `policy.py` | `PermissionPolicy`, `ToolDecision` | 权限模式：read-only, workspace-write, ask |
+| `argument_schema.py` | `SchemaValidator` | 执行前 JSON Schema 参数校验 |
 | `approval.py` | `ApprovalProvider` | 审批提供者协议 |
-| `sandbox.py` | `WorkspaceSandbox` | 路径隔离，防止文件操作越界 |
-| `shell_policy.py` | `ShellExecutionPolicy` | Shell 命令超时、输出限制、环境变量过滤 |
+| `result_safety.py` | `ToolResultGuard` | 执行后 secret/PII/prompt injection 防护和输出可信度标记 |
+| `workspace_safety.py` | `WorkspaceSandbox` | 路径隔离，防止文件操作越界 |
+| `shell_safety.py` | shell 安全函数 | Shell 命令分类、输出截断、环境变量过滤 |
 
 **内置工具** (8个):
 
@@ -194,16 +195,20 @@ ToolCall → ToolRuntime.execute()
   ↓
 1. 权限检查 (PermissionPolicy)
   ↓
-2. 审批检查 (ApprovalProvider)
+2. 参数校验 (SchemaValidator)
   ↓
-3. 执行工具 (AgentTool.execute)
+3. 审批检查 (ApprovalProvider)
   ↓
-4. 返回结果 (ToolResult)
+4. 执行工具 (AgentTool.execute)
+  ↓
+5. 结果防护 (ToolResultGuard)
+  ↓
+6. 返回结构化结果 (ToolResult)
 ```
 
 ---
 
-### 3.5 Layer 4: `sessions/` — 会话管理层
+### 3.5 Layer 3: `sessions/` — 会话管理层
 
 **职责**: 管理会话状态、记忆、上下文治理和持久化。
 
@@ -272,7 +277,7 @@ ToolCall → ToolRuntime.execute()
 | `service.py` | `RuntimeService` — 会话生命周期管理 |
 | `config.py` | 多源配置解析 (CLI > session > workspace > default) |
 | `model_resolver.py` | 模型解析（从选项/工作区/内置目录） |
-| `tool_assembler.py` | 工具组装（builtin < caller < extension < MCP） |
+| `bootstrap/tool_assembler.py` | 工具组装（builtins < caller < extension < MCP） |
 | `prompt.py` | 系统提示词组合 |
 | `context.py` | 运行时上下文构建 |
 | `hook_pipeline.py` | 钩子流水线组合 |
@@ -293,7 +298,7 @@ ToolCall → ToolRuntime.execute()
 
 ---
 
-### 3.7 Layer 6: `extensions/` — 扩展系统层
+### 3.7 Layer 4: `extensions/` — 扩展接入层
 
 **职责**: 支持三种扩展机制：Python 扩展、Markdown 技能、MCP 工具。
 
@@ -329,7 +334,7 @@ ToolCall → ToolRuntime.execute()
 
 ---
 
-### 3.8 Layer 7: `interfaces/` — 用户接口层
+### 3.8 Layer 6: `interfaces/` — 用户接口层
 
 **职责**: 提供用户交互界面，目前支持 CLI 和 Web（骨架）。
 
@@ -407,11 +412,11 @@ ToolCall → ToolRuntime.execute()
 │    ├─ 运行 before_prompt 生命周期钩子                        │
 │    ├─ 写入任务恢复状态 (TaskRecoveryStore)                    │
 │    ├─ 检查上下文新鲜度 (外部文件变更)                         │
-│    ├─ 检查/压缩上下文 (如果溢出)                             │
+│    ├─ 通过 ContextGovernor 生成本轮上下文投影                 │
 │    ├─ 调用 Agent.run(text)                                   │
 │    ├─ 持久化运行结果                                         │
 │    ├─ 终结记忆 (运行结果)                                    │
-│    ├─ 压缩上下文 (如果需要)                                  │
+│    ├─ 写入上下文治理报告和工具 artifact ledger                │
 │    └─ 运行 after_prompt 生命周期钩子                         │
 └─────────────────────────────────────────────────────────────┘
     ↓
@@ -437,8 +442,8 @@ ToolCall → ToolRuntime.execute()
 └─────────────────────────────────────────────────────────────┘
     ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ 6. ToolRuntime (runtime.py:execute)                         │
-│    权限检查 → 审批 → 执行 → 结果                             │
+│ 6. ToolRuntime (execution.py:execute)                       │
+│    权限检查 → 参数校验 → 审批 → 执行 → 结果防护               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -513,19 +518,19 @@ stream = await stream(model, messages, tools, options)
 ```
 Layer 0: protocols/        ← 从这里开始，理解数据类型
     ↓
-Layer 2: llm/              ← 理解 LLM 集成
+Layer 1: llm/              ← 理解 LLM 集成
     ↓
-Layer 3: tools/            ← 理解工具系统
+Layer 1: tools/            ← 理解工具系统
     ↓
-Layer 1: core/             ← 理解 Agent 循环核心（最重要）
+Layer 2: core/             ← 理解 Agent 循环核心（最重要）
     ↓
-Layer 4: sessions/         ← 理解会话和记忆管理
+Layer 3: sessions/         ← 理解会话和记忆管理
+    ↓
+Layer 4: extensions/       ← 理解扩展机制
     ↓
 Layer 5: runtime/          ← 理解运行时组装（串联一切）
     ↓
-Layer 6: extensions/       ← 理解扩展机制
-    ↓
-Layer 7: interfaces/       ← 最后看用户接口
+Layer 6: interfaces/       ← 最后看用户接口
 ```
 
 > **为什么先学 llm/ 和 tools/ 再学 core/?** 因为 `core/` 是 LLM 调用和工具执行的编排者，先理解它依赖的两个子系统，再看它如何串联它们，会更容易理解。
@@ -538,24 +543,25 @@ Layer 7: interfaces/       ← 最后看用户接口
 3. `protocols/events.py` — 理解事件类型
 4. `protocols/llm.py` — 理解 LLM 相关类型
 
-#### Layer 2: `llm/` — 先读这些文件
+#### Layer 1: `llm/` — 先读这些文件
 1. `llm/api_registry.py` — 理解提供者注册模式
 2. `llm/models.py` — 理解模型定义
 3. `llm/providers/_common.py` — 理解消息/工具转换
 
-#### Layer 3: `tools/` — 先读这些文件
-1. `tools/types.py` — 理解 `AgentTool` 定义
+#### Layer 1: `tools/` — 先读这些文件
+1. `tools/contracts.py` — 理解 `AgentTool` 和运行时请求/结果契约
 2. `tools/registry.py` — 理解工具注册
-3. `tools/runtime.py` — 理解工具执行流程
-4. `tools/builtin/file_tools.py` — 看一个具体工具实现
+3. `tools/execution.py` — 理解工具执行流程
+4. `tools/policy.py`、`tools/result_safety.py` — 理解执行前策略和执行后防护
+5. `tools/builtins/files.py` — 看一个具体工具实现
 
-#### Layer 1: `core/` — 先读这些文件
+#### Layer 2: `core/` — 先读这些文件
 1. `core/agent_loop.py` — **最重要**，理解主循环
 2. `core/agent.py` — 理解 Agent 封装
 3. `core/llm_runner.py` — 理解 LLM 调用桥接
 4. `core/tool_coordinator.py` — 理解工具执行协调
 
-#### Layer 4: `sessions/` — 先读这些文件
+#### Layer 3: `sessions/` — 先读这些文件
 1. `sessions/session.py` — 理解会话主类
 2. `sessions/memory/store.py` — 理解记忆存储
 3. `sessions/memory/writer.py` — 理解记忆写入
@@ -566,14 +572,14 @@ Layer 7: interfaces/       ← 最后看用户接口
 1. `runtime/assembly.py` — **最重要**，理解组装流水线
 2. `runtime/service.py` — 理解会话生命周期管理
 3. `runtime/config.py` — 理解配置解析
-4. `runtime/tool_assembler.py` — 理解工具组装
+4. `runtime/bootstrap/tool_assembler.py` — 理解工具组装
 
-#### Layer 6: `extensions/` — 先读这些文件
+#### Layer 4: `extensions/` — 先读这些文件
 1. `extensions/api.py` — 理解扩展 API
 2. `extensions/loader.py` — 理解扩展加载
 3. `extensions/skills.py` — 理解技能系统
 
-#### Layer 7: `interfaces/` — 先读这些文件
+#### Layer 6: `interfaces/` — 先读这些文件
 1. `interfaces/cli/cli.py` — 理解 CLI 入口
 2. `interfaces/cli/runner.py` — 理解运行模式分发
 3. `interfaces/cli/shell.py` — 理解交互式 shell
@@ -604,11 +610,13 @@ cli.py:main()
                 → providers/anthropic.py:stream_anthropic()  [或 openai_compatible]
             → agent_loop.py:_extract_tool_calls()
             → tool_coordinator.py:ToolCallCoordinator.execute_batch()
-              → runtime.py:ToolRuntime.execute()
-                → permissions.py:PermissionPolicy.check()
-                → approval.py:ApprovalProvider.approve()
-                → tool.py:AgentTool.execute()
-            → task_controller.py:TaskController.update()
+              → execution.py:ToolRuntime.execute()
+                → policy.py:PermissionPolicy.decide()
+                → argument_schema.py:SchemaValidator.validate()
+                → approval.py:ApprovalProvider.request_approval()
+                → contracts.py:AgentTool.execute()
+                → result_safety.py:ToolResultGuard.guard()
+            → task_control/controller.py:TaskController.after_tool_results()
         → session.py:_persist_run_result()
         → session.py:_finalize_memory()
         → session.py:_run_hooks("after_prompt")
@@ -618,14 +626,13 @@ cli.py:main()
 
 ```
 assembly.py:assemble_tools()
-  → tool_assembler.py:assemble_tools()
-    → builtin/__init__.py:create_builtin_tools()  [内置工具]
+  → bootstrap/tool_assembler.py:assemble_tools()
+    → builtins/__init__.py:create_builtin_tools()  [内置工具]
     → caller tools  [调用者提供的工具]
     → extension tools  [扩展工具]
     → mcp tools  [MCP 工具]
     → tool_assembler.py:_merge_tools()  [合并，按优先级]
-    → tool_assembler.py:_validate_tools()  [验证]
-    → tool_assembler.py:_apply_permissions()  [应用权限]
+    → ToolRegistry + ToolRuntime  [过滤、权限、schema、审批和结果防护]
 ```
 
 ### 7.3 扩展加载调用链
@@ -659,18 +666,23 @@ src/codepilot/
 │   ├── errors.py
 │   └── context.py
 │
-├── core/                       # Layer 1: Agent 循环引擎
+├── core/                       # Layer 2: Agent 循环引擎
 │   ├── agent_loop.py           # 主循环
 │   ├── agent.py                # Agent 封装
 │   ├── llm_runner.py           # LLM 调用桥接
 │   ├── tool_coordinator.py     # 工具执行协调
-│   ├── task_controller.py      # 任务控制
+│   ├── task_control/           # 任务控制
+│   │   ├── controller.py       # 任务控制器
+│   │   ├── rules.py            # 任务控制规则
+│   │   ├── state.py            # 任务状态
+│   │   ├── planner.py          # 计划生成
+│   │   └── contracts.py        # 任务控制契约
 │   ├── events.py               # 事件发射器
 │   ├── run_state.py            # 运行状态
 │   ├── types.py                # 核心类型
 │   └── message_conversion.py   # 消息转换
 │
-├── llm/                        # Layer 2: LLM 提供者层
+├── llm/                        # Layer 1: LLM 提供者层
 │   ├── api_registry.py         # 提供者注册表
 │   ├── models.py               # 模型目录
 │   ├── providers/
@@ -682,22 +694,25 @@ src/codepilot/
 │   ├── overflow.py             # 溢出检测
 │   └── env_api_keys.py         # API Key 解析
 │
-├── tools/                      # Layer 3: 工具系统层
-│   ├── types.py                # 工具类型
+├── tools/                      # Layer 1: 工具系统层
+│   ├── contracts.py            # 工具契约
 │   ├── registry.py             # 工具注册表
-│   ├── runtime.py              # 工具运行时
-│   ├── permissions.py          # 权限策略
+│   ├── metadata.py             # 工具元数据
+│   ├── execution.py            # 工具运行时
+│   ├── policy.py               # 权限策略
+│   ├── argument_schema.py      # 参数 schema 校验
 │   ├── approval.py             # 审批提供者
-│   ├── sandbox.py              # 沙箱
-│   ├── shell_policy.py         # Shell 策略
-│   └── builtin/
+│   ├── result_safety.py        # 工具结果防护
+│   ├── workspace_safety.py     # 工作区边界
+│   ├── shell_safety.py         # Shell 安全
+│   └── builtins/
 │       ├── __init__.py         # 内置工具工厂
-│       ├── file_tools.py       # 文件工具
-│       ├── search_tools.py     # 搜索工具
-│       ├── shell_tools.py      # Shell 工具
-│       └── workspace_tools.py  # 工作区工具
+│       ├── files.py            # 文件工具
+│       ├── search.py           # 搜索工具
+│       ├── shell.py            # Shell 工具
+│       └── workspace_status.py # 工作区工具
 │
-├── sessions/                   # Layer 4: 会话管理层
+├── sessions/                   # Layer 3: 会话事实源和上下文治理
 │   ├── session.py              # 会话主类
 │   ├── layout.py               # sessions/runs/memory/context 路径契约
 │   ├── context/
@@ -727,16 +742,21 @@ src/codepilot/
 ├── runtime/                    # Layer 5: 运行时组装层
 │   ├── assembly.py             # 组装流水线
 │   ├── service.py              # 运行时服务
-│   ├── config.py               # 配置解析
-│   ├── model_resolver.py       # 模型解析
-│   ├── tool_assembler.py       # 工具组装
-│   ├── prompt.py               # 提示词构建
-│   ├── context.py              # 上下文构建
-│   ├── hook_pipeline.py        # 钩子流水线
-│   ├── resources.py            # 资源加载
+│   ├── contracts.py            # runtime 服务契约
+│   ├── bootstrap/
+│   │   ├── config.py           # 配置解析
+│   │   ├── model_resolver.py   # 模型解析
+│   │   ├── tool_assembler.py   # 工具组装
+│   │   ├── prompt.py           # 提示词构建
+│   │   ├── context.py          # 上下文构建
+│   │   ├── hook_pipeline.py    # 钩子流水线
+│   │   └── resources.py        # 资源加载
+│   ├── execution/
+│   │   ├── approval.py         # 审批恢复服务
+│   │   └── runs.py             # active run 管理
 │   └── types.py                # 运行时类型
 │
-├── extensions/                 # Layer 6: 扩展系统层
+├── extensions/                 # Layer 4: 扩展接入层
 │   ├── api.py                  # 扩展 API
 │   ├── loader.py               # 扩展加载器
 │   ├── skills.py               # 技能加载器
@@ -744,7 +764,7 @@ src/codepilot/
 │   └── mcp/
 │       └── bridge.py           # MCP 桥接
 │
-├── interfaces/                 # Layer 7: 用户接口层
+├── interfaces/                 # Layer 6: 用户接口层
 │   ├── cli/
 │   │   ├── cli.py              # CLI 入口
 │   │   ├── runner.py           # 运行器

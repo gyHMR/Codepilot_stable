@@ -1,3 +1,6 @@
+# 新手导读：包门面文件：集中导出本层最常用的类型和入口，降低学习时的导入成本。
+# 关注点：extensions 层负责把 Python 扩展、skill 和 MCP 外部能力加载成项目内统一能力。
+
 """
 扩展与技能加载模块。
 
@@ -8,6 +11,13 @@
 from .api import ExtensionAPI
 from .loader import discover_extension_paths, load_extensions
 from .skills import discover_skill_paths, load_skills
+from codepilot.sessions.types import (
+    CommandHandler,
+    LifecycleHook,
+    RegisteredCommand,
+    SessionCommandContext,
+    SessionLifecycleContext,
+)
 from .types import (
     AfterToolCallContext,
     AfterToolCallResult,
@@ -15,12 +25,7 @@ from .types import (
     BeforeToolCallContext,
     BeforeToolCallResult,
     BeforeHook,
-    CommandHandler,
-    ExtensionCommandContext,
-    ExtensionLifecycleContext,
-    LifecycleHook,
     LoadedExtensions,
-    RegisteredCommand,
     SkillSpec,
 )
 
@@ -33,8 +38,8 @@ __all__ = [
     "AfterToolCallResult",
     "CommandHandler",
     "RegisteredCommand",
-    "ExtensionCommandContext",
-    "ExtensionLifecycleContext",
+    "SessionCommandContext",
+    "SessionLifecycleContext",
     "LifecycleHook",
     "SkillSpec",
     "LoadedExtensions",

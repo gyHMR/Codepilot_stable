@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：工具 metadata 描述工具风险、只读/写入能力、并发安全和默认推断。
+# 关注点：registry 只负责登记，工具语义判断集中在这里和 policy.py。
+
 """Tool metadata catalog and conservative metadata inference."""
 
 from .contracts import AgentTool, ToolMetadata, ToolRiskLevel

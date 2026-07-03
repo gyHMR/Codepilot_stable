@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：EventRecorder 负责把事件写入 JSONL。
+# 关注点：调试某次运行时，先确认这里记录了哪些原始事件。
+
 """Passive JSONL recorder for the slim run event contract."""
 
 import json

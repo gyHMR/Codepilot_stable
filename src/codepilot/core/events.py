@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：AgentEventEmitter 统一给 core 层事件补齐 run/turn/sequence 等观测字段。
+# 关注点：事件从这里发出后，会被 CLI 渲染、session 持久化和 observability 消费。
+
 """Agent 事件信封辅助工具：为原始事件注入 run/turn/event 元数据后转发。"""
 
 import asyncio

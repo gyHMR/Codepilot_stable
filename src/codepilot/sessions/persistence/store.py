@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：SessionStore 是 session.json/messages.jsonl 的事实源封装。
+# 关注点：会话恢复、消息追加和 task recovery 当前投影都从这里落盘。
+
 """Slim session persistence store.
 
 Canonical layout:

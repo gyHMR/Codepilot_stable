@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：OpenAI compatible provider 适配 DeepSeek/OpenAI 风格的 Chat Completions 接口。
+# 关注点：它展示了如何把统一 ToolCall/Message 协议映射到兼容 API。
+
 """
 OpenAI 标准 Chat Completions 流式 provider。
 

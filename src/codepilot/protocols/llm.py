@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：llm.py 定义 Model、能力、上下文窗口和流式选项等模型协议。
+# 关注点：llm/provider 和 runtime 都依赖这些稳定字段。
+
 """
 LLM 相关类型定义。
 

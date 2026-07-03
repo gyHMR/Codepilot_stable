@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：内置搜索工具实现 grep/find，属于只读上下文收集能力。
+# 关注点：这些工具通常可并行执行，因为 metadata 会标记为 read_only/concurrency_safe。
+
 """内置搜索工具：grep（正则内容搜索）、find（glob 文件查找）。"""
 
 import re

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：core/types.py 定义 AgentContext、AgentLoopConfig、AgentState 和工具 hook 上下文。
+# 关注点：这些类型是 core 主循环的输入面板，读懂它们就能理解一次 run 能拿到哪些能力。
+
 """
 agent_core 的类型定义模块
 ========================
@@ -114,15 +117,6 @@ class AgentContext:
         # 清理可选文本字段
         self.current_task = _optional_core_text(self.current_task)
         # 深拷贝可选字典（避免外部修改影响内部状态）
-        self.task_recovery_projection = _copy_optional_dict(
-            self.task_recovery_projection,
-            field_name="task_recovery_projection",
-        )
-        self.task_signal = _copy_optional_dict(self.task_signal, field_name="task_signal")
-        self.system_prompt = _clean_core_text(self.system_prompt)
-        self.messages = _copy_messages(self.messages, field_name="messages")
-        self.tools = _copy_tools(self.tools, field_name="tools")
-        self.current_task = _optional_core_text(self.current_task)
         self.task_recovery_projection = _copy_optional_dict(
             self.task_recovery_projection,
             field_name="task_recovery_projection",
@@ -454,23 +448,6 @@ class AgentState:
             field_name="pending_tool_calls",
         )
         # 清理错误信息
-        self.error = _optional_core_text(self.error)
-        if not isinstance(self.model, Model):
-            raise TypeError("AgentState model must be Model")
-        self.system_prompt = _clean_core_text(self.system_prompt)
-        self.thinking_level = _ensure_agent_thinking_level(self.thinking_level)
-        self.tools = _copy_tools(self.tools, field_name="tools")
-        self.messages = _copy_messages(self.messages, field_name="messages")
-        self.is_streaming = _ensure_bool(self.is_streaming, field_name="is_streaming")
-        if self.stream_message is not None and not isinstance(
-            self.stream_message,
-            (UserMessage, AssistantMessage, ToolResultMessage),
-        ):
-            raise TypeError("AgentState stream_message must be AgentMessage or None")
-        self.pending_tool_calls = _copy_text_set(
-            self.pending_tool_calls,
-            field_name="pending_tool_calls",
-        )
         self.error = _optional_core_text(self.error)
 
 

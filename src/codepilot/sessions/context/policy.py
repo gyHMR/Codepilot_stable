@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# 新手导读：ContextPressurePolicy 根据 token 估算和工具输出压力判断 normal/tight/critical。
+# 关注点：不同压力会影响保留消息数量、工具输出摘要和 checkpoint 行为。
+
 """上下文压力策略。"""
 
 from dataclasses import dataclass
