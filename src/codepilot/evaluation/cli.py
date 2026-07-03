@@ -13,11 +13,12 @@ import sys
 import uuid
 from pathlib import Path
 
-from codepilot.runtime import WorkspaceResourceLoader
+from codepilot.runtime.bootstrap import WorkspaceResourceLoader
 from codepilot.runtime.contracts import CreateAgentSessionOptions
 
 from .artifacts import EvaluationArtifacts
 from .experiments import (
+    aggregate_experiment_comparison,
     experiment_variants,
     run_context_ab,
     run_security_ab,
@@ -121,13 +122,7 @@ async def _run_experiment(
     off, on = experiment_variants(args.module)
     eval_id = options.eval_id or f"{args.module}_{uuid.uuid4().hex[:8]}"
     root = Path(options.artifact_root) / eval_id
-    comparison = {
-        "schema_version": 1,
-        "module": args.module,
-        "variants": [off, on],
-        "repeats": args.repeat,
-        "variant_dirs": {},
-    }
+    variant_dirs: dict[str, list[Path]] = {}
     for variant in (off, on):
         overrides = _variant_overrides(args.module, variant)
         for index in range(1, args.repeat + 1):
@@ -141,9 +136,12 @@ async def _run_experiment(
                 runtime_overrides=overrides,
             )
             result = await service.run_suite(suite_path, repeat_options)
-            comparison["variant_dirs"].setdefault(variant, []).append(
-                result.artifact_dir
-            )
+            variant_dirs.setdefault(variant, []).append(Path(result.artifact_dir))
+    comparison = aggregate_experiment_comparison(
+        module=args.module,
+        variants=(off, on),
+        variant_dirs=variant_dirs,
+    )
     artifacts = EvaluationArtifacts(options.artifact_root, eval_id)
     artifacts.initialize(args.module, case_count=0)
     artifacts.write_comparison(comparison, render_comparison_markdown(comparison))

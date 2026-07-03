@@ -5,6 +5,8 @@ from __future__ import annotations
 
 """Lightweight experiment helpers for evaluation v2."""
 
+import json
+from pathlib import Path
 from statistics import mean
 from typing import Any
 
@@ -116,6 +118,57 @@ def run_security_ab(cases: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def aggregate_experiment_comparison(
+    *,
+    module: str,
+    variants: tuple[str, str] = ("off", "on"),
+    variant_dirs: dict[str, list[str | Path]],
+) -> dict[str, Any]:
+    """Aggregate repeated on/off run summaries into one comparison artifact."""
+
+    variant_summaries = {
+        variant: [_load_summary(Path(path)) for path in variant_dirs.get(variant, [])]
+        for variant in variants
+    }
+    metric_names = sorted(
+        {
+            "task.pass_rate",
+            *[
+                str(name)
+                for summaries in variant_summaries.values()
+                for summary in summaries
+                for name in _dict(summary.get("metrics")).keys()
+            ],
+        }
+    )
+    metrics: dict[str, dict[str, float | None]] = {}
+    off, on = variants
+    for name in metric_names:
+        off_value = _aggregate_metric(variant_summaries.get(off, []), name)
+        on_value = _aggregate_metric(variant_summaries.get(on, []), name)
+        metrics[name] = {
+            "off": off_value,
+            "on": on_value,
+            "delta": (
+                on_value - off_value
+                if off_value is not None and on_value is not None
+                else None
+            ),
+        }
+    return {
+        "schema_version": 1,
+        "module": module,
+        "kind": "model_ablation",
+        "variants": list(variants),
+        "repeats": max((len(paths) for paths in variant_dirs.values()), default=0),
+        "variant_dirs": {
+            variant: [str(path) for path in paths]
+            for variant, paths in variant_dirs.items()
+        },
+        "metrics": metrics,
+    }
+
+
 def _naive_select(candidates: list[dict[str, Any]], budget_tokens: int) -> list[dict[str, Any]]:
     if budget_tokens <= 0:
         return list(candidates)
@@ -156,6 +209,45 @@ def _context_hit_score(
     return None if score.value is None else float(score.value)
 
 
+def _load_summary(path: Path) -> dict[str, Any]:
+    summary_path = path / "summary.json"
+    if not summary_path.is_file():
+        return {}
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else {}
+
+
+def _aggregate_metric(summaries: list[dict[str, Any]], metric_name: str) -> float | None:
+    if metric_name == "task.pass_rate":
+        values = [
+            float(summary["pass_rate"])
+            for summary in summaries
+            if isinstance(summary.get("pass_rate"), (int, float))
+        ]
+        return mean(values) if values else None
+    weighted_total = 0.0
+    total_count = 0
+    fallback_values: list[float] = []
+    for summary in summaries:
+        metric = _dict(_dict(summary.get("metrics")).get(metric_name))
+        avg = metric.get("avg")
+        if not isinstance(avg, (int, float)):
+            continue
+        count = metric.get("count")
+        if isinstance(count, int) and count > 0:
+            weighted_total += float(avg) * count
+            total_count += count
+        else:
+            fallback_values.append(float(avg))
+    if total_count > 0:
+        return weighted_total / total_count
+    return mean(fallback_values) if fallback_values else None
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def experiment_variants(module: str) -> tuple[str, str]:
     if module not in {"memory", "planning"}:
         raise ValueError(f"{module} does not support on/off ablation")
@@ -163,6 +255,7 @@ def experiment_variants(module: str) -> tuple[str, str]:
 
 
 __all__ = [
+    "aggregate_experiment_comparison",
     "experiment_variants",
     "run_context_ab",
     "run_security_ab",

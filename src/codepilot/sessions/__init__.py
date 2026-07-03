@@ -14,7 +14,7 @@ The sessions layer owns four small domains:
 """
 
 from .context import ContextGovernor, RepositoryBootstrap, RepositoryTracker
-from .history import SessionCheckpoint
+from .history import GitRollbackAction, GitRollbackPlan, GitRollbackResult, SessionCheckpoint
 from .layout import SessionLayout
 from .memory import (
     MemoryQuery,
@@ -49,6 +49,9 @@ __all__ = [
     "SessionLifecycleContext",
     "ContextGovernor",
     "SessionCheckpoint",
+    "GitRollbackAction",
+    "GitRollbackPlan",
+    "GitRollbackResult",
     "SessionLayout",
     "SessionStore",
     "FreshnessResult",

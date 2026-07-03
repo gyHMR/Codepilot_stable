@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,6 +43,63 @@ def _create_runtime_session(tmp_path: Path):
     return runtime, handle.session_id
 
 
+def _git(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def _init_repo(root: Path) -> None:
+    _git(root, "init")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test User")
+
+
+def _append_run(session, run_id: str, affected_paths: list[str]) -> None:
+    from codepilot.protocols import (
+        AgentRunCounters,
+        AgentRunResult,
+        AssistantMessage,
+        TextContent,
+    )
+
+    final = AssistantMessage(content=[TextContent(text="done")])
+    result = AgentRunResult(
+        run_id=run_id,
+        session_id=session.session_id,
+        status="completed",
+        stop_reason="final_answer",
+        counters=AgentRunCounters(tool_calls=1),
+        messages=[final],
+        final_message=final,
+        affected_paths=affected_paths,
+        workspace_changed=True,
+    )
+    session.store.append_run_result(result)
+
+
+def _append_run_with_rollback(session, run_id: str, *, baseline, affected_paths: list[str]) -> None:
+    from codepilot.sessions.history.git_rollback import build_rollback_metadata
+
+    _append_run(session, run_id, affected_paths)
+    session.store.write_rollback_metadata(
+        run_id,
+        build_rollback_metadata(
+            baseline,
+            affected_paths=affected_paths,
+            workspace_changed=True,
+        ),
+    )
+
+
 def test_cli_command_router_handles_session_command(tmp_path: Path) -> None:
     asyncio.run(_run_session_command_case(tmp_path))
 
@@ -74,6 +132,18 @@ def test_cli_command_router_does_not_expose_removed_compact_command(tmp_path: Pa
 
 def test_cli_command_router_manages_project_memory(tmp_path: Path) -> None:
     asyncio.run(_run_memory_command_case(tmp_path))
+
+
+def test_cli_command_router_previews_and_applies_rollback(tmp_path: Path) -> None:
+    asyncio.run(_run_rollback_command_case(tmp_path))
+
+
+def test_cli_command_router_reports_no_rollback_run(tmp_path: Path) -> None:
+    asyncio.run(_run_rollback_no_run_case(tmp_path))
+
+
+def test_cli_command_router_reports_blocked_rollback(tmp_path: Path) -> None:
+    asyncio.run(_run_rollback_blocked_case(tmp_path))
 
 
 async def _run_memory_command_case(tmp_path: Path) -> None:
@@ -119,6 +189,87 @@ async def _run_context_command_case(tmp_path: Path) -> None:
         assert result.handled
         assert any("ctx_1" in line for line in result.output_lines)
         assert any("Dropped items" in line for line in result.output_lines)
+    finally:
+        runtime.close_all()
+
+
+async def _run_rollback_command_case(tmp_path: Path) -> None:
+    from codepilot.interfaces.cli.commands import handle_cli_command
+
+    _init_repo(tmp_path)
+    tracked = tmp_path / "app.py"
+    tracked.write_text("print('before')\n", encoding="utf-8")
+    _git(tmp_path, "add", "app.py")
+    _git(tmp_path, "commit", "-m", "baseline")
+
+    runtime, session_id = _create_runtime_session(tmp_path)
+    session = runtime.get_session(session_id)
+    try:
+        baseline = session.capture_run_rollback_baseline()
+        tracked.write_text("print('after')\n", encoding="utf-8")
+        _append_run_with_rollback(
+            session,
+            "run_cli_rollback",
+            baseline=baseline,
+            affected_paths=["app.py"],
+        )
+
+        preview = await handle_cli_command(runtime, session_id, "/rollback run_cli_rollback")
+        applied = await handle_cli_command(runtime, session_id, "/rollback apply run_cli_rollback")
+
+        assert preview.handled
+        assert any("Rollback preview" in line for line in preview.output_lines)
+        assert any("restore app.py" in line for line in preview.output_lines)
+        assert applied.handled
+        assert any("Rollback result" in line for line in applied.output_lines)
+        assert any("status=reverted" in line for line in applied.output_lines)
+        assert tracked.read_text(encoding="utf-8") == "print('before')\n"
+    finally:
+        runtime.close_all()
+
+
+async def _run_rollback_no_run_case(tmp_path: Path) -> None:
+    from codepilot.interfaces.cli.commands import handle_cli_command
+
+    runtime, session_id = _create_runtime_session(tmp_path)
+    try:
+        result = await handle_cli_command(runtime, session_id, "/rollback")
+
+        assert result.handled
+        assert any("status=not_eligible" in line for line in result.output_lines)
+        assert any("no_run_results" in line for line in result.output_lines)
+    finally:
+        runtime.close_all()
+
+
+async def _run_rollback_blocked_case(tmp_path: Path) -> None:
+    from codepilot.interfaces.cli.commands import handle_cli_command
+
+    _init_repo(tmp_path)
+    tracked = tmp_path / "app.py"
+    tracked.write_text("print('before')\n", encoding="utf-8")
+    _git(tmp_path, "add", "app.py")
+    _git(tmp_path, "commit", "-m", "baseline")
+
+    runtime, session_id = _create_runtime_session(tmp_path)
+    session = runtime.get_session(session_id)
+    try:
+        baseline = session.capture_run_rollback_baseline()
+        tracked.write_text("print('after')\n", encoding="utf-8")
+        _append_run_with_rollback(
+            session,
+            "run_cli_blocked",
+            baseline=baseline,
+            affected_paths=["app.py"],
+        )
+        _git(tmp_path, "add", "app.py")
+
+        result = await handle_cli_command(runtime, session_id, "/rollback apply")
+
+        assert result.handled
+        assert any("status=conflict" in line for line in result.output_lines)
+        assert any("affected_path_has_staged_changes" in line for line in result.output_lines)
+        assert tracked.read_text(encoding="utf-8") == "print('after')\n"
     finally:
         runtime.close_all()
 

@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 
 from codepilot.sessions.session import AgentSession
+from codepilot.sessions.history import GitRollbackPlan, GitRollbackResult
 from codepilot.sessions.memory import load_global_memory, render_memory
 from codepilot.sessions.types import RegisteredCommand, SessionCommandContext
 
@@ -121,6 +122,7 @@ def builtin_commands() -> list[RuntimeCommand]:
         RuntimeCommand(name="clear", description="清空上下文，创建新会话", source="builtin"),
         RuntimeCommand(name="context", description="查看最近一次上下文投影治理报告", source="builtin"),
         RuntimeCommand(name="memory", description="查看、添加、提升或删除结构化记忆", source="builtin"),
+        RuntimeCommand(name="rollback", description="预览或执行最近一次 run 的 Git 回退", source="builtin"),
         RuntimeCommand(name="tools", description="查看当前可用工具", source="builtin"),
         RuntimeCommand(name="model", description="查看当前模型信息", source="builtin"),
         RuntimeCommand(name="usage", description="查看 token 用量和费用", source="builtin"),
@@ -328,6 +330,31 @@ async def handle_cli_command(
         ]
         return RuntimeCommandResult(handled=True, output_lines=lines)
 
+    # /rollback [apply] [run_id]: 预览或执行 run 级 Git 回退
+    if cmd == "/rollback":
+        action, _, value = arg.partition(" ")
+        action = action.strip()
+        value = value.strip()
+        if action in {"help", "-h", "--help"}:
+            return RuntimeCommandResult(
+                handled=True,
+                output_lines=[
+                    "usage: /rollback [run_id]",
+                    "       /rollback apply [run_id]",
+                ],
+            )
+        if action == "apply":
+            result = session.revert_run(value) if value else session.revert_last_run()
+            return RuntimeCommandResult(
+                handled=True,
+                output_lines=_format_rollback_result(result),
+            )
+        plan = session.preview_run_rollback(action) if action else session.preview_last_run_rollback()
+        return RuntimeCommandResult(
+            handled=True,
+            output_lines=_format_rollback_plan(plan),
+        )
+
     # /memory [list|add|promote|forget]
     if cmd == "/memory":
         action, _, value = arg.partition(" ")
@@ -509,3 +536,44 @@ async def handle_cli_command(
 
     # 未匹配任何命令：交还给界面层决定如何提示。
     return RuntimeCommandResult(handled=False)
+
+
+def _format_rollback_plan(plan: GitRollbackPlan) -> list[str]:
+    lines = [
+        "=== Rollback preview ===",
+        f"  run_id={plan.run_id or '(none)'}",
+        f"  status={plan.status}",
+    ]
+    if plan.reason:
+        lines.append(f"  reason={plan.reason}")
+    if plan.actions:
+        lines.append("  actions:")
+        for action in plan.actions:
+            suffix = f" ({action.reason})" if action.reason else ""
+            lines.append(f"    - {action.action} {action.path}{suffix}")
+    else:
+        lines.append("  actions: (none)")
+    if plan.ignored_paths:
+        lines.append("  ignored unrelated changes:")
+        lines.extend(f"    - {path}" for path in plan.ignored_paths)
+    return lines
+
+
+def _format_rollback_result(result: GitRollbackResult) -> list[str]:
+    lines = [
+        "=== Rollback result ===",
+        f"  run_id={result.run_id or '(none)'}",
+        f"  status={result.status}",
+    ]
+    if result.reason:
+        lines.append(f"  reason={result.reason}")
+    if result.restored_paths:
+        lines.append("  restored:")
+        lines.extend(f"    - {path}" for path in result.restored_paths)
+    if result.removed_paths:
+        lines.append("  removed:")
+        lines.extend(f"    - {path}" for path in result.removed_paths)
+    if result.conflicted_paths:
+        lines.append("  conflicted:")
+        lines.extend(f"    - {path}" for path in result.conflicted_paths)
+    return lines

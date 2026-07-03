@@ -244,6 +244,14 @@ def test_context_governor_projects_decision_view_with_checkpoint_and_memory(
     assert prepared.report.artifact_refs
     assert prepared.report.context_view is not None
     assert prepared.report.context_view.recalled_memory
+    assert any(
+        item.get("path") == "test/test_app.py"
+        for item in prepared.report.selected_items
+    )
+    assert any(
+        item.get("kind") == "memory" and item.get("id") == "mem_1"
+        for item in prepared.report.selected_items
+    )
     assert governor.checkpoints.load_latest() is not None
     session_dir = tmp_path / ".codepilot" / "sessions" / "session_1"
     assert (session_dir / "context_ledger.jsonl").exists()

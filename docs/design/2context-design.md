@@ -1,158 +1,435 @@
 # Codepilot 上下文管理机制设计
 
-本文只描述当前代码中的上下文投影治理实现。旧的手动压缩入口、旧上下文编译路径和旧 `context.jsonl/runs.jsonl` 布局已经不再是运行时能力；代码中没有兼容读取旧 session layout 的主路径。
+本文说明当前代码中的上下文管理机制。更准确的说法是：Codepilot 在每次模型调用前都会跑一条上下文治理链路，把会话历史、仓库状态、工具结果、任务状态、长期记忆和预算压力重新编排成一次可发送给模型的 prompt。
 
-## 0. 机制概述
+完整历史仍由 session/run 持久化保存；进入 prompt 的只是本轮模型决策需要的规则、当前工作状态、召回记忆、有效证据和少量最近对话。
 
-Codepilot 当前的上下文治理不是“把历史消息列表裁短后发给模型”，而是“从完整 Session 事实源、工具输出 ledger、仓库状态、任务恢复投影和记忆召回中，为本轮模型调用投影一个 ContextView”。`AgentSession` 在创建时无条件构造 `ContextGovernor`，并把 `ContextGovernor.prepare()` 绑定到核心 Agent 的 `prepare_context` 回调；每次模型调用前由 governor 重新读取快照、计算压力、生成分层视图、压缩工具输出、必要时创建 checkpoint，最后返回 `PreparedAgentContext`。
+## 0. 一句话概述
 
-代码证据：
-- `AgentSession` 文档明确第 4 项职责是“通过 ContextGovernor 为每轮模型调用投影上下文”：`src/codepilot/sessions/session.py:9`。
-- `AgentSession._build_context_preparer()` 创建 `ContextGovernor` 并返回 `self.context_governor.prepare`：`src/codepilot/sessions/session.py:652-665`。
-- runtime 装配层不再传入旧 prepare_context，而是交给 session 内部绑定：`src/codepilot/runtime/assembly.py:185`。
-- `ContextGovernor.prepare()` 是本轮上下文准备主入口：`src/codepilot/sessions/context/governor.py:79-186`。
+Codepilot 的上下文管理不是简单截断历史消息，而是在每次 LLM 调用前由 `ContextGovernor.prepare()` 统一执行：先整理本轮可用信息，再根据模型窗口计算 token 压力，然后按 `normal / tight / critical` 三档选择、压缩和组装上下文，最后生成 `PreparedAgentContext` 和 `ContextReport`。
 
-## 1. 核心模块、类和入口
+核心入口和代码位置：
 
-| 模块 | 核心类/函数 | 职责 | 代码证据 |
-|---|---|---|---|
-| `src/codepilot/sessions/layout.py` | `SessionLayout` | 统一定义 sessions/runs/memory/context/artifact 路径，避免各模块散落拼路径。 | `SessionLayout`：`src/codepilot/sessions/layout.py:10`；`context_ledger_file`：`src/codepilot/sessions/layout.py:45`；`tool_outputs_dir`：`src/codepilot/sessions/layout.py:49`；`run_file()`：`src/codepilot/sessions/layout.py:63`。 |
-| `src/codepilot/sessions/session.py` | `AgentSession` | 会话编排入口：加载 transcript、绑定 ContextGovernor、持久化消息、在 run 结束后写 memory/task/rollback。 | 初始化读取 `load_session_messages()`：`src/codepilot/sessions/session.py:111`；事件中写消息：`src/codepilot/sessions/session.py:625-646`；绑定 governor：`src/codepilot/sessions/session.py:652-665`。 |
-| `src/codepilot/sessions/persistence/store.py` | `SessionStore` | session 事实源：`session.json`、`messages.jsonl`、lazy session events、task recovery 当前投影。 | `ensure_initialized()` 只创建 `session.json/messages.jsonl`：`src/codepilot/sessions/persistence/store.py:52-75`；`append_message()` 写 transcript：`src/codepilot/sessions/persistence/store.py:111-125`；`save_task_recovery()` 写入 session state：`src/codepilot/sessions/persistence/store.py:108-110`。 |
-| `src/codepilot/sessions/persistence/run_store.py` | `RunStore` | run 事实源：`run.json`、lazy run events、rollback metadata、freshness 评估。 | `append_run_result()` 写单一 `run.json`：`src/codepilot/sessions/persistence/run_store.py:77-100`；`write_rollback_metadata()`：`src/codepilot/sessions/persistence/run_store.py:114-125`；`evaluate_freshness()`：`src/codepilot/sessions/persistence/run_store.py:142-145`。 |
-| `src/codepilot/sessions/context/governor.py` | `ContextGovernor` | 唯一上下文治理入口，串联 snapshot、memory、pressure、projector、checkpoint、ledger report。 | 初始化依赖：`src/codepilot/sessions/context/governor.py:42-77`；`prepare()` 主流程：`src/codepilot/sessions/context/governor.py:79-186`；写 context ledger：`src/codepilot/sessions/context/governor.py:227-254`。 |
-| `src/codepilot/sessions/context/snapshot.py` | `SessionSnapshotBuilder` | 从 repository tracker、context state、tool ledger、checkpoint 读取本轮事实快照。 | `SessionSnapshotBuilder.build()` 刷新 repo、处理工具结果、返回 active/changed/artifact/checkpoint：`src/codepilot/sessions/context/snapshot.py:54-81`。 |
-| `src/codepilot/sessions/context/policy.py` | `ContextPressurePolicy` | 根据模型窗口、输出预算、安全边界、历史和工具输出规模判定 `normal/tight/critical`。 | `evaluate()`：`src/codepilot/sessions/context/policy.py:17-52`。 |
-| `src/codepilot/sessions/context/projector.py` | `ContextProjector` | 把快照和召回信息投影为 `stable_rules/working_state/recalled_memory/evidence/recent_messages/tools` 分层视图。 | `project()`：`src/codepilot/sessions/context/projector.py:61-90`；`project_messages()` 根据压力保留 10/6/4 条消息：`src/codepilot/sessions/context/projector.py:92-112`。 |
-| `src/codepilot/sessions/context/ledger.py` | `ToolArtifactLedger` | 大工具输出 artifact 化；prompt 中使用轻量摘要和 artifact ref。 | 初始化使用 `context_ledger.jsonl` 和 `artifacts/tool_outputs`：`src/codepilot/sessions/context/ledger.py:68-77`；`record_tool_result()`：`src/codepilot/sessions/context/ledger.py:79-132`；`project_tool_result()`：`src/codepilot/sessions/context/ledger.py:134-161`。 |
-| `src/codepilot/sessions/context/checkpoint.py` | `ContextCheckpointManager` | critical 压力下创建结构化 checkpoint，并写入统一 `context_ledger.jsonl`。 | `ContextCheckpointManager`：`src/codepilot/sessions/context/checkpoint.py:14-23`；`append()`：`src/codepilot/sessions/context/checkpoint.py:49-56`。 |
-| `src/codepilot/sessions/memory/store.py` | `MemoryStore` | 负责 session/project memory 文件位置与读写；上下文只召回，不改失败记忆总结算法。 | session memory/project memory 路径：`src/codepilot/sessions/memory/store.py:30-45`。 |
-| `src/codepilot/sessions/history/task_recovery.py` | `TaskRecoveryStore` | 保存/读取当前任务恢复投影，实际落在 `session.json.task_recovery`。 | `load_projection()`：`src/codepilot/sessions/history/task_recovery.py:46-47`；`save_projection()`：`src/codepilot/sessions/history/task_recovery.py:64-73`。 |
-| `src/codepilot/sessions/history/git_rollback.py` | `build_rollback_metadata()` | 维持轻量 git 回退元数据，不做复杂快照事务。 | `build_rollback_metadata()`：`src/codepilot/sessions/history/git_rollback.py:79`；session 写 rollback metadata：`src/codepilot/sessions/session.py:524-532`。 |
+| 代码位置 | 职责 |
+|---|---|
+| `src/codepilot/sessions/session.py` 的 `AgentSession._build_context_preparer()` | 创建 `ContextGovernor`，并把 `prepare()` 绑定到 Agent 的 `prepare_context` 回调 |
+| `src/codepilot/core/llm_runner.py` 的 `LLMStreamRunner.stream_assistant_response()` | 每次模型调用前执行 `prepare_context`，然后再转换消息并调用 provider |
+| `src/codepilot/sessions/context/governor.py` 的 `ContextGovernor.prepare()` | 上下文治理主流程 |
+| `src/codepilot/sessions/context/snapshot.py` 的 `SessionSnapshotBuilder.build()` | 整理仓库、工具、artifact、checkpoint、active files 等事实 |
+| `src/codepilot/sessions/context/policy.py` 的 `ContextPressurePolicy.evaluate()` | 计算有效预算和上下文压力 |
+| `src/codepilot/sessions/context/projector.py` 的 `ContextProjector.project()` | 按层组装 system prompt 和 recent messages |
+| `src/codepilot/sessions/context/ledger.py` 的 `ToolArtifactLedger` | 把工具输出写入 artifact，并在高压力下用摘要引用替代原文 |
+| `src/codepilot/sessions/context/checkpoint.py` 的 `ContextCheckpointManager` | critical 压力下写入结构化 checkpoint |
 
-公共导出也只暴露新主线：`src/codepilot/sessions/context/__init__.py:32-48` 导出 `ContextGovernor`、`ContextProjector`、`ContextPressurePolicy`、`SessionSnapshotBuilder`、`ToolArtifactLedger` 等；sessions public API 不再导出旧上下文编译入口。
+## 1. 调用时机
 
-## 2. 用户请求进入后的上下文构建数据流
+一次用户请求进入系统后，context 不会马上被最终确定。真正的上下文治理发生在“即将调用模型”之前。
 
-1. runtime 通过 `assemble_runtime()` 组装模型、工具、系统提示词和 `AgentSessionOptions`，但 `prepare_context=None`，不在 runtime 层注入旧编译器。证据：`src/codepilot/runtime/assembly.py:145-186`。
-2. `AgentSession.__init__()` 初始化 `SessionStore`，确保 `session.json/messages.jsonl` 存在，读取 canonical transcript，再构造核心 `AgentOptions`。证据：`src/codepilot/sessions/session.py:79-145`。
-3. `AgentSession._build_context_preparer()` 创建 `ContextGovernor`，注入 workspace、session_id、`SessionContextState`、`MemoryRetriever`，并返回 `prepare` 回调。证据：`src/codepilot/sessions/session.py:652-665`。
-4. run 开始前，session 做生命周期钩子、prompt memory admission、task recovery begin、freshness 检查；真正 prompt 投影在 Agent 调模型前通过 prepare_context 执行。证据：`src/codepilot/sessions/session.py:537-566`。
-5. `ContextGovernor.prepare()` 调用 `SessionSnapshotBuilder.build()` 读取仓库快照、工具结果、artifact refs、checkpoint、active/changed files。证据：`src/codepilot/sessions/context/governor.py:85`、`src/codepilot/sessions/context/snapshot.py:54-81`。
-6. governor 召回 memory，读取 pinned memory，估算历史/工具输出/总体 token，调用 `ContextPressurePolicy.evaluate()`。证据：`src/codepilot/sessions/context/governor.py:86-107`。
-7. governor 渲染 evidence；critical 时创建 checkpoint；然后调用 `ContextProjector.project()` 生成 `ContextView`、投影后的 messages 和新的 system prompt。证据：`src/codepilot/sessions/context/governor.py:108-136`。
-8. governor 生成 `ContextReport`，写一条 `type="context_view"` 到 `context_ledger.jsonl`，并返回 `PreparedAgentContext`。证据：`src/codepilot/sessions/context/governor.py:137-186`、`src/codepilot/sessions/context/governor.py:227-254`。
+运行流程如下：
 
-## 3. 上下文来源
+1. `AgentSession.__init__()` 初始化 `SessionStore`、`MemoryStore`、`MemoryRetriever`、`TaskRecoveryStore`。
+2. `AgentSession._build_context_preparer()` 创建 `ContextGovernor`，返回 `self.context_governor.prepare`。
+3. `AgentOptions.prepare_context` 保存这个回调。
+4. `LLMStreamRunner.stream_assistant_response()` 在每次模型调用前构造 `ContextPreparationRequest`，包含 `session_id`、`model_context_window`、`model_max_output_tokens`。
+5. `ContextGovernor.prepare(context, request)` 返回新的 `PreparedAgentContext`。
+6. LLM runner 使用准备后的 `system_prompt/messages/tools` 调用模型，并发出 `context_prepared` 事件。
 
-当前上下文来源可以分成六类：
+这意味着同一个 run 中如果发生多次“模型 -> 工具 -> 模型”循环，每次模型调用前都会重新治理上下文，而不是只在用户消息进入时治理一次。
 
-| 来源 | 进入方式 | 代码证据 |
+## 2. 四阶段治理链路
+
+从原始信息到最终 prompt，当前代码可以按四个阶段理解。
+
+### 阶段一：整理本轮可用信息
+
+入口是 `ContextGovernor.prepare()` 的前半段。它先调用 `SessionSnapshotBuilder.build(context)`，再调用 memory retriever。
+
+这一阶段做四件事。
+
+第一，刷新仓库状态。
+
+`RepositoryTracker.refresh(previous_snapshot)` 会生成新的 `RepositorySnapshot`，并与上一轮快照比较得到 `RepositoryDelta`。快照内容包括：
+
+- workspace root
+- project type
+- manifest files
+- top-level entries
+- test directories
+- instruction files
+- git branch / HEAD
+- git status
+- instruction file hash
+- dirty path hash
+
+如果发现仓库变化，`SessionSnapshotBuilder.build()` 会调用：
+
+- `SessionContextState.invalidate_paths(modified_paths + deleted_paths)`
+- `SessionContextState.invalidate_verification()`
+
+这样旧的文件摘要、文件证据和验证结果不会继续被当成 fresh evidence。
+
+第二，观察工具结果。
+
+`SessionSnapshotBuilder.build()` 会遍历当前 `AgentContext.messages` 中的 `ToolResultMessage`：
+
+- `SessionContextState.observe_tool_result()` 记录 active files、tool evidence、verification evidence。
+- `ToolArtifactLedger.record_tool_result()` 把工具输出写入 `.codepilot/sessions/<session_id>/artifacts/tool_outputs/*.txt`，并把引用写进 `context_ledger.jsonl`。
+
+注意：当前实现会为观察到的工具结果建立 artifact 引用；是否把完整工具输出继续放进 prompt，由后面的压力阶段决定。
+
+第三，检查新鲜度。
+
+`SessionContextState.validate_sources(repository_fingerprint)` 会重新检查：
+
+- file summaries 是否与磁盘 hash 一致
+- active files 是否被修改或删除
+- verification evidence 是否对应当前 workspace fingerprint
+
+返回的 `stale_items` 后面会进入 `ContextReport`，并且最多前 8 条会被渲染到 evidence 区域提醒模型。
+
+第四，召回长期记忆。
+
+`ContextGovernor._recall_memory()` 构造 `MemoryQuery`：
+
+- `text`: 最近一条用户消息
+- `active_paths`: 当前 active files
+- `task_phase`: task signal 中的 phase
+- `action_intent`: task signal 中的 action_intent
+- `recent_error`: task signal 中的 recent_error_code
+- `retrieval_mode`: 由 `context_mode()` 推断出的 `repair / verify / qa / act`
+
+然后调用 `MemoryRetriever.recall(query)`，得到 `MemoryRecall`：
+
+- pinned memory：来自 `.codepilot/MEMORY.md`
+- always memory：correction 和 always constraint
+- selected memory：按 query 命中的 decision / experience 等
+- dropped memory：因为 deleted/superseded 等原因不召回的记录
+
+ContextGovernor 只消费召回结果，不负责总结或写入长期记忆。
+
+### 阶段二：动态预算和压力判断
+
+这一阶段决定本轮 prompt 应该宽松组装，还是需要更激进地裁剪。
+
+代码入口是 `ContextGovernor.prepare()` 中对 `estimate_context_tokens()` 和 `ContextPressurePolicy.evaluate()` 的调用。
+
+Token 估算在 `src/codepilot/llm/overflow.py`：
+
+| 内容 | 估算方式 |
+|---|---|
+| 文本 | `len(text) // 4`，即默认 4 字符约等于 1 token |
+| 图片 | 每张图片按 `IMAGE_TOKEN_ESTIMATE = 1000` token 估算 |
+| tool call | 按工具名、参数字符串长度和少量固定开销估算 |
+| tool schema | 每个工具按 `TOOL_SCHEMA_TOKEN_ESTIMATE = 200` token 估算 |
+
+ContextGovernor 会估算三组数字：
+
+- `tool_output_tokens`：所有 `ToolResultMessage` 的估算 token。
+- `history_tokens`：当前 messages 不含 system prompt 的估算 token。
+- `estimated_tokens`：当前 messages + system prompt 的估算 token。
+
+`ContextPressurePolicy.evaluate()` 先计算有效预算：
+
+```text
+effective_budget =
+  model_context_window
+  - model_max_output_tokens
+  - safety_margin_tokens
+```
+
+默认 `safety_margin_tokens = 1024`，并且有效预算最低为 128。
+
+然后计算：
+
+```text
+pressure_ratio = estimated_tokens / effective_budget
+```
+
+三档压力规则：
+
+| 压力 | 条件 | 后续影响 |
 |---|---|---|
-| stable rules / system prompt | `ContextProjector.stable_rules()` 从系统提示词中抽取规则行或前 8 行，最终仍保留完整 base system prompt。 | `src/codepilot/sessions/context/projector.py:115-124`、`src/codepilot/sessions/context/projector.py:153-169`。 |
-| canonical transcript | `SessionStore.load_session_messages()` 从 `messages.jsonl` 重建消息树；`project_messages()` 只取最近少量消息。 | `src/codepilot/sessions/persistence/store.py:167-187`、`src/codepilot/sessions/context/projector.py:92-112`。 |
-| repository snapshot | `RepositoryTracker.refresh()` 由 `SessionSnapshotBuilder.build()` 调用，delta 变化会使路径和 verification 失效。 | `src/codepilot/sessions/context/snapshot.py:54-60`。 |
-| active/changed files | `SessionContextState` 维护 active files；snapshot 同时从 repository delta 收集 changed files。 | `src/codepilot/sessions/context/snapshot.py:78-80`。 |
-| tool results / evidence | `SessionSnapshotBuilder` 遍历 `ToolResultMessage`，先观察 evidence，再交给 `ToolArtifactLedger` 记录 artifact/ref。 | `src/codepilot/sessions/context/snapshot.py:62-73`。 |
-| memory recall | `ContextGovernor._recall_memory()` 构造 `MemoryQuery`，只接受 durable active memory；pinned memory 通过 retriever 动态读取。 | `src/codepilot/sessions/context/governor.py:191-218`。 |
-| task recovery | `TaskRecoveryStore` 从 `session.json.task_recovery` 读取当前任务投影，session 在 run 前交给核心 Agent。 | `src/codepilot/sessions/history/task_recovery.py:46-47`、`src/codepilot/sessions/session.py:563`。 |
+| `normal` | 总体 token 未超过 tight 阈值，工具输出和历史也没有触发压力原因 | 保留更多 recent messages，工具结果原文可以短期保留 |
+| `tight` | `pressure_ratio >= 0.72`，或工具输出/历史触发压力原因 | 减少 recent messages，工具结果改为 artifact 摘要 |
+| `critical` | `pressure_ratio >= 0.90` | 进一步减少 recent messages，并创建结构化 checkpoint |
 
-代码中未发现明确实现：当前 context projector 不会自动读取 active file 的完整源码片段；`working_state_lines()` 只把 active files 和 changed files 的路径写入 working state。证据：`src/codepilot/sessions/context/projector.py:126-151`。
+额外压力原因：
 
-## 4. 上下文选择策略
+- 工具输出 token 超过有效预算 25%：`tool_output_pressure`
+- 历史消息 token 超过有效预算 50%：`history_pressure`
+- 总量超过 tight/critical 阈值：`tight_budget_pressure` / `critical_budget_pressure`
 
-当前选择策略以分层投影为中心，而不是旧版“多个 section 按比例塞条目”。
+这一步的重点不是精确 tokenization，而是给上下文裁剪提供一个稳定、可解释的压力信号。
 
-- `stable_rules`：来自 system prompt 的规则行或前 8 行；完整 system prompt 仍是最终 system prompt 的 base。证据：`src/codepilot/sessions/context/projector.py:115-124`、`src/codepilot/sessions/context/projector.py:153-169`。
-- `working_state`：当前任务、checkpoint goal/next actions、active files、changed files。证据：`src/codepilot/sessions/context/projector.py:126-151`。
-- `recalled_memory`：`MemoryRetriever.retrieve()` 返回后，governor 只保留 `DURABLE_MEMORY_KINDS` 且 `status=="active"` 的记忆。证据：`src/codepilot/sessions/context/governor.py:191-211`。
-- `evidence`：只渲染 freshness 为 `fresh` 的 evidence；artifact refs 只放最近 8 条；stale items 最多放 8 条。证据：`src/codepilot/sessions/context/projector.py:27-49`。
-- `recent_messages`：按压力保留摘要行，normal/tight/critical 分别保留 6/4/2 条。证据：`src/codepilot/sessions/context/projector.py:142-151`。
-- `messages`：真正发给模型的消息列表按压力保留 normal/tight/critical 10/6/4 条，并修复 tool_call/tool_result 配对。证据：`src/codepilot/sessions/context/projector.py:92-112`、`src/codepilot/sessions/context/projector.py:202-217`。
-- 工具结果：`project_tool_result()` 在 normal 下可短期保留完整结果；tight/critical 或大输出会用摘要 + artifact ref 替代。证据：`src/codepilot/sessions/context/ledger.py:134-161`。
+### 阶段三：按压力组装 prompt
 
-代码中未发现明确实现：没有独立 file selector 对源码片段进行 BM25/embedding/ranking，也没有模型主动调用的 snip/collapse 工具；当前选择更多是规则化、压力感知和 evidence 新鲜度约束。
+这一阶段由 `ContextProjector.project()` 完成。虽然类名叫 Projector，但它实际做的是 prompt 组装：把前面整理出的信息按固定层次写入 system prompt，并裁剪 messages。
 
-## 5. Token 预算、裁剪与结构化压缩
+最终 system prompt 会包含这些层：
 
-Token 估算由 `estimate_context_tokens()` 完成，governor 分别估算：
+```text
+原始 system prompt
 
-- 工具输出 token：`tool_output_tokens(context.messages)`。证据：`src/codepilot/sessions/context/governor.py:93`、`src/codepilot/sessions/context/projector.py:174-180`。
-- 历史消息 token：`estimate_context_tokens(context.messages, "")`。证据：`src/codepilot/sessions/context/governor.py:94`。
-- 投影前总 token：`estimate_context_tokens(context.messages, context.system_prompt)`。证据：`src/codepilot/sessions/context/governor.py:95-98`。
-- 投影后 token：`estimate_context_tokens(prepared_messages, system_prompt)`。证据：`src/codepilot/sessions/context/governor.py:138-140`。
+## Stable Rules
+- ...
 
-压力预算由 `ContextPressurePolicy.evaluate()` 计算：
+## Working State
+- ...
 
-- `effective_budget = model_context_window - model_max_output_tokens - safety_margin_tokens`，且至少为 128。证据：`src/codepilot/sessions/context/policy.py:19-24`。
-- 默认 safety margin 是 1024，tight ratio 是 0.72，critical ratio 是 0.90，工具输出压力阈值是有效预算的 0.25。证据：`src/codepilot/sessions/context/policy.py:12-16`。
-- 工具输出过大标记 `tool_output_pressure`，历史过大标记 `history_pressure`，总量超过阈值进入 `tight/critical`。证据：`src/codepilot/sessions/context/policy.py:28-45`。
+## Memory Recall
+- ...
 
-裁剪/压缩动作：
+## Evidence
+- ...
 
-- normal：保留较多 recent messages，并允许近期 tool result 原文短期进入 prompt。证据：`src/codepilot/sessions/context/projector.py:92-112`、`src/codepilot/sessions/context/ledger.py:134-161`。
-- tight：recent messages 降低到 6 条，tool result 默认投影为 artifact 摘要。证据：`src/codepilot/sessions/context/projector.py:92-112`。
-- critical：recent messages 降到 4 条，并创建 `ContextCheckpoint`，后续轮次优先读取 latest checkpoint。证据：`src/codepilot/sessions/context/governor.py:114-126`、`src/codepilot/sessions/context/snapshot.py:77`。
+## Recent Turns
+- ...
+```
 
-代码中未发现明确实现：当前没有 LLM summary builder、后台 collapse agent、旧历史消息替换成 summary message 的 runtime 路径；CLI 只保留 `/context` 查看最近一次上下文投影治理报告，不再提供手动压缩命令。证据：`src/codepilot/interfaces/cli/commands.py`。
+各层来源如下。
 
-## 6. 更新与失效机制
+#### stable_rules
 
-上下文新鲜度主要由 repository delta 和 context state 驱动：
+`stable_rules(system_prompt)` 从 system prompt 中抽取规则行：
 
-- `SessionSnapshotBuilder.build()` 每轮刷新 repository snapshot；如果 delta 发生变化，会调用 `invalidate_paths()` 和 `invalidate_verification()`。证据：`src/codepilot/sessions/context/snapshot.py:54-60`。
-- 工具结果进入 `SessionContextState.observe_tool_result()`，并携带当时的 repository fingerprint。证据：`src/codepilot/sessions/context/snapshot.py:62-69`。
-- 最后通过 `validate_sources(snapshot.fingerprint)` 生成 stale items。证据：`src/codepilot/sessions/context/snapshot.py:74`。
-- `AgentSession._check_context_freshness()` 会在 run 前更新 freshness notice。证据：`src/codepilot/sessions/session.py:564`。
-- run 层还保留 `RunStore.evaluate_freshness()`，用于已跟踪文件的新鲜度判断。证据：`src/codepilot/sessions/persistence/run_store.py:142-145`。
+- 包含 `AGENTS`
+- 包含 `CLAUDE`
+- 包含 `rule`
 
-代码中未发现明确实现：`context_ledger.jsonl` 当前是 append-only，代码中没有按时间、大小或条数的自动 pruning 策略。
+如果没有明显规则行，就取 system prompt 前 8 行。
 
-## 7. 不同任务阶段的上下文差异
+注意：原始 system prompt 仍然完整保留在最终 system prompt 的开头；`Stable Rules` 是为了让规则在结构化区域里更醒目，不是替代原始系统提示词。
 
-当前差异主要来自 `context_mode()` 和压力级别：
+#### working_state
 
-- `context_mode()` 会根据 `task_signal.action_intent`、`recent_error_code`、用户问题文本判断 `repair/verify/qa/act`。证据：`src/codepilot/sessions/context/projector.py:299-311`。
-- 该 mode 会进入 `MemoryQuery.retrieval_mode`，影响记忆召回语义。证据：`src/codepilot/sessions/context/governor.py:198-206`。
-- 压力级别会影响 recent messages 数量、tool result 是否保留原文、是否创建 checkpoint。证据：`src/codepilot/sessions/context/projector.py:92-112`、`src/codepilot/sessions/context/governor.py:114-126`。
+`working_state_lines()` 写入：
 
-代码中未发现明确实现：没有独立 read-only/plan/execute/replan 的分区预算 profile；`TaskMode` 和 planning budget 主要在 task control 层生效，不直接改变 `ContextProjector.section_reports()` 的预算比例。证据：`src/codepilot/sessions/context/projector.py:171-199`。
+- `context.current_task`
+- latest checkpoint 的 goal
+- latest checkpoint 的 next actions
+- active files，最多前 12 个
+- changed files，最多前 12 个
 
-## 8. 与工具、任务、记忆、持久化和 git 回退的关系
+这里不会自动把 active file 的完整源码塞进 prompt。active files 只是告诉模型当前哪些路径与任务相关；如果模型需要内容，仍应通过工具读取。
 
-工具系统：
-- 工具结果仍作为 canonical message 写入 `messages.jsonl`；进入 prompt 时由 `ToolArtifactLedger` 决定保留原文还是摘要引用。证据：`src/codepilot/sessions/session.py:625-646`、`src/codepilot/sessions/context/ledger.py:79-161`。
+#### memory_recall
 
-任务控制：
-- task recovery 当前投影属于 session state，保存到 `session.json.task_recovery`，不是 memory，也不是 context ledger。证据：`src/codepilot/sessions/persistence/store.py:103-110`、`src/codepilot/sessions/history/task_recovery.py:46-73`。
+`ContextGovernor._render_recalled_memory()` 将 memory recall 渲染成：
 
-记忆系统：
-- `MemoryStore` 管理 session memory 和 project memory 路径；`ContextGovernor` 只召回，不负责失败记忆总结。证据：`src/codepilot/sessions/memory/store.py:30-45`、`src/codepilot/sessions/context/governor.py:191-224`。
+- `[Pinned memory] ...`
+- `[Correction] ... [reasons=...]`
+- `[Constraint] ... [reasons=...]`
+- `[Decision] ... [reasons=...]`
+- `[Experience] ... [reasons=...]`
 
-持久化：
-- session 事实源是 `session.json/messages.jsonl`；run 事实源是 `run.json/events.jsonl`；context 派生视图只写 `context_ledger.jsonl`。证据：`src/codepilot/sessions/persistence/store.py:52-75`、`src/codepilot/sessions/persistence/run_store.py:77-125`、`src/codepilot/sessions/context/governor.py:227-254`。
+召回到的 record id 和原因会进入 `ContextReport.retrieved_memory_ids` 与 `ContextReport.memory_retrieval_reasons`。
 
-git 回退：
-- rollback metadata 写入 `run.json.rollback`，回退策略仍是轻量 clean-worktree + affected paths，不引入隐藏分支或事务快照。证据：`src/codepilot/sessions/session.py:524-532`、`src/codepilot/sessions/persistence/run_store.py:114-125`。
+#### evidence
 
-## 9. 当前优点和缺陷
+`ContextProjector.render_evidence()` 渲染三类信息：
+
+- freshness 为 `fresh` 的 `ContextEvidence`
+- 最近 8 条 artifact 引用
+- 前 8 条 stale item
+
+工具输出会先经过 `_compact_evidence_content()`：
+
+- 短输出直接压缩空白后保留。
+- 长输出优先抽取包含 `FAILED / ERROR / Traceback / AssertionError / Exception / Exit code` 的重要行。
+- 如果没有明显关键行，则写成类似 `N lines, M chars archived` 的摘要。
+
+#### recent_messages
+
+`recent_message_lines()` 写入最近几条消息的文本摘要：
+
+| 压力 | system prompt 中 Recent Turns 行数 |
+|---|---|
+| `normal` | 最近 6 条 |
+| `tight` | 最近 4 条 |
+| `critical` | 最近 2 条 |
+
+这部分用于保留对话连续性，但不会把全部 transcript 都塞进 system prompt。
+
+#### messages
+
+真正发送给模型的 messages 也会按压力裁剪：
+
+| 压力 | `project_messages()` 保留消息数 | ToolResultMessage 处理 |
+|---|---:|---|
+| `normal` | 最近 10 条 | `preserve_full=True`，保留原工具结果 |
+| `tight` | 最近 6 条 | 替换为 artifact 摘要 |
+| `critical` | 最近 4 条 | 替换为 artifact 摘要 |
+
+`repair_tool_pairs()` 会修复 tool call / tool result 配对问题：如果裁剪后保留了某个 `ToolResultMessage`，但对应的 assistant `ToolCall` 被裁掉了，会补回一个最小 assistant tool call message，避免 provider 报消息结构错误。
+
+#### critical checkpoint
+
+如果压力是 `critical`，ContextGovernor 会调用 `ContextCheckpointManager.create()` 写入结构化 checkpoint，字段包括：
+
+- goal
+- active_files
+- changed_files
+- key_evidence
+- verification_state
+- open_questions
+- next_actions
+- source_refs
+
+checkpoint 写在 `context_ledger.jsonl` 中，类型是 `checkpoint`。下一轮 `SessionSnapshotBuilder.build()` 会通过 `ContextCheckpointManager.load_latest()` 读取最新 checkpoint，并把它作为 working state 的优先信息。
+
+### 阶段四：记录报告并交给模型
+
+组装完成后，ContextGovernor 会生成 `ContextReport`，并返回 `PreparedAgentContext`。
+
+`PreparedAgentContext` 包含：
+
+- `system_prompt`: 原始 system prompt + 五个结构化上下文区块
+- `messages`: 按压力裁剪和修复后的消息列表
+- `tools`: 当前工具列表
+- `report`: 本轮上下文治理报告
+
+`ContextReport` 记录：
+
+- `context_id`
+- repository fingerprint
+- effective token budget
+- estimated tokens before / after
+- sections
+- selected items
+- stale items
+- repository delta
+- memory ids 和 recall reasons
+- context mode
+- pressure
+- checkpoint used / created
+- artifact refs
+- tokens by layer
+- prefix hash
+- dynamic hash
+
+`prefix_hash` 来自 `stable_rules`，`dynamic_hash` 来自 working state、memory、evidence、recent messages。当前代码只记录 hash，代码中没有发现把它们映射到具体 provider prefix cache metadata 的实现。
+
+最后，`ContextGovernor._append_context_view()` 会向：
+
+```text
+.codepilot/sessions/<session_id>/context_ledger.jsonl
+```
+
+追加一条 `type="context_view"` 的记录，包含 pressure、tokens_by_layer、checkpoint、artifact_refs、prefix_hash、dynamic_hash 等摘要信息。
+
+## 3. 上下文来源总览
+
+| 来源 | 事实源 | 如何进入 prompt |
+|---|---|---|
+| 系统规则 | `AgentOptions.system_prompt`，通常包含 AGENTS.md 等规则 | 原样作为 system prompt 开头，并提取规则行进入 `Stable Rules` |
+| 会话消息 | `messages.jsonl` 还原出的 canonical transcript | 只保留 recent messages；数量由压力决定 |
+| 仓库状态 | `RepositoryTracker.snapshot()` | 进入 repository fingerprint、changed files、stale 判断 |
+| 活跃文件 | `SessionContextState.active_files` | 路径进入 `Working State`，不自动注入源码 |
+| 工具结果 | `ToolResultMessage` | 进入 evidence；必要时通过 artifact 摘要进入 messages |
+| 验证结果 | `ToolResultMessage.verification` | 进入 verification evidence；工作区变化后会 stale |
+| 长期记忆 | `MemoryRetriever.recall()` | 进入 `Memory Recall` |
+| checkpoint | `context_ledger.jsonl` 中的 `checkpoint` | critical 后的下一轮进入 `Working State` |
+| 工具列表 | `AgentContext.tools` | 原样返回给 LLM runner，名称也记录在 `ContextView.tools` |
+
+## 4. 压力级别对比
+
+| 行为 | normal | tight | critical |
+|---|---:|---:|---:|
+| system prompt Recent Turns | 6 条 | 4 条 | 2 条 |
+| 发送给模型的 messages | 10 条 | 6 条 | 4 条 |
+| tool result 原文 | 保留 | 摘要 + artifact ref | 摘要 + artifact ref |
+| checkpoint | 不创建 | 不创建 | 创建 |
+| evidence | fresh evidence + 最近 artifact + stale 提醒 | 同 normal，但消息更短 | 同 tight，并保留 checkpoint 所需关键证据 |
+
+这三个级别没有做得很复杂，适合当前学习型项目：能解释、能演示、能覆盖大日志和长历史压力，但没有引入 Claude Code 风格的 snip/collapse agent。
+
+## 5. 新鲜度机制
+
+上下文的新鲜度由三层控制。
+
+第一层是仓库 delta。
+
+`RepositoryTracker` 每次模型调用前都会重新计算仓库 fingerprint。只要发现新增、修改、删除、分支变化、HEAD 变化或 instruction 文件变化，`RepositoryDelta.changed` 就会为 true。
+
+第二层是 session context state。
+
+`SessionContextState` 保存：
+
+- active files
+- file summaries
+- tool evidence
+- verification evidence
+- last repository snapshot
+- observed tool call ids
+
+当工具修改工作区时：
+
+- 相关路径的 file summary 会被标记 stale。
+- 相关 path evidence 会被标记 stale。
+- verification evidence 会被标记 stale。
+
+第三层是 validate_sources。
+
+`validate_sources(repository_fingerprint)` 会检查文件 hash 和 verification fingerprint。如果发现不一致，会产生 `stale_items`，并进入 `ContextReport.stale_items` 和 evidence 提醒。
+
+## 6. 与 Memory、TaskRecovery、Tool Ledger 的边界
+
+### Memory
+
+Memory 只保存长期可复用知识。ContextGovernor 只调用 `MemoryRetriever.recall()`，不总结失败经验，也不写 memory。
+
+失败-成功-验证通过的经验沉淀由 `MemoryWriter.finalize_run()` 负责，发生在 run 收尾阶段，而不是 context prepare 阶段。
+
+### TaskRecovery
+
+TaskRecovery 保存当前任务目标、步骤进度和下一步动作，属于 session 级恢复信息，不属于长期 memory。
+
+Context 侧能看到的是 `AgentContext.current_task` 和 `task_signal`。`ContextProjector` 当前只把 `current_task` 写入 working state，并用 `task_signal` 帮助判断 context mode 和 memory query。
+
+### Tool Ledger
+
+Tool Ledger 负责解决“大段工具输出是否每轮都塞进 prompt”的问题：
+
+- 原始工具输出写入 artifact 文件。
+- `context_ledger.jsonl` 记录 artifact ref。
+- normal 压力下近期工具结果可以保留原文。
+- tight/critical 压力下工具结果替换成摘要和 artifact 路径。
+
+完整工具结果仍在 transcript 和 artifact 中可恢复，但 prompt 不必每轮携带完整日志。
+
+## 7. 当前没有做什么
+
+代码中未发现以下能力的明确实现：
+
+- 没有 embedding/vector database 级别的文件片段召回。
+- 没有独立 file selector 自动把源码片段按相关性注入 prompt。
+- 没有 LLM summary builder 把旧历史总结成一条 summary message。
+- 没有后台 collapse agent。
+- 没有 provider-specific tokenizer，token 估算是字符级近似。
+- 没有把 `prefix_hash/dynamic_hash` 映射到 provider cache metadata。
+- `context_ledger.jsonl` 当前是 append-only，没有自动 retention/pruning。
+
+这些不是 bug，而是当前学习型项目的取舍：先把主线做清楚，避免为了“像生产系统”而引入难解释的机制。
+
+## 8. 优点和风险
 
 优点：
 
-1. 主线清晰：上下文只有 `ContextGovernor.prepare()` 一个入口，避免多套上下文处理路径并存。证据：`src/codepilot/sessions/session.py:652-665`、`src/codepilot/sessions/context/__init__.py:32-48`。
-2. 文件契约更瘦：新 session 默认只创建 `session.json/messages.jsonl`，其他 ledger/event/memory 按需懒创建。证据：`src/codepilot/sessions/persistence/store.py:52-75`。
-3. 工具输出不再线性污染 prompt：工具输出可 artifact 化，prompt 中放摘要和路径引用。证据：`src/codepilot/sessions/context/ledger.py:79-161`。
-4. 有压力感知：normal/tight/critical 三档影响 recent history、tool result 投影和 critical checkpoint。证据：`src/codepilot/sessions/context/policy.py:17-52`、`src/codepilot/sessions/context/projector.py:92-112`、`src/codepilot/sessions/context/governor.py:114-126`。
-5. 新鲜度有最小闭环：仓库 delta 会使路径和 verification 失效，避免旧证据长期被当成 fresh evidence。证据：`src/codepilot/sessions/context/snapshot.py:54-74`。
+- 每次模型调用前都会重新整理上下文，能反映最新工具结果和仓库变化。
+- 工具输出有 artifact 机制，长日志不会在 tight/critical 下线性污染 prompt。
+- 有 `normal/tight/critical` 三档压力，行为可解释。
+- 有 stale 检查，验证结果和文件证据不会无限期保持 fresh。
+- Memory、TaskRecovery、Context、RunStore 的边界比旧方案更清楚。
+- `ContextReport` 能展示压力、token 分层、记忆召回、artifact、checkpoint 等调试信息。
 
-缺陷：
+风险：
 
-1. active files 只记录路径，不自动注入源码片段；模型可能知道“该看哪个文件”，但仍需要工具读取内容。证据：`src/codepilot/sessions/context/projector.py:126-151`。
-2. 阶段策略仍偏轻量；`repair/verify/qa/act` 主要影响 memory query，没有独立 plan/replan 预算 profile。证据：`src/codepilot/sessions/context/projector.py:299-311`、`src/codepilot/sessions/context/governor.py:198-206`。
-3. `context_ledger.jsonl` append-only，代码中未发现 retention/pruning；长 session 的调试 ledger 可能增长。证据：`src/codepilot/sessions/context/governor.py:227-254`、`src/codepilot/sessions/context/ledger.py:177-181`。
-4. token 估算仍是近似值，代码中未发现 provider-specific tokenizer；预算判断可能与真实 provider token 数有偏差。证据：`src/codepilot/sessions/context/governor.py:93-140`。
-5. prefix caching 目前只记录 `prefix_hash/dynamic_hash`，代码中未发现把它映射到 provider cache metadata 的实现。证据：`src/codepilot/sessions/context/governor.py:141-170`。
+- active files 只放路径，不放源码内容；复杂修改仍依赖模型主动 read 文件。
+- token 估算较粗，可能与真实 provider token 数存在偏差。
+- stable rules 只是从 system prompt 中抽取规则行，不能替代更严格的指令文件解析和优先级系统。
+- tight/critical 的消息裁剪是按最近 N 条，不是语义相关性排序。
+- context ledger 长期 append 可能增长，需要后续 retention 策略。
 
-## 10. 简历/项目文档总结
+## 9. 可以写进项目介绍的总结
 
-“针对 Coding Agent 在多轮代码任务中容易出现关键信息遗漏、无关上下文污染和过期信息干扰的问题，项目设计了以 `ContextGovernor` 为唯一入口的上下文投影机制，通过 `SessionLayout + SessionStore/RunStore` 保留完整事实源，通过 `SessionSnapshotBuilder` 汇总仓库、工具、任务和记忆事实，通过 `ContextPressurePolicy` 进行 normal/tight/critical 三档压力判断，并由 `ContextProjector` 生成分层 `ContextView`、tool artifact ledger 和 critical checkpoint，从而让模型每轮在有限 token 预算内优先获得当前决策所需的规则、工作态、记忆召回、有效证据和少量最近对话，同时避免大日志、旧摘要和过期验证结果污染 prompt。”
+针对 Coding Agent 在多轮代码任务中容易出现历史过长、工具日志污染、旧验证结果误导和长期记忆混杂的问题，Codepilot 设计了每次模型调用前执行的上下文治理链路：先整理仓库状态、工具结果、active files、checkpoint 和 memory recall，再根据模型窗口计算 `normal/tight/critical` 压力，随后按固定层次组装 system prompt、裁剪 recent messages、将工具输出替换为 artifact 摘要，并记录 `ContextReport`。这样模型每轮拿到的是当前决策最需要的规则、工作状态、长期记忆、有效证据和少量对话连续性，而完整 transcript、run 结果和工具输出仍保存在 session/run/artifact 文件中，可恢复、可调试。

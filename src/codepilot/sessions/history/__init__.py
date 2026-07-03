@@ -15,10 +15,13 @@ from .branching import (
 from .checkpoint import SessionCheckpoint, record_checkpoint
 from .task_recovery import TaskRecoveryStore
 from .git_rollback import (
+    GitRollbackAction,
     GitRollbackBaseline,
+    GitRollbackPlan,
     GitRollbackResult,
     build_rollback_metadata,
     capture_git_baseline,
+    plan_run_rollback,
     revert_run_changes,
 )
 
@@ -26,13 +29,16 @@ from .git_rollback import (
 __all__ = [
     "SessionCheckpoint",
     "TaskRecoveryStore",
+    "GitRollbackAction",
     "GitRollbackBaseline",
+    "GitRollbackPlan",
     "GitRollbackResult",
     "build_session_options_from_existing",
     "build_rollback_metadata",
     "capture_git_baseline",
     "create_fresh_session",
     "fork_session",
+    "plan_run_rollback",
     "record_checkpoint",
     "revert_run_changes",
     "switch_session",
