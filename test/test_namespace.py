@@ -23,7 +23,7 @@ def test_codepilot_namespace_imports() -> None:
     import codepilot.tools
 
     cli_main = import_module("codepilot.interfaces.cli.main")
-    web_api = import_module("codepilot.interfaces.web.api")
+    dingtalk_main = import_module("codepilot.interfaces.dingtalk.main")
 
     assert codepilot.core is not None
     assert codepilot.extensions is not None
@@ -33,7 +33,7 @@ def test_codepilot_namespace_imports() -> None:
     assert codepilot.sessions is not None
     assert codepilot.tools is not None
     assert cli_main.main is not None
-    assert web_api.describe_web_contract is not None
+    assert dingtalk_main.main is not None
 
 
 def test_im_interface_source_package_is_removed() -> None:
@@ -354,14 +354,59 @@ def test_core_namespace_keeps_cross_layer_contracts_out() -> None:
     assert AfterToolCallResult.__module__ == "codepilot.core.types"
 
 
-def test_web_namespace_exports_complete_public_contract_types() -> None:
-    import codepilot.interfaces.web as web
-    from codepilot.interfaces.web import __all__ as web_exports
+def test_web_interface_package_is_removed() -> None:
+    try:
+        spec = find_spec("codepilot.interfaces.web")
+    except ModuleNotFoundError:
+        spec = None
 
-    assert hasattr(web, "ApprovalDecision")
-    assert hasattr(web, "WebEventKind")
-    assert "ApprovalDecision" in web_exports
-    assert "WebEventKind" in web_exports
+    assert spec is None
+
+
+def test_dingtalk_namespace_exports_complete_public_contract_types() -> None:
+    import codepilot.interfaces.dingtalk as dingtalk
+    from codepilot.interfaces.dingtalk import __all__ as dingtalk_exports
+
+    assert hasattr(dingtalk, "DingTalkBridge")
+    assert hasattr(dingtalk, "DingTalkBridgeConfig")
+    assert hasattr(dingtalk, "DingTalkInboundMessage")
+    assert hasattr(dingtalk, "DingTalkOutboundMessage")
+    assert hasattr(dingtalk, "describe_dingtalk_contract")
+    assert "DingTalkBridge" in dingtalk_exports
+    assert "DingTalkBridgeConfig" in dingtalk_exports
+    assert "DingTalkInboundMessage" in dingtalk_exports
+    assert "DingTalkOutboundMessage" in dingtalk_exports
+    assert "describe_dingtalk_contract" in dingtalk_exports
+
+def test_cli_interface_does_not_import_dingtalk() -> None:
+    offenders: list[str] = []
+    for path in (SRC / "codepilot" / "interfaces" / "cli").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "codepilot.interfaces.dingtalk" in text or "interfaces.dingtalk" in text:
+            offenders.append(str(path.relative_to(ROOT)))
+
+    assert offenders == []
+
+
+def test_dingtalk_interface_does_not_bypass_runtime_boundary() -> None:
+    offenders: list[str] = []
+    forbidden_patterns = (
+        "import codepilot.core",
+        "from codepilot.core",
+        "from ..core",
+        "import codepilot.tools",
+        "from codepilot.tools",
+        "from ..tools",
+    )
+    for path in (SRC / "codepilot" / "interfaces" / "dingtalk").rglob("*.py"):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if any(
+            any(line.strip().startswith(pattern) for pattern in forbidden_patterns)
+            for line in lines
+        ):
+            offenders.append(str(path.relative_to(ROOT)))
+
+    assert offenders == []
 
 
 def test_cli_startup_contract_is_separate_from_renderer_exports() -> None:

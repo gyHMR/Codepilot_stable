@@ -80,7 +80,7 @@ read | edit | plan
 
 ## 2. 用户请求进入后，先确定模式
 
-入口来自 CLI、RPC、Web 或 runtime service。模式最终进入 `AgentLoopConfig.task_mode`。
+入口来自 CLI、RPC、DingTalk 或 runtime service。模式最终进入 `AgentLoopConfig.task_mode`。
 
 配置来源大致是：
 

@@ -59,7 +59,7 @@ class RuntimeCommand:
         self.source = _normalize_command_source(self.source)
 
     def to_dict(self) -> dict[str, str]:
-        """返回 CLI/Web/RPC 可直接展示的命令元数据。"""
+        """返回 CLI/钉钉/RPC 可直接展示的命令元数据。"""
 
         return {
             "name": self.name,

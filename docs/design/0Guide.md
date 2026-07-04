@@ -23,7 +23,7 @@ protocols -> llm/tools -> core -> sessions/observability -> extensions -> runtim
 
 ```mermaid
 flowchart TD
-    A["CLI/Web/Eval 入口"] --> B["RuntimeService 创建 session"]
+    A["CLI/DingTalk/Eval 入口"] --> B["RuntimeService 创建 session"]
     B --> C["assemble_runtime 装配模型、工具、扩展、prompt"]
     C --> D["AgentSession 初始化持久化、memory、context、Agent"]
     D --> E["用户输入进入 RuntimeService.send_message"]
@@ -73,7 +73,8 @@ flowchart TD
 | `src/codepilot/interfaces/cli/shell.py` | 交互式输入、历史、补全 |
 | `src/codepilot/interfaces/cli/renderer.py` | 把 Agent 事件渲染到终端 |
 | `src/codepilot/interfaces/cli/commands.py` | 处理 `/help`、`/context`、`/rollback`、`/memory` 等斜杠命令 |
-| `src/codepilot/interfaces/web/api.py` | Web 后端入口，和 CLI 一样委托给 `RuntimeService` |
+| `src/codepilot/interfaces/dingtalk/main.py` | 钉钉独立启动入口 `codepilot-dingtalk` |
+| `src/codepilot/interfaces/dingtalk/bridge.py` | 钉钉消息桥接，和 CLI 一样委托给 `RuntimeService` |
 
 CLI 启动的关键路径是：
 
@@ -86,6 +87,18 @@ main.py:main()
 ```
 
 这里要注意一个边界：`interfaces/` 只做输入输出适配。它不会直接调用模型、不会直接执行工具、也不会自己改 session 内部状态。所有核心动作都通过 `RuntimeService` 完成。
+
+钉钉远程入口也是同一个边界，只是把“终端输入”换成“钉钉消息”：
+
+```text
+codepilot-dingtalk
+  -> interfaces/dingtalk/main.py:main()
+  -> DingTalkStreamTransport.start()
+  -> DingTalkBridge.handle_message()
+  -> RuntimeService.create_session() / send_message() / approve_tool_call()
+```
+
+钉钉不会复用或修改 CLI parser，也不会新增 `codepilot dingtalk` 子命令。它使用独立脚本 `codepilot-dingtalk serve`，远程任务默认强制 `tool_permission_mode="ask"`，入口层审计写入 `.codepilot/dingtalk/audit.jsonl`。更完整的启动、审批和验收流程见 `docs/design/5dingtalk-interface.md`。
 
 ---
 
@@ -251,7 +264,7 @@ RuntimeService.send_message()
   -> AgentSession.run()
 ```
 
-`_stream_session_events()` 会订阅 session 的事件，把 `message_start`、`message_update`、`tool_execution_start`、`tool_execution_end`、`context_prepared`、`agent_end` 等事件推给 CLI/Web。
+`_stream_session_events()` 会订阅 session 的事件，把 `message_start`、`message_update`、`tool_execution_start`、`tool_execution_end`、`context_prepared`、`agent_end` 等事件推给 CLI/钉钉。
 
 这就是为什么 CLI 能实时看到模型输出和工具执行进度。
 
@@ -491,7 +504,7 @@ ToolRegistry 查找工具
 | `src/codepilot/runtime/execution/approval.py` | `PendingApproval`、审批结果规范化、pending approval 提取 |
 | `src/codepilot/runtime/service.py` | pending approval 表、审批入口、审批后继续 run |
 | `src/codepilot/interfaces/cli/approval.py` | CLI 交互式审批 provider |
-| `src/codepilot/interfaces/web/api.py` | Web 审批 API |
+| `src/codepilot/interfaces/dingtalk/bridge.py` | 钉钉远程审批命令 `approve/deny` |
 
 审批暂停的路径是：
 
@@ -542,7 +555,7 @@ RuntimeService.approve_tool_call(approval_id, "approve")
 | ContextGovernor | `src/codepilot/sessions/context/governor.py` | 下一次模型调用前把工具结果变成 evidence 或 artifact |
 | MemoryWriter | `src/codepilot/sessions/memory/writer.py` | run 收尾时沉淀经验或修正 |
 | Observability | `src/codepilot/observability/events.py`、`recorder.py` | 归一化事件、写入 trace/audit |
-| CLI/Web | `src/codepilot/interfaces/cli/renderer.py`、`interfaces/web/event_adapter.py` | 展示工具开始、结束、审批、错误 |
+| CLI/钉钉 | `src/codepilot/interfaces/cli/renderer.py`、`interfaces/dingtalk/renderer.py` | 展示工具开始、结束、审批、错误 |
 
 工具结果里的关键字段包括：
 
@@ -564,7 +577,7 @@ RuntimeService.approve_tool_call(approval_id, "approve")
 
 ## 14. 事件和观测：运行过程如何被记录
 
-Agent 运行时会不断发事件。事件先从 core 发出，再由 session 监听落盘，最后被 CLI/Web 渲染或被 RunStore 汇总。
+Agent 运行时会不断发事件。事件先从 core 发出，再由 session 监听落盘，最后被 CLI/钉钉渲染或被 RunStore 汇总。
 
 核心文件：
 

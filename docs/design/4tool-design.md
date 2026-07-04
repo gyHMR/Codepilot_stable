@@ -33,7 +33,7 @@ protocols -> llm/tools -> core -> sessions/observability -> extensions -> runtim
 | `sessions/` | 会话事实源 | 保存工具结果消息，并把结果投影进上下文、记忆和任务恢复 |
 | `extensions/` | 外部能力接入 | 把 Python 扩展、skill、MCP 适配成 Codepilot 工具或命令 |
 | `runtime/` | 应用装配 | 把内置工具、外部工具和安全策略组装成一个可运行会话 |
-| `interfaces/` | CLI/Web 适配 | 展示工具事件、审批提示和工具输出 |
+| `interfaces/` | CLI/钉钉适配 | 展示工具事件、审批提示和工具输出 |
 
 所以，工具安全策略不是只在某一个点发生，而是贯穿整条链路：
 
@@ -50,7 +50,7 @@ protocols -> llm/tools -> core -> sessions/observability -> extensions -> runtim
 
 ```mermaid
 flowchart TD
-    A["CLI/Web 创建 RuntimeService"] --> B["assemble_runtime()"]
+    A["CLI/DingTalk 创建 RuntimeService"] --> B["assemble_runtime()"]
     B --> C["assemble_tools() 汇总内置/调用方/扩展/MCP 工具"]
     C --> D["ToolRegistry + ToolRuntime"]
     D --> E["ToolRuntime.as_agent_tools() 生成模型可用工具适配器"]
@@ -82,7 +82,7 @@ flowchart TD
 
 ## 3. 阶段一：runtime 组装工具目录
 
-用户启动 CLI 或 Web 会话时，接口层不会自己创建工具，而是调用 `RuntimeService.create_session()`。这里会进入 `assemble_runtime()`，再调用 `assemble_tools()`。
+用户启动 CLI 或 DingTalk 会话时，接口层不会自己创建工具，而是调用 `RuntimeService.create_session()`。这里会进入 `assemble_runtime()`，再调用 `assemble_tools()`。
 
 核心文件：`src/codepilot/runtime/bootstrap/tool_assembler.py`
 
@@ -338,7 +338,7 @@ error_code = approval_required
 
 这条 `ToolResultMessage` 会进入 Agent 运行结果，`RuntimeService` 会从结果中提取 pending approval，保存在内存表 `_pending_approvals` 中。
 
-CLI 或 Web 后续可以调用：
+CLI 或 DingTalk 后续可以调用：
 
 ```python
 RuntimeService.approve_tool_call(approval_id, "approve")
@@ -472,7 +472,7 @@ MCP、extension、network 工具的输出默认更保守，可能被标记为 `u
 | `MemoryWriter` | 验证结果、失败和修复证据 | 写入结构化记忆 |
 | `Observability` | 工具事件、权限、耗时、工作区变化 | 生成 trace、summary、audit bundle |
 | `Evaluation` | 工具调用证据和结果字段 | 评估工具安全、任务规划和上下文效果 |
-| CLI/Web | 工具事件和审批结果 | 展示运行进度和审批提示 |
+| CLI/钉钉 | 工具事件和审批结果 | 展示运行进度和审批提示 |
 
 这就是为什么工具结果不能只是一段文本。它必须是结构化证据，后续模块才能可靠判断。
 

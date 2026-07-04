@@ -321,3 +321,64 @@ def test_read_only_tool_assembly_filters_by_metadata(tmp_path: Path) -> None:
     assert "grep" in names
     assert "calendar.create_event" not in names
     assert "calendar.create_event" not in registered_names
+
+
+def test_tool_assembly_exposes_skill_loader_tool(tmp_path: Path) -> None:
+    from codepilot.runtime.bootstrap.config import RuntimeConfig
+    from codepilot.runtime.bootstrap.tool_assembler import assemble_tools
+    from codepilot.runtime.contracts import CreateAgentSessionOptions
+
+    skill_file = tmp_path / "triage.md"
+    skill_file.write_text(
+        "\n".join(
+            [
+                "---",
+                "name: Triage Skill",
+                "command: triage",
+                "description: Use when triaging failures.",
+                "---",
+                "# Triage Skill",
+                "TRIAGE_SKILL_BODY",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = RuntimeConfig(
+        system_prompt="",
+        thinking_level="off",
+        tool_execution="parallel",
+        task_mode="edit",
+        planning_budget_profile="balanced",
+        retry_enabled=True,
+        max_retries=2,
+        retry_base_delay_ms=1200,
+        read_only_mode=True,
+        block_dangerous_bash=True,
+        bash_allow_patterns=None,
+        bash_block_patterns=None,
+        edit_require_unique_match=True,
+        extension_paths=[],
+        skill_paths=[str(skill_file)],
+        mcp_servers=[],
+        prompt_guidelines=None,
+        append_system_prompt=None,
+        prompt_debug_sources=False,
+        tool_snippets=None,
+        enabled_builtin_tools=None,
+    )
+
+    assembled = assemble_tools(
+        tmp_path,
+        CreateAgentSessionOptions(workspace_dir=tmp_path),
+        config,
+    )
+    tools = {tool.name: tool for tool in assembled.tools}
+    registered = {tool.name: tool for tool in assembled.registered_tools}
+
+    assert "load_skill" in tools
+    assert "load_skill" in registered
+    result = asyncio.run(tools["load_skill"].execute("call_skill", {"name": "triage"}))
+
+    assert not result.is_error
+    assert "TRIAGE_SKILL_BODY" in result.content[0].text
+    assert result.details["command"] == "triage"

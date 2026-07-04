@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-# 新手导读：skills.py 负责加载 Markdown skill，并把它们变成命令和 prompt 片段。
+# 新手导读：skills.py 负责发现 Markdown skill，并把它们变成命令、索引和按需加载工具。
 # 关注点：skill 是轻量扩展方式，不需要写 Python 代码。
 
-"""技能加载器：发现并加载工作区中的 .md 技能文件，将其内容注入系统提示词。"""
+"""技能加载器：发现工作区中的 .md 技能文件，启动时只暴露索引，正文按需加载。"""
 
 import re
 from pathlib import Path
+from typing import Any
 
+from codepilot.protocols import TextContent
 from codepilot.sessions.types import RegisteredCommand
+from codepilot.tools import AgentTool, AgentToolResult, ToolMetadata
 
 from .types import LoadedExtensions, SkillSpec
+
+SKILL_LOADER_TOOL_NAME = "load_skill"
 
 
 def discover_skill_paths(workspace_dir: str | Path, configured_paths: list[str] | None = None) -> list[Path]:
@@ -46,7 +51,7 @@ def discover_skill_paths(workspace_dir: str | Path, configured_paths: list[str] 
 
 
 def load_skills(workspace_dir: str | Path, configured_paths: list[str] | None = None) -> LoadedExtensions:
-    """加载所有技能：解析 .md 文件的 frontmatter 和正文，注册为命令和提示词段落。"""
+    """加载所有技能：解析 .md 文件，注册命令，并生成紧凑技能索引。"""
     result = LoadedExtensions()
     seen_cmds: dict[str, str] = {}
     for path in discover_skill_paths(workspace_dir, configured_paths=configured_paths):
@@ -74,8 +79,6 @@ def load_skills(workspace_dir: str | Path, configured_paths: list[str] | None = 
             seen_cmds[cmd] = str(path)
 
             result.skills.append(skill)
-            result.prompt_guidelines.append(f"Skill guideline ({title}): follow this skill workflow.")
-            result.append_prompts.append(f"## Skill: {title}\n{text}")
             result.commands[cmd] = RegisteredCommand(
                 name=cmd,
                 description=desc,
@@ -85,7 +88,114 @@ def load_skills(workspace_dir: str | Path, configured_paths: list[str] | None = 
             result.loaded_paths.append(str(path))
         except Exception as exc:
             result.errors.append(f"{path}: {exc}")
+    if result.skills:
+        result.prompt_guidelines.append(
+            "Skills are available in the Available Skills index; use load_skill "
+            "with a listed name or command before following a skill workflow."
+        )
+        result.append_prompts.append(_render_skill_index(result.skills))
+        result.tools.append(_create_skill_loader_tool(result.skills))
     return result
+
+
+def _render_skill_index(skills: list[SkillSpec]) -> str:
+    """渲染启动提示词中的紧凑技能目录，不包含 skill 正文。"""
+
+    lines = [
+        "## Available Skills",
+        (
+            "These skills are discoverable capabilities. When a task clearly matches "
+            "one, call load_skill with its name or command to load the full workflow."
+        ),
+    ]
+    for skill in skills:
+        lines.append(f"- /{skill.command_name}: {skill.name} - {skill.description}")
+    return "\n".join(lines)
+
+
+def _create_skill_loader_tool(skills: list[SkillSpec]) -> AgentTool:
+    """创建模型可调用的 skill 正文加载工具。"""
+
+    lookup: dict[str, SkillSpec] = {}
+    for skill in skills:
+        lookup[_skill_lookup_key(skill.name)] = skill
+        lookup[_skill_lookup_key(skill.command_name)] = skill
+
+    async def _execute(
+        tool_call_id: str,
+        params: dict[str, Any],
+        signal: Any | None = None,
+        on_update: Any | None = None,
+    ) -> AgentToolResult:
+        _ = signal, on_update
+        raw_name = params.get("name", "") if isinstance(params, dict) else ""
+        skill = lookup.get(_skill_lookup_key(raw_name))
+        if skill is None:
+            available = [skill.command_name for skill in skills]
+            return AgentToolResult(
+                tool_call_id=tool_call_id,
+                tool_name=SKILL_LOADER_TOOL_NAME,
+                content=[
+                    TextContent(
+                        text=(
+                            f"Skill not found: {raw_name}. "
+                            f"Available skills: {', '.join('/' + name for name in available)}"
+                        )
+                    )
+                ],
+                status="error",
+                is_error=True,
+                error_code="skill_not_found",
+                details={
+                    "reason": "skill_not_found",
+                    "requested": str(raw_name),
+                    "available": available,
+                },
+            )
+        return AgentToolResult(
+            tool_call_id=tool_call_id,
+            tool_name=SKILL_LOADER_TOOL_NAME,
+            content=[TextContent(text=_render_loaded_skill(skill))],
+            details={
+                "skill": skill.name,
+                "command": skill.command_name,
+                "source_path": skill.source_path,
+            },
+        )
+
+    return AgentTool(
+        name=SKILL_LOADER_TOOL_NAME,
+        label="Load Skill",
+        description=(
+            "Load the full Markdown workflow for a discovered skill when the current "
+            "task matches the Available Skills index."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Skill name or slash command, for example demo-review or /demo-review.",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        execute=_execute,
+        metadata=ToolMetadata(
+            name=SKILL_LOADER_TOOL_NAME,
+            category="skill",
+            read_only=True,
+            concurrency_safe=True,
+            exclusive=False,
+            requires_approval=False,
+            risk_level="low",
+            resource_scope=("skill",),
+            network_access=False,
+            credential_required=False,
+            extra={"capabilities": ["skill.load"]},
+        ),
+    )
 
 
 def _extract_title(text: str) -> str | None:
@@ -123,6 +233,18 @@ def _slugify(text: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9_-]+", "-", text.strip().lower())
     normalized = normalized.strip("-")
     return normalized or "skill"
+
+
+def _skill_lookup_key(value: object) -> str:
+    return str(value or "").strip().lstrip("/").lower()
+
+
+def _render_loaded_skill(skill: SkillSpec) -> str:
+    return (
+        f"Loaded skill {skill.name} (command: /{skill.command_name}).\n"
+        "Follow the skill content below and produce actionable results.\n\n"
+        f"{skill.content}"
+    )
 
 
 def _render_skill_prompt(skill: SkillSpec, raw_text: str) -> str:

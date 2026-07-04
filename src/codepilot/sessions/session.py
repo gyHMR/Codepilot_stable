@@ -572,26 +572,33 @@ class AgentSession:
         is_continue: bool,
         rollback_baseline: GitRollbackBaseline | None = None,
     ) -> GitRollbackBaseline:
-        """Prepare session-owned state before delegating to the core Agent.
+        """在委派给核心代理之前，准备会话拥有的状态。
 
-        This is the boundary between application session concerns and the core
-        run loop: hooks, durable memory admission, task recovery projection,
-        and context freshness are prepared here. The ContextGovernor projection
-        runs later through AgentOptions.prepare_context, immediately before the
-        Agent asks the model for the next response.
+            这是应用程序会话关注点和核心之间的边界
+            运行循环：挂钩、持久内存接纳、任务恢复投影、，
+            这里准备了上下文新鲜度。ContextGovernor投影
+            稍后通过AgentOptions.prepare_context运行，紧邻
+            代理向模型询问下一个响应。
         """
 
         rollback_baseline = rollback_baseline or capture_git_baseline(self.workspace_dir)
+        #② 执行 before_prompt_hooks（扩展的预处理逻辑）
         await self._run_lifecycle_hooks(
             text=text,
             is_continue=is_continue,
             hooks=self.before_prompt_hooks,
         )
+
         if not is_continue:
+            # ③ 如果用户说了"记住xxx"，录入长期记忆
             if self.memory_enabled:
                 self._admit_prompt_memory(text, run_id=run_id)
+                #保存任务进度快照（崩溃后可以恢复）
             self._begin_task_recovery(text, run_id=run_id)
+
         self.agent.set_task_recovery_projection(self._active_task_recovery_projection())
+
+        #检查上下文新鲜度（文件有没有被外部改过）
         self._check_context_freshness()
         return rollback_baseline
 

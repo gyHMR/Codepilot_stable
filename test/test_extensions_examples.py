@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "docs" / "examples" / "extensions"
 
 
-def test_demo_skill_loads_as_command_and_prompt() -> None:
+def test_demo_skill_loads_as_command_and_compact_index() -> None:
     from codepilot.extensions import SessionCommandContext, load_skills
 
     loaded = load_skills(ROOT, configured_paths=[str(EXAMPLES / "demo_skill.md")])
@@ -18,7 +18,12 @@ def test_demo_skill_loads_as_command_and_prompt() -> None:
     assert loaded.skills[0].name == "Demo Review Checklist"
     assert loaded.skills[0].command_name == "demo-review"
     assert "demo-review" in loaded.commands
-    assert any("Demo Review Checklist" in text for text in loaded.append_prompts)
+    assert len(loaded.append_prompts) == 1
+    assert "Available Skills" in loaded.append_prompts[0]
+    assert "/demo-review" in loaded.append_prompts[0]
+    assert "Use a compact review checklist" in loaded.append_prompts[0]
+    assert "Goal:" not in loaded.append_prompts[0]
+    assert "Verification:" not in loaded.append_prompts[0]
 
     command = loaded.commands["demo-review"]
     rendered = command.handler(
@@ -35,6 +40,24 @@ def test_demo_skill_loads_as_command_and_prompt() -> None:
     assert "Applied skill Demo Review Checklist" in rendered
     assert "Goal:" in rendered
     assert "Verification:" in rendered
+
+
+def test_demo_skill_registers_load_skill_tool_for_on_demand_content() -> None:
+    from codepilot.extensions import load_skills
+
+    loaded = load_skills(ROOT, configured_paths=[str(EXAMPLES / "demo_skill.md")])
+
+    assert [tool.name for tool in loaded.tools] == ["load_skill"]
+
+    tool = loaded.tools[0]
+    result = asyncio.run(tool.execute("call_load_skill", {"name": "demo-review"}))
+
+    assert not result.is_error
+    assert result.content[0].text.startswith("Loaded skill Demo Review Checklist")
+    assert "Goal:" in result.content[0].text
+    assert "Verification:" in result.content[0].text
+    assert result.details["skill"] == "Demo Review Checklist"
+    assert result.details["command"] == "demo-review"
 
 
 def test_demo_extension_registers_command_tool_prompt_and_hook() -> None:

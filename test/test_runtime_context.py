@@ -55,3 +55,69 @@ def test_runtime_prompt_keeps_repository_context_with_custom_prompt(tmp_path: Pa
     assert prompt.startswith("Custom system prompt")
     assert "Repository Context" in prompt
     assert "Project type: Python" in prompt
+
+
+def test_runtime_prompt_includes_skill_index_without_skill_body(tmp_path: Path) -> None:
+    from codepilot.extensions import load_skills
+    from codepilot.extensions.types import LoadedExtensions
+    from codepilot.runtime.bootstrap.config import RuntimeConfig
+    from codepilot.runtime.bootstrap.context import build_runtime_context
+    from codepilot.runtime.bootstrap.prompt import build_runtime_system_prompt
+
+    skill_file = tmp_path / "review.md"
+    skill_file.write_text(
+        "\n".join(
+            [
+                "---",
+                "name: Focused Review",
+                "command: focused-review",
+                "description: Use this when reviewing a focused code change.",
+                "---",
+                "# Focused Review",
+                "SECRET_SKILL_BODY_MARKER",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    loaded_skills = load_skills(tmp_path, configured_paths=[str(skill_file)])
+    config = RuntimeConfig(
+        system_prompt="",
+        thinking_level="off",
+        tool_execution="parallel",
+        task_mode="edit",
+        planning_budget_profile="balanced",
+        retry_enabled=True,
+        max_retries=2,
+        retry_base_delay_ms=1200,
+        read_only_mode=False,
+        block_dangerous_bash=True,
+        bash_allow_patterns=None,
+        bash_block_patterns=None,
+        edit_require_unique_match=True,
+        extension_paths=[],
+        skill_paths=[str(skill_file)],
+        mcp_servers=[],
+        prompt_guidelines=None,
+        append_system_prompt=None,
+        prompt_debug_sources=False,
+        tool_snippets=None,
+        enabled_builtin_tools=None,
+    )
+
+    context = build_runtime_context(
+        tmp_path,
+        config,
+        LoadedExtensions(),
+        loaded_skills,
+    )
+    prompt = build_runtime_system_prompt(
+        base_system_prompt="",
+        tools=[],
+        runtime_context=context,
+        workspace=tmp_path,
+    )
+
+    assert "Available Skills" in prompt
+    assert "/focused-review" in prompt
+    assert "Use this when reviewing a focused code change." in prompt
+    assert "SECRET_SKILL_BODY_MARKER" not in prompt

@@ -83,12 +83,25 @@ codepilot --task-mode plan -p "修复失败测试并说明验证方式"
 codepilot --permission-mode ask
 ```
 
+### 钉钉远程入口
+
+钉钉接入不复用 `codepilot` CLI parser，而是使用独立脚本启动：
+
+```bash
+pip install -e ".[dingtalk]"
+export DINGTALK_CLIENT_ID="your-client-id"
+export DINGTALK_CLIENT_SECRET="your-client-secret"
+codepilot-dingtalk serve --cwd /path/to/project --allowed-user <sender_staff_id>
+```
+
+手机端发送 `cp <任务描述>` 会进入同一个 `RuntimeService -> AgentSession -> ToolRuntime` 主链。钉钉会话默认强制 `tool_permission_mode="ask"`，写文件、shell、回退等操作仍要审批；Git 工作区有用户改动时默认拒绝远程 run，可显式加 `--allow-dirty`。
+
 ## 运行主线
 
 一次请求大致经过下面这条链路：
 
 ```text
-CLI/Web/Eval
+CLI/DingTalk/Eval
   -> RuntimeService
   -> assemble_runtime()
   -> AgentSession
@@ -106,7 +119,7 @@ CLI/Web/Eval
 
 | 阶段 | 代码位置 | 说明 |
 |---|---|---|
-| 接口入口 | `src/codepilot/interfaces/` | CLI、Web、RPC 适配 |
+| 接口入口 | `src/codepilot/interfaces/` | CLI、钉钉远程入口、RPC 适配 |
 | 应用门面 | `src/codepilot/runtime/service.py` | session 管理、消息发送、审批恢复、运行查询 |
 | 运行时装配 | `src/codepilot/runtime/assembly.py` | 解析模型、配置、工具、扩展、prompt 和 session options |
 | 会话事实源 | `src/codepilot/sessions/session.py` | run 生命周期、持久化、记忆、上下文、任务恢复 |
@@ -131,7 +144,7 @@ src/codepilot/
 ├── observability/  # 运行 trace、事件归一化、审计报告
 ├── extensions/     # Python 扩展、Markdown skill、MCP 桥接
 ├── runtime/        # 配置解析、模型/工具/prompt/session 装配、服务门面
-├── interfaces/     # CLI 和 Web 接口
+├── interfaces/     # CLI 和钉钉远程入口
 └── evaluation/     # Benchmark、runner、evidence、scorer、report
 ```
 

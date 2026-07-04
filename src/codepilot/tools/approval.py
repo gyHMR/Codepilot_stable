@@ -105,7 +105,7 @@ def build_approval_request(
 
 
 class ApprovalProvider(Protocol):
-    """审批提供者协议：由 CLI/Web 等接口层实现。"""
+    """审批提供者协议：由 CLI/钉钉等接口层实现。"""
     async def request_approval(
         self,
         request: ToolRuntimeRequest,

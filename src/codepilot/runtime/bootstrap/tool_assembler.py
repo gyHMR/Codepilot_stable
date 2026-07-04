@@ -189,7 +189,7 @@ def assemble_tools(
         ),
     )
 
-    # 按名称去重合并：内置 -> 自定义 -> 扩展 -> MCP（后者覆盖前者）
+    # 按名称去重合并：内置 -> 自定义 -> 技能 -> 扩展 -> MCP（后者覆盖前者）
     tool_map: dict[str, tuple[AgentTool, str, str | None]] = {}
 
     # 内置工具
@@ -220,6 +220,25 @@ def assemble_tools(
                 message=f"Tool '{tool.name}' from caller overrides {prev_source}",
             ))
         tool_map[tool.name] = (tool, "caller", None)
+
+    # Skill 按需加载工具
+    for tool in loaded_skills.tools:
+        if get_builtin_tool_metadata(tool.name) is not None:
+            diagnostics.append(RuntimeDiagnostic(
+                severity="warning",
+                code="tool.reserved_name",
+                message=f"Tool '{tool.name}' from skill uses a reserved builtin name",
+                source="skill",
+            ))
+            continue
+        if tool.name in tool_map:
+            prev_source = tool_map[tool.name][1]
+            diagnostics.append(RuntimeDiagnostic(
+                severity="warning",
+                code="tool.name_conflict",
+                message=f"Tool '{tool.name}' from skill overrides {prev_source}",
+            ))
+        tool_map[tool.name] = (tool, "extension", "skill")
 
     # 扩展工具
     for tool in loaded_extensions.tools:

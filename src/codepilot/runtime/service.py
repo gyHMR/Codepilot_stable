@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-# 新手导读：RuntimeService 是 CLI/Web 面向的应用服务门面，管理 session、发送消息、恢复审批和取消运行。
+# 新手导读：RuntimeService 是 CLI/钉钉面向的应用服务门面，管理 session、发送消息、恢复审批和取消运行。
 # 关注点：interfaces 层基本只应该调用这里，而不是直接摸 core/sessions 内部。
 
 """
 运行时应用服务层。
 
-RuntimeService 是面向用户接口（CLI、Web）的统一门面，
+RuntimeService 是面向用户接口（CLI、钉钉）的统一门面，
 提供会话管理、消息发送、运行结果查询等高层操作。
 """
 
