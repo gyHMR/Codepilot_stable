@@ -17,13 +17,15 @@ from __future__ import annotations
 - print/rpc 模式不被人类界面输出污染
 """
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Literal
 
 from codepilot.runtime.actions import (
+    ApprovalDecided,
+    ApprovalRequiredFrame,
     FailedFrame,
     ProgressFrame,
     PromptSubmitted,
@@ -32,21 +34,33 @@ from codepilot.runtime.actions import (
 )
 
 from .commands import handle_cli_command
-from .renderer import SimpleRenderer, TerminalRenderer
-from .rpc_protocol import (
-    RpcEmit,
-    emit_rpc_ready,
-    emit_rpc_error,
-    emit_rpc_ok,
-    rpc_error_from_exception,
-    rpc_json_default,
+from .render import (
+    OutputFn,
+    SimpleRenderer,
+    TerminalRenderer,
+    build_startup_state,
 )
-from .startup import build_startup_state
-from .types import InputFn, OutputFn, RunMode
+
+
+RunMode = Literal["print", "interactive", "rpc"]
+InputFn = Callable[[str], str]
+RpcEmit = Callable[[dict[str, Any]], None]
+RPC_PROTOCOL_VERSION = "1.2"
 
 
 __all__ = [
     "RunOptions",
+    "RPC_PROTOCOL_VERSION",
+    "RpcEmit",
+    "RpcError",
+    "InputFn",
+    "OutputFn",
+    "RunMode",
+    "emit_rpc_error",
+    "emit_rpc_ok",
+    "emit_rpc_ready",
+    "rpc_error_from_exception",
+    "rpc_json_default",
     "run",
     "run_interactive",
     "run_print",
@@ -55,6 +69,109 @@ __all__ = [
 
 
 # ── 运行模式实现 ──────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class RpcError:
+    """Normalized JSONL RPC error payload."""
+
+    code: str
+    message: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "code", _require_rpc_text(self.code, field_name="code"))
+        object.__setattr__(
+            self,
+            "message",
+            _require_rpc_text(self.message, field_name="message"),
+        )
+
+
+def rpc_json_default(value: Any) -> Any:
+    """Serialize dataclasses and sets while preserving readable fallback text."""
+
+    if is_dataclass(value):
+        return asdict(value)
+    if isinstance(value, set):
+        return list(value)
+    return str(value)
+
+
+def rpc_error_from_exception(exc: Exception) -> RpcError:
+    """Map Python exceptions to the stable JSONL RPC error contract."""
+
+    raw_code = getattr(exc, "code", None)
+    code = raw_code.strip() if isinstance(raw_code, str) and raw_code.strip() else "execution_error"
+    message = str(exc).strip() or type(exc).__name__
+    return RpcError(code=code, message=message)
+
+
+def emit_rpc_error(
+    emit: RpcEmit,
+    *,
+    req_id: Any,
+    command: Any,
+    code: str,
+    message: str,
+) -> None:
+    """Emit one JSONL RPC error response."""
+
+    error = RpcError(code=code, message=message)
+    emit(
+        {
+            "type": "response",
+            "id": req_id,
+            "command": command,
+            "status": "error",
+            "error": {"code": error.code, "message": error.message},
+        }
+    )
+
+
+def emit_rpc_ready(
+    emit: RpcEmit,
+    *,
+    session_id: str,
+) -> None:
+    """Emit the initial JSONL RPC handshake message."""
+
+    normalized_session_id = _require_rpc_text(session_id, field_name="session_id")
+    emit(
+        {
+            "type": "rpc_ready",
+            "session_id": normalized_session_id,
+            "protocol_version": RPC_PROTOCOL_VERSION,
+        }
+    )
+
+
+def emit_rpc_ok(
+    emit: RpcEmit,
+    *,
+    req_id: Any,
+    command: str,
+    data: dict[str, Any] | None = None,
+) -> None:
+    """Emit one JSONL RPC success response."""
+
+    normalized_command = _require_rpc_text(command, field_name="command")
+    payload: dict[str, Any] = {
+        "type": "response",
+        "id": req_id,
+        "command": normalized_command,
+        "status": "ok",
+    }
+    if data is not None:
+        payload["data"] = data
+    emit(payload)
+
+
+def _require_rpc_text(value: str, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"RPC error {field_name} must be str")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"RPC error {field_name} cannot be empty")
+    return normalized
 
 @dataclass
 class RunOptions:
@@ -136,10 +253,45 @@ async def _render_prompt_run(
 ) -> None:
     """发送普通用户输入，并把运行事件渲染到 CLI renderer。"""
 
+    await _render_runtime_frames(
+        runtime.dispatch(session_id, PromptSubmitted(text=prompt)),
+        renderer,
+    )
+
+
+async def _render_approval_decision_run(
+    runtime: Any,
+    session_id: str,
+    *,
+    approval_id: str,
+    decision: str,
+    reason: str = "",
+    renderer: Any,
+) -> None:
+    """提交审批决定，并把恢复后的运行事件渲染到 CLI renderer。"""
+
+    await _render_runtime_frames(
+        runtime.dispatch(
+            session_id,
+            ApprovalDecided(
+                approval_id=approval_id,
+                decision=decision,  # type: ignore[arg-type]
+                reason=reason,
+            ),
+        ),
+        renderer,
+    )
+
+
+async def _render_runtime_frames(frames: Any, renderer: Any) -> None:
+    """Consume runtime frames and render progress, approval, final, or failure."""
+
     final_message = None
-    async for frame in runtime.dispatch(session_id, PromptSubmitted(text=prompt)):
+    async for frame in frames:
         if isinstance(frame, ProgressFrame):
             renderer.handle_event(frame.event)
+        elif isinstance(frame, ApprovalRequiredFrame):
+            _render_approval_required(frame, renderer)
         elif isinstance(frame, RunFinishedFrame):
             final_message = _final_message_from_record(frame.record)
         elif isinstance(frame, FailedFrame):
@@ -154,6 +306,34 @@ def _final_message_from_record(record: Any) -> Any:
         if message is not None:
             return message
     return getattr(record, "final_message", None)
+
+
+def _render_approval_required(frame: ApprovalRequiredFrame, renderer: Any) -> None:
+    event = _approval_event_from_frame(frame)
+    renderer.handle_event(event)
+    render_status = getattr(renderer, "render_status", None)
+    if callable(render_status):
+        approval_id = event["approvalId"]
+        render_status(
+            f"Approval pending: /approve {approval_id} or /deny {approval_id}",
+            kind="warning",
+        )
+
+
+def _approval_event_from_frame(frame: ApprovalRequiredFrame) -> dict[str, Any]:
+    approval = frame.approval
+    risk = getattr(approval, "risk", None)
+    return {
+        "type": "tool_approval_required",
+        "toolName": str(getattr(approval, "tool_name", "")),
+        "toolCallId": str(getattr(approval, "tool_call_id", "")),
+        "approvalId": str(getattr(approval, "approval_id", "")),
+        "runId": str(getattr(approval, "run_id", "")),
+        "args": dict(getattr(approval, "arguments", {}) or {}),
+        "riskLevel": str(getattr(risk, "level", "unknown")),
+        "reason": str(getattr(approval, "reason", "")),
+        "status": "approval_required",
+    }
 
 
 def _frame_error_message(error: Any) -> str:
@@ -291,6 +471,31 @@ async def run_interactive(
 
         # "/" 开头的命令通过 RuntimeGateway 执行
         if text.startswith("/"):
+            approval_command = _parse_approval_command(text)
+            if approval_command is not None:
+                decision, approval_id, reason = approval_command
+                if not approval_id:
+                    renderer.render_status(
+                        f"Usage: /{decision} <approval_id>",
+                        kind="error",
+                    )
+                    continue
+                try:
+                    renderer.reset()
+                    await _render_approval_decision_run(
+                        runtime,
+                        current_session_id,
+                        approval_id=approval_id,
+                        decision=decision,
+                        reason=reason,
+                        renderer=renderer,
+                    )
+                except Exception as exc:
+                    renderer.render_status(f"Approval error: {exc}", kind="error")
+                    if verbose:
+                        import traceback
+                        traceback.print_exc()
+                continue
             try:
                 command_result = await handle_cli_command(runtime, current_session_id, text)
                 renderer.render_command_output(command_result.output_lines)
@@ -340,6 +545,18 @@ async def run_interactive(
                 import traceback
                 traceback.print_exc()
             continue
+
+
+def _parse_approval_command(text: str) -> tuple[str, str, str] | None:
+    parts = text.strip().lstrip("/").split(maxsplit=2)
+    if not parts:
+        return None
+    command = parts[0].lower()
+    if command not in {"approve", "deny"}:
+        return None
+    approval_id = parts[1].strip() if len(parts) >= 2 else ""
+    reason = parts[2].strip() if len(parts) >= 3 else ""
+    return command, approval_id, reason
 
 
 async def run(options: RunOptions) -> None:
@@ -412,11 +629,47 @@ async def _handle_rpc_request(
             ):
                 if isinstance(frame, ProgressFrame):
                     emit({"type": "event", "event": frame.event})
+                elif isinstance(frame, ApprovalRequiredFrame):
+                    approval = _approval_rpc_data(frame)
+                    emit({"type": "approval_required", "approval": approval})
+                    result_data = {
+                        "status": "waiting_approval",
+                        "approval_id": approval["approval_id"],
+                    }
                 elif isinstance(frame, RunFinishedFrame):
                     result_data = _run_record_rpc_data(frame.record)
                 elif isinstance(frame, FailedFrame):
                     raise _runtime_error_from_frame(frame.error)
             emit_rpc_ok(emit, req_id=req_id, command="prompt", data=result_data)
+
+        elif cmd in {"approve", "deny"}:
+            approval_id = str(req.get("approval_id", "")).strip()
+            if not approval_id:
+                raise ValueError(f"{cmd} requires approval_id")
+            reason = str(req.get("reason", "")).strip()
+            result_data: dict[str, Any] | None = None
+            async for frame in runtime.dispatch(
+                session_id,
+                ApprovalDecided(
+                    approval_id=approval_id,
+                    decision=cmd,  # type: ignore[arg-type]
+                    reason=reason,
+                ),
+            ):
+                if isinstance(frame, ProgressFrame):
+                    emit({"type": "event", "event": frame.event})
+                elif isinstance(frame, ApprovalRequiredFrame):
+                    approval = _approval_rpc_data(frame)
+                    emit({"type": "approval_required", "approval": approval})
+                    result_data = {
+                        "status": "waiting_approval",
+                        "approval_id": approval["approval_id"],
+                    }
+                elif isinstance(frame, RunFinishedFrame):
+                    result_data = _run_record_rpc_data(frame.record)
+                elif isinstance(frame, FailedFrame):
+                    raise _runtime_error_from_frame(frame.error)
+            emit_rpc_ok(emit, req_id=req_id, command=cmd, data=result_data)
 
         elif cmd == "state":
             state = _session_state(runtime, session_id)
@@ -573,6 +826,20 @@ def _run_record_rpc_data(record: Any) -> dict[str, Any]:
         if value is not None:
             data[name] = value
     return data
+
+
+def _approval_rpc_data(frame: ApprovalRequiredFrame) -> dict[str, Any]:
+    approval = frame.approval
+    risk = getattr(approval, "risk", None)
+    return {
+        "approval_id": str(getattr(approval, "approval_id", "")),
+        "run_id": str(getattr(approval, "run_id", "")),
+        "tool_call_id": str(getattr(approval, "tool_call_id", "")),
+        "tool_name": str(getattr(approval, "tool_name", "")),
+        "arguments": dict(getattr(approval, "arguments", {}) or {}),
+        "reason": str(getattr(approval, "reason", "")),
+        "risk_level": str(getattr(risk, "level", "unknown")),
+    }
 
 
 async def run_rpc(

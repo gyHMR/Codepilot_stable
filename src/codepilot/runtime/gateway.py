@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from typing import Any
+from typing import Any, Callable
 
+from codepilot.core.contracts import AgentLoopPorts, ContextPort
 from codepilot.core.loop import resume_agent_loop, run_agent_loop
 from codepilot.sessions.contracts import (
     SessionCommandIntent,
@@ -12,6 +14,7 @@ from codepilot.sessions.contracts import (
     SessionView,
 )
 from codepilot.sessions.controller import SessionController
+from codepilot.tools.ports import ToolCatalogView
 
 from .approvals import ApprovalRegistry, ApprovalView
 from .actions import (
@@ -28,7 +31,7 @@ from .actions import (
     RuntimeFrame,
     UserAction,
 )
-from .session_opening import (
+from .opening import (
     AppSessionView,
     SessionOpenIntent as _SessionOpenIntent,
     SessionRef,
@@ -55,11 +58,11 @@ class RuntimeGateway:
 
     def open_session(self, intent: _SessionOpenIntent) -> SessionRef:
         from .assembly import assemble_runtime
-        from codepilot.tools.ports import ToolRuntimePort
+        from codepilot.tools.adapter import ToolRuntimePort
 
         controller, assembly = assemble_runtime(_to_runtime_assembly_intent(intent))
         session_id = controller.session_id
-        from codepilot.llm.ports import ProviderModelPort
+        from codepilot.llm.adapter import ProviderModelPort
 
         self._sessions.add(
             session_id,
@@ -161,14 +164,29 @@ class RuntimeGateway:
             )
         )
         self._active_runs.start(controller.session_id, prepared.run_id)
+        event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        def event_sink(event: dict[str, Any]) -> None:
+            event_queue.put_nowait(dict(event))
+
         try:
-            outcome = await run_agent_loop(
-                prepared.loop_input,
-                ports=self._ports_for(
-                    controller.session_id,
-                    context_port=prepared.context_port,
+            task = asyncio.create_task(
+                run_agent_loop(
+                    prepared.loop_input,
+                    ports=self._ports_for(
+                        controller.session_id,
+                        context_port=prepared.context_port,
+                        event_sink=event_sink,
+                    ),
                 ),
             )
+            while not task.done() or not event_queue.empty():
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    continue
+                yield ProgressFrame(event=event)
+            outcome = await task
             record = await controller.commit_run(prepared, outcome)
         except Exception as exc:
             yield FailedFrame(error=_runtime_error_payload(exc))
@@ -176,7 +194,12 @@ class RuntimeGateway:
         finally:
             self._active_runs.finish(controller.session_id)
 
-        async for frame in self._frames_from_outcome(controller, outcome, record):
+        async for frame in self._frames_from_outcome(
+            controller,
+            outcome,
+            record,
+            include_events=False,
+        ):
             yield frame
 
     async def _dispatch_approval(
@@ -219,13 +242,28 @@ class RuntimeGateway:
                 )
                 return
             self._active_runs.start(controller.session_id, prepared.run_id)
-            outcome = await resume_agent_loop(
-                prepared.resume_input,
-                self._ports_for(
-                    controller.session_id,
-                    context_port=prepared.context_port,
-                ),
+            event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+            def event_sink(event: dict[str, Any]) -> None:
+                event_queue.put_nowait(dict(event))
+
+            task = asyncio.create_task(
+                resume_agent_loop(
+                    prepared.resume_input,
+                    self._ports_for(
+                        controller.session_id,
+                        context_port=prepared.context_port,
+                        event_sink=event_sink,
+                    ),
+                )
             )
+            while not task.done() or not event_queue.empty():
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    continue
+                yield ProgressFrame(event=event)
+            outcome = await task
             record = await controller.commit_run(prepared, outcome)
         except Exception as exc:
             yield FailedFrame(error=_runtime_error_payload(exc))
@@ -233,7 +271,12 @@ class RuntimeGateway:
         finally:
             self._active_runs.finish(controller.session_id)
         self._approvals.pop(action.approval_id)
-        async for frame in self._frames_from_outcome(controller, outcome, record):
+        async for frame in self._frames_from_outcome(
+            controller,
+            outcome,
+            record,
+            include_events=False,
+        ):
             yield frame
 
     async def _frames_from_outcome(
@@ -241,9 +284,12 @@ class RuntimeGateway:
         controller: SessionController,
         outcome: Any,
         record: Any,
+        *,
+        include_events: bool = True,
     ) -> AsyncIterator[RuntimeFrame]:
-        for event in outcome.events:
-            yield ProgressFrame(event=dict(event))
+        if include_events:
+            for event in outcome.events:
+                yield ProgressFrame(event=dict(event))
         if outcome.status == "waiting_approval":
             for interruption in outcome.interruptions:
                 self._approvals.add(controller.session_id, interruption)
@@ -254,12 +300,19 @@ class RuntimeGateway:
             return
         yield RunFinishedFrame(record=record)
 
-    def _ports_for(self, session_id: str, *, context_port: Any | None):
+    def _ports_for(
+        self,
+        session_id: str,
+        *,
+        context_port: ContextPort | None,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
+    ) -> AgentLoopPorts:
         entry = self._sessions.require(session_id)
         return _ports(
             entry.model_port or self._model_port,
             entry.tool_port or self._tool_port,
             context_port,
+            event_sink,
         )
 
     def _tool_catalog_for(self, session_id: str) -> list[Any]:
@@ -268,6 +321,8 @@ class RuntimeGateway:
         if tool_port is None:
             return []
         catalog = tool_port.catalog()
+        if isinstance(catalog, ToolCatalogView):
+            return list(catalog.tools)
         if isinstance(catalog, dict):
             value = catalog.get("tools")
             return list(value) if isinstance(value, (list, tuple)) else [catalog]
@@ -311,14 +366,22 @@ class RuntimeGateway:
         )
 
 
-def _ports(model_port: Any, tool_port: Any | None = None, context_port: Any | None = None):
-    from codepilot.core.contracts import AgentLoopPorts
-
-    return AgentLoopPorts(model=model_port, tools=tool_port, context=context_port)
+def _ports(
+    model_port: Any,
+    tool_port: Any | None = None,
+    context_port: ContextPort | None = None,
+    event_sink: Callable[[dict[str, Any]], None] | None = None,
+) -> AgentLoopPorts:
+    return AgentLoopPorts(
+        model=model_port,
+        tools=tool_port,
+        context=context_port,
+        events=event_sink,
+    )
 
 
 def _builtin_commands():
-    from .command_catalog import builtin_commands
+    from .views import builtin_commands
 
     return builtin_commands()
 

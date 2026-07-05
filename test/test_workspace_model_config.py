@@ -11,9 +11,9 @@ from codepilot.interfaces.cli.main import (
     build_parser,
 )
 from codepilot.runtime.assembly import assemble_runtime
-from codepilot.runtime.bootstrap.model_resolver import resolve_model
-from codepilot.runtime.bootstrap.resources import WorkspaceResourceLoader
-from codepilot.runtime.assembly_input import RuntimeAssemblyIntent
+from codepilot.runtime.assembly import resolve_model
+from codepilot.runtime.assembly import WorkspaceResourceLoader
+from codepilot.runtime.assembly import RuntimeAssemblyIntent
 
 
 def _write_model_config(workspace, *, api_key: str = "local-key") -> None:
@@ -157,9 +157,9 @@ def test_config_check_and_show_use_sanitized_human_output(tmp_path, capsys) -> N
 
 
 def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import resolve_runtime_config
-    from codepilot.sessions.metadata import load_session_open_metadata
-    from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.runtime.assembly import resolve_runtime_config
+    from codepilot.sessions.storage import load_session_open_metadata
+    from codepilot.sessions.storage import SessionStore
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -189,7 +189,7 @@ def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> Non
 
 
 def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import resolve_runtime_config
+    from codepilot.runtime.assembly import resolve_runtime_config
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -231,7 +231,7 @@ def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> 
 
 
 def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import resolve_runtime_config
+    from codepilot.runtime.assembly import resolve_runtime_config
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -254,7 +254,7 @@ def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
 
 
 def test_workspace_settings_can_select_task_mode(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import resolve_runtime_config
+    from codepilot.runtime.assembly import resolve_runtime_config
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -273,7 +273,7 @@ def test_workspace_settings_can_select_task_mode(tmp_path) -> None:
 
 
 def test_workspace_settings_can_select_planning_budget_profile(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import resolve_runtime_config
+    from codepilot.runtime.assembly import resolve_runtime_config
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -293,7 +293,7 @@ def test_workspace_settings_can_select_planning_budget_profile(tmp_path) -> None
 
 
 def test_read_task_mode_forces_read_only_permission(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import resolve_runtime_config
+    from codepilot.runtime.assembly import resolve_runtime_config
 
     config = resolve_runtime_config(
         RuntimeAssemblyIntent(workspace_dir=tmp_path, task_mode="read"),
@@ -306,7 +306,7 @@ def test_read_task_mode_forces_read_only_permission(tmp_path) -> None:
 
 
 def test_read_task_mode_rejects_workspace_write_override(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import resolve_runtime_config
+    from codepilot.runtime.assembly import resolve_runtime_config
 
     with pytest.raises(ValueError, match="task_mode=read"):
         resolve_runtime_config(
@@ -320,8 +320,8 @@ def test_read_task_mode_rejects_workspace_write_override(tmp_path) -> None:
 
 
 def _runtime_inputs(tmp_path, *, session_id: str | None = None):
-    from codepilot.runtime.bootstrap.config import RuntimeInputs
-    from codepilot.sessions.metadata import load_session_open_metadata
+    from codepilot.runtime.assembly import RuntimeInputs
+    from codepilot.sessions.storage import load_session_open_metadata
 
     return RuntimeInputs(
         workspace=tmp_path,

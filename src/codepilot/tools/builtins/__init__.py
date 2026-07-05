@@ -7,14 +7,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from codepilot.tools.contracts import AgentTool
-from codepilot.tools.metadata import (
+from codepilot.tools.authoring import AgentTool
+from codepilot.tools.authoring import (
     MUTATING_TOOL_NAMES,
     READ_ONLY_TOOL_NAMES,
     get_builtin_tool_metadata,
 )
-from codepilot.tools.workspace_safety import WorkspaceSandbox
-from codepilot.tools.shell_safety import ShellExecutionPolicy
+from codepilot.tools.workspace import WorkspaceSandbox
+from codepilot.tools.workspace import ShellExecutionPolicy
 
 from .files import create_file_tools
 from .search import create_search_tools

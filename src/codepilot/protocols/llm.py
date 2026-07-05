@@ -21,8 +21,7 @@ from .errors import LLMErrorInfo
 
 # 仅在类型检查时导入，避免运行时循环引用
 if TYPE_CHECKING:
-    from .messages import AssistantMessage
-    from .tools import ToolCall
+    from .conversation import AssistantMessage, ToolCall
 
 
 # ── 类型别名 ────────────────────────────────────────────────────

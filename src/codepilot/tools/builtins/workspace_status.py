@@ -10,8 +10,8 @@ import subprocess
 from typing import Any, Callable
 
 from codepilot.protocols import TextContent
-from codepilot.tools.workspace_safety import WorkspaceSandbox
-from codepilot.tools.contracts import AgentTool, AgentToolResult
+from codepilot.tools.workspace import WorkspaceSandbox
+from codepilot.tools.authoring import AgentTool, AgentToolResult
 
 
 def create_workspace_tools(

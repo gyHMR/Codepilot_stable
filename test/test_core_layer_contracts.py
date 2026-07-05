@@ -37,7 +37,7 @@ def test_event_emitter_normalizes_envelope_and_rejects_unknown_event_type() -> N
 
 
 async def _run_event_emitter_contract_case() -> None:
-    from codepilot.core.events import AgentEventEmitter
+    from codepilot.core.loop import AgentEventEmitter
 
     events: list[dict[str, Any]] = []
     emitter = AgentEventEmitter(events.append, run_id=" run_events ", session_id=" session_1 ")
@@ -60,7 +60,7 @@ async def _run_event_emitter_contract_case() -> None:
 
 
 def test_core_context_validates_session_context_boundaries() -> None:
-    from codepilot.core.types import AgentContext
+    from codepilot.core.contracts import AgentContext
     from codepilot.protocols import UserMessage
 
     messages = [UserMessage(content="hello")]
@@ -84,7 +84,7 @@ def test_core_context_validates_session_context_boundaries() -> None:
 
 def test_legacy_agent_state_is_not_a_core_contract() -> None:
     import codepilot.core as core
-    import codepilot.core.types as core_types
+    import codepilot.core.contracts as core_types
     from codepilot.core import __all__ as core_exports
 
     assert not hasattr(core_types, "AgentState")
@@ -98,7 +98,7 @@ def test_model_turn_prepares_context_after_task_context_is_injected() -> None:
 
 async def _run_prepare_context_sees_current_task_case() -> None:
     from codepilot.core.contracts import AgentLoopInput, AgentLoopPorts, RunCorrelation
-    from codepilot.core.model_turn import build_model_request
+    from codepilot.core.model_step import build_model_request
     from codepilot.llm.ports import ModelDescriptor
     from codepilot.protocols import UserMessage
 

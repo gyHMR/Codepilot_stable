@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..persistence.store import SessionStore
+from ..storage import SessionStore
 
 
 @dataclass(frozen=True)

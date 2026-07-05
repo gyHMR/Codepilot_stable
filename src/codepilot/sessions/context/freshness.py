@@ -6,7 +6,7 @@ from __future__ import annotations
 """Helpers for turning context freshness checks into Agent steering messages."""
 
 from codepilot.protocols import TextContent, UserMessage
-from codepilot.sessions.persistence import FreshnessResult
+from codepilot.sessions.storage import FreshnessResult
 
 
 def build_context_freshness_notice(

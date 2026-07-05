@@ -61,7 +61,7 @@ def test_demo_skill_registers_load_skill_tool_for_on_demand_content() -> None:
 def test_demo_extension_registers_command_tool_prompt_and_hook() -> None:
     from codepilot.extensions import AfterToolCallContext, SessionCommandContext, load_extensions
     from codepilot.protocols import AssistantMessage, ToolCall
-    from codepilot.protocols.tool_hooks import ToolHookContextSnapshot
+    from codepilot.protocols.commands import ToolHookContextSnapshot
 
     loaded = load_extensions(ROOT, configured_paths=[str(EXAMPLES / "demo_extension.py")])
 

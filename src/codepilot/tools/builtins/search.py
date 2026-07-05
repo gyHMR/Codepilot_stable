@@ -9,8 +9,8 @@ import re
 from typing import Any, Callable
 
 from codepilot.protocols import TextContent
-from codepilot.tools.workspace_safety import WorkspaceSandbox
-from codepilot.tools.contracts import AgentTool, AgentToolResult
+from codepilot.tools.workspace import WorkspaceSandbox
+from codepilot.tools.authoring import AgentTool, AgentToolResult
 
 _IGNORED_DIRS = {
     ".git",

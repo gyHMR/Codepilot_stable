@@ -7,7 +7,7 @@ import pytest
 
 
 def _session_store(tmp_path: Path, session_id: str = "session_memory"):
-    from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.sessions.storage import SessionStore
 
     store = SessionStore(tmp_path, session_id)
     store.ensure_initialized(model_id="test", provider="test", system_prompt="")
@@ -430,7 +430,7 @@ def test_context_governor_reads_pinned_memory_dynamically(tmp_path: Path) -> Non
 
 
 async def _dynamic_pinned_memory_case(tmp_path: Path) -> None:
-    from codepilot.core.types import AgentContext, ContextPreparationRequest
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
     from codepilot.sessions.context.governor import ContextGovernor
     from codepilot.sessions.context.state import SessionContextState

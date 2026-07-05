@@ -42,8 +42,8 @@ def test_runtime_actions_are_immutable_user_intents_and_frames() -> None:
 
 def test_runtime_describe_view_is_app_session_view_not_legacy_snapshot() -> None:
     from codepilot.runtime.approvals import ApprovalView
-    from codepilot.runtime.command_catalog import builtin_commands
-    from codepilot.runtime.session_opening import AppSessionView
+    from codepilot.runtime.views import builtin_commands
+    from codepilot.runtime.opening import AppSessionView
     from codepilot.runtime.views import SessionStatus
     import codepilot.runtime.views as views
     from codepilot.sessions.contracts import SessionView
@@ -87,6 +87,7 @@ def test_core_contracts_describe_loop_stage_without_session_objects() -> None:
         AgentLoopOutcome,
         AgentLoopPorts,
         RunCorrelation,
+        TaskStrategy,
     )
     from codepilot.llm.ports import ModelDescriptor
     from codepilot.protocols import AgentRunCounters, AssistantMessage, TextContent
@@ -110,12 +111,135 @@ def test_core_contracts_describe_loop_stage_without_session_objects() -> None:
         context={"system_prompt": "sys"},
         model=ModelDescriptor(provider="fake", model_id="unit"),
         tools=[],
-        task_strategy={"mode": "edit"},
+        task_strategy=TaskStrategy(mode="edit"),
         limits=AgentLoopLimits(max_model_turns=3),
     )
     assert loop_input.correlation.session_id == "s1"
     assert loop_input.limits.max_model_turns == 3
     assert AgentLoopPorts(model=None, tools=None).events is None
+
+
+def test_agent_loop_retry_policy_is_explicit_contract() -> None:
+    from typing import get_type_hints
+
+    from codepilot.core.contracts import AgentLoopInput, AgentResumeInput, RetryPolicy
+
+    input_hints = get_type_hints(AgentLoopInput)
+    resume_hints = get_type_hints(AgentResumeInput)
+
+    assert input_hints["retry_policy"] is RetryPolicy
+    assert resume_hints["retry_policy"] is RetryPolicy
+    assert RetryPolicy(enabled=True, max_retries=-1, base_delay_ms=-5).max_retries == 0
+
+
+def test_agent_loop_task_strategy_is_explicit_contract() -> None:
+    from typing import get_type_hints
+
+    from codepilot.core.contracts import AgentLoopInput, AgentResumeInput, TaskStrategy
+
+    input_hints = get_type_hints(AgentLoopInput)
+    resume_hints = get_type_hints(AgentResumeInput)
+    strategy = TaskStrategy(
+        enabled=True,
+        mode="plan",
+        goal="  ship it  ",
+        steps=[{"title": "Inspect"}],
+        max_replans_per_run=-1,
+        recovery_projection={"goal": "ship it"},
+    )
+
+    assert input_hints["task_strategy"] is TaskStrategy
+    assert resume_hints["task_strategy"] is TaskStrategy
+    assert strategy.goal == "ship it"
+    assert strategy.steps == ({"title": "Inspect"},)
+    assert strategy.max_replans_per_run is None
+    assert strategy.recovery_projection == {"goal": "ship it"}
+
+
+def test_agent_loop_context_is_named_prepared_context_contract() -> None:
+    from typing import get_type_hints
+
+    from codepilot.core import PreparedContext as PublicPreparedContext
+    from codepilot.core.contracts import (
+        AgentLoopInput,
+        AgentResumeInput,
+        PreparedContext,
+        RunCorrelation,
+    )
+
+    input_hints = get_type_hints(AgentLoopInput)
+    resume_hints = get_type_hints(AgentResumeInput)
+    source = {"system_prompt": "Base rules", "session_id": "s1"}
+
+    loop_input = AgentLoopInput(
+        run_id="run_context",
+        correlation=RunCorrelation(session_id="s1"),
+        context=source,
+    )
+    resume_input = AgentResumeInput(
+        run_id="run_context_resume",
+        correlation=RunCorrelation(session_id="s1"),
+        context=source,
+    )
+    source["system_prompt"] = "mutated"
+
+    assert PublicPreparedContext is PreparedContext
+    assert input_hints["context"] is PreparedContext
+    assert resume_hints["context"] is PreparedContext
+    assert loop_input.context.system_prompt == "Base rules"
+    assert resume_input.context.session_id == "s1"
+    assert dict(loop_input.context) == {
+        "system_prompt": "Base rules",
+        "session_id": "s1",
+    }
+    with pytest.raises(TypeError):
+        loop_input.context["new"] = "value"  # type: ignore[index]
+
+
+def test_agent_loop_ports_use_named_event_sink_contract() -> None:
+    from typing import get_type_hints
+
+    from codepilot.core import EventSink as PublicEventSink
+    from codepilot.core.contracts import AgentLoopPorts, EventSink
+
+    hints = get_type_hints(AgentLoopPorts)
+
+    assert PublicEventSink is EventSink
+    assert hints["events"] == EventSink | None
+
+
+def test_prepared_agent_run_context_port_uses_core_context_port_contract() -> None:
+    from typing import get_type_hints
+
+    from codepilot.core.contracts import ContextPort
+    from codepilot.sessions.contracts import PreparedAgentRun
+
+    hints = get_type_hints(PreparedAgentRun)
+
+    assert hints["context_port"] == ContextPort | None
+
+
+def test_prepared_agent_run_rollback_baseline_is_public_ref() -> None:
+    from typing import get_type_hints
+
+    from codepilot.sessions.contracts import PreparedAgentRun, RollbackBaselineRef
+
+    hints = get_type_hints(PreparedAgentRun)
+    ref = RollbackBaselineRef(session_id="session1", run_id="run1")
+
+    assert hints["rollback_baseline"] == RollbackBaselineRef | None
+    assert ref.kind == "rollback_baseline_ref"
+
+
+def test_session_run_record_status_follows_core_loop_status_contract() -> None:
+    from typing import get_type_hints
+
+    from codepilot.core.contracts import AgentLoopStatus
+    from codepilot.sessions.contracts import SessionRunRecord
+
+    hints = get_type_hints(SessionRunRecord)
+
+    assert hints["status"] == AgentLoopStatus
 
 
 def test_session_intents_normalize_resume_and_cancel_values() -> None:
@@ -177,7 +301,7 @@ def test_v2_contract_modules_do_not_import_higher_layers() -> None:
     forbidden = {
         "codepilot.core.contracts": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
         "codepilot.sessions.contracts": ("codepilot.runtime", "codepilot.interfaces"),
-        "codepilot.runtime.actions": ("codepilot.core.agent", "codepilot.sessions.session", "codepilot.tools.execution"),
+        "codepilot.runtime.actions": ("codepilot.core.agent", "codepilot.sessions.prepare", "codepilot.tools.engine"),
         "codepilot.llm.ports": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
         "codepilot.tools.ports": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
     }

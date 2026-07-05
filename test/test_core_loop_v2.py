@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+from codepilot.core.contracts import TaskStrategy
+
 
 def test_core_loop_uses_model_port_and_returns_outcome() -> None:
     async def run_case() -> None:
@@ -57,6 +59,52 @@ def test_core_loop_uses_model_port_and_returns_outcome() -> None:
         assert outcome.events[0]["runId"] == "run1"
         assert outcome.events[1]["turnId"] == 1
         assert all("eventId" in event for event in outcome.events)
+
+    asyncio.run(run_case())
+
+
+def test_core_loop_emits_model_text_deltas_as_message_updates() -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import (
+            AgentLoopInput,
+            AgentLoopLimits,
+            AgentLoopPorts,
+            RunCorrelation,
+        )
+        from codepilot.core.loop import run_agent_loop
+        from codepilot.llm.ports import LLMCompleted, LLMTextDelta, ModelDescriptor
+        from codepilot.protocols import AssistantMessage, TextContent
+
+        class FakeModel:
+            async def stream(self, request):
+                yield LLMTextDelta(text="hel")
+                yield LLMTextDelta(text="lo")
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text="hello")])
+                )
+
+        events: list[dict] = []
+        loop_input = AgentLoopInput(
+            run_id="run_stream",
+            correlation=RunCorrelation(session_id="s1"),
+            user_prompt="hello",
+            model=ModelDescriptor(provider="fake", model_id="unit"),
+            limits=AgentLoopLimits(max_model_turns=1),
+        )
+
+        outcome = await run_agent_loop(
+            loop_input,
+            AgentLoopPorts(model=FakeModel(), tools=None, events=events.append),
+        )
+
+        deltas = [
+            event["assistantMessageEvent"]["delta"]
+            for event in outcome.events
+            if event["type"] == "message_update"
+        ]
+        assert outcome.status == "completed"
+        assert deltas == ["hel", "lo"]
+        assert events == outcome.events
 
     asyncio.run(run_case())
 
@@ -359,6 +407,7 @@ def test_core_loop_retries_retryable_model_turn_from_retry_policy() -> None:
             AgentLoopInput,
             AgentLoopLimits,
             AgentLoopPorts,
+            RetryPolicy,
             RunCorrelation,
         )
         from codepilot.core.loop import run_agent_loop
@@ -386,11 +435,11 @@ def test_core_loop_retries_retryable_model_turn_from_retry_policy() -> None:
                 user_prompt="hello",
                 model=ModelDescriptor(provider="fake", model_id="unit"),
                 limits=AgentLoopLimits(max_model_turns=1),
-                retry_policy={
-                    "enabled": True,
-                    "max_retries": 1,
-                    "base_delay_ms": 0,
-                },
+                retry_policy=RetryPolicy(
+                    enabled=True,
+                    max_retries=1,
+                    base_delay_ms=0,
+                ),
             ),
             AgentLoopPorts(model=model, tools=None),
         )
@@ -439,7 +488,7 @@ def test_core_loop_injects_task_context_and_returns_task_summary() -> None:
                 user_prompt="ship the task-control migration",
                 context={"system_prompt": "base rules"},
                 model=ModelDescriptor(provider="fake", model_id="unit"),
-                task_strategy={"enabled": True, "mode": "edit"},
+                task_strategy=TaskStrategy(enabled=True, mode="edit"),
                 limits=AgentLoopLimits(max_model_turns=1),
             ),
             AgentLoopPorts(model=model, tools=None),
@@ -484,11 +533,11 @@ def test_core_loop_plan_mode_uses_planning_budget_and_proposed_steps() -> None:
                 correlation=RunCorrelation(session_id="s1"),
                 user_prompt="refactor by plan",
                 model=ModelDescriptor(provider="fake", model_id="unit"),
-                task_strategy={
-                    "enabled": True,
-                    "mode": "plan",
-                    "planning_budget_profile": "wide",
-                    "steps": [
+                task_strategy=TaskStrategy(
+                    enabled=True,
+                    mode="plan",
+                    planning_budget_profile="wide",
+                    steps=[
                         {
                             "title": "Inspect target files",
                             "kind": "investigate",
@@ -500,7 +549,7 @@ def test_core_loop_plan_mode_uses_planning_budget_and_proposed_steps() -> None:
                             "verification_hint": "python -m pytest -q",
                         },
                     ],
-                },
+                ),
                 limits=AgentLoopLimits(max_model_turns=1),
             ),
             AgentLoopPorts(model=FakeModel(), tools=None),
@@ -572,7 +621,7 @@ def test_core_loop_preserves_task_summary_when_waiting_for_approval() -> None:
                 correlation=RunCorrelation(session_id="s1"),
                 user_prompt="edit the file",
                 model=ModelDescriptor(provider="fake", model_id="unit"),
-                task_strategy={"enabled": True, "mode": "edit"},
+                task_strategy=TaskStrategy(enabled=True, mode="edit"),
                 limits=AgentLoopLimits(max_model_turns=1),
             ),
             AgentLoopPorts(model=FakeModel(), tools=FakeTools()),
@@ -711,7 +760,7 @@ def test_core_loop_waits_for_user_when_final_answer_lacks_required_verification(
                 correlation=RunCorrelation(session_id="s1"),
                 user_prompt="edit code",
                 model=ModelDescriptor(provider="fake", model_id="unit"),
-                task_strategy={"enabled": True, "mode": "edit"},
+                task_strategy=TaskStrategy(enabled=True, mode="edit"),
                 limits=AgentLoopLimits(max_model_turns=2),
             ),
             AgentLoopPorts(model=FakeModel(), tools=FakeTools()),
@@ -803,7 +852,7 @@ def test_core_loop_allows_one_final_verification_at_tool_iteration_limit() -> No
                 correlation=RunCorrelation(session_id="s1"),
                 user_prompt="edit and verify",
                 model=ModelDescriptor(provider="fake", model_id="unit"),
-                task_strategy={"enabled": True, "mode": "edit"},
+                task_strategy=TaskStrategy(enabled=True, mode="edit"),
                 limits=AgentLoopLimits(
                     max_model_turns=3,
                     max_tool_iterations=1,
@@ -871,7 +920,7 @@ def test_core_loop_denied_tool_blocks_completion_through_task_control() -> None:
                 correlation=RunCorrelation(session_id="s1"),
                 user_prompt="write file",
                 model=ModelDescriptor(provider="fake", model_id="unit"),
-                task_strategy={"enabled": True, "mode": "edit"},
+                task_strategy=TaskStrategy(enabled=True, mode="edit"),
                 limits=AgentLoopLimits(max_model_turns=2),
             ),
             AgentLoopPorts(model=FakeModel(), tools=FakeTools()),

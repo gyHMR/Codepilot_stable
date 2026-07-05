@@ -4,7 +4,7 @@
 """Runtime execution base for assembled Codepilot agent sessions."""
 
 from .gateway import RuntimeGateway
-from .session_opening import SessionOpenIntent
+from .opening import SessionOpenIntent
 
 __all__ = [
     "RuntimeGateway",

@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+import time
+from dataclasses import dataclass, replace
 from typing import Any
 
 from codepilot.protocols import (
     AgentEvent,
+    AgentEventSink,
     AgentRunCounters,
+    AgentRunStatus,
+    AgentRunStopReason,
     AssistantMessage,
+    ErrorInfo,
+    Message,
+    TaskSummary,
     TextContent,
     ToolCall,
     ToolResultMessage,
     UserMessage,
+    ensure_runtime_event_type,
 )
 from codepilot.tools.ports import ToolObservation, ToolResumeDecision
 
@@ -20,25 +28,401 @@ from .contracts import (
     AgentLoopOutcome,
     AgentLoopPorts,
     AgentResumeInput,
+    PreparedContext,
+    RetryPolicy,
+    TaskStrategy,
 )
-from .events import now_ms
-from .model_turn import run_model_turn, tool_catalog_for_request
-from .stopping import (
-    completion_decision,
-    completed_outcome,
-    last_assistant,
-    post_tool_decision,
-    tool_call_signature,
-    tool_execution_gate,
+from .model_step import run_model_turn, tool_catalog_for_request
+from .state import RunState
+from .task import (
+    CompletionCheck,
+    ExecutionDecision,
+    TaskController,
+    TaskPlanningState,
+    budget_for_profile,
+    policy_for_mode,
 )
-from .task_runtime import AgentTaskRuntime, with_task_context
-from .tool_turn import (
+from .task.state import TaskState
+from .tool_step import (
     approval_observations,
     execute_tool_turn,
     to_tool_result_message,
     verification,
     workspace_effects,
 )
+
+
+ToolCallSignature = tuple[tuple[str, tuple[tuple[str, str], ...]], ...]
+
+
+@dataclass
+class AgentTaskRuntime:
+    """Loop-local adapter that keeps task control out of session/runtime layers."""
+
+    controller: TaskController
+    task: TaskState
+    run_state: "RunState"
+
+    @classmethod
+    def from_strategy(
+        cls,
+        *,
+        strategy: TaskStrategy,
+        messages: list[Message],
+        run_id: str,
+        session_id: str | None,
+    ) -> "AgentTaskRuntime | None":
+        if not strategy.enabled:
+            return None
+        policy = policy_for_mode(strategy.mode)
+        planning = strategy.planning
+        if planning is None and policy.planner_required:
+            planning = TaskPlanningState(
+                phase="execution",
+                source="default",
+                budget=budget_for_profile(strategy.planning_budget_profile),
+            )
+        controller = TaskController()
+        task = controller.initialize(
+            messages,
+            goal=strategy.goal,
+            proposed_steps=strategy.steps,
+            mode=policy.mode,
+            planning=planning,
+            max_replans_per_run=strategy.max_replans_per_run,
+            task_recovery_projection=strategy.recovery_projection,
+        )
+        return cls(
+            controller=controller,
+            task=task,
+            run_state=RunState(run_id=run_id, session_id=session_id),
+        )
+
+    def context_text(self) -> str:
+        return self.controller.render_context(self.task)
+
+    def event_payload(self) -> dict[str, object]:
+        return self.controller.event_payload(self.task)
+
+    def after_tool_results(
+        self,
+        results: list[ToolResultMessage],
+    ) -> ExecutionDecision:
+        self.run_state.collect_tool_results(results)
+        return self.controller.after_tool_results(self.task, self.run_state, results)
+
+    def snapshot(self) -> TaskSummary:
+        return self.controller.summarize(self.task)
+
+    def complete(self) -> tuple[TaskSummary, CompletionCheck]:
+        check = self.controller.check_completion(self.task, self.run_state)
+        return self.controller.summarize(self.task), check
+
+    def completion_steering(self, check: CompletionCheck) -> UserMessage:
+        return self.controller.completion_steering(check)
+
+    def needs_final_verification_grace(self, tool_calls: list[ToolCall]) -> bool:
+        return (
+            self.run_state.workspace_changed
+            and not self.run_state.fresh_verification_passed
+            and any(_looks_like_verification_call(call) for call in tool_calls)
+        )
+
+    def merge_observation_summary(
+        self,
+        *,
+        affected_paths: tuple[str, ...],
+        workspace_changed: bool,
+        verification: list[Any],
+    ) -> None:
+        self.run_state.affected_paths.update(affected_paths)
+        self.run_state.workspace_changed = (
+            self.run_state.workspace_changed or workspace_changed
+        )
+        self.run_state.verification = list(verification)
+        self.run_state.fresh_verification_passed = any(
+            getattr(item, "status", None) == "passed" for item in verification
+        )
+
+
+@dataclass(frozen=True)
+class ToolExecutionGate:
+    should_execute: bool
+    reason: str = "allowed"
+    code: str | None = None
+    message: str | None = None
+    stop_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class PostToolDecision:
+    should_stop: bool
+    reason: str
+    status: AgentRunStatus | None = None
+    stop_reason: AgentRunStopReason | None = None
+    error: ErrorInfo | None = None
+    force_completion_check: bool = False
+
+
+@dataclass(frozen=True)
+class CompletionDecision:
+    should_stop: bool
+    should_continue: bool
+    reason: str
+    status: AgentRunStatus | None = None
+    stop_reason: AgentRunStopReason | None = None
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+async def maybe_await(value: Any) -> Any:
+    if asyncio.isfuture(value) or asyncio.iscoroutine(value):
+        return await value
+    return value
+
+
+class AgentEventEmitter:
+    """Emit agent events with run, turn, sequence, and timestamp metadata."""
+
+    def __init__(
+        self,
+        sink: AgentEventSink,
+        *,
+        run_id: str,
+        session_id: str | None = None,
+    ) -> None:
+        self._sink = sink
+        self._session_id = _optional_event_text(session_id)
+        self.run_id = _require_event_text(run_id, field_name="run_id")
+        self.turn_id = 0
+        self._event_seq = 0
+
+    async def emit(self, event: dict[str, Any]) -> None:
+        if not isinstance(event, dict):
+            raise TypeError("event must be a dict")
+        event_type = ensure_runtime_event_type(event.get("type"))
+        if event_type == "turn_start":
+            self.turn_id += 1
+
+        self._event_seq += 1
+        enriched = {
+            **event,
+            "type": event_type,
+            "runId": self.run_id,
+            "turnId": self.turn_id,
+            "eventId": f"{self.run_id}:{self._event_seq}",
+            "timestamp": now_ms(),
+            "sessionId": self._session_id,
+        }
+        value = self._sink(enriched)  # type: ignore[arg-type]
+        if asyncio.isfuture(value) or asyncio.iscoroutine(value):
+            await value
+
+
+def _clean_event_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _optional_event_text(value: object) -> str | None:
+    text = _clean_event_text(value)
+    return text or None
+
+
+def _require_event_text(value: object, *, field_name: str) -> str:
+    text = _clean_event_text(value)
+    if not text:
+        raise ValueError(f"event {field_name} cannot be empty")
+    return text
+
+
+def completed_outcome(
+    run_id: str,
+    messages: list[AssistantMessage | ToolResultMessage],
+    final_message: AssistantMessage,
+    events: list[AgentEvent],
+    *,
+    model_attempts: int,
+    tool_iterations: int = 0,
+    tool_calls: int = 0,
+    usage: Any = None,
+    observations: list[ToolObservation] | None = None,
+    task: TaskSummary | None = None,
+) -> AgentLoopOutcome:
+    return AgentLoopOutcome(
+        run_id=run_id,
+        status="completed",
+        stop_reason="final_answer",
+        new_messages=list(messages),
+        final_message=final_message,
+        counters=AgentRunCounters(
+            model_attempts=model_attempts,
+            tool_iterations=tool_iterations,
+            tool_calls=tool_calls,
+        ),
+        usage=usage,
+        verification=verification(observations or []),
+        workspace_effects=workspace_effects(observations or []),
+        events=events,
+        task=task,
+    )
+
+
+def last_assistant(
+    messages: list[AssistantMessage | ToolResultMessage],
+) -> AssistantMessage | None:
+    for message in reversed(messages):
+        if isinstance(message, AssistantMessage):
+            return message
+    return None
+
+
+def tool_call_signature(tool_calls: list[ToolCall]) -> ToolCallSignature:
+    return tuple(
+        (
+            call.name,
+            tuple(sorted((key, repr(value)) for key, value in call.arguments.items())),
+        )
+        for call in tool_calls
+    )
+
+
+def tool_execution_gate(
+    *,
+    tool_iterations: int,
+    tool_calls: list[ToolCall],
+    current_signature: ToolCallSignature | None,
+    repeated_count: int,
+    max_tool_iterations: int,
+    repeated_tool_call_limit: int,
+) -> ToolExecutionGate:
+    if max_tool_iterations >= 0 and tool_iterations >= max_tool_iterations:
+        return ToolExecutionGate(
+            should_execute=False,
+            reason="max_iterations",
+            code="run.max_iterations",
+            message=f"Stopped after reaching max_tool_iterations={max_tool_iterations}",
+            stop_reason="max_iterations",
+        )
+    if (
+        current_signature is not None
+        and repeated_tool_call_limit >= 0
+        and repeated_count > repeated_tool_call_limit
+    ):
+        return ToolExecutionGate(
+            should_execute=False,
+            reason="repeated_tool_call",
+            code="run.repeated_tool_call",
+            message="Stopped after repeated identical tool calls",
+            stop_reason="repeated_tool_call",
+        )
+    return ToolExecutionGate(should_execute=True)
+
+
+def post_tool_decision(
+    tool_results: list[ToolResultMessage],
+    task_decision: ExecutionDecision | None,
+) -> PostToolDecision:
+    if any(result.status == "approval_required" for result in tool_results):
+        return PostToolDecision(
+            should_stop=True,
+            reason="approval_required",
+            status="waiting_approval",
+            stop_reason="approval_required",
+        )
+    if any(result.status == "cancelled" for result in tool_results):
+        return PostToolDecision(
+            should_stop=True,
+            reason="cancelled",
+            status="aborted",
+            stop_reason="aborted",
+        )
+    if task_decision is None:
+        return PostToolDecision(should_stop=False, reason="continue")
+    if task_decision.action == "propose_revert":
+        return PostToolDecision(
+            should_stop=True,
+            reason=task_decision.reason,
+            status="waiting_user",
+            stop_reason="task_blocked",
+        )
+    if task_decision.action == "finish":
+        return PostToolDecision(
+            should_stop=False,
+            reason="finish",
+            force_completion_check=True,
+        )
+    if task_decision.action != "stop":
+        return PostToolDecision(should_stop=False, reason=task_decision.reason)
+    if task_decision.reason == "replan_limit_exceeded":
+        return PostToolDecision(
+            should_stop=True,
+            reason=task_decision.reason,
+            status="failed",
+            stop_reason="replan_limit",
+            error=ErrorInfo(
+                code="run.replan_limit",
+                message=task_decision.reason,
+                retryable=False,
+                source="runtime",
+            ),
+        )
+    return PostToolDecision(
+        should_stop=True,
+        reason=task_decision.reason,
+        status="waiting_user",
+        stop_reason="task_blocked",
+    )
+
+
+def completion_decision(check: CompletionCheck) -> CompletionDecision:
+    if check.satisfied:
+        return CompletionDecision(
+            should_stop=False,
+            should_continue=False,
+            reason=check.reason,
+        )
+    if check.can_continue:
+        return CompletionDecision(
+            should_stop=False,
+            should_continue=True,
+            reason=check.reason,
+        )
+    return CompletionDecision(
+        should_stop=True,
+        should_continue=False,
+        reason=check.reason,
+        status="waiting_user",
+        stop_reason=(
+            "task_blocked" if check.reason == "blocked_steps" else "task_incomplete"
+        ),
+    )
+
+
+def with_task_context(
+    context: PreparedContext,
+    runtime: AgentTaskRuntime | None,
+) -> PreparedContext:
+    if runtime is None:
+        return context
+    return PreparedContext(
+        {
+            **dict(context),
+            "current_task": runtime.context_text(),
+            "task_control_signal": runtime.controller.control_signal(runtime.task),
+        }
+    )
+
+
+def _looks_like_verification_call(call: ToolCall) -> bool:
+    name = call.name.lower()
+    if any(marker in name for marker in ("test", "verify", "check", "pytest")):
+        return True
+    command = call.arguments.get("command") or call.arguments.get("cmd")
+    if not isinstance(command, str):
+        return False
+    return any(marker in command.lower() for marker in ("pytest", "test", "compile", "lint"))
 
 
 async def run_agent_loop(
@@ -212,6 +596,7 @@ async def _run_loop_body(
                 _with_current_task(input, task_runtime),
                 ports,
                 messages,
+                emit=recorder.emit,
             )
             model_attempts += 1
             if model_turn.error is None:
@@ -694,24 +1079,16 @@ def _task_snapshot(task_runtime: AgentTaskRuntime | None):
     return task_runtime.snapshot()
 
 
-def _next_model_retry(policy: dict[str, Any], retries_so_far: int) -> int | None:
-    if not bool(policy.get("enabled", False)):
+def _next_model_retry(policy: RetryPolicy, retries_so_far: int) -> int | None:
+    if not policy.enabled:
         return None
-    max_retries = _non_negative_int(policy.get("max_retries"), default=0)
-    if retries_so_far >= max_retries:
+    if retries_so_far >= policy.max_retries:
         return None
-    base_delay_ms = _non_negative_int(policy.get("base_delay_ms"), default=0)
-    return int(base_delay_ms * (2 ** retries_so_far))
+    return int(policy.base_delay_ms * (2 ** retries_so_far))
 
 
-def _max_model_attempts(policy: dict[str, Any]) -> int:
-    return 1 + _non_negative_int(policy.get("max_retries"), default=0)
-
-
-def _non_negative_int(value: Any, *, default: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return default
-    return max(0, value)
+def _max_model_attempts(policy: RetryPolicy) -> int:
+    return 1 + policy.max_retries
 
 
 def _without_continuation_budget(check: Any) -> Any:

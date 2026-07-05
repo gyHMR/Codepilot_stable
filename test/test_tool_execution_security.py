@@ -202,7 +202,7 @@ def test_default_approval_provider_defers_execution_with_approval_id() -> None:
 
 
 def test_approval_contracts_normalize_identity_and_preview_fields() -> None:
-    from codepilot.tools.approval import ApprovalDecision, ApprovalRequest
+    from codepilot.tools.policy import ApprovalDecision, ApprovalRequest
 
     decision = ApprovalDecision(
         approved=True,
@@ -283,7 +283,7 @@ def test_approval_contracts_normalize_identity_and_preview_fields() -> None:
 
 
 def test_tool_runtime_request_and_result_own_execution_boundary_invariants() -> None:
-    from codepilot.tools.contracts import (
+    from codepilot.tools.authoring import (
         AgentToolResult,
         ToolRuntimeRequest,
         ToolRuntimeResult,
@@ -332,7 +332,7 @@ def test_tool_runtime_request_and_result_own_execution_boundary_invariants() -> 
 
 
 def test_agent_tool_owns_executable_definition_invariants() -> None:
-    from codepilot.tools.contracts import AgentTool, AgentToolResult
+    from codepilot.tools.authoring import AgentTool, AgentToolResult
 
     async def execute(tool_call_id, params, signal=None, on_update=None):
         _ = tool_call_id, params, signal, on_update
@@ -376,8 +376,8 @@ def test_agent_tool_owns_executable_definition_invariants() -> None:
 
 
 def test_tool_registry_owns_tool_metadata_identity_invariants() -> None:
-    from codepilot.tools.contracts import AgentTool, AgentToolResult
-    from codepilot.tools.registry import ToolRegistry
+    from codepilot.tools.authoring import AgentTool, AgentToolResult
+    from codepilot.tools.authoring import ToolRegistry
 
     async def execute(tool_call_id, params, signal=None, on_update=None):
         _ = tool_call_id, params, signal, on_update
@@ -411,9 +411,9 @@ def test_tool_registry_owns_tool_metadata_identity_invariants() -> None:
 
 
 async def _deferred_approval_provider_case() -> None:
-    from codepilot.tools.approval import DeferredApprovalProvider
+    from codepilot.tools.policy import DeferredApprovalProvider
     from codepilot.tools.policy import ToolDecision
-    from codepilot.tools.contracts import ToolRuntimeRequest
+    from codepilot.tools.authoring import ToolRuntimeRequest
 
     provider = DeferredApprovalProvider()
     decision = ToolDecision(kind="approval_required", reason="workspace_write")
@@ -436,12 +436,12 @@ async def _deferred_approval_provider_case() -> None:
 
 async def _approval_case() -> None:
     from codepilot.protocols import TextContent
-    from codepilot.tools.contracts import AgentTool, AgentToolResult
-    from codepilot.tools.execution import ToolRuntime
-    from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.approval import ApprovalDecision
+    from codepilot.tools.authoring import AgentTool, AgentToolResult
+    from codepilot.tools.engine import ToolRuntime
+    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.policy import ApprovalDecision
     from codepilot.tools.policy import PermissionPolicy
-    from codepilot.tools.contracts import ToolRuntimeRequest
+    from codepilot.tools.authoring import ToolRuntimeRequest
 
     calls = []
     approved_request = None
@@ -494,7 +494,7 @@ async def _approval_case() -> None:
 
 
 def test_shell_policy_filters_environment_and_truncates_output(monkeypatch) -> None:
-    from codepilot.tools.shell_safety import build_shell_environment, truncate_output
+    from codepilot.tools.workspace import build_shell_environment, truncate_output
 
     monkeypatch.setenv("PATH", "safe-path")
     monkeypatch.setenv("CODEPILOT_TEST_SECRET", "must-not-leak")
@@ -557,8 +557,8 @@ def test_shell_tool_applies_env_allowlist_and_output_limits(
 
 async def _shell_runtime_limits_case(tmp_path: Path, monkeypatch) -> None:
     from codepilot.tools.builtins.shell import create_shell_tools
-    from codepilot.tools.workspace_safety import WorkspaceSandbox
-    from codepilot.tools.shell_safety import ShellExecutionPolicy
+    from codepilot.tools.workspace import WorkspaceSandbox
+    from codepilot.tools.workspace import ShellExecutionPolicy
 
     captured = {}
 
@@ -641,7 +641,7 @@ def test_v2_tool_turn_executes_calls_in_model_order_and_emits_events() -> None:
 
 
 async def _v2_tool_turn_order_case() -> None:
-    from codepilot.core.tool_turn import execute_tool_turn
+    from codepilot.core.tool_step import execute_tool_turn
     from codepilot.protocols import TextContent, ToolCall
     from codepilot.tools.ports import ToolObservation
 
@@ -840,8 +840,8 @@ async def _shell_quality_and_change_evidence_case(tmp_path: Path, monkeypatch) -
     import subprocess
 
     from codepilot.tools.builtins.shell import create_shell_tools
-    from codepilot.tools.workspace_safety import WorkspaceSandbox
-    from codepilot.tools.shell_safety import ShellExecutionPolicy
+    from codepilot.tools.workspace import WorkspaceSandbox
+    from codepilot.tools.workspace import ShellExecutionPolicy
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
@@ -918,8 +918,8 @@ async def _shell_clean_tracked_before_hash_case(tmp_path: Path) -> None:
 
 
 def test_external_tool_without_metadata_defaults_to_medium_risk_approval() -> None:
-    from codepilot.tools.contracts import AgentTool, AgentToolResult
-    from codepilot.tools.registry import ToolRegistry
+    from codepilot.tools.authoring import AgentTool, AgentToolResult
+    from codepilot.tools.authoring import ToolRegistry
 
     async def execute(*_args):
         return AgentToolResult()
@@ -948,12 +948,12 @@ def test_runtime_exception_preserves_permission_duration_and_approval() -> None:
 
 
 async def _runtime_exception_evidence_case() -> None:
-    from codepilot.tools.contracts import AgentTool, AgentToolResult
-    from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.approval import ApprovalDecision
+    from codepilot.tools.authoring import AgentTool, AgentToolResult
+    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.policy import ApprovalDecision
     from codepilot.tools.policy import PermissionPolicy
-    from codepilot.tools.execution import ToolRuntime
-    from codepilot.tools.contracts import ToolRuntimeRequest
+    from codepilot.tools.engine import ToolRuntime
+    from codepilot.tools.authoring import ToolRuntimeRequest
 
     async def execute(*_args) -> AgentToolResult:
         raise RuntimeError("boom")
@@ -1047,7 +1047,7 @@ def test_cli_approval_provider_requires_callable_io() -> None:
 async def _cli_approval_case() -> None:
     from codepilot.interfaces.cli.approval import CliApprovalProvider
     from codepilot.tools.policy import ToolDecision
-    from codepilot.tools.contracts import ToolRuntimeRequest
+    from codepilot.tools.authoring import ToolRuntimeRequest
 
     outputs = []
     provider = CliApprovalProvider(
@@ -1113,10 +1113,10 @@ def test_tool_runtime_rejects_arguments_that_do_not_match_schema() -> None:
 
 async def _schema_validation_case() -> None:
     from codepilot.protocols import TextContent
-    from codepilot.tools.contracts import AgentTool, AgentToolResult
-    from codepilot.tools.execution import ToolRuntime
-    from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.contracts import ToolRuntimeRequest
+    from codepilot.tools.authoring import AgentTool, AgentToolResult
+    from codepilot.tools.engine import ToolRuntime
+    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.authoring import ToolRuntimeRequest
 
     calls = []
 
@@ -1189,11 +1189,11 @@ def test_tool_runtime_accepts_injected_schema_validator_and_result_guard() -> No
 
 async def _tool_runtime_injected_guards_case() -> None:
     from codepilot.protocols import TextContent
-    from codepilot.tools.contracts import AgentTool, AgentToolResult
-    from codepilot.tools.execution import ToolRuntime
-    from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.argument_schema import SchemaValidationResult
-    from codepilot.tools.contracts import ToolRuntimeRequest
+    from codepilot.tools.authoring import AgentTool, AgentToolResult
+    from codepilot.tools.engine import ToolRuntime
+    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.engine import SchemaValidationResult
+    from codepilot.tools.authoring import ToolRuntimeRequest
 
     class Validator:
         def __init__(self) -> None:
@@ -1245,10 +1245,10 @@ async def _tool_runtime_injected_guards_case() -> None:
 
 async def _tool_result_guard_case() -> None:
     from codepilot.protocols import TextContent
-    from codepilot.tools.contracts import AgentTool, AgentToolResult
-    from codepilot.tools.execution import ToolRuntime
-    from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.contracts import ToolRuntimeRequest
+    from codepilot.tools.authoring import AgentTool, AgentToolResult
+    from codepilot.tools.engine import ToolRuntime
+    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.authoring import ToolRuntimeRequest
 
     async def execute(*_args):
         return AgentToolResult(
@@ -1338,7 +1338,7 @@ def test_mcp_tool_policy_populates_metadata_and_output_trust() -> None:
 
 def test_tool_result_message_preserves_approval_evidence() -> None:
     from codepilot.protocols import TextContent, ToolResultMessage
-    from codepilot.sessions.persistence.serde import message_from_dict, message_to_dict
+    from codepilot.sessions.storage import message_from_dict, message_to_dict
 
     message = ToolResultMessage(
         tool_call_id="call_1",

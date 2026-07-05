@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from codepilot.sessions.command_state import preview_last_run_rollback, revert_last_run
+from codepilot.sessions.commands import preview_last_run_rollback, revert_last_run
 
 
 def _git(root: Path, *args: str) -> str:
@@ -45,8 +45,8 @@ def _model():
 
 
 def _session(root: Path):
-    from codepilot.sessions.session import SessionRuntime
-    from codepilot.sessions.types import SessionOptions
+    from codepilot.sessions.contracts import SessionOptions
+    from codepilot.sessions.prepare import SessionRuntime
 
     return SessionRuntime(
         SessionOptions(

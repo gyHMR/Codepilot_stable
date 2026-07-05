@@ -11,13 +11,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from codepilot.core.types import AgentContext, ContextPreparationRequest, PreparedAgentContext
-from codepilot.llm.overflow import estimate_context_tokens
+from codepilot.core.contracts import AgentContext, ContextPreparationRequest, PreparedAgentContext
+from codepilot.llm.stream import estimate_context_tokens
 from codepilot.protocols import (
     ContextCheckpoint,
     ContextReport,
 )
-from codepilot.sessions.layout import SessionLayout
+from codepilot.sessions.storage import SessionLayout
 from codepilot.sessions.memory.records import MemoryQuery, MemoryRecall
 
 from .checkpoint import ContextCheckpointManager

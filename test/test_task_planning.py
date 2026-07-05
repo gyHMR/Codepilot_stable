@@ -4,9 +4,11 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from codepilot.core.contracts import TaskStrategy
+
 
 def test_task_control_contracts_define_planning_budget_and_state() -> None:
-    from codepilot.core.task_control import (
+    from codepilot.core.task import (
         PlanningBudgetUsage,
         PlanningDiscoveryReport,
         TaskPlanningState,
@@ -159,9 +161,8 @@ def test_task_state_owns_step_navigation_and_status_projections() -> None:
 def test_session_runtime_records_task_recovery_warning_separately_from_memory(
     tmp_path: Path,
 ) -> None:
-    from codepilot.sessions.lifecycle import begin_task_recovery
-    from codepilot.sessions.types import SessionOptions
-    from codepilot.sessions.session import SessionRuntime
+    from codepilot.sessions.contracts import SessionOptions
+    from codepilot.sessions.prepare import SessionRuntime, begin_task_recovery
 
     class BrokenTaskRecovery:
         def begin_task(self, text: str, *, run_id: str | None = None):
@@ -410,7 +411,7 @@ def test_task_controller_coerces_unknown_raw_step_kind() -> None:
 
 
 def test_task_controller_normalizes_steps_and_updates_from_tool_results() -> None:
-    from codepilot.core.run_state import RunState
+    from codepilot.core.state import RunState
     from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
@@ -480,7 +481,7 @@ def test_task_controller_normalizes_steps_and_updates_from_tool_results() -> Non
 
 
 def test_completion_gate_requires_fresh_verification_after_workspace_change() -> None:
-    from codepilot.core.run_state import RunState
+    from codepilot.core.state import RunState
     from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
@@ -531,7 +532,7 @@ def test_completion_gate_requires_fresh_verification_after_workspace_change() ->
 
 
 def test_passed_verification_completes_current_step_and_advances() -> None:
-    from codepilot.core.run_state import RunState
+    from codepilot.core.state import RunState
     from codepilot.core import TaskController
     from codepilot.protocols import ToolResultMessage, UserMessage
 
@@ -565,7 +566,7 @@ def test_passed_verification_completes_current_step_and_advances() -> None:
 
 
 def test_passed_verification_keeps_acting_phase_after_fresh_verification() -> None:
-    from codepilot.core.run_state import RunState
+    from codepilot.core.state import RunState
     from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
@@ -609,7 +610,7 @@ def test_passed_verification_keeps_acting_phase_after_fresh_verification() -> No
 
 
 def test_completion_gate_treats_unavailable_tool_as_blocked() -> None:
-    from codepilot.core.run_state import RunState
+    from codepilot.core.state import RunState
     from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
@@ -638,7 +639,7 @@ def test_completion_gate_treats_unavailable_tool_as_blocked() -> None:
 
 
 def test_permission_blocked_steps_keep_tool_evidence() -> None:
-    from codepilot.core.run_state import RunState
+    from codepilot.core.state import RunState
     from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
@@ -681,7 +682,7 @@ def test_permission_blocked_steps_keep_tool_evidence() -> None:
 
 
 def test_replan_preserves_completed_steps_and_stops_after_limit() -> None:
-    from codepilot.core.run_state import RunState
+    from codepilot.core.state import RunState
     from codepilot.core import TaskController
     from codepilot.protocols import ToolResultMessage, UserMessage
 
@@ -730,7 +731,7 @@ def test_replan_preserves_completed_steps_and_stops_after_limit() -> None:
 
 
 def test_task_controller_respects_configured_replan_limit() -> None:
-    from codepilot.core.run_state import RunState
+    from codepilot.core.state import RunState
     from codepilot.core import TaskController
     from codepilot.protocols import UserMessage
 
@@ -761,7 +762,7 @@ def test_task_controller_respects_configured_replan_limit() -> None:
 
 
 def test_repeated_failed_verification_after_change_proposes_revert() -> None:
-    from codepilot.core.run_state import RunState
+    from codepilot.core.state import RunState
     from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
@@ -807,7 +808,7 @@ def test_repeated_failed_verification_after_change_proposes_revert() -> None:
 
 
 def test_task_controller_exports_control_signal_and_attempts() -> None:
-    from codepilot.core.run_state import RunState
+    from codepilot.core.state import RunState
     from codepilot.core import TaskController
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
 
@@ -1062,11 +1063,11 @@ async def _v2_agent_loop_plan_strategy_case() -> None:
         _v2_loop_input(
             "run_plan_strategy",
             prompt="实现 planner",
-            task_strategy={
-                "enabled": True,
-                "mode": "plan",
-                "planning_budget_profile": "wide",
-                "steps": [
+            task_strategy=TaskStrategy(
+                enabled=True,
+                mode="plan",
+                planning_budget_profile="wide",
+                steps=[
                     {
                         "title": "定位任务模块",
                         "kind": "investigate",
@@ -1079,7 +1080,7 @@ async def _v2_agent_loop_plan_strategy_case() -> None:
                         "verification_hint": "pytest task",
                     },
                 ],
-            },
+            ),
         ),
         AgentLoopPorts(model=CapturingModel(), tools=None),
     )
@@ -1136,14 +1137,14 @@ async def _v2_agent_loop_complete_step_advances_case() -> None:
         _v2_loop_input(
             "run_complete_step",
             prompt="实现 planner",
-            task_strategy={
-                "enabled": True,
-                "mode": "plan",
-                "steps": [
+            task_strategy=TaskStrategy(
+                enabled=True,
+                mode="plan",
+                steps=[
                     {"title": "定位任务模块", "kind": "investigate", "acceptance": "找到 TaskController"},
                     {"title": "修改执行逻辑", "kind": "edit", "acceptance": "按 step 推进"},
                 ],
-            },
+            ),
         ),
         AgentLoopPorts(
             model=_TaskScriptedModel(response),
@@ -1206,10 +1207,10 @@ async def _v2_agent_loop_recovered_task_context_case() -> None:
         _v2_loop_input(
             "run_recovered_task",
             prompt="继续旧任务",
-            task_strategy={
-                "enabled": True,
-                "mode": "edit",
-                "recovery_projection": {
+            task_strategy=TaskStrategy(
+                enabled=True,
+                mode="edit",
+                recovery_projection={
                     "goal": "恢复旧任务",
                     "task_progress": {
                         "completed_steps": ["定位失败"],
@@ -1220,7 +1221,7 @@ async def _v2_agent_loop_recovered_task_context_case() -> None:
                     },
                     "next_action": "报告连续失败并等待用户指示",
                 },
-            },
+            ),
         ),
         AgentLoopPorts(model=CapturingModel(), tools=None),
     )
@@ -1534,7 +1535,11 @@ async def _v2_agent_loop_replan_limit_case() -> None:
             "run_replan_limit",
             prompt="修复失败测试",
             limits=AgentLoopLimits(max_model_turns=4, max_tool_iterations=20, repeated_tool_call_limit=20),
-            task_strategy={"enabled": True, "mode": "edit", "max_task_replans_per_run": 1},
+            task_strategy=TaskStrategy(
+                enabled=True,
+                mode="edit",
+                max_replans_per_run=1,
+            ),
         ),
         AgentLoopPorts(
             model=_TaskScriptedModel(
@@ -1582,14 +1587,11 @@ def _v2_loop_input(
     *,
     prompt: str,
     limits: Any | None = None,
-    task_strategy: dict[str, Any] | None = None,
+    task_strategy: TaskStrategy | None = None,
 ):
     from codepilot.core.contracts import AgentLoopInput, AgentLoopLimits, RunCorrelation
     from codepilot.llm.ports import ModelDescriptor
 
-    strategy = {"enabled": True, "mode": "edit"}
-    if task_strategy is not None:
-        strategy.update(task_strategy)
     return AgentLoopInput(
         run_id=run_id,
         correlation=RunCorrelation(session_id="session_1"),
@@ -1597,7 +1599,7 @@ def _v2_loop_input(
         context={"system_prompt": "rules"},
         model=ModelDescriptor(provider="unit-test", model_id="task-test"),
         limits=limits or AgentLoopLimits(max_model_turns=4),
-        task_strategy=strategy,
+        task_strategy=task_strategy or TaskStrategy(enabled=True, mode="edit"),
     )
 
 

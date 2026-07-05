@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from codepilot.core.types import AgentContext
+from codepilot.core.contracts import AgentContext
 from codepilot.protocols import (
     ContextArtifactRef,
     ContextCheckpoint,

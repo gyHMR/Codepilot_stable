@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-# 新手导读：tools.py 定义模型可见工具 spec、工具调用和工具结果的跨层协议。
+# 新手导读：tools.py 定义模型可见工具 spec、工具结果和工具元数据。
 # 关注点：注意这里没有 execute 函数；可执行工具属于 tools/contracts.py。
 
 """
 工具相关类型定义。
 
-定义了工具调用全生命周期涉及的类型：
+定义工具层跨层共享的静态与结果结构：
 - Tool: 工具定义（模型可见的工具规范）
-- ToolCall: 模型发出的工具调用请求
 - ToolResult: 工具执行结果
 - ToolMetadata: 工具元数据（风险级别、权限要求等）
 """
@@ -17,7 +16,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, Union, cast
 
-from .content import ImageContent, TextContent
+from .conversation import ImageContent, TextContent
 
 
 # 工具风险级别：用于权限控制和审批流程
@@ -59,33 +58,6 @@ class Tool:
         if not isinstance(self.parameters, dict):
             raise TypeError("Tool parameters must be a dict")
         self.parameters = deepcopy(self.parameters)
-
-
-@dataclass
-class ToolCall:
-    """模型发出的归一化工具调用请求。
-
-    当 LLM 决定调用工具时，生成此对象描述要调用的工具和参数。
-
-    Attributes:
-        type: 类型标识，固定为 "toolCall"。
-        id: 工具调用的唯一 ID（用于匹配 ToolResultMessage）。
-        name: 要调用的工具名称。
-        arguments: 解析后的参数字典。
-        raw_arguments: 原始参数 JSON 字符串（解析失败时保留原文）。
-        index: 在同一批工具调用中的序号。
-        provider: 来源 provider 标识（可选）。
-        metadata: 附加元数据字典。
-    """
-
-    type: Literal["toolCall"] = "toolCall"
-    id: str = ""
-    name: str = ""
-    arguments: dict[str, Any] = field(default_factory=dict)
-    raw_arguments: str | None = None
-    index: int | None = None
-    provider: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # 工具结果中可包含的内容块类型
@@ -266,7 +238,6 @@ def _clean_unique_metadata_items(values: tuple[str, ...]) -> list[str]:
 
 __all__ = [
     "Tool",
-    "ToolCall",
     "ToolMetadata",
     "ToolResult",
     "ToolResultBlock",

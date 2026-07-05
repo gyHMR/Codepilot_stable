@@ -166,20 +166,38 @@ ToolPort.execute()
 暴露给其他层：
 
 ```python
+ContentBlock
+TextContent
+ImageContent
+ThinkingContent
 Message
+UserMessage
 AssistantMessage
 ToolCall
+ToolResultMessage
+Tool
+ToolMetadata
 ToolResult
+ToolResultStatus
+ToolRiskLevel
 AgentEvent
+RuntimeEventType
+AgentEventSink
+ensure_runtime_event_type
+AgentRunStatus
+AgentRunStopReason
 AgentRunCounters
 TaskSummary
 RunVerification
-Tool
-ToolMetadata
 RegisteredCommand
 SessionCommandContext
+SessionLifecycleContext
 ToolHookContextSnapshot
-CodepilotError
+BeforeToolCallContext
+AfterToolCallContext
+ContextReport
+ErrorInfo
+LLMErrorInfo
 ```
 
 目标模块形态：
@@ -192,10 +210,13 @@ protocols/
   runs.py          # counters、usage、verification、workspace effects
   commands.py      # extension command 和 lifecycle hook DTO
   tool_hooks.py    # tool hook context snapshot
+  context.py       # context report 和只读证据 DTO
   errors.py        # 稳定 error code 和异常基类
 ```
 
 推理依据：这些概念都被多个层级共享，但没有执行权；它们应该停留在协议层。
+provider 内部类型、ToolRuntime 内部类型、registry、adapter、runtime live object
+都不能进入 `protocols`。
 
 ### 4.2 `llm`
 
@@ -214,16 +235,20 @@ protocols/
 ```python
 class ModelPort:
     async def stream(self, request: LLMRequest) -> AsyncIterator[LLMEvent]: ...
-    def estimate(self, request: TokenEstimateRequest) -> TokenEstimate: ...
+
+@dataclass(frozen=True)
+class LLMCorrelation:
+    run_id: str = ""
+    session_id: str = ""
 
 @dataclass(frozen=True)
 class LLMRequest:
     model: ModelDescriptor
-    messages: list[Message]
+    messages: tuple[Message, ...]
     system_prompt: str
-    tools: list[Tool]
+    tools: tuple[Tool, ...]
     options: LLMOptions
-    correlation: RunCorrelation | None = None
+    correlation: LLMCorrelation
 ```
 
 返回：
@@ -242,16 +267,31 @@ LLMEvent.failed(error)
 ```text
 llm/
   ports.py             # ModelPort、LLMRequest、LLMEvent
+  provider_types.py    # provider bridge callback 签名，供 runtime/session 装配配置引用
+  adapters.py          # ProviderModelPort 等，把 provider registry 适配成 ModelPort
   models.py            # ModelDescriptor、capabilities、catalog
-  provider_registry.py # provider 注册与选择
-  token_estimation.py  # token/context 估算
+  api_registry.py      # provider 注册与选择
+  event_stream.py      # provider 内部流式事件聚合
+  env_api_keys.py      # provider 默认环境变量名和读取
+  errors.py            # provider 异常到 LLMErrorInfo 的分类
+  overflow.py          # token/context 估算
   providers/
+    __init__.py        # 空包根；不聚合导出，不触发注册
+    register_builtins.py  # 显式注册内置 provider，不在 import 时执行
     openai_compatible.py
     anthropic.py
+    _common.py
 ```
 
 推理依据：core 需要的是模型能力端口，不需要知道 provider registry、HTTP、
-鉴权、重试细节。provider 差异应被 llm 层吞掉。
+鉴权、重试细节。`ports.py` 只描述端口契约；把现有 provider registry 接到
+`ModelPort` 的具体桥接代码放在 `adapters.py`。runtime/session 装配配置如需
+接收旧 provider registry 的注入回调，只引用 `provider_types.py` 中的签名，
+不引用具体 adapter。provider 差异应被 llm 层吞掉。`codepilot.llm` 顶层不再
+转发 protocol DTO 或 provider registry 函数，也不在 import 时自动注册 provider。
+`codepilot.llm.providers` 包根同样不是 provider 门面；需要 provider 函数时导入
+具体模块，需要启用内置 provider 时由 runtime assembly 显式调用
+`register_builtin_api_providers()`。
 
 ### 4.3 `tools`
 
@@ -275,6 +315,15 @@ class ToolPort:
     async def resume(self, decision: ToolResumeDecision) -> ToolObservation: ...
 
 @dataclass(frozen=True)
+class ToolCatalogView:
+    tools: tuple[Tool, ...]
+
+@dataclass(frozen=True)
+class ToolPolicyContext:
+    session_id: str | None
+    metadata: Mapping[str, object]
+
+@dataclass(frozen=True)
 class ToolInvocation:
     run_id: str
     tool_call_id: str
@@ -282,7 +331,7 @@ class ToolInvocation:
     arguments: dict[str, object]
     source: ToolInvocationSource
     policy_context: ToolPolicyContext
-    hook_context: ToolHookContextSnapshot | None = None
+    context: ToolHookContextSnapshot | None = None
 ```
 
 返回：
@@ -306,15 +355,19 @@ class ToolObservation:
 ```text
 tools/
   ports.py          # ToolPort、ToolInvocation、ToolObservation、ToolInterruption
-  catalog.py        # 工具目录和工具描述视图
+  adapters.py       # ToolRuntimePort，把 ToolRuntime 安全管线适配成 ToolPort
+  contracts.py      # tool authoring 和 ToolRuntime 内部 request/result 类型
+  registry.py       # 工具实例和 metadata 的登记表
+  metadata.py       # 内置工具 metadata 和外部工具保守推断
   execution.py      # ToolRuntime 安全执行管线
   policy.py         # permission/risk 决策
   approval.py       # approval provider、deferred approval
-  argument_schema.py
-  result_safety.py
-  workspace_safety.py
-  shell_safety.py
+  argument_schema.py # 工具参数 JSON schema 子集校验
+  result_safety.py  # 工具输出脱敏、prompt-injection 标记和可信度
+  workspace_safety.py # 工作区路径边界和文件状态快照
+  shell_safety.py   # shell 命令分类、环境过滤、输出截断
   builtins/
+    __init__.py     # create_builtin_tools 聚合工厂，不扩展成杂乱门面
     files.py
     search.py
     shell.py
@@ -323,7 +376,9 @@ tools/
 ```
 
 推理依据：工具层是安全边界。无论调用者是 core、测试还是未来的其他入口，
-工具执行都必须经过同一条安全管线。
+工具执行都必须经过同一条安全管线。`ports.py` 保持为 core 可消费的纯端口契约；
+`adapters.py` 负责把 ToolRuntime 的安全执行管线桥接为 `ToolPort`。`codepilot.tools`
+顶层只暴露 tool authoring 和 runtime 装配能力，不暴露 `ToolPort` 或 `ToolRuntimePort`。
 
 ### 4.4 `core`
 
@@ -357,6 +412,10 @@ async def resume_agent_loop(
 
 ```python
 @dataclass(frozen=True)
+class PreparedContext(Mapping[str, object]):
+    values: Mapping[str, object]
+
+@dataclass(frozen=True)
 class AgentLoopInput:
     run_id: str
     correlation: RunCorrelation
@@ -369,12 +428,40 @@ class AgentLoopInput:
     retry_policy: RetryPolicy
 
 @dataclass(frozen=True)
+class TaskStrategy:
+    enabled: bool = False
+    mode: TaskMode = "edit"
+    goal: str | None = None
+    steps: tuple[object, ...] = ()
+    planning: TaskPlanningState | None = None
+    planning_budget_profile: PlanningBudgetProfile = "balanced"
+    max_replans_per_run: int | None = None
+    recovery_projection: dict[str, object] | None = None
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    enabled: bool = False
+    max_retries: int = 0
+    base_delay_ms: int = 0
+
+EventSink = Callable[[AgentEvent], None]
+
+@dataclass(frozen=True)
 class AgentLoopPorts:
     model: ModelPort
     tools: ToolPort
     context: ContextPort | None
     events: EventSink | None
 ```
+
+`PreparedContext` 是 sessions 交给 core 的只读 loop 上下文快照，至少可包含
+`system_prompt`、`session_id`，并允许 core 在单次 run 内注入
+`current_task` / `task_control_signal` 这类轻量控制信号。它不是
+`sessions.context.ContextGovernor` 的 live object，也不是 runtime session state。
+
+`EventSink` 是 core loop 的同步事件出口，用于把已经补齐 run/turn 元数据的
+`AgentEvent` 推给外层记录或渲染；它不是 session/runtime 的 live object，也不承担
+异步事件总线职责。
 
 输出：
 
@@ -401,11 +488,10 @@ class AgentLoopOutcome:
 core/
   contracts.py      # AgentLoopInput、AgentLoopOutcome、AgentLoopPorts
   loop.py           # run_agent_loop、resume_agent_loop 主控制流
-  model_turn.py     # 构造 LLMRequest，消费 ModelPort
-  tool_turn.py      # 调 ToolPort，生成 tool observations
-  stopping.py       # 完成、失败、重复调用、上限、approval wait
-  task_runtime.py   # task-control 在 loop 内的轻量 adapter
-  task_control/     # 任务状态、计划、步骤、控制信号语义
+  model_step.py     # 构造 LLMRequest，消费 ModelPort，整理 LLM 消息
+  tool_step.py      # 调 ToolPort，生成 tool observations
+  state.py          # 单次 run 内部状态
+  task/             # 任务状态、计划、步骤、控制信号语义
 ```
 
 推理依据：core 的自然分段不是按旧类拆，而是按 agent loop 的四个动作拆：
@@ -460,6 +546,20 @@ class PreparedAgentRun:
     recovery_refs: dict[str, object]
 ```
 
+`rollback_baseline` 是公开 ref，不是 `sessions/history` 内部的 git baseline 对象：
+
+```python
+@dataclass(frozen=True)
+class RollbackBaselineRef:
+    session_id: str
+    run_id: str
+    kind: Literal["rollback_baseline_ref"] = "rollback_baseline_ref"
+```
+
+推理依据：rollback baseline 的真实内容只供 session commit 阶段写入审计元数据；
+runtime 只需要把 `PreparedAgentRun` 原样带回 `commit_run()`，不应该看见 history
+内部实现类型。
+
 `commit_run()` 产物：
 
 ```python
@@ -467,7 +567,7 @@ class PreparedAgentRun:
 class SessionRunRecord:
     run_id: str
     session_id: str
-    status: RunStatus
+    status: AgentLoopStatus
     stop_reason: str
     new_messages: list[Message]
     final_text: str
@@ -495,15 +595,11 @@ class SessionCommandRecord:
 sessions/
   contracts.py        # Session intent、PreparedAgentRun、record、view
   controller.py       # runtime-facing SessionController
-  lifecycle.py        # prepare/commit 生命周期编排
-  session.py          # session-owned state aggregate，不跨层暴露
-  conversation_state.py
-  commands.py         # command router，只解释用户命令语义
-  command_state.py    # command 需要的 session-owned action/view
-  persistence/
-    layout.py
-    run_store.py
-    transcript.py
+  prepare.py          # session-owned state aggregate、prepare run/resume、run 前副作用
+  commit.py           # outcome 写回、memory/task recovery/rollback 收尾
+  conversation.py     # transcript state 和事件订阅
+  commands.py         # command router 及命令需要的 session-owned action/view
+  storage.py          # layout、serde、SessionStore、RunStore、repository bootstrap
   context/
     governor.py
     policy.py
@@ -661,16 +757,12 @@ RuntimeFrame =
 runtime/
   gateway.py          # RuntimeGateway 和 dispatch 主入口
   actions.py          # UserAction / RuntimeFrame
-  session_opening.py  # SessionOpenIntent / SessionRef / AppSessionView
+  opening.py          # SessionOpenIntent / SessionRef / AppSessionView
   sessions.py         # session registry / active run registry
   approvals.py        # approval transaction registry
-  assembly.py         # runtime assembly flow
-  assembly_input.py   # runtime 内部装配意图
-  assembly_types.py   # RuntimeAssembly、capability catalog、diagnostics
-  views.py            # SessionStatus、CommandDescriptor 等只读 DTO
-  command_catalog.py  # app-level command descriptors
+  assembly.py         # RuntimeAssemblyIntent、配置解析、模型/工具/prompt/hook 装配
+  views.py            # SessionStatus、CommandDescriptor、builtin command view
   configuration.py    # config explain / model resolution views
-  bootstrap/          # 装配细节，非 public contract
 ```
 
 推理依据：runtime 是应用服务门面。它可以知道 live objects 如何被装配，
@@ -810,15 +902,17 @@ runtime/actions.py
 runtime/gateway.py
 sessions/contracts.py
 sessions/controller.py
-sessions/lifecycle.py
+sessions/prepare.py
+sessions/commit.py
 core/contracts.py
 core/loop.py
-core/model_turn.py
-core/tool_turn.py
-core/stopping.py
+core/model_step.py
+core/tool_step.py
 llm/ports.py
+llm/adapter.py
 tools/ports.py
-tools/execution.py
+tools/adapter.py
+tools/engine.py
 sessions/context/governor.py
 sessions/memory/retriever.py
 sessions/history/task_recovery.py

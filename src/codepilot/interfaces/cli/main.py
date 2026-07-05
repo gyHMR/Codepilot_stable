@@ -38,7 +38,7 @@ from codepilot.runtime.configuration import (
 )
 
 from .runner import RunOptions, run
-from .ui import (
+from .render import (
     create_console,
     format_config_help_text,
     format_error_text,

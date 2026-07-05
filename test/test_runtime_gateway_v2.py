@@ -95,7 +95,7 @@ def test_runtime_gateway_dispatch_command_and_cancel_as_frames(tmp_path) -> None
 
 def test_runtime_gateway_default_open_session_uses_real_assembly(tmp_path) -> None:
     async def run_case() -> None:
-        from codepilot.llm.event_stream import AssistantMessageEventStream
+        from codepilot.llm.stream import AssistantMessageEventStream
         from codepilot.protocols import AssistantMessage, Model, TextContent
         from codepilot.runtime.actions import PromptSubmitted, RunFinishedFrame
         from codepilot.runtime import RuntimeGateway, SessionOpenIntent
@@ -216,7 +216,7 @@ def test_runtime_gateway_tools_command_renders_tool_port_catalog(tmp_path) -> No
 
 def test_runtime_gateway_command_can_register_derived_session(tmp_path) -> None:
     async def run_case() -> None:
-        from codepilot.llm.event_stream import AssistantMessageEventStream
+        from codepilot.llm.stream import AssistantMessageEventStream
         from codepilot.protocols import AssistantMessage, Model, TextContent
         from codepilot.runtime.actions import CommandFinishedFrame, CommandSubmitted, PromptSubmitted
         from codepilot.runtime import RuntimeGateway, SessionOpenIntent
@@ -266,7 +266,7 @@ def test_runtime_gateway_command_can_register_derived_session(tmp_path) -> None:
 
 def test_runtime_gateway_prompt_failure_returns_failed_frame(tmp_path) -> None:
     async def run_case() -> None:
-        from codepilot.llm.event_stream import AssistantMessageEventStream
+        from codepilot.llm.stream import AssistantMessageEventStream
         from codepilot.protocols import Model
         from codepilot.runtime.actions import FailedFrame, PromptSubmitted
         from codepilot.runtime import RuntimeGateway, SessionOpenIntent
@@ -314,7 +314,7 @@ def test_runtime_gateway_prompt_failure_returns_failed_frame(tmp_path) -> None:
 
 def test_runtime_gateway_real_prompt_flow_retries_model_failure(tmp_path) -> None:
     async def run_case() -> None:
-        from codepilot.llm.event_stream import AssistantMessageEventStream
+        from codepilot.llm.stream import AssistantMessageEventStream
         from codepilot.protocols import AssistantMessage, Model, TextContent
         from codepilot.runtime.actions import ProgressFrame, PromptSubmitted, RunFinishedFrame
         from codepilot.runtime import RuntimeGateway, SessionOpenIntent
@@ -693,7 +693,7 @@ def test_runtime_gateway_approval_decision_is_bound_to_origin_session(tmp_path) 
 
 def test_runtime_gateway_real_prompt_flow_uses_v2_core_and_tool_ports(tmp_path) -> None:
     async def run_case() -> None:
-        from codepilot.llm.event_stream import AssistantMessageEventStream
+        from codepilot.llm.stream import AssistantMessageEventStream
         from codepilot.protocols import AssistantMessage, Model, ToolCall
         from codepilot.runtime.actions import ApprovalRequiredFrame, PromptSubmitted
         from codepilot.runtime import RuntimeGateway, SessionOpenIntent

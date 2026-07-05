@@ -16,7 +16,7 @@ from pathlib import Path
 
 from codepilot.protocols import RepositoryDelta, RepositorySnapshot
 
-from ..repository import build_repository_bootstrap
+from ..storage import build_repository_bootstrap
 
 _INTERNAL_DIR_NAMES = {".git", ".codepilot", ".pytest_cache", "__pycache__"}
 

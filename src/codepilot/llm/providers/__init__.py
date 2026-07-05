@@ -1,17 +1,11 @@
-# 新手导读：包门面文件：集中导出本层最常用的类型和入口，降低学习时的导入成本。
-# 关注点：llm 层只负责模型目录、Provider 注册和不同 API 的适配。
+# 新手导读：provider 子包不做聚合导出，也不在导入时注册 provider。
+# 关注点：需要具体 provider 时导入具体模块；需要注册时显式调用 llm.registry。
 
-"""LLM Provider 子包：导出各 provider 的流式调用函数和注册工具。"""
+"""Concrete LLM provider implementations.
 
-from .anthropic import stream_anthropic, stream_simple_anthropic
-from .openai_compatible import stream_openai_compatible, stream_simple_openai_compatible
-from .register_builtins import register_builtin_api_providers, reset_api_providers
+This package root is intentionally not a provider facade. Import concrete
+provider functions from their modules, and register built-ins explicitly from
+``codepilot.llm.registry`` during runtime bootstrap.
+"""
 
-__all__ = [
-    "stream_anthropic",
-    "stream_simple_anthropic",
-    "stream_openai_compatible",
-    "stream_simple_openai_compatible",
-    "register_builtin_api_providers",
-    "reset_api_providers",
-]
+__all__: list[str] = []

@@ -11,9 +11,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from codepilot.llm.overflow import estimate_context_tokens
+from codepilot.llm.stream import estimate_context_tokens
 from codepilot.protocols import ContextArtifactRef, TextContent, ToolResultMessage
-from codepilot.sessions.layout import SessionLayout
+from codepilot.sessions.storage import SessionLayout
 
 
 @dataclass(frozen=True)

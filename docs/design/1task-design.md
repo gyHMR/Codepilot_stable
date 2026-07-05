@@ -97,7 +97,7 @@ CLI/RPC/DingTalk action or open intent
 相关实现：
 
 - `src/codepilot/runtime/session_opening.py`
-- `src/codepilot/runtime/bootstrap/config.py`
+- `src/codepilot/runtime/assembly.py`
 - `src/codepilot/sessions/controller.py`
 - `src/codepilot/core/contracts.py`
 - `src/codepilot/core/task_runtime.py`

@@ -9,7 +9,9 @@ from codepilot.core.contracts import (
     AgentLoopOutcome,
     AgentLoopLimits,
     AgentResumeInput,
+    PreparedContext,
     RunCorrelation,
+    TaskStrategy,
 )
 from codepilot.llm.ports import ModelDescriptor
 from codepilot.protocols import AgentEvent, AgentRunResult, ErrorInfo, Message, UserMessage
@@ -24,10 +26,10 @@ from .contracts import (
     SessionRunRecord,
     SessionView,
 )
-from .lifecycle import (
+from .commit import commit_runtime_run
+from .prepare import (
     capture_rollback_baseline_ref,
     close_runtime_session,
-    commit_runtime_run,
     describe_runtime_session,
     new_v2_run_id,
     prepare_runtime_resume,
@@ -36,7 +38,7 @@ from .lifecycle import (
 
 
 if TYPE_CHECKING:
-    from .session import SessionRuntime
+    from .prepare import SessionRuntime
 
 
 SessionEventListener = Callable[[AgentEvent], None]
@@ -46,7 +48,7 @@ Unsubscribe = Callable[[], None]
 def create_session_controller(options: Any) -> "SessionController":
     """Create a controller from session-owned runtime options."""
 
-    from .session import SessionRuntime
+    from .prepare import SessionRuntime
 
     return _bind_session_runtime(SessionRuntime(options))
 
@@ -103,6 +105,14 @@ class SessionController:
             "planning_budget_profile": "balanced",
         }
 
+    def _loop_context(self) -> PreparedContext:
+        return PreparedContext(
+            {
+                "system_prompt": "You are Codepilot.",
+                "session_id": self.session_id,
+            }
+        )
+
     async def prepare_run(self, intent: SessionRunIntent) -> PreparedAgentRun:
         run_id = intent.run_id or new_v2_run_id()
         if self._session is not None:
@@ -118,14 +128,11 @@ class SessionController:
             correlation=RunCorrelation(session_id=self.session_id),
             messages=list(self._messages),
             user_prompt=intent.text,
-            context={
-                "system_prompt": "You are Codepilot.",
-                "session_id": self.session_id,
-            },
-                model=self.model,
-                task_strategy=_controller_task_strategy(self, mode_hint=intent.mode_hint),
-                limits=_controller_loop_limits(self),
-            )
+            context=self._loop_context(),
+            model=self.model,
+            task_strategy=_controller_task_strategy(self, mode_hint=intent.mode_hint),
+            limits=_controller_loop_limits(self),
+        )
         return PreparedAgentRun(
             run_id=run_id,
             session_id=self.session_id,
@@ -150,10 +157,7 @@ class SessionController:
             run_id=run_id,
             correlation=RunCorrelation(session_id=self.session_id),
             messages=list(self._messages),
-            context={
-                "system_prompt": "You are Codepilot.",
-                "session_id": self.session_id,
-            },
+            context=self._loop_context(),
             model=self.model,
             approval_id=intent.approval_id,
             decision=intent.decision,
@@ -167,10 +171,7 @@ class SessionController:
                 run_id=run_id,
                 correlation=RunCorrelation(session_id=self.session_id),
                 messages=list(self._messages),
-                context={
-                    "system_prompt": "You are Codepilot.",
-                    "session_id": self.session_id,
-                },
+                context=self._loop_context(),
                 model=self.model,
                 limits=_controller_loop_limits(self),
             ),
@@ -285,11 +286,8 @@ def _controller_task_strategy(
     controller: SessionController,
     *,
     mode_hint: str | None = None,
-) -> dict[str, Any]:
-    return {
-        "enabled": False,
-        "mode": mode_hint or controller.task_mode,
-    }
+) -> TaskStrategy:
+    return TaskStrategy(enabled=False, mode=mode_hint or controller.task_mode)
 
 
 def _agent_status(status: str) -> str:

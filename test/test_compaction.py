@@ -11,8 +11,8 @@ def test_context_compaction_module_is_removed() -> None:
 
 def test_session_runtime_uses_governor_and_slim_layout(tmp_path: Path) -> None:
     from codepilot.protocols import Model
-    from codepilot.sessions.session import SessionRuntime
-    from codepilot.sessions.types import SessionOptions
+    from codepilot.sessions.contracts import SessionOptions
+    from codepilot.sessions.prepare import SessionRuntime
 
     session = SessionRuntime(
         SessionOptions(

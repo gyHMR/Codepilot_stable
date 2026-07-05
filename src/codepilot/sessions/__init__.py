@@ -17,18 +17,23 @@ from .controller import SessionController
 from .contracts import (
     CancelRunIntent,
     PreparedAgentRun,
+    RollbackBaselineRef,
     SessionCommandIntent,
     SessionCommandRecord,
     SessionIntent,
     SessionResumeIntent,
     SessionRunIntent,
     SessionRunRecord,
+    SessionOptions,
     SessionView,
 )
-from .metadata import SessionOpenMetadata, load_session_open_metadata
-from .persistence import new_session_id
-from .repository import RepositoryBootstrap, build_repository_bootstrap
-from .types import SessionOptions
+from .storage import (
+    RepositoryBootstrap,
+    SessionOpenMetadata,
+    build_repository_bootstrap,
+    load_session_open_metadata,
+    new_session_id,
+)
 
 __all__ = [
     "SessionController",
@@ -38,6 +43,7 @@ __all__ = [
     "CancelRunIntent",
     "SessionIntent",
     "PreparedAgentRun",
+    "RollbackBaselineRef",
     "SessionRunRecord",
     "SessionCommandRecord",
     "SessionView",

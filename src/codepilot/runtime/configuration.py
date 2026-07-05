@@ -11,10 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .session_opening import SessionOpenIntent, _to_runtime_assembly_intent
+from .opening import SessionOpenIntent, _to_runtime_assembly_intent
 
 if TYPE_CHECKING:
-    from .assembly_types import ResolvedConfigValue
+    from .assembly import ResolvedConfigValue
 
 
 class UnknownRuntimeConfigKeyError(KeyError):
@@ -71,7 +71,7 @@ def resolve_workspace_session_intent(
             provider=provider,
             model_id=model_id,
         )
-    from .bootstrap.resources import WorkspaceResourceLoader
+    from .assembly import WorkspaceResourceLoader
 
     resources = WorkspaceResourceLoader(workspace_path).load()
     if resources.model is not None:
@@ -92,7 +92,7 @@ def resolve_workspace_session_intent(
 def check_workspace_model_config(workspace: str | Path) -> WorkspaceConfigCheck:
     """Return a sanitized model-config health view for a workspace."""
 
-    from .bootstrap.resources import WorkspaceResourceLoader
+    from .assembly import WorkspaceResourceLoader
 
     loader = WorkspaceResourceLoader(workspace)
     model = loader.load().model
@@ -125,7 +125,7 @@ def check_workspace_model_config(workspace: str | Path) -> WorkspaceConfigCheck:
 def describe_workspace_config(workspace: str | Path) -> WorkspaceConfigView:
     """Return sanitized model and settings rows for interface rendering."""
 
-    from .bootstrap.resources import WorkspaceResourceLoader
+    from .assembly import WorkspaceResourceLoader
 
     loaded = WorkspaceResourceLoader(workspace).load()
     model = loaded.model

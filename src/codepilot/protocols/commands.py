@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-# 新手导读：commands.py 定义外部能力暴露 slash command 和生命周期 hook 的协议。
+# 新手导读：commands.py 定义外部能力暴露 slash command、生命周期 hook 和工具 hook 的协议。
 # 关注点：这里不执行命令，也不持有 session；extensions 生产这些能力，sessions 消费这些能力。
 
-"""Command and lifecycle capability contracts shared across layers."""
+"""Command and hook capability contracts shared across layers."""
 
-from dataclasses import dataclass
-from typing import Awaitable, Callable, Literal, cast
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Literal, cast
+
+from .conversation import AssistantMessage, ImageContent, Message, TextContent, ToolCall
+from .tools import Tool, ToolResult
 
 
 CommandSource = Literal["extension", "skill", "builtin", "prompt"]
@@ -102,6 +105,58 @@ class RegisteredCommand:
         object.__setattr__(self, "source", _ensure_command_source(self.source))
 
 
+@dataclass(frozen=True)
+class ToolHookContextSnapshot:
+    """Read-only context visible to before/after tool hooks."""
+
+    run_id: str = ""
+    session_id: str | None = None
+    system_prompt: str = ""
+    messages: tuple[Message, ...] = ()
+    tools: tuple[Tool, ...] = ()
+    task_signal: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class BeforeToolCallResult:
+    """Result returned by a before-tool hook."""
+
+    block: bool = False
+    reason: str | None = None
+
+
+@dataclass
+class AfterToolCallResult:
+    """Patch returned by an after-tool hook."""
+
+    content: list[TextContent | ImageContent] | None = None
+    details: Any = None
+    is_error: bool | None = None
+
+
+@dataclass
+class BeforeToolCallContext:
+    """Context passed before a tool call is executed."""
+
+    assistant_message: AssistantMessage
+    tool_call: ToolCall
+    args: dict[str, Any]
+    context: ToolHookContextSnapshot
+
+
+@dataclass
+class AfterToolCallContext:
+    """Context passed after a tool call has produced a result."""
+
+    assistant_message: AssistantMessage
+    tool_call: ToolCall
+    args: dict[str, Any]
+    result: ToolResult
+    is_error: bool
+    context: ToolHookContextSnapshot
+
+
 def _require_command_text(value: object, *, field_name: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{field_name} must be a string")
@@ -125,6 +180,10 @@ def _ensure_command_source(value: object) -> CommandSource:
 
 
 __all__ = [
+    "AfterToolCallContext",
+    "AfterToolCallResult",
+    "BeforeToolCallContext",
+    "BeforeToolCallResult",
     "CommandHandler",
     "CommandSource",
     "LifecycleHook",
@@ -133,4 +192,5 @@ __all__ = [
     "SessionCommandView",
     "SessionLifecycleContext",
     "SessionLifecycleView",
+    "ToolHookContextSnapshot",
 ]

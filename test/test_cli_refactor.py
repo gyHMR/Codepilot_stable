@@ -16,11 +16,11 @@ from unittest.mock import MagicMock, AsyncMock
 from pathlib import Path
 from types import SimpleNamespace
 
-from codepilot.interfaces.cli.renderer import (
+from codepilot.interfaces.cli.render import (
     TerminalRenderer,
     SimpleRenderer,
 )
-from codepilot.interfaces.cli.startup import CliStartupState, build_startup_state
+from codepilot.interfaces.cli.render import CliStartupState, build_startup_state
 from codepilot.runtime.views import SessionStatus
 from codepilot.sessions.contracts import SessionCommandRecord
 from codepilot.protocols import AssistantMessage, LLMErrorInfo, TextContent, Usage, Cost
@@ -132,7 +132,7 @@ class TestTerminalRenderer:
         renderer = TerminalRenderer(use_rich=False, output=output)
         timestamps = iter([10.0, 11.0, 12.0, 13.0])
         monkeypatch.setattr(
-            "codepilot.interfaces.cli.renderer.time.time",
+            "codepilot.interfaces.cli.render.time.time",
             lambda: next(timestamps),
         )
 
@@ -359,6 +359,124 @@ def test_render_prompt_run_forwards_events_and_final_message():
     assert renderer.final is runtime.final_message
 
 
+def test_render_prompt_run_surfaces_approval_required_frame():
+    from codepilot.interfaces.cli.runner import _render_prompt_run
+    from codepilot.runtime.actions import ApprovalRequiredFrame, PromptSubmitted
+    from codepilot.tools.ports import ToolInterruption, ToolRiskView
+
+    interruption = ToolInterruption(
+        approval_id="approval_1",
+        run_id="run_1",
+        tool_call_id="call_1",
+        tool_name="write",
+        arguments={"path": "demo.txt"},
+        reason="workspace_write",
+        risk=ToolRiskView(level="high", summary="write file"),
+    )
+
+    class FakeRuntime:
+        async def dispatch(self, session_id, action):
+            assert session_id == "session_1"
+            assert isinstance(action, PromptSubmitted)
+            yield ApprovalRequiredFrame(approval=interruption)
+
+    class FakeRenderer:
+        def __init__(self):
+            self.events = []
+            self.statuses = []
+            self.final = "not-called"
+
+        def handle_event(self, event):
+            self.events.append(event)
+
+        def render_status(self, message, *, kind="info"):
+            self.statuses.append((kind, message))
+
+        def render_final(self, message):
+            self.final = message
+
+    renderer = FakeRenderer()
+
+    asyncio.run(_render_prompt_run(FakeRuntime(), "session_1", "write file", renderer))
+
+    assert renderer.events == [
+        {
+            "type": "tool_approval_required",
+            "toolName": "write",
+            "toolCallId": "call_1",
+            "approvalId": "approval_1",
+            "runId": "run_1",
+            "args": {"path": "demo.txt"},
+            "riskLevel": "high",
+            "reason": "workspace_write",
+            "status": "approval_required",
+        }
+    ]
+    assert renderer.statuses == [
+        ("warning", "Approval pending: /approve approval_1 or /deny approval_1")
+    ]
+    assert renderer.final is None
+
+
+def test_cli_approval_command_dispatches_decision_and_renders_result():
+    from codepilot.interfaces.cli.runner import _render_approval_decision_run
+    from codepilot.runtime.actions import ApprovalDecided, ProgressFrame, RunFinishedFrame
+
+    final_message = AssistantMessage(content=[TextContent(text="approved done")])
+
+    class FakeRuntime:
+        def __init__(self):
+            self.sent = None
+
+        async def dispatch(self, session_id, action):
+            assert session_id == "session_1"
+            assert isinstance(action, ApprovalDecided)
+            self.sent = (action.approval_id, action.decision, action.reason)
+            yield ProgressFrame(event={"type": "message_update", "delta": "ok"})
+            yield RunFinishedFrame(
+                record=type(
+                    "Record",
+                    (),
+                    {
+                        "outcome": type(
+                            "Outcome",
+                            (),
+                            {"final_message": final_message},
+                        )()
+                    },
+                )()
+            )
+
+    class FakeRenderer:
+        def __init__(self):
+            self.events = []
+            self.final = None
+
+        def handle_event(self, event):
+            self.events.append(event)
+
+        def render_final(self, message):
+            self.final = message
+
+    runtime = FakeRuntime()
+    renderer = FakeRenderer()
+
+    asyncio.run(
+        _render_approval_decision_run(
+            runtime,
+            "session_1",
+            approval_id="approval_1",
+            decision="approve",
+            reason="ok",
+            renderer=renderer,
+        )
+    )
+
+    assert runtime.sent == ("approval_1", "approve", "ok")
+    assert renderer.events == [{"type": "message_update", "delta": "ok"}]
+    assert renderer.final is final_message
+
+
 def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monkeypatch):
     from codepilot.interfaces.cli.runner import run_rpc
     from codepilot.runtime.actions import (
@@ -514,8 +632,109 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
     assert messages[7]["status"] == "ok"
 
 
+def test_run_rpc_surfaces_and_resumes_approval(monkeypatch):
+    from codepilot.interfaces.cli.runner import run_rpc
+    from codepilot.runtime.actions import (
+        ApprovalDecided,
+        ApprovalRequiredFrame,
+        PromptSubmitted,
+        RunFinishedFrame,
+    )
+    from codepilot.tools.ports import ToolInterruption, ToolRiskView
+
+    final_message = AssistantMessage(content=[TextContent(text="approved done")])
+    interruption = ToolInterruption(
+        approval_id="approval_1",
+        run_id="run_1",
+        tool_call_id="call_1",
+        tool_name="write",
+        arguments={"path": "demo.txt"},
+        reason="workspace_write",
+        risk=ToolRiskView(level="high", summary="write file"),
+    )
+
+    class FakeRuntime:
+        async def dispatch(self, session_id, action):
+            assert session_id == "session_1"
+            if isinstance(action, PromptSubmitted):
+                yield ApprovalRequiredFrame(approval=interruption)
+                return
+            if isinstance(action, ApprovalDecided):
+                assert action.approval_id == "approval_1"
+                assert action.decision == "approve"
+                yield RunFinishedFrame(
+                    record=type(
+                        "Record",
+                        (),
+                        {
+                            "run_id": "run_approved",
+                            "session_id": "session_1",
+                            "status": "completed",
+                            "stop_reason": "final_answer",
+                            "final_text": "approved done",
+                            "outcome": type(
+                                "Outcome",
+                                (),
+                                {"final_message": final_message},
+                            )(),
+                        },
+                    )()
+                )
+                return
+            raise AssertionError(f"unexpected action: {action!r}")
+
+    stdin = io.StringIO(
+        "\n".join(
+            [
+                json.dumps({"type": "prompt", "id": "prompt_1", "text": "write"}),
+                json.dumps(
+                    {
+                        "type": "approve",
+                        "id": "approve_1",
+                        "approval_id": "approval_1",
+                        "reason": "ok",
+                    }
+                ),
+                json.dumps({"type": "shutdown", "id": "shutdown_1"}),
+            ]
+        )
+        + "\n"
+    )
+    output: list[str] = []
+    monkeypatch.setattr("sys.stdin", stdin)
+
+    asyncio.run(run_rpc(FakeRuntime(), "session_1", output=output.append))
+
+    messages = [json.loads(line) for line in output]
+    assert messages[1] == {
+        "type": "approval_required",
+        "approval": {
+            "approval_id": "approval_1",
+            "run_id": "run_1",
+            "tool_call_id": "call_1",
+            "tool_name": "write",
+            "arguments": {"path": "demo.txt"},
+            "reason": "workspace_write",
+            "risk_level": "high",
+        },
+    }
+    assert messages[2] == {
+        "type": "response",
+        "id": "prompt_1",
+        "command": "prompt",
+        "status": "ok",
+        "data": {
+            "status": "waiting_approval",
+            "approval_id": "approval_1",
+        },
+    }
+    assert messages[3]["command"] == "approve"
+    assert messages[3]["status"] == "ok"
+    assert messages[3]["data"]["run_id"] == "run_approved"
+
+
 def test_rpc_ready_signal_uses_named_protocol_version() -> None:
-    from codepilot.interfaces.cli.rpc_protocol import (
+    from codepilot.interfaces.cli.runner import (
         RPC_PROTOCOL_VERSION,
         emit_rpc_ready,
     )
@@ -537,7 +756,7 @@ def test_rpc_ready_signal_uses_named_protocol_version() -> None:
 
 
 def test_rpc_ok_response_requires_command_name() -> None:
-    from codepilot.interfaces.cli.rpc_protocol import emit_rpc_ok
+    from codepilot.interfaces.cli.runner import emit_rpc_ok
 
     emitted: list[dict] = []
     emit_rpc_ok(emitted.append, req_id="request_1", command=" state ")
@@ -556,7 +775,7 @@ def test_rpc_ok_response_requires_command_name() -> None:
 
 
 def test_rpc_error_mapping_uses_coded_exception_payloads() -> None:
-    from codepilot.interfaces.cli.rpc_protocol import rpc_error_from_exception
+    from codepilot.interfaces.cli.runner import rpc_error_from_exception
 
     class SessionBusyError(Exception):
         code = "runtime.session_busy"
@@ -571,7 +790,7 @@ def test_rpc_error_mapping_uses_coded_exception_payloads() -> None:
 
 
 def test_rpc_error_requires_non_empty_code_and_message() -> None:
-    from codepilot.interfaces.cli.rpc_protocol import RpcError, rpc_error_from_exception
+    from codepilot.interfaces.cli.runner import RpcError, rpc_error_from_exception
 
     with pytest.raises(ValueError, match="code"):
         RpcError(code="  ", message="Something failed")

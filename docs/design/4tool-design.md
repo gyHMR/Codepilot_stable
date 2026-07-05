@@ -72,7 +72,7 @@ flowchart TD
 新人阅读代码时，建议按这条链路走：
 
 1. `src/codepilot/runtime/assembly.py`
-2. `src/codepilot/runtime/bootstrap/tool_assembler.py`
+2. `src/codepilot/runtime/assembly.py`
 3. `src/codepilot/tools/execution.py`
 4. `src/codepilot/tools/ports.py`
 5. `src/codepilot/core/tool_turn.py`
@@ -85,7 +85,7 @@ flowchart TD
 
 用户启动 CLI 或 DingTalk 会话时，接口层不会自己创建工具，而是调用 `RuntimeGateway.open_session()`。这里会进入 `assemble_runtime()`，再调用 `assemble_tools()`。
 
-核心文件：`src/codepilot/runtime/bootstrap/tool_assembler.py`
+核心文件：`src/codepilot/runtime/assembly.py`
 
 `assemble_tools()` 做九件事：
 
@@ -542,7 +542,7 @@ ToolPort -> ToolRuntime -> PermissionPolicy -> SchemaValidator -> ApprovalProvid
 | `src/codepilot/tools/builtins/files.py` | 文件工具具体实现 |
 | `src/codepilot/tools/builtins/shell.py` | shell 工具具体实现 |
 | `src/codepilot/tools/builtins/task_control.py` | `complete_task_step` 这类任务控制工具的可执行定义 |
-| `src/codepilot/runtime/bootstrap/tool_assembler.py` | 工具从哪里来、怎么合并、怎么创建 `ToolRuntime` |
+| `src/codepilot/runtime/assembly.py` | 工具从哪里来、怎么合并、怎么创建 `ToolRuntime` |
 | `src/codepilot/tools/ports.py` | V2 core 如何通过 ToolPort 调用工具 |
 | `src/codepilot/core/tool_turn.py` | Agent loop 怎么执行一轮工具调用 |
 | `src/codepilot/runtime/gateway.py` | 审批动作如何重新进入工具主链 |
@@ -552,7 +552,7 @@ ToolPort -> ToolRuntime -> PermissionPolicy -> SchemaValidator -> ApprovalProvid
 ```text
 contracts.py
   -> metadata.py
-  -> runtime/bootstrap/tool_assembler.py
+  -> runtime/assembly.py
   -> tools/ports.py
   -> execution.py
   -> policy.py / argument_schema.py / approval.py / result_safety.py

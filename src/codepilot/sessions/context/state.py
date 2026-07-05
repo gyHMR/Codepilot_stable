@@ -50,7 +50,7 @@ from codepilot.protocols import (
     RepositorySnapshot,
     ToolResultMessage,
 )
-from codepilot.tools.workspace_safety import file_state_for_path
+from codepilot.tools.workspace import file_state_for_path
 
 
 ContextFileRole = Literal["target", "test", "dependency", "config", "reference"]

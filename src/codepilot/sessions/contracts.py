@@ -1,10 +1,75 @@
 from __future__ import annotations
 
+from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable, Literal, Optional
 
-from codepilot.core.contracts import AgentLoopInput, AgentLoopOutcome, AgentResumeInput
+from codepilot.core.contracts import (
+    AgentMessage,
+    AgentLoopInput,
+    AgentLoopOutcome,
+    AgentResumeInput,
+    AgentLoopStatus,
+    ContextPort,
+    PrepareContextFn,
+    ToolExecutionMode,
+)
+from codepilot.core.task import PlanningBudgetProfile, TaskMode
+from codepilot.llm.adapter import ProviderSimpleStreamFn
 from codepilot.protocols import AgentEvent, Message
+from codepilot.protocols import Model
+from codepilot.protocols.commands import (
+    AfterToolCallContext,
+    AfterToolCallResult,
+    BeforeToolCallContext,
+    BeforeToolCallResult,
+    LifecycleHook,
+    RegisteredCommand,
+)
+
+
+ConvertToLlmFn = Callable[[list[AgentMessage]], list[Message] | Awaitable[list[Message]]]
+
+
+@dataclass
+class SessionOptions:
+    """Runtime-supplied configuration for opening a session controller."""
+
+    model: Model
+    workspace_dir: str | Path
+    system_prompt: str = ""
+    session_id: Optional[str] = None
+    messages: list[AgentMessage] = field(default_factory=list)
+    thinking_level: str = "off"
+    tool_execution: ToolExecutionMode = "parallel"
+    max_tool_calls_per_turn: int = 8
+    memory_enabled: bool = True
+    task_control_enabled: bool = True
+    task_mode: TaskMode = "edit"
+    planning_budget_profile: PlanningBudgetProfile = "balanced"
+    max_task_replans_per_run: int = 2
+    convert_to_llm: Optional[ConvertToLlmFn] = None
+    get_api_key: Optional[Callable[[str], str | None | Awaitable[str | None]]] = None
+    retry_enabled: bool = True
+    max_retries: int = 2
+    retry_base_delay_ms: int = 1200
+    extension_commands: dict[str, RegisteredCommand] = field(default_factory=dict)
+    before_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
+    after_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
+    before_tool_call: Optional[
+        Callable[
+            [BeforeToolCallContext, Any | None],
+            BeforeToolCallResult | None | Awaitable[BeforeToolCallResult | None],
+        ]
+    ] = None
+    after_tool_call: Optional[
+        Callable[
+            [AfterToolCallContext, Any | None],
+            AfterToolCallResult | None | Awaitable[AfterToolCallResult | None],
+        ]
+    ] = None
+    stream_fn: ProviderSimpleStreamFn | None = None
+    prepare_context: PrepareContextFn | None = None
 
 
 @dataclass(frozen=True)
@@ -67,14 +132,28 @@ class SessionView:
 
 
 @dataclass(frozen=True)
+class RollbackBaselineRef:
+    session_id: str
+    run_id: str
+    kind: Literal["rollback_baseline_ref"] = field(
+        default="rollback_baseline_ref",
+        init=False,
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "session_id", _require_text(self.session_id, "session_id"))
+        object.__setattr__(self, "run_id", _require_text(self.run_id, "run_id"))
+
+
+@dataclass(frozen=True)
 class PreparedAgentRun:
     run_id: str
     session_id: str
     loop_input: AgentLoopInput
     resume_input: AgentResumeInput | None = None
-    context_port: Any | None = None
+    context_port: ContextPort | None = None
     input_messages: list[Message] = field(default_factory=list)
-    rollback_baseline: Any = None
+    rollback_baseline: RollbackBaselineRef | None = None
     context_refs: dict[str, Any] = field(default_factory=dict)
     memory_refs: dict[str, Any] = field(default_factory=dict)
     recovery_refs: dict[str, Any] = field(default_factory=dict)
@@ -84,7 +163,7 @@ class PreparedAgentRun:
 class SessionRunRecord:
     run_id: str
     session_id: str
-    status: str
+    status: AgentLoopStatus
     stop_reason: str
     new_messages: list[Message] = field(default_factory=list)
     final_text: str = ""
@@ -129,12 +208,15 @@ def _approval_decision(value: object) -> str:
 
 __all__ = [
     "CancelRunIntent",
+    "ConvertToLlmFn",
     "PreparedAgentRun",
+    "RollbackBaselineRef",
     "SessionCommandIntent",
     "SessionCommandRecord",
     "SessionIntent",
     "SessionResumeIntent",
     "SessionRunIntent",
     "SessionRunRecord",
+    "SessionOptions",
     "SessionView",
 ]

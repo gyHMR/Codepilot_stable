@@ -131,7 +131,7 @@ def test_context_freshness_notice_summarizes_stale_run_files(
 ) -> None:
     from codepilot.protocols import TextContent, UserMessage
     from codepilot.sessions.context.freshness import build_context_freshness_notice
-    from codepilot.sessions.persistence import FreshnessResult
+    from codepilot.sessions.storage import FreshnessResult
 
     result = FreshnessResult(
         status="stale",
@@ -157,7 +157,7 @@ def test_context_freshness_notice_summarizes_stale_run_files(
 
 def test_context_freshness_notice_is_absent_for_valid_state(tmp_path: Path) -> None:
     from codepilot.sessions.context.freshness import build_context_freshness_notice
-    from codepilot.sessions.persistence import FreshnessResult
+    from codepilot.sessions.storage import FreshnessResult
 
     result = FreshnessResult(status="valid", workspace_path=str(tmp_path))
 

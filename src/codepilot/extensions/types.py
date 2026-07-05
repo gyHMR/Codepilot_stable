@@ -8,13 +8,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from codepilot.protocols.tool_hooks import (
+from codepilot.protocols.commands import (
     AfterToolCallContext,
     AfterToolCallResult,
     BeforeToolCallContext,
     BeforeToolCallResult,
+    LifecycleHook,
+    RegisteredCommand,
 )
-from codepilot.protocols.commands import LifecycleHook, RegisteredCommand
 from codepilot.tools import AgentTool
 
 # 工具调用前钩子类型

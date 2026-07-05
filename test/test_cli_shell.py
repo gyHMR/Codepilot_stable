@@ -9,7 +9,7 @@ import pytest
 from prompt_toolkit.document import Document
 
 from codepilot.interfaces.cli.shell import CODEPILOT_STYLE, InteractiveShell
-from codepilot.runtime.command_catalog import builtin_commands
+from codepilot.runtime.views import builtin_commands
 from codepilot.runtime.views import SessionStatus
 
 

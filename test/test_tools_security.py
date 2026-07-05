@@ -14,7 +14,7 @@ if str(SRC) not in sys.path:
 
 
 def test_workspace_sandbox_blocks_path_escape(tmp_path: Path) -> None:
-    from codepilot.tools.workspace_safety import WorkspaceSandbox
+    from codepilot.tools.workspace import WorkspaceSandbox
 
     sandbox = WorkspaceSandbox(tmp_path)
 
@@ -44,7 +44,7 @@ def test_permission_policy_supports_future_approval_flow() -> None:
 
 def test_permission_policy_uses_tool_metadata_for_read_only() -> None:
     from codepilot.tools.policy import PermissionPolicy, ToolRequest
-    from codepilot.tools.contracts import ToolMetadata
+    from codepilot.tools.authoring import ToolMetadata
 
     metadata = ToolMetadata(
         name="database.query",
@@ -66,7 +66,7 @@ def test_permission_policy_uses_tool_metadata_for_read_only() -> None:
 
 def test_permission_policy_requires_approval_for_high_risk_metadata() -> None:
     from codepilot.tools.policy import PermissionPolicy, ToolRequest
-    from codepilot.tools.contracts import ToolMetadata
+    from codepilot.tools.authoring import ToolMetadata
 
     metadata = ToolMetadata(
         name="email.send",
@@ -105,9 +105,9 @@ def test_tool_runtime_preserves_denied_status() -> None:
 async def _run_tool_runtime_blocks_dangerous_bash_before_execution() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
-    from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.execution import ToolRuntime
-    from codepilot.tools.contracts import ToolRuntimeRequest
+    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.engine import ToolRuntime
+    from codepilot.tools.authoring import ToolRuntimeRequest
 
     executed = False
 
@@ -146,9 +146,9 @@ async def _run_tool_runtime_blocks_dangerous_bash_before_execution() -> None:
 async def _run_tool_runtime_requires_approval_for_high_risk_tool() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
-    from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.execution import ToolRuntime
-    from codepilot.tools.contracts import ToolMetadata, ToolRuntimeRequest
+    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.engine import ToolRuntime
+    from codepilot.tools.authoring import ToolMetadata, ToolRuntimeRequest
 
     executed = False
 
@@ -200,9 +200,9 @@ async def _run_tool_runtime_requires_approval_for_high_risk_tool() -> None:
 async def _run_tool_runtime_preserves_denied_status() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
-    from codepilot.tools.contracts import ToolRuntimeRequest
-    from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.execution import ToolRuntime
+    from codepilot.tools.authoring import ToolRuntimeRequest
+    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.engine import ToolRuntime
 
     executed = False
 
@@ -242,7 +242,7 @@ async def _run_tool_runtime_preserves_denied_status() -> None:
 def test_unknown_external_tool_metadata_is_conservative() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
-    from codepilot.tools.registry import ToolRegistry
+    from codepilot.tools.authoring import ToolRegistry
 
     async def execute(tool_call_id, params, signal=None, on_update=None):
         _ = tool_call_id, params, signal, on_update
@@ -271,9 +271,9 @@ def test_unknown_external_tool_metadata_is_conservative() -> None:
 def test_read_only_tool_assembly_filters_by_metadata(tmp_path: Path) -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
-    from codepilot.runtime.bootstrap.config import RuntimeConfig
-    from codepilot.runtime.bootstrap.tool_assembler import assemble_tools
-    from codepilot.runtime.assembly_input import RuntimeAssemblyIntent
+    from codepilot.runtime.assembly import RuntimeConfig
+    from codepilot.runtime.assembly import assemble_tools
+    from codepilot.runtime.assembly import RuntimeAssemblyIntent
 
     async def execute(tool_call_id, params, signal=None, on_update=None):
         _ = tool_call_id, params, signal, on_update
@@ -325,10 +325,10 @@ def test_read_only_tool_assembly_filters_by_metadata(tmp_path: Path) -> None:
 
 
 def test_tool_assembly_exposes_skill_loader_tool(tmp_path: Path) -> None:
-    from codepilot.runtime.bootstrap.config import RuntimeConfig
-    from codepilot.runtime.bootstrap.tool_assembler import assemble_tools
-    from codepilot.runtime.assembly_input import RuntimeAssemblyIntent
-    from codepilot.tools.contracts import ToolRuntimeRequest
+    from codepilot.runtime.assembly import RuntimeConfig
+    from codepilot.runtime.assembly import assemble_tools
+    from codepilot.runtime.assembly import RuntimeAssemblyIntent
+    from codepilot.tools.authoring import ToolRuntimeRequest
 
     skill_file = tmp_path / "triage.md"
     skill_file.write_text(

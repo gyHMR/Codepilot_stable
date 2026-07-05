@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from .records import MEMORY_SCHEMA_VERSION, MemoryRecord, MemoryStatus, utc_now_iso
 
 if TYPE_CHECKING:
-    from ..persistence.store import SessionStore
+    from ..storage import SessionStore
 
 
 logger = logging.getLogger("codepilot.sessions.memory")

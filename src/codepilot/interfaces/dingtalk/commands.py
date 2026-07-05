@@ -43,7 +43,7 @@ def parse_dingtalk_command(text: str) -> DingTalkCommand:
 def help_text() -> str:
     """Return concise DingTalk command help."""
 
-    from .renderer import render_help
+    from .render import render_help
 
     return render_help()
 

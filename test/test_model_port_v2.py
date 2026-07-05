@@ -5,8 +5,9 @@ import asyncio
 
 def test_provider_model_port_streams_completed_message_from_injected_stream() -> None:
     async def run_case() -> None:
-        from codepilot.llm.event_stream import AssistantMessageEventStream
-        from codepilot.llm.ports import LLMCompleted, LLMRequest, ModelDescriptor, ProviderModelPort
+        from codepilot.llm.stream import AssistantMessageEventStream
+        from codepilot.llm.adapter import ProviderModelPort
+        from codepilot.llm.ports import LLMCompleted, LLMCorrelation, LLMRequest, ModelDescriptor
         from codepilot.protocols import AssistantMessage, Model, TextContent, UserMessage
 
         seen = {}
@@ -41,7 +42,7 @@ def test_provider_model_port_streams_completed_message_from_injected_stream() ->
                     model=ModelDescriptor(provider="unit-test", model_id="unit"),
                     messages=(UserMessage(content="hello"),),
                     system_prompt="rules",
-                    correlation={"session_id": "s1"},
+                    correlation=LLMCorrelation(session_id="s1"),
                 )
             )
         ]
@@ -57,7 +58,8 @@ def test_provider_model_port_streams_completed_message_from_injected_stream() ->
 
 def test_provider_model_port_reports_stream_errors_as_llm_failed() -> None:
     async def run_case() -> None:
-        from codepilot.llm.ports import LLMFailed, LLMRequest, ModelDescriptor, ProviderModelPort
+        from codepilot.llm.adapter import ProviderModelPort
+        from codepilot.llm.ports import LLMFailed, LLMRequest, ModelDescriptor
         from codepilot.protocols import Model, UserMessage
 
         async def broken_stream(_model, _context, _options):
@@ -96,7 +98,8 @@ def test_provider_model_port_reports_stream_errors_as_llm_failed() -> None:
 
 def test_provider_model_port_applies_model_capabilities_before_provider_call() -> None:
     async def run_case() -> None:
-        from codepilot.llm.ports import LLMFailed, LLMOptions, LLMRequest, ModelDescriptor, ProviderModelPort
+        from codepilot.llm.adapter import ProviderModelPort
+        from codepilot.llm.ports import LLMFailed, LLMOptions, LLMRequest, ModelDescriptor
         from codepilot.protocols import ImageContent, Model, ModelCapabilities, UserMessage
 
         called = False
@@ -142,8 +145,9 @@ def test_provider_model_port_applies_model_capabilities_before_provider_call() -
 
 def test_provider_model_port_filters_prompt_tools_and_reasoning_by_capability() -> None:
     async def run_case() -> None:
-        from codepilot.llm.event_stream import AssistantMessageEventStream
-        from codepilot.llm.ports import LLMCompleted, LLMOptions, LLMRequest, ModelDescriptor, ProviderModelPort
+        from codepilot.llm.stream import AssistantMessageEventStream
+        from codepilot.llm.adapter import ProviderModelPort
+        from codepilot.llm.ports import LLMCompleted, LLMOptions, LLMRequest, ModelDescriptor
         from codepilot.protocols import AssistantMessage, Model, ModelCapabilities, TextContent, UserMessage
 
         captured = {}
@@ -201,7 +205,8 @@ def test_provider_model_port_filters_prompt_tools_and_reasoning_by_capability() 
 
 def test_provider_model_port_uses_complete_path_for_non_streaming_models() -> None:
     async def run_case() -> None:
-        from codepilot.llm.ports import LLMCompleted, LLMRequest, ModelDescriptor, ProviderModelPort
+        from codepilot.llm.adapter import ProviderModelPort
+        from codepilot.llm.ports import LLMCompleted, LLMRequest, ModelDescriptor
         from codepilot.protocols import AssistantMessage, Model, ModelCapabilities, TextContent, UserMessage
 
         called = False

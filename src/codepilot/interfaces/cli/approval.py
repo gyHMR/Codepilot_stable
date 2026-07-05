@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from typing import Callable
 
-from .ui import format_plain_panel
+from .render import format_plain_panel
 
 
 class _CliApprovalDecision:

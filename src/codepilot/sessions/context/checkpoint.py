@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from codepilot.protocols import ContextCheckpoint
-from codepilot.sessions.layout import SessionLayout
+from codepilot.sessions.storage import SessionLayout
 
 
 class ContextCheckpointManager:

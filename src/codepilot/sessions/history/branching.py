@@ -7,11 +7,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..persistence.store import SessionStore, new_session_id
-from ..types import SessionOptions
+from ..contracts import SessionOptions
+from ..storage import SessionStore, new_session_id
 
 if TYPE_CHECKING:
-    from ..session import SessionRuntime
+    from ..prepare import SessionRuntime
 
 
 def build_session_options_from_existing(
@@ -50,7 +50,7 @@ def build_session_options_from_existing(
 def create_fresh_session(old: "SessionRuntime") -> "SessionRuntime":
     """创建一个空的兄弟会话（保留运行时设置，清空消息历史）。"""
 
-    from ..session import SessionRuntime
+    from ..prepare import SessionRuntime
 
     return SessionRuntime(
         build_session_options_from_existing(
@@ -63,7 +63,7 @@ def create_fresh_session(old: "SessionRuntime") -> "SessionRuntime":
 def fork_session(session: "SessionRuntime", from_entry_id: str | None = None) -> "SessionRuntime":
     """从指定条目或当前叶子分叉一个新会话。"""
 
-    from ..session import SessionRuntime
+    from ..prepare import SessionRuntime
 
     new_id = new_session_id()
     fork_store = session.store.fork_to(new_id, from_entry_id=from_entry_id)

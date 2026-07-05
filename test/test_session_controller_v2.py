@@ -6,7 +6,7 @@ import asyncio
 async def _run_real_session_spine(session, text: str, *, run_id: str):
     from codepilot.core.contracts import AgentLoopPorts
     from codepilot.core.loop import run_agent_loop
-    from codepilot.llm.ports import ProviderModelPort
+    from codepilot.llm.adapter import ProviderModelPort
     from codepilot.sessions.contracts import SessionRunIntent
     from codepilot.sessions.controller import _bind_session_runtime
 
@@ -98,10 +98,10 @@ def test_session_controller_applies_command_as_session_intent() -> None:
 
 def test_session_controller_drives_real_session_lifecycle(tmp_path) -> None:
     async def run_case() -> None:
-        from codepilot.llm.event_stream import AssistantMessageEventStream
+        from codepilot.llm.stream import AssistantMessageEventStream
         from codepilot.protocols import AssistantMessage, Model, TextContent
-        from codepilot.sessions.session import SessionRuntime
-        from codepilot.sessions.types import SessionOptions
+        from codepilot.sessions.prepare import SessionRuntime
+        from codepilot.sessions.contracts import SessionOptions
 
         hook_calls: list[tuple[str, str, bool]] = []
 
@@ -173,10 +173,10 @@ def test_session_controller_drives_real_session_lifecycle(tmp_path) -> None:
 
 def test_session_controller_carries_task_control_through_core_and_recovery(tmp_path) -> None:
     async def run_case() -> None:
-        from codepilot.llm.event_stream import AssistantMessageEventStream
+        from codepilot.llm.stream import AssistantMessageEventStream
         from codepilot.protocols import AssistantMessage, Model, TextContent
-        from codepilot.sessions.session import SessionRuntime
-        from codepilot.sessions.types import SessionOptions
+        from codepilot.sessions.prepare import SessionRuntime
+        from codepilot.sessions.contracts import SessionOptions
 
         seen_system_prompts: list[str | None] = []
 
@@ -236,12 +236,12 @@ def test_session_controller_carries_task_control_through_core_and_recovery(tmp_p
 def test_session_controller_commits_v2_outcome_into_real_session_lifecycle(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import AgentLoopOutcome, WorkspaceEffects
-        from codepilot.llm.event_stream import AssistantMessageEventStream
+        from codepilot.llm.stream import AssistantMessageEventStream
         from codepilot.protocols import AssistantMessage, Model, TextContent, ToolResultMessage
         from codepilot.sessions.contracts import SessionRunIntent
         from codepilot.sessions.controller import _bind_session_runtime
-        from codepilot.sessions.session import SessionRuntime
-        from codepilot.sessions.types import SessionOptions
+        from codepilot.sessions.prepare import SessionRuntime
+        from codepilot.sessions.contracts import SessionOptions
 
         async def fake_stream(_model, _context, _options):
             stream = AssistantMessageEventStream()
@@ -317,12 +317,12 @@ def test_session_controller_commits_v2_outcome_into_real_session_lifecycle(tmp_p
 def test_session_runtime_subscribers_receive_v2_run_events(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import AgentLoopOutcome
-        from codepilot.llm.event_stream import AssistantMessageEventStream
+        from codepilot.llm.stream import AssistantMessageEventStream
         from codepilot.protocols import AssistantMessage, Model, TextContent
         from codepilot.sessions.contracts import SessionRunIntent
         from codepilot.sessions.controller import _bind_session_runtime
-        from codepilot.sessions.session import SessionRuntime
-        from codepilot.sessions.types import SessionOptions
+        from codepilot.sessions.prepare import SessionRuntime
+        from codepilot.sessions.contracts import SessionOptions
 
         async def fake_stream(_model, _context, _options):
             stream = AssistantMessageEventStream()

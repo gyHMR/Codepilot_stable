@@ -7,9 +7,8 @@
 """
 
 from .main import build_parser
-from .renderer import SimpleRenderer, TerminalRenderer
+from .render import CliStartupState, SimpleRenderer, TerminalRenderer, build_startup_state
 from .runner import RunOptions, run, run_interactive, run_print, run_rpc
-from .startup import CliStartupState, build_startup_state
 
 __all__ = [
     "CliStartupState",

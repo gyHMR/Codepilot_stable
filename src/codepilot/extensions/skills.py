@@ -254,4 +254,3 @@ def _render_skill_prompt(skill: SkillSpec, raw_text: str) -> str:
         "Follow the skill content below and produce actionable results.\n\n"
         f"{skill.content}"
     )
-

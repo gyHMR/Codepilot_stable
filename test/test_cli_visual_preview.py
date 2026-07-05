@@ -4,8 +4,8 @@ from io import StringIO
 
 from rich.console import Console
 
-from codepilot.interfaces.cli.renderer import TerminalRenderer
-from codepilot.interfaces.cli.startup import CliStartupState
+from codepilot.interfaces.cli.render import TerminalRenderer
+from codepilot.interfaces.cli.render import CliStartupState
 from codepilot.protocols import LLMErrorInfo
 
 
@@ -20,7 +20,7 @@ def test_rich_cli_preview_has_compact_coding_agent_hierarchy(monkeypatch) -> Non
     )
     timestamps = iter([10.0, 10.614])
     monkeypatch.setattr(
-        "codepilot.interfaces.cli.renderer.time.time",
+        "codepilot.interfaces.cli.render.time.time",
         lambda: next(timestamps),
     )
 

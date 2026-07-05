@@ -115,7 +115,7 @@ async def _run_session_command_case(tmp_path: Path) -> None:
 
     runtime, session_id = _create_runtime_session(tmp_path)
     session = _persistent_session(runtime, session_id)
-    from codepilot.sessions.command_state import get_leaf_id
+    from codepilot.sessions.commands import get_leaf_id
 
     try:
         result = await handle_cli_command(runtime, session_id, "/session")
@@ -205,7 +205,7 @@ async def _run_context_command_case(tmp_path: Path) -> None:
 
 async def _run_rollback_command_case(tmp_path: Path) -> None:
     from codepilot.interfaces.cli.commands import handle_cli_command
-    from codepilot.sessions.command_state import capture_run_rollback_baseline
+    from codepilot.sessions.commands import capture_run_rollback_baseline
 
     _init_repo(tmp_path)
     tracked = tmp_path / "app.py"
@@ -255,7 +255,7 @@ async def _run_rollback_no_run_case(tmp_path: Path) -> None:
 
 async def _run_rollback_blocked_case(tmp_path: Path) -> None:
     from codepilot.interfaces.cli.commands import handle_cli_command
-    from codepilot.sessions.command_state import capture_run_rollback_baseline
+    from codepilot.sessions.commands import capture_run_rollback_baseline
 
     _init_repo(tmp_path)
     tracked = tmp_path / "app.py"
@@ -288,7 +288,7 @@ async def _run_rollback_blocked_case(tmp_path: Path) -> None:
 
 async def _run_removed_compact_command_case(tmp_path: Path) -> None:
     from codepilot.interfaces.cli.commands import handle_cli_command
-    from codepilot.runtime.command_catalog import builtin_commands
+    from codepilot.runtime.views import builtin_commands
 
     runtime, session_id = _create_runtime_session(tmp_path)
     try:

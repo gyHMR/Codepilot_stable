@@ -14,7 +14,7 @@ if str(SRC) not in sys.path:
 
 def test_session_store_persists_messages_forks_and_summarizes_events(tmp_path: Path) -> None:
     from codepilot.protocols import AssistantMessage, Cost, TextContent, Usage, UserMessage
-    from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.sessions.storage import SessionStore
     from codepilot.tools import AgentToolResult
 
     store = SessionStore(tmp_path, "session_test")
@@ -74,7 +74,7 @@ def test_session_store_persists_messages_forks_and_summarizes_events(tmp_path: P
 
 def test_session_store_uses_slim_layout_and_lazy_files(tmp_path: Path) -> None:
     from codepilot.protocols import UserMessage
-    from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.sessions.storage import SessionStore
 
     store = SessionStore(tmp_path, "session_layout")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
@@ -146,7 +146,7 @@ def test_event_recorder_builds_trace_and_summary(tmp_path: Path) -> None:
 
 def test_session_store_restores_assistant_error_info(tmp_path: Path) -> None:
     from codepilot.protocols import AssistantMessage, LLMErrorInfo
-    from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.sessions.storage import SessionStore
 
     store = SessionStore(tmp_path, "session_error")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="")
@@ -187,8 +187,8 @@ def test_session_store_persists_run_results(tmp_path: Path) -> None:
         TextContent,
         ToolResultMessage,
     )
-    from codepilot.sessions.persistence.run_store import RunStore
-    from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.sessions.storage import RunStore
+    from codepilot.sessions.storage import SessionStore
 
     store = SessionStore(tmp_path, "session_run")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="")
@@ -242,7 +242,7 @@ def test_session_store_persists_run_results(tmp_path: Path) -> None:
 
 
 def test_freshness_result_names_event_and_steering_policy() -> None:
-    from codepilot.sessions.persistence import FreshnessResult
+    from codepilot.sessions.storage import FreshnessResult
 
     no_tracked_files = FreshnessResult(status="valid")
     checked_and_valid = FreshnessResult(status="valid", checked_paths=["src/a.py"])
@@ -257,7 +257,7 @@ def test_freshness_result_names_event_and_steering_policy() -> None:
 
 
 def test_freshness_result_rejects_unknown_status() -> None:
-    from codepilot.sessions.persistence import FreshnessResult
+    from codepilot.sessions.storage import FreshnessResult
 
     with pytest.raises(ValueError, match="Unknown freshness status"):
         FreshnessResult(status="unknown")
@@ -265,7 +265,7 @@ def test_freshness_result_rejects_unknown_status() -> None:
 
 def test_tool_result_message_rejects_unknown_status_but_serde_coerces_legacy() -> None:
     from codepilot.protocols import ToolResultMessage
-    from codepilot.sessions.persistence.serde import message_from_dict
+    from codepilot.sessions.storage import message_from_dict
 
     with pytest.raises(ValueError, match="Unknown tool result status"):
         ToolResultMessage(status="interrupted")

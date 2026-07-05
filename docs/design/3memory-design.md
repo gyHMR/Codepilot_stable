@@ -98,7 +98,7 @@ updated_at: str
 ### 阶段二：run 开始前检查用户输入是否应该记住
 
 每次新的用户 turn 进入 `SessionController.prepare_run()` 时，会调用
-`sessions.lifecycle.begin_run_lifecycle()`。
+`sessions.prepare.begin_run_lifecycle()`。
 
 如果 `memory_enabled=True`，session 会调用：
 
@@ -137,7 +137,7 @@ MemoryWriter.admit_prompt_memory(text, run_id=run_id)
 - 如果是项目边界约束，写固定 `constraint:project_boundary`。
 - 其他输入返回 `should_store=False`。
 
-如果成功写入，`sessions.lifecycle.admit_prompt_memory()` 会写一条 `memory_updated` session event。
+如果成功写入，`sessions.prepare.admit_prompt_memory()` 会写一条 `memory_updated` session event。
 
 ### 阶段三：每次模型调用前召回 Memory
 
@@ -214,7 +214,7 @@ observe_tool_memory(session, message, run_id=...)
 
 ### 阶段五：run 结束后沉淀经验
 
-`sessions.lifecycle.complete_run_lifecycle()` 在 run 结果落盘、task recovery 更新后，如果启用 memory，会调用：
+`sessions.commit.complete_run_lifecycle()` 在 run 结果落盘、task recovery 更新后，如果启用 memory，会调用：
 
 ```python
 finalize_memory(session, result)

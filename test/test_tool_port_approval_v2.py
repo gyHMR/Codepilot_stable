@@ -6,16 +6,16 @@ import asyncio
 def test_tool_runtime_port_defers_and_resumes_approval_through_runtime() -> None:
     async def run_case() -> None:
         from codepilot.protocols import TextContent
-        from codepilot.tools.approval import DeferredApprovalProvider
-        from codepilot.tools.contracts import AgentTool, AgentToolResult, ToolMetadata
-        from codepilot.tools.execution import ToolRuntime
+        from codepilot.tools.policy import DeferredApprovalProvider
+        from codepilot.tools.authoring import AgentTool, AgentToolResult, ToolMetadata
+        from codepilot.tools.engine import ToolRuntime
         from codepilot.tools.policy import PermissionPolicy
+        from codepilot.tools.adapter import ToolRuntimePort
         from codepilot.tools.ports import (
             ToolInvocation,
             ToolResumeDecision,
-            ToolRuntimePort,
         )
-        from codepilot.tools.registry import ToolRegistry
+        from codepilot.tools.authoring import ToolRegistry
 
         executed: list[dict] = []
 
@@ -95,16 +95,16 @@ def test_tool_runtime_port_defers_and_resumes_approval_through_runtime() -> None
 def test_tool_runtime_port_denied_resume_does_not_execute_pending_tool() -> None:
     async def run_case() -> None:
         from codepilot.protocols import TextContent
-        from codepilot.tools.approval import DeferredApprovalProvider
-        from codepilot.tools.contracts import AgentTool, AgentToolResult, ToolMetadata
-        from codepilot.tools.execution import ToolRuntime
+        from codepilot.tools.policy import DeferredApprovalProvider
+        from codepilot.tools.authoring import AgentTool, AgentToolResult, ToolMetadata
+        from codepilot.tools.engine import ToolRuntime
         from codepilot.tools.policy import PermissionPolicy
+        from codepilot.tools.adapter import ToolRuntimePort
         from codepilot.tools.ports import (
             ToolInvocation,
             ToolResumeDecision,
-            ToolRuntimePort,
         )
-        from codepilot.tools.registry import ToolRegistry
+        from codepilot.tools.authoring import ToolRegistry
 
         executed = False
 
@@ -159,7 +159,7 @@ def test_tool_runtime_port_denied_resume_does_not_execute_pending_tool() -> None
             )
         )
 
-        assert denied.status == "error"
+        assert denied.status == "denied"
         assert denied.metadata["approval_id"] == deferred.interruption.approval_id
         assert executed is False
 
@@ -169,16 +169,17 @@ def test_tool_runtime_port_denied_resume_does_not_execute_pending_tool() -> None
 def test_tool_runtime_port_runs_before_and_after_hooks_with_protocol_snapshot() -> None:
     async def run_case() -> None:
         from codepilot.protocols import AssistantMessage, TextContent, Tool, UserMessage
-        from codepilot.protocols.tool_hooks import (
+        from codepilot.protocols.commands import (
             AfterToolCallContext,
             AfterToolCallResult,
             BeforeToolCallContext,
             ToolHookContextSnapshot,
         )
-        from codepilot.tools.contracts import AgentTool, AgentToolResult, ToolMetadata
-        from codepilot.tools.execution import ToolRuntime
-        from codepilot.tools.ports import ToolInvocation, ToolRuntimePort
-        from codepilot.tools.registry import ToolRegistry
+        from codepilot.tools.authoring import AgentTool, AgentToolResult, ToolMetadata
+        from codepilot.tools.engine import ToolRuntime
+        from codepilot.tools.adapter import ToolRuntimePort
+        from codepilot.tools.ports import ToolInvocation
+        from codepilot.tools.authoring import ToolRegistry
 
         seen: list[tuple[str, str, str]] = []
         executed: list[dict] = []
@@ -186,7 +187,7 @@ def test_tool_runtime_port_runs_before_and_after_hooks_with_protocol_snapshot() 
         def before(ctx: BeforeToolCallContext, signal):
             seen.append(("before", ctx.context.run_id, ctx.context.system_prompt))
             if ctx.args.get("blocked"):
-                from codepilot.protocols.tool_hooks import BeforeToolCallResult
+                from codepilot.protocols.commands import BeforeToolCallResult
 
                 return BeforeToolCallResult(block=True, reason="blocked by test hook")
             return None

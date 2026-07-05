@@ -8,12 +8,10 @@ Protocols 子包公共索引。
 这里不放业务逻辑、文件读写、模型调用、工具执行或持久化实现。
 
 子模块分工：
-- content.py: 内容块类型（文本、图片、思考）
-- messages.py: 消息类型（用户、助手、工具结果）和上下文
-- tools.py: 工具定义、工具调用、工具结果
+- conversation.py: 内容块、消息、上下文和模型工具调用意图
+- tools.py: 工具定义、工具结果和工具元数据
 - llm.py: 模型配置、用量统计、流式事件
-- events.py: 运行时事件类型定义
-- runs.py: 运行结果和状态
+- runtime.py: 运行结果、运行状态和运行时事件
 - errors.py: 错误信息结构
 
 使用建议：
@@ -21,7 +19,21 @@ Protocols 子包公共索引。
 - 细分事件、上下文治理等较专门的类型，优先从对应子模块导入。
 """
 
-from .content import ContentBlock, ImageContent, TextContent, ThinkingContent
+from .conversation import (
+    AssistantBlock,
+    AssistantMessage,
+    ContentBlock,
+    Context,
+    ImageContent,
+    Message,
+    TextContent,
+    ThinkingContent,
+    ToolCall,
+    ToolResultBlock,
+    ToolResultMessage,
+    UserBlock,
+    UserMessage,
+)
 from .context import (
     ContextArtifactRef,
     ContextCheckpoint,
@@ -39,6 +51,10 @@ from .context import (
     RepositorySnapshot,
 )
 from .commands import (
+    AfterToolCallContext,
+    AfterToolCallResult,
+    BeforeToolCallContext,
+    BeforeToolCallResult,
     CommandHandler,
     CommandSource,
     LifecycleHook,
@@ -47,13 +63,18 @@ from .commands import (
     SessionCommandView,
     SessionLifecycleContext,
     SessionLifecycleView,
+    ToolHookContextSnapshot,
 )
 from .errors import ErrorInfo, ErrorSource, LLMErrorInfo, LLMErrorKind
-from .events import (
+from .runtime import (
     AgentEndEvent,
     AgentEvent,
     AgentEventBase,
     AgentEventSink,
+    AgentRunCounters,
+    AgentRunResult,
+    AgentRunStatus,
+    AgentRunStopReason,
     AgentStartEvent,
     ErrorEvent,
     EventEnvelope,
@@ -64,6 +85,9 @@ from .events import (
     ModelRetryStartEvent,
     RuntimeEvent,
     RuntimeEventType,
+    RunVerification,
+    RunVerificationStatus,
+    TaskSummary,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
@@ -84,40 +108,13 @@ from .llm import (
     ThinkingLevel,
     Usage,
 )
-from .messages import (
-    AssistantBlock,
-    AssistantMessage,
-    Context,
-    Message,
-    ToolResultBlock,
-    ToolResultMessage,
-    UserBlock,
-    UserMessage,
-)
-from .runs import (
-    AgentRunCounters,
-    AgentRunResult,
-    AgentRunStatus,
-    AgentRunStopReason,
-    RunVerification,
-    RunVerificationStatus,
-    TaskSummary,
-)
 from .tools import (
     TASK_CONTROL_COMPLETE_TOOL,
     Tool,
-    ToolCall,
     ToolMetadata,
     ToolResult,
     ToolResultStatus,
     ToolRiskLevel,
-)
-from .tool_hooks import (
-    AfterToolCallContext,
-    AfterToolCallResult,
-    BeforeToolCallContext,
-    BeforeToolCallResult,
-    ToolHookContextSnapshot,
 )
 
 

@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 from codepilot.protocols import TASK_CONTROL_COMPLETE_TOOL, TextContent
-from codepilot.tools.contracts import AgentTool, AgentToolResult
+from codepilot.tools.authoring import AgentTool, AgentToolResult
 
 
 def create_task_control_tools(*, allow: Callable[[str], bool]) -> list[AgentTool]:

@@ -158,8 +158,8 @@ def test_lifecycle_hook_context_exposes_only_session_view() -> None:
 
 
 def test_session_persistence_exports_freshness_contract() -> None:
-    import codepilot.sessions.persistence as persistence
-    from codepilot.sessions.persistence import __all__ as persistence_exports
+    import codepilot.sessions.storage as persistence
+    from codepilot.sessions.storage import __all__ as persistence_exports
 
     assert hasattr(persistence, "FreshnessResult")
     assert hasattr(persistence, "FreshnessStatus")
@@ -286,41 +286,34 @@ def test_removed_runtime_compat_modules_are_gone() -> None:
 def test_runtime_public_contracts_and_views_are_separate() -> None:
     import codepilot.runtime as runtime
     import codepilot.runtime.assembly as assembly
-    import codepilot.runtime.assembly_input as assembly_input
-    import codepilot.runtime.assembly_types as assembly_types
     import codepilot.runtime.gateway as gateway_module
-    import codepilot.runtime.session_opening as session_opening
+    import codepilot.runtime.opening as session_opening
     import codepilot.runtime.sessions as runtime_sessions
     import codepilot.runtime.views as views
     from importlib.util import find_spec
 
     assert hasattr(runtime, "SessionOpenIntent")
-    assert hasattr(assembly_input, "RuntimeAssemblyIntent")
-    assert assembly_input.__all__ == ["RuntimeAssemblyIntent", "RuntimePermissionMode"]
-    assert hasattr(assembly_types, "RuntimeAssembly")
-    assert hasattr(assembly_types, "RuntimeDiagnostic")
-    assert hasattr(assembly_types, "CapabilityCatalog")
+    assert hasattr(assembly, "RuntimeAssemblyIntent")
+    assert hasattr(assembly, "RuntimePermissionMode")
+    assert hasattr(assembly, "RuntimeAssembly")
+    assert hasattr(assembly, "RuntimeDiagnostic")
+    assert hasattr(assembly, "CapabilityCatalog")
     assert hasattr(views, "CommandDescriptor")
     assert hasattr(views, "SessionStatus")
-    assert not hasattr(assembly_input, "SessionOpenRequest")
-    assert not hasattr(assembly_input, "UserTurn")
-    assert not hasattr(assembly_input, "RuntimeOutput")
-    assert not hasattr(assembly_input, "ApprovalDecision")
-    assert not hasattr(assembly_input, "ApprovalSnapshot")
-    assert not hasattr(assembly_input, "CancellationResult")
-    assert not hasattr(assembly_input, "CommandRequest")
-    assert not hasattr(assembly_input, "SessionRef")
-    assert not hasattr(assembly_input, "CommandDescriptor")
-    assert not hasattr(assembly_input, "CommandResult")
-    assert not hasattr(assembly_input, "SessionSnapshot")
-    assert not hasattr(assembly_input, "SessionStatus")
-    assert not hasattr(assembly_input, "SessionOptions")
-    assert not hasattr(assembly_input, "RuntimeAssembly")
-    assert not hasattr(assembly_input, "RuntimeDiagnostic")
-    assert not hasattr(assembly_input, "CapabilityCatalog")
-    assert not hasattr(assembly_input, "ModelSelection")
-    assert not hasattr(assembly_input, "ToolRuntime")
-    assert not hasattr(assembly_input, "AgentSessionOptions")
+    assert not hasattr(assembly, "SessionOpenRequest")
+    assert not hasattr(assembly, "UserTurn")
+    assert not hasattr(assembly, "RuntimeOutput")
+    assert not hasattr(assembly, "ApprovalDecision")
+    assert not hasattr(assembly, "ApprovalSnapshot")
+    assert not hasattr(assembly, "CancellationResult")
+    assert not hasattr(assembly, "CommandRequest")
+    assert not hasattr(assembly, "SessionRef")
+    assert not hasattr(assembly, "CommandDescriptor")
+    assert not hasattr(assembly, "CommandResult")
+    assert not hasattr(assembly, "SessionSnapshot")
+    assert not hasattr(assembly, "SessionStatus")
+    assert not hasattr(assembly, "ModelSelection")
+    assert not hasattr(assembly, "AgentSessionOptions")
     assert not hasattr(runtime, "WorkspaceResourceLoader")
     assert not hasattr(runtime, "build_default_system_prompt")
     assert not hasattr(runtime, "format_commands_for_help")
@@ -346,6 +339,11 @@ def test_runtime_public_contracts_and_views_are_separate() -> None:
     assert find_spec("codepilot.runtime.contracts") is None
     assert find_spec("codepilot.runtime.commands") is None
     assert find_spec("codepilot.runtime.execution") is None
+    assert find_spec("codepilot.runtime.assembly_input") is None
+    assert find_spec("codepilot.runtime.assembly_types") is None
+    assert find_spec("codepilot.runtime.session_opening") is None
+    assert find_spec("codepilot.runtime.command_catalog") is None
+    assert find_spec("codepilot.runtime.bootstrap") is None
     assert not hasattr(runtime, "create_agent_session")
 
 
@@ -372,7 +370,6 @@ def test_removed_sessions_compat_modules_are_gone() -> None:
 def test_removed_llm_forwarding_modules_are_gone() -> None:
     removed_modules = (
         "codepilot.llm.types",
-        "codepilot.llm.stream",
     )
 
     existing = [module for module in removed_modules if find_spec(module) is not None]
@@ -392,7 +389,7 @@ def test_removed_protocol_and_llm_aliases_are_gone() -> None:
 
 def test_removed_builtin_file_tool_aliases_are_gone(tmp_path: Path) -> None:
     from codepilot.tools.builtins import create_builtin_tools, get_builtin_tool_metadata
-    from codepilot.tools.metadata import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES
+    from codepilot.tools.authoring import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES
 
     removed_aliases = {"list_dir", "read_file", "write_file"}
     tool_names = {tool.name for tool in create_builtin_tools(tmp_path)}
@@ -408,15 +405,15 @@ def test_tools_refactor_exposes_new_lifecycle_modules() -> None:
     from importlib.util import find_spec
 
     expected_modules = (
-        "codepilot.tools.contracts",
-        "codepilot.tools.registry",
-        "codepilot.tools.metadata",
+        "codepilot.tools.authoring",
+        "codepilot.tools.authoring",
+        "codepilot.tools.authoring",
         "codepilot.tools.policy",
-        "codepilot.tools.execution",
-        "codepilot.tools.argument_schema",
-        "codepilot.tools.result_safety",
-        "codepilot.tools.workspace_safety",
-        "codepilot.tools.shell_safety",
+        "codepilot.tools.engine",
+        "codepilot.tools.engine",
+        "codepilot.tools.engine",
+        "codepilot.tools.workspace",
+        "codepilot.tools.workspace",
         "codepilot.tools.builtins",
         "codepilot.tools.builtins.files",
         "codepilot.tools.builtins.search",
@@ -457,9 +454,11 @@ def test_removed_tools_compat_modules_are_gone() -> None:
 
 def test_removed_tool_port_transition_adapters_are_gone() -> None:
     import codepilot.tools.ports as ports
-    from codepilot.tools.execution import ToolRuntime
+    import codepilot.tools.adapter as adapters
+    from codepilot.tools.engine import ToolRuntime
 
-    assert hasattr(ports, "ToolRuntimePort")
+    assert not hasattr(ports, "ToolRuntimePort")
+    assert hasattr(adapters, "ToolRuntimePort")
     assert not hasattr(ports, "ExecutableToolPort")
     assert not hasattr(ToolRuntime, "execute_approved")
 
@@ -470,8 +469,8 @@ def test_tools_top_level_exports_contracts_not_live_runtime() -> None:
 
     assert "AgentTool" in tool_exports
     assert "AgentToolResult" in tool_exports
-    assert "ToolPort" in tool_exports
-    assert "ToolRuntimePort" in tool_exports
+    assert "ToolPort" not in tool_exports
+    assert "ToolRuntimePort" not in tool_exports
     assert "ToolRuntime" not in tool_exports
     assert "ToolRuntimeRequest" not in tool_exports
     assert "ToolRuntimeResult" not in tool_exports
@@ -479,6 +478,8 @@ def test_tools_top_level_exports_contracts_not_live_runtime() -> None:
     assert "SchemaValidator" not in tool_exports
     assert "ToolResultGuard" not in tool_exports
     assert not hasattr(tools, "ToolRuntime")
+    assert not hasattr(tools, "ToolPort")
+    assert not hasattr(tools, "ToolRuntimePort")
     assert not hasattr(tools, "ToolRuntimeRequest")
     assert not hasattr(tools, "ToolRuntimeResult")
     assert not hasattr(tools, "WorkspaceSandbox")
@@ -488,10 +489,10 @@ def test_tools_top_level_exports_contracts_not_live_runtime() -> None:
 
 def test_removed_task_control_helper_modules_are_gone() -> None:
     removed_modules = (
-        "codepilot.core.task_control.evidence",
-        "codepilot.core.task_control.verifier",
-        "codepilot.core.task_control.replanner",
-        "codepilot.core.task_control.stop",
+        "codepilot.core.task.evidence",
+        "codepilot.core.task.verifier",
+        "codepilot.core.task.replanner",
+        "codepilot.core.task.stop",
     )
 
     existing = [module for module in removed_modules if find_spec(module) is not None]
@@ -502,9 +503,9 @@ def test_removed_task_control_helper_modules_are_gone() -> None:
 def test_removed_run_result_compat_entries_are_gone() -> None:
     import codepilot.core as core
     from codepilot.core import __all__ as core_exports
-    import codepilot.sessions.session as session_module
-    from codepilot.sessions.conversation_state import SessionConversationState
-    from codepilot.sessions.types import SessionOptions
+    import codepilot.sessions.prepare as session_module
+    from codepilot.sessions.conversation import SessionConversationState
+    from codepilot.sessions.contracts import SessionOptions
 
     assert not hasattr(core, "Agent")
     assert not hasattr(core, "complete_task_step_tool")
@@ -622,7 +623,7 @@ def test_core_namespace_keeps_cross_layer_contracts_out() -> None:
     assert "ToolCallCoordinator" not in core_exports
     assert AgentRunResult.__module__.startswith("codepilot.protocols")
     assert AgentToolResult.__module__.startswith("codepilot.protocols")
-    assert AfterToolCallResult.__module__ == "codepilot.protocols.tool_hooks"
+    assert AfterToolCallResult.__module__ == "codepilot.protocols.commands"
 
 
 def test_web_interface_package_is_removed() -> None:
@@ -681,20 +682,34 @@ def test_dingtalk_interface_does_not_bypass_runtime_boundary() -> None:
 
 
 def test_cli_startup_contract_is_separate_from_renderer_exports() -> None:
-    from codepilot.interfaces.cli.startup import CliStartupState, build_startup_state
-    from codepilot.interfaces.cli.renderer import __all__ as renderer_exports
+    from codepilot.interfaces.cli.render import (
+        CliStartupState,
+        __all__ as renderer_exports,
+        build_startup_state,
+    )
 
-    assert CliStartupState.__module__ == "codepilot.interfaces.cli.startup"
-    assert build_startup_state.__module__ == "codepilot.interfaces.cli.startup"
-    assert "CliStartupState" not in renderer_exports
-    assert "build_startup_state" not in renderer_exports
+    assert CliStartupState.__module__ == "codepilot.interfaces.cli.render"
+    assert build_startup_state.__module__ == "codepilot.interfaces.cli.render"
+    assert "CliStartupState" in renderer_exports
+    assert "build_startup_state" in renderer_exports
 
 
-def test_cli_runner_exports_only_run_mode_entrypoints() -> None:
+def test_cli_runner_exports_compact_run_and_rpc_entrypoints() -> None:
     from codepilot.interfaces.cli.runner import __all__ as runner_exports
 
     assert set(runner_exports) == {
+        "InputFn",
+        "OutputFn",
+        "RPC_PROTOCOL_VERSION",
+        "RpcEmit",
+        "RpcError",
+        "RunMode",
         "RunOptions",
+        "emit_rpc_error",
+        "emit_rpc_ok",
+        "emit_rpc_ready",
+        "rpc_error_from_exception",
+        "rpc_json_default",
         "run",
         "run_interactive",
         "run_print",
@@ -703,7 +718,7 @@ def test_cli_runner_exports_only_run_mode_entrypoints() -> None:
 
 
 def test_cli_run_mode_types_stay_out_of_runtime_contracts() -> None:
-    import codepilot.runtime.assembly_input as runtime_types
+    import codepilot.runtime.assembly as runtime_types
     import codepilot.interfaces.cli.runner as runner
 
     assert hasattr(runner, "RunMode")

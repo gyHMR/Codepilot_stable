@@ -144,7 +144,7 @@ def test_retryable_model_error_remains_inside_one_run() -> None:
 
 
 async def _run_retry_case() -> None:
-    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts
+    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts, RetryPolicy
     from codepilot.core.loop import run_agent_loop
     from codepilot.llm.ports import LLMCompleted, LLMFailed
     from codepilot.protocols import AssistantMessage, ErrorInfo, TextContent
@@ -175,7 +175,7 @@ async def _run_retry_case() -> None:
             "run_retry",
             prompt="retry",
             limits=AgentLoopLimits(max_model_turns=1),
-            retry_policy={"enabled": True, "max_retries": 1, "base_delay_ms": 0},
+            retry_policy=RetryPolicy(enabled=True, max_retries=1, base_delay_ms=0),
         ),
         AgentLoopPorts(model=model, tools=None),
     )
@@ -189,7 +189,7 @@ async def _run_retry_case() -> None:
 
 
 def test_v2_post_tool_decision_explains_pause_and_stop_cases() -> None:
-    from codepilot.core.stopping import post_tool_decision
+    from codepilot.core.loop import post_tool_decision
     from codepilot.core import ExecutionDecision
     from codepilot.protocols import ToolResultMessage
 
@@ -255,7 +255,7 @@ def test_v2_post_tool_decision_explains_pause_and_stop_cases() -> None:
 
 
 def test_v2_completion_decision_explains_continue_wait_and_done_cases() -> None:
-    from codepilot.core.stopping import completion_decision
+    from codepilot.core.loop import completion_decision
     from codepilot.core import CompletionCheck
 
     needs_more_work = completion_decision(
@@ -298,7 +298,7 @@ def test_task_finish_decision_exits_tool_loop_for_completion_check() -> None:
 
 
 async def _task_finish_exits_tool_loop_case() -> None:
-    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts
+    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts, TaskStrategy
     from codepilot.core.loop import run_agent_loop
     from codepilot.protocols import AssistantMessage, RunVerification, ToolCall
     from codepilot.tools.ports import ToolObservation
@@ -332,7 +332,7 @@ async def _task_finish_exits_tool_loop_case() -> None:
             "run_finish",
             prompt="运行验证",
             limits=AgentLoopLimits(max_tool_iterations=1, repeated_tool_call_limit=20),
-            task_strategy={"enabled": True, "mode": "edit"},
+            task_strategy=TaskStrategy(enabled=True, mode="edit"),
         ),
         AgentLoopPorts(model=model, tools=tools),
     )
@@ -349,9 +349,9 @@ def test_builtin_file_and_shell_results_are_structured(tmp_path: Path, monkeypat
 
 async def _run_builtin_result_case(tmp_path: Path, monkeypatch) -> None:
     from codepilot.tools.builtins import create_builtin_tools, get_builtin_tool_metadata
-    from codepilot.tools.contracts import ToolRuntimeRequest
-    from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.execution import ToolRuntime
+    from codepilot.tools.authoring import ToolRuntimeRequest
+    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.engine import ToolRuntime
     from codepilot.tools.policy import PermissionPolicy
 
     return_codes = iter([3, 0])
@@ -451,10 +451,16 @@ def _loop_input(
     *,
     prompt: str,
     limits: Any | None = None,
-    retry_policy: dict[str, Any] | None = None,
-    task_strategy: dict[str, Any] | None = None,
+    retry_policy: "RetryPolicy | None" = None,
+    task_strategy: "TaskStrategy | None" = None,
 ):
-    from codepilot.core.contracts import AgentLoopInput, AgentLoopLimits, RunCorrelation
+    from codepilot.core.contracts import (
+        AgentLoopInput,
+        AgentLoopLimits,
+        RetryPolicy,
+        RunCorrelation,
+        TaskStrategy,
+    )
     from codepilot.llm.ports import ModelDescriptor
 
     return AgentLoopInput(
@@ -463,8 +469,8 @@ def _loop_input(
         user_prompt=prompt,
         model=ModelDescriptor(provider="unit-test", model_id="run-test"),
         limits=limits or AgentLoopLimits(max_model_turns=4),
-        retry_policy=retry_policy or {},
-        task_strategy=task_strategy or {},
+        retry_policy=retry_policy or RetryPolicy(),
+        task_strategy=task_strategy or TaskStrategy(),
     )
 
 

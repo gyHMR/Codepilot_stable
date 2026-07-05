@@ -68,7 +68,7 @@ protocols <- llm/tools <- core <- sessions/observability <- extensions <- runtim
 | `src/codepilot/runtime/configuration.py` | config explain 等配置视图 |
 | `src/codepilot/runtime/assembly.py` | 装配模型、工具、扩展、hooks，并创建 `SessionController` |
 | `src/codepilot/runtime/assembly_types.py` | `RuntimeAssembly`、诊断和能力目录等 runtime 内部装配记录 |
-| `src/codepilot/runtime/bootstrap/*` | 配置、模型、工具、prompt、hook 的具体装配 |
+| `src/codepilot/runtime/assembly.py` | 配置、模型、工具、prompt、hook 的具体装配 |
 
 Runtime 的职责是应用级调度：
 
@@ -240,7 +240,7 @@ CommandSubmitted
   -> RuntimeGateway.dispatch()
   -> SessionController.apply_command()
   -> sessions.commands.apply_session_command()
-  -> sessions.command_state
+  -> sessions.commands
   -> CommandFinishedFrame
 ```
 
