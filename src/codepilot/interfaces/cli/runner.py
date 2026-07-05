@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # 新手导读：runner.py 分发 print/interactive/rpc 三种运行模式。
-# 关注点：它只调用 RuntimeService，不直接改 core 或 session 内部状态。
+# 关注点：它只调用 RuntimeGateway 的应用动作和快照，不直接改 core 或 session 内部状态。
 
 """
 运行模式入口。
@@ -12,7 +12,7 @@ from __future__ import annotations
 - rpc: 极简 JSON-RPC 模式，供外部程序调用
 
 设计原则：
-- CLI 通过 RuntimeService 操作 Session，不直接访问 Session 内部
+- CLI 通过 RuntimeGateway 操作 Session，不直接访问 Session 内部
 - 默认隐藏内部调试字段，--verbose 下显示
 - print/rpc 模式不被人类界面输出污染
 """
@@ -20,12 +20,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
-from codepilot.runtime.service import RuntimeService
-from codepilot.runtime.contracts import UserInput
+from codepilot.runtime.actions import (
+    FailedFrame,
+    ProgressFrame,
+    PromptSubmitted,
+    RunFinishedFrame,
+    RunCancelled,
+)
 
-from .commands import handle_cli_command, list_runtime_commands
+from .commands import handle_cli_command
 from .renderer import SimpleRenderer, TerminalRenderer
 from .rpc_protocol import (
     RpcEmit,
@@ -55,7 +61,7 @@ class RunOptions:
     """运行配置选项。"""
     mode: RunMode
     session_id: str
-    runtime: RuntimeService
+    runtime: Any
     prompt: str | None = None
     output: OutputFn = print
     input_fn: InputFn = input
@@ -106,21 +112,76 @@ def _normalize_exit_commands(value: object) -> tuple[str, ...]:
     return tuple(commands)
 
 
+def _session_view(runtime: Any, session_id: str) -> Any:
+    return runtime.describe(session_id)
+
+
+def _session_state(runtime: Any, session_id: str) -> dict[str, Any]:
+    return dict(_session_view(runtime, session_id).state or {})
+
+
+def _session_status(runtime: Any, session_id: str):
+    return _session_view(runtime, session_id).status
+
+
+def _session_commands(runtime: Any, session_id: str) -> tuple[Any, ...]:
+    return tuple(getattr(_session_view(runtime, session_id), "commands", ()) or ())
+
+
 async def _render_prompt_run(
-    runtime: RuntimeService,
+    runtime: Any,
     session_id: str,
     prompt: str,
     renderer: Any,
 ) -> None:
     """发送普通用户输入，并把运行事件渲染到 CLI renderer。"""
 
-    async for event in runtime.send_message(session_id, UserInput(text=prompt)):
-        renderer.handle_event(event)
-    renderer.render_final(runtime.get_latest_assistant_message(session_id))
+    final_message = None
+    async for frame in runtime.dispatch(session_id, PromptSubmitted(text=prompt)):
+        if isinstance(frame, ProgressFrame):
+            renderer.handle_event(frame.event)
+        elif isinstance(frame, RunFinishedFrame):
+            final_message = _final_message_from_record(frame.record)
+        elif isinstance(frame, FailedFrame):
+            raise _runtime_error_from_frame(frame.error)
+    renderer.render_final(final_message)
+
+
+def _final_message_from_record(record: Any) -> Any:
+    outcome = getattr(record, "outcome", None)
+    if outcome is not None:
+        message = getattr(outcome, "final_message", None)
+        if message is not None:
+            return message
+    return getattr(record, "final_message", None)
+
+
+def _frame_error_message(error: Any) -> str:
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("code") or "Runtime failed")
+    return str(error)
+
+
+class _RuntimeFrameError(RuntimeError):
+    code = "runtime.dispatch_failed"
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        if code:
+            self.code = code
+
+
+def _runtime_error_from_frame(error: Any) -> _RuntimeFrameError:
+    if isinstance(error, dict):
+        return _RuntimeFrameError(
+            _frame_error_message(error),
+            code=str(error.get("code") or "runtime.dispatch_failed"),
+        )
+    return _RuntimeFrameError(str(error))
 
 
 async def run_print(
-    runtime: RuntimeService,
+    runtime: Any,
     session_id: str,
     prompt: str,
     *,
@@ -128,11 +189,11 @@ async def run_print(
 ) -> None:
     """单次问答模式。
 
-    通过 RuntimeService 发送消息，消费事件流。
+    通过 RuntimeGateway 发送消息，消费事件流。
 
     流程：
     1. 创建渲染器
-    2. 通过 RuntimeService.send_message() 消费事件
+    2. 通过 Runtime dispatch() 消费事件和最终结果
     3. 实时渲染流式输出
     4. 渲染最终结果
     """
@@ -143,7 +204,7 @@ async def run_print(
 
 
 async def run_interactive(
-    runtime: RuntimeService,
+    runtime: Any,
     session_id: str,
     *,
     input_fn: InputFn = input,
@@ -154,16 +215,16 @@ async def run_interactive(
 ) -> None:
     """交互式 REPL 模式。
 
-    通过 RuntimeService 操作 Session，不直接访问 Session 内部。
+    通过 RuntimeGateway 操作 Session，不直接访问 Session 内部。
 
     流程：
-    1. 从 RuntimeService 获取会话状态
+    1. 从 RuntimeGateway 获取会话状态
     2. 渲染启动摘要
     3. 创建 InteractiveShell（支持历史、补全、快捷键）
     4. 循环读取用户输入
-    5. "/" 开头 → 通过 RuntimeService 执行命令
-    6. 普通文本 → 通过 RuntimeService 发送消息
-    7. 捕获 KeyboardInterrupt，通过 RuntimeService 取消任务
+    5. "/" 开头 → 通过 RuntimeGateway 执行命令
+    6. 普通文本 → 通过 RuntimeGateway 发送消息
+    7. 捕获 KeyboardInterrupt，通过 RuntimeGateway 取消任务
     """
     from .shell import create_shell
 
@@ -174,16 +235,17 @@ async def run_interactive(
         use_rich=not no_color,
     )
 
-    # 从 RuntimeService 获取会话状态
-    status = runtime.get_session_status(session_id)
+    # 从 RuntimeGateway 获取会话快照
+    status = _session_status(runtime, session_id)
     startup_state = build_startup_state(status)
     renderer.render_startup(state=startup_state)
 
     # 创建 InteractiveShell（支持历史、补全）
-    workspace = runtime.get_workspace(session_id)
+    workspace = Path(status.workspace)
     shell = create_shell(
         history_dir=workspace / ".codepilot",
         no_color=no_color,
+        commands=_session_commands(runtime, session_id),
     )
 
     current_session_id = session_id
@@ -193,8 +255,10 @@ async def run_interactive(
         try:
             if shell:
                 # 使用 prompt_toolkit（异步版本）
-                status = runtime.get_session_status(current_session_id)
-                toolbar = renderer.build_toolbar(build_startup_state(status))
+                view = _session_view(runtime, current_session_id)
+                if hasattr(shell, "set_commands"):
+                    shell.set_commands(tuple(getattr(view, "commands", ()) or ()))
+                toolbar = renderer.build_toolbar(build_startup_state(view.status))
                 text = await shell.prompt(
                     prompt_text="› ",
                     bottom_toolbar=toolbar,
@@ -225,7 +289,7 @@ async def run_interactive(
         if not text:
             continue
 
-        # "/" 开头的命令通过 RuntimeService 执行
+        # "/" 开头的命令通过 RuntimeGateway 执行
         if text.startswith("/"):
             try:
                 command_result = await handle_cli_command(runtime, current_session_id, text)
@@ -233,11 +297,11 @@ async def run_interactive(
                 # 如果命令导致会话切换（如 /fork, /clear）
                 if command_result.switched_session_id is not None:
                     # 关闭旧 Session
-                    await runtime.aclose_session(current_session_id)
+                    runtime.close(current_session_id)
                     # 更新当前会话 ID
                     current_session_id = command_result.switched_session_id
                     # 更新状态显示
-                    status = runtime.get_session_status(current_session_id)
+                    status = _session_status(runtime, current_session_id)
                     renderer.render_status(
                         f"Switched to session {current_session_id[:8]}..",
                         kind="success",
@@ -257,15 +321,18 @@ async def run_interactive(
                 renderer.render_status(f"Command error: {exc}", kind="error")
                 continue
 
-        # 普通文本 → 通过 RuntimeService 发送消息
+        # 普通文本 → 通过 RuntimeGateway 发送消息
         try:
             renderer.reset()
             await _render_prompt_run(runtime, current_session_id, text, renderer)
         except KeyboardInterrupt:
             # Ctrl+C 取消当前运行，不退出 CLI
             renderer.render_status("Cancelled", kind="cancelled")
-            # 通过 RuntimeService 取消任务
-            await runtime.cancel_run(current_session_id)
+            async for _frame in runtime.dispatch(
+                current_session_id,
+                RunCancelled(reason="keyboard_interrupt"),
+            ):
+                pass
             continue
         except Exception as exc:
             renderer.render_status(f"Error: {exc}", kind="error")
@@ -309,7 +376,7 @@ async def run(options: RunOptions) -> None:
 
 
 async def _handle_rpc_request(
-    runtime: RuntimeService,
+    runtime: Any,
     session_id: str,
     req: Any,
     emit: RpcEmit,
@@ -338,20 +405,21 @@ async def _handle_rpc_request(
             task_mode = req.get("task_mode")
             if task_mode is not None and not isinstance(task_mode, str):
                 raise ValueError("task_mode must be a string")
-            async for event in runtime.send_message(
+            result_data: dict[str, Any] | None = None
+            async for frame in runtime.dispatch(
                 session_id,
-                UserInput(text=text, task_mode=task_mode),
+                PromptSubmitted(text=text, mode_hint=task_mode),
             ):
-                emit({"type": "event", "event": event})
-            emit_rpc_ok(emit, req_id=req_id, command="prompt")
-
-        elif cmd == "continue":
-            async for event in runtime.continue_session(session_id):
-                emit({"type": "event", "event": event})
-            emit_rpc_ok(emit, req_id=req_id, command="continue")
+                if isinstance(frame, ProgressFrame):
+                    emit({"type": "event", "event": frame.event})
+                elif isinstance(frame, RunFinishedFrame):
+                    result_data = _run_record_rpc_data(frame.record)
+                elif isinstance(frame, FailedFrame):
+                    raise _runtime_error_from_frame(frame.error)
+            emit_rpc_ok(emit, req_id=req_id, command="prompt", data=result_data)
 
         elif cmd == "state":
-            state = runtime.get_session_state(session_id)
+            state = _session_state(runtime, session_id)
             emit_rpc_ok(
                 emit,
                 req_id=req_id,
@@ -363,16 +431,23 @@ async def _handle_rpc_request(
             mode = req.get("task_mode")
             if not isinstance(mode, str):
                 raise ValueError("set_task_mode requires task_mode")
-            current = runtime.set_task_mode(session_id, mode)
+            result = await handle_cli_command(
+                runtime,
+                session_id,
+                f"/mode {mode}",
+            )
             emit_rpc_ok(
                 emit,
                 req_id=req_id,
                 command="set_task_mode",
-                data={"session_id": session_id, "task_mode": current},
+                data={
+                    "session_id": session_id,
+                    "task_mode": result.data.get("task_mode"),
+                },
             )
 
         elif cmd == "list_entries":
-            state = runtime.get_session_state(session_id)
+            state = _session_state(runtime, session_id)
             emit_rpc_ok(
                 emit,
                 req_id=req_id,
@@ -380,20 +455,20 @@ async def _handle_rpc_request(
                 data={
                     "session_id": session_id,
                     "entry_ids": state["entry_ids"],
-                    "entries": runtime.list_session_entries(session_id),
+                    "entries": state.get("entries", []),
                     "leaf_id": state["leaf_id"],
                 },
             )
 
         elif cmd == "show_tree":
-            state = runtime.get_session_state(session_id)
+            state = _session_state(runtime, session_id)
             emit_rpc_ok(
                 emit,
                 req_id=req_id,
                 command="show_tree",
                 data={
                     "session_id": session_id,
-                    "tree": runtime.get_session_tree(session_id),
+                    "tree": state.get("tree", []),
                     "leaf_id": state["leaf_id"],
                 },
             )
@@ -402,6 +477,11 @@ async def _handle_rpc_request(
             entry_id = str(req.get("entry_id", ""))
             if not entry_id:
                 raise ValueError("entry_path requires entry_id")
+            result = await handle_cli_command(
+                runtime,
+                session_id,
+                f"/path {entry_id}",
+            )
             emit_rpc_ok(
                 emit,
                 req_id=req_id,
@@ -409,7 +489,7 @@ async def _handle_rpc_request(
                 data={
                     "session_id": session_id,
                     "entry_id": entry_id,
-                    "path": runtime.get_entry_path(session_id, entry_id),
+                    "path": result.data.get("path", []),
                 },
             )
 
@@ -417,32 +497,32 @@ async def _handle_rpc_request(
             entry_id = str(req.get("entry_id", ""))
             if not entry_id:
                 raise ValueError("fork_entry requires entry_id")
-            new_session_id = runtime.fork_session(session_id, entry_id)
+            result = await handle_cli_command(
+                runtime,
+                session_id,
+                f"/fork {entry_id}",
+            )
             emit_rpc_ok(
                 emit,
                 req_id=req_id,
                 command="fork_entry",
-                data={
-                    "from_session_id": session_id,
-                    "from_entry_id": entry_id,
-                    "new_session_id": new_session_id,
-                },
+                data=dict(result.data),
             )
 
         elif cmd == "switch_entry":
             entry_id = str(req.get("entry_id", ""))
             if not entry_id:
                 raise ValueError("switch_entry requires entry_id")
-            runtime.switch_entry(session_id, entry_id)
+            result = await handle_cli_command(
+                runtime,
+                session_id,
+                f"/switch {entry_id}",
+            )
             emit_rpc_ok(
                 emit,
                 req_id=req_id,
                 command="switch_entry",
-                data={
-                    "session_id": session_id,
-                    "entry_id": entry_id,
-                    "path": runtime.get_entry_path(session_id, entry_id),
-                },
+                data=dict(result.data),
             )
 
         elif cmd == "get_commands":
@@ -454,7 +534,7 @@ async def _handle_rpc_request(
                     "session_id": session_id,
                     "commands": [
                         command.to_dict()
-                        for command in list_runtime_commands(runtime.get_session(session_id))
+                        for command in runtime.describe(session_id).commands
                     ],
                 },
             )
@@ -484,8 +564,19 @@ async def _handle_rpc_request(
     return False
 
 
+def _run_record_rpc_data(record: Any) -> dict[str, Any]:
+    """Return the stable RPC summary for a completed prompt run."""
+
+    data: dict[str, Any] = {}
+    for name in ("run_id", "session_id", "status", "stop_reason", "final_text"):
+        value = getattr(record, name, None)
+        if value is not None:
+            data[name] = value
+    return data
+
+
 async def run_rpc(
-    runtime: RuntimeService,
+    runtime: Any,
     session_id: str,
     *,
     output: OutputFn = print,

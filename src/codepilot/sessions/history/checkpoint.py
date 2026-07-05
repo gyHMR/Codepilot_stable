@@ -6,7 +6,7 @@ from __future__ import annotations
 """会话检查点辅助工具。
 
 检查点目前刻意采用基于事件的方式实现；后续阶段可以附加文件快照和 diff 记录，
-而无需修改 AgentSession 的接口。
+而无需修改 SessionController 的接口。
 """
 
 from dataclasses import dataclass, field

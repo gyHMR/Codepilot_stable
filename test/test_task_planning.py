@@ -156,19 +156,20 @@ def test_task_state_owns_step_navigation_and_status_projections() -> None:
     assert task.next_action is None
 
 
-def test_agent_session_records_task_recovery_warning_separately_from_memory(
+def test_session_runtime_records_task_recovery_warning_separately_from_memory(
     tmp_path: Path,
 ) -> None:
-    from codepilot.runtime.contracts import AgentSessionOptions
-    from codepilot.sessions.session import AgentSession
+    from codepilot.sessions.lifecycle import begin_task_recovery
+    from codepilot.sessions.types import SessionOptions
+    from codepilot.sessions.session import SessionRuntime
 
     class BrokenTaskRecovery:
         def begin_task(self, text: str, *, run_id: str | None = None):
             _ = text, run_id
             raise RuntimeError("task recovery write failed")
 
-    session = AgentSession(
-        AgentSessionOptions(
+    session = SessionRuntime(
+        SessionOptions(
             model=_task_test_model(),
             workspace_dir=tmp_path,
             system_prompt="sys",
@@ -178,7 +179,7 @@ def test_agent_session_records_task_recovery_warning_separately_from_memory(
     session.task_recovery = BrokenTaskRecovery()  # type: ignore[assignment]
 
     try:
-        session._begin_task_recovery("修复任务推进", run_id="run_1")
+        begin_task_recovery(session, "修复任务推进", run_id="run_1")
 
         events = session.store.load_events()
         assert not any(
@@ -191,7 +192,7 @@ def test_agent_session_records_task_recovery_warning_separately_from_memory(
             for event in events
         )
     finally:
-        session.close()
+        session._close()
 
 
 def test_task_planner_parses_json_plan_from_llm_message() -> None:
@@ -956,298 +957,343 @@ def test_task_recovery_projection_coerces_unknown_step_kind() -> None:
     assert task.steps[0].verification_hint == "curl localhost"
 
 
-def test_agent_loop_emits_task_events_and_result_summary() -> None:
-    asyncio.run(_agent_loop_task_summary_case())
+def test_v2_agent_loop_emits_task_events_and_result_summary() -> None:
+    asyncio.run(_v2_agent_loop_task_summary_case())
 
 
-def test_agent_loop_can_plan_before_react_execution() -> None:
-    asyncio.run(_agent_loop_llm_planner_case())
+def test_v2_agent_loop_uses_plan_strategy_steps_in_context() -> None:
+    asyncio.run(_v2_agent_loop_plan_strategy_case())
 
 
-def test_agent_loop_plan_mode_discovers_facts_before_synthesis() -> None:
-    asyncio.run(_agent_loop_planning_discovery_case())
+def test_v2_agent_loop_complete_task_step_advances_plan_execution() -> None:
+    asyncio.run(_v2_agent_loop_complete_step_advances_case())
 
 
-def test_agent_loop_edit_mode_skips_planner() -> None:
-    asyncio.run(_agent_loop_edit_mode_skips_planner_case())
+def test_v2_agent_loop_uses_recovered_task_projection_in_context() -> None:
+    asyncio.run(_v2_agent_loop_recovered_task_context_case())
 
 
-def test_agent_loop_exposes_planner_fallback_reason_in_task_event() -> None:
-    asyncio.run(_agent_loop_planner_fallback_event_case())
+def test_v2_agent_loop_allows_one_final_verification_at_iteration_limit() -> None:
+    asyncio.run(_v2_agent_loop_final_verification_grace_case())
 
 
-def test_agent_loop_allows_one_final_verification_at_iteration_limit() -> None:
-    asyncio.run(_agent_loop_final_verification_grace_case())
+def test_v2_agent_loop_does_not_complete_when_completion_gate_is_unsatisfied() -> None:
+    asyncio.run(_v2_agent_loop_unverified_completion_gate_case())
 
 
-def test_agent_loop_complete_task_step_advances_plan_execution() -> None:
-    asyncio.run(_agent_loop_complete_step_advances_case())
+def test_v2_agent_loop_reports_blocked_task_instead_of_completed_after_denied_tool() -> None:
+    asyncio.run(_v2_agent_loop_denied_tool_blocks_completion_case())
 
 
-def test_agent_loop_uses_recovered_task_projection_in_context() -> None:
-    asyncio.run(_agent_loop_recovered_task_context_case())
+def test_v2_agent_loop_preserves_cancelled_stop_reason() -> None:
+    asyncio.run(_v2_agent_loop_cancelled_stop_reason_case())
 
 
-async def _agent_loop_complete_step_advances_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, Model, TextContent, ToolCall, ToolResultMessage, UserMessage
-    from codepilot.tools import AgentTool, AgentToolResult
+def test_v2_agent_loop_does_not_complete_after_generic_tool_error() -> None:
+    asyncio.run(_v2_agent_loop_generic_tool_error_case())
+
+
+def test_v2_agent_loop_waits_for_user_when_revert_is_proposed() -> None:
+    asyncio.run(_v2_agent_loop_propose_revert_case())
+
+
+def test_v2_agent_loop_stops_when_replan_limit_is_exceeded() -> None:
+    asyncio.run(_v2_agent_loop_replan_limit_case())
+
+
+async def _v2_agent_loop_task_summary_case() -> None:
+    from codepilot.core.contracts import AgentLoopPorts
+    from codepilot.core.loop import run_agent_loop
+    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
+    from codepilot.tools.ports import ToolObservation
+
+    model = _TaskScriptedModel(
+        lambda request, _calls: AssistantMessage(
+            content=[TextContent(text="done")]
+            if any(isinstance(message, ToolResultMessage) for message in request.messages)
+            else [ToolCall(id="read_1", name="read_test", arguments={})],
+            stop_reason="stop" if any(isinstance(message, ToolResultMessage) for message in request.messages) else "toolUse",
+        )
+    )
+    events: list[dict[str, Any]] = []
+    result = await run_agent_loop(
+        _v2_loop_input("run_task_summary", prompt="解释这个文件"),
+        AgentLoopPorts(
+            model=model,
+            tools=_TaskToolPort(
+                {
+                    "read_test": ToolObservation(
+                        tool_call_id="read_1",
+                        name="read_test",
+                        status="success",
+                        content=(TextContent(text="read result"),),
+                    )
+                }
+            ),
+            events=events.append,
+        ),
+    )
+
+    assert result.status == "completed"
+    assert result.task is not None
+    assert result.task.goal == "解释这个文件"
+    assert result.task.completed_steps == ["完成当前请求"]
+    assert result.task.completion_satisfied is True
+    assert any(event["type"] == "task_plan_created" for event in events)
+    assert any(event["type"] == "task_step_updated" for event in events)
+    assert any(event["type"] == "completion_checked" for event in events)
+
+
+async def _v2_agent_loop_plan_strategy_case() -> None:
+    from codepilot.core.contracts import AgentLoopPorts
+    from codepilot.core.loop import run_agent_loop
+    from codepilot.protocols import AssistantMessage, TextContent
+
+    prompts: list[str] = []
+
+    class CapturingModel:
+        async def stream(self, request):
+            from codepilot.llm.ports import LLMCompleted
+
+            prompts.append(request.system_prompt)
+            yield LLMCompleted(message=AssistantMessage(content=[TextContent(text="done")]))
+
+    result = await run_agent_loop(
+        _v2_loop_input(
+            "run_plan_strategy",
+            prompt="实现 planner",
+            task_strategy={
+                "enabled": True,
+                "mode": "plan",
+                "planning_budget_profile": "wide",
+                "steps": [
+                    {
+                        "title": "定位任务模块",
+                        "kind": "investigate",
+                        "acceptance": "找到 TaskController",
+                    },
+                    {
+                        "title": "修改执行逻辑",
+                        "kind": "edit",
+                        "acceptance": "按 step 推进",
+                        "verification_hint": "pytest task",
+                    },
+                ],
+            },
+        ),
+        AgentLoopPorts(model=CapturingModel(), tools=None),
+    )
+
+    assert result.task is not None
+    assert result.task.control_signal["mode"] == "plan"
+    assert result.task.control_signal["planning"]["budget"]["profile"] == "wide"
+    assert result.task.step_details["定位任务模块"]["acceptance"] == "找到 TaskController"
+    assert result.task.step_details["修改执行逻辑"]["verification_hint"] == "pytest task"
+    assert "Current step: 定位任务模块" in prompts[0]
+
+
+async def _v2_agent_loop_complete_step_advances_case() -> None:
+    from codepilot.core.contracts import AgentLoopPorts
+    from codepilot.core.loop import run_agent_loop
+    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
+    from codepilot.tools.ports import ToolObservation
 
     execution_contexts: list[str] = []
 
-    async def fake_stream(_model, context, _options):
-        stream = AssistantMessageEventStream()
-        system_prompt = context.system_prompt or ""
-        if "Task Planner" in system_prompt:
-            stream.end(
-                AssistantMessage(
-                    content=[
-                        TextContent(
-                            text=(
-                                '{"goal":"实现 planner","steps":['
-                                '{"title":"定位任务模块","kind":"investigate",'
-                                '"acceptance":"找到 TaskController","verification_hint":null},'
-                                '{"title":"修改执行逻辑","kind":"edit",'
-                                '"acceptance":"按 step 推进","verification_hint":null}'
-                                ']}'
-                            )
-                        )
-                    ]
-                )
-            )
-            return stream
-
-        execution_contexts.append(system_prompt)
-        if not any(isinstance(message, ToolResultMessage) for message in context.messages):
-            stream.end(
-                AssistantMessage(
-                    content=[ToolCall(id="read_1", name="read_test", arguments={})],
-                    stop_reason="toolUse",
-                )
-            )
-            return stream
-        if "Current step: 定位任务模块" in system_prompt:
-            stream.end(
-                AssistantMessage(
-                    content=[
-                        ToolCall(
-                            id="complete_1",
-                            name="complete_task_step",
-                            arguments={
-                                "summary": "已定位 TaskController",
-                                "evidence_refs": ["tool:read_1"],
-                            },
-                        )
-                    ],
-                    stop_reason="toolUse",
-                )
-            )
-            return stream
-        assert "Current step: 修改执行逻辑" in system_prompt
-        if any(
-            isinstance(message, ToolResultMessage) and message.tool_name == "edit_test"
-            for message in context.messages
-        ):
-            stream.end(AssistantMessage(content=[TextContent(text="修改完成，等待验证")]))
-            return stream
-        stream.end(
-            AssistantMessage(
-                content=[ToolCall(id="edit_1", name="edit_test", arguments={})],
+    def response(request, _calls):
+        execution_contexts.append(request.system_prompt)
+        if not any(isinstance(message, ToolResultMessage) for message in request.messages):
+            return AssistantMessage(
+                content=[ToolCall(id="read_1", name="read_test", arguments={})],
                 stop_reason="toolUse",
             )
-        )
-        return stream
-
-    async def read_tool(*_args):
-        return AgentToolResult(content=[TextContent(text="TaskController source")])
-
-    async def edit_tool(*_args):
-        return AgentToolResult(
-            content=[TextContent(text="edited")],
-            workspace_changed=True,
-            affected_paths=["src/codepilot/core/task_controller.py"],
+        if "Current step: 定位任务模块" in request.system_prompt:
+            return AssistantMessage(
+                content=[
+                    ToolCall(
+                        id="complete_1",
+                        name="complete_task_step",
+                        arguments={
+                            "summary": "已定位 TaskController",
+                            "evidence_refs": ["tool:read_1"],
+                        },
+                    )
+                ],
+                stop_reason="toolUse",
+            )
+        if any(
+            isinstance(message, ToolResultMessage) and message.tool_name == "edit_test"
+            for message in request.messages
+        ):
+            return AssistantMessage(content=[TextContent(text="修改完成，等待验证")])
+        assert "Current step: 修改执行逻辑" in request.system_prompt
+        return AssistantMessage(
+            content=[ToolCall(id="edit_1", name="edit_test", arguments={})],
+            stop_reason="toolUse",
         )
 
     result = await run_agent_loop(
-        prompts=[UserMessage(content="实现 planner")],
-        context=AgentContext(
-            system_prompt="rules",
-            messages=[],
-            tools=[
-                AgentTool(
-                    name="read_test",
-                    label="read",
-                    description="read",
-                    parameters={},
-                    execute=read_tool,
-                ),
-                AgentTool(
-                    name="edit_test",
-                    label="edit",
-                    description="edit",
-                    parameters={},
-                    execute=edit_tool,
-                ),
-            ],
+        _v2_loop_input(
+            "run_complete_step",
+            prompt="实现 planner",
+            task_strategy={
+                "enabled": True,
+                "mode": "plan",
+                "steps": [
+                    {"title": "定位任务模块", "kind": "investigate", "acceptance": "找到 TaskController"},
+                    {"title": "修改执行逻辑", "kind": "edit", "acceptance": "按 step 推进"},
+                ],
+            },
         ),
-        config=AgentLoopConfig(
-            model=Model(
-                id="task-test",
-                name="Task Test",
-                api="unit-test",
-                provider="unit-test",
-                base_url="",
-                reasoning=False,
-                input=["text"],
-                context_window=4000,
-                max_tokens=500,
+        AgentLoopPorts(
+            model=_TaskScriptedModel(response),
+            tools=_TaskToolPort(
+                {
+                    "read_test": ToolObservation(
+                        tool_call_id="read_1",
+                        name="read_test",
+                        status="success",
+                        content=(TextContent(text="TaskController source"),),
+                    ),
+                    "complete_task_step": ToolObservation(
+                        tool_call_id="complete_1",
+                        name="complete_task_step",
+                        status="success",
+                        content=(TextContent(text="Current task step completed: 已定位 TaskController"),),
+                        metadata={
+                            "task_control": {
+                                "action": "complete_step",
+                                "summary": "已定位 TaskController",
+                                "evidence_refs": ["tool:read_1"],
+                            }
+                        },
+                    ),
+                    "edit_test": ToolObservation(
+                        tool_call_id="edit_1",
+                        name="edit_test",
+                        status="success",
+                        content=(TextContent(text="edited"),),
+                        workspace_changed=True,
+                        affected_paths=("src/codepilot/core/task_controller.py",),
+                    ),
+                }
             ),
-            convert_to_llm=lambda items: items,
-            allow_unmanaged_tools=True,
-            task_mode="plan",
-            repeated_tool_call_limit=20,
         ),
-        emit=lambda _event: None,
-        stream_fn=fake_stream,
     )
 
     assert any("Current step: 修改执行逻辑" in item for item in execution_contexts)
     assert result.task is not None
     assert "定位任务模块" in result.task.completed_steps
     assert result.task.pending_steps == ["修改执行逻辑"]
-    assert result.workspace_changed is True
+    assert result.workspace_effects.changed is True
 
 
-async def _agent_loop_planner_fallback_event_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, Model, TextContent, UserMessage
+async def _v2_agent_loop_recovered_task_context_case() -> None:
+    from codepilot.core.contracts import AgentLoopPorts
+    from codepilot.core.loop import run_agent_loop
+    from codepilot.protocols import AssistantMessage, TextContent
 
-    async def fake_stream(_model, context, _options):
-        if "Task Planner" in (context.system_prompt or ""):
-            raise RuntimeError("planner unavailable")
-        stream = AssistantMessageEventStream()
-        stream.end(AssistantMessage(content=[TextContent(text="done")]))
-        return stream
+    prompts: list[str] = []
 
-    events: list[dict[str, Any]] = []
+    class CapturingModel:
+        async def stream(self, request):
+            from codepilot.llm.ports import LLMCompleted
+
+            prompts.append(request.system_prompt)
+            yield LLMCompleted(message=AssistantMessage(content=[TextContent(text="done")]))
+
     result = await run_agent_loop(
-        prompts=[UserMessage(content="实现 planner")],
-        context=AgentContext(system_prompt="rules", messages=[]),
-        config=AgentLoopConfig(
-            model=Model(
-                id="task-test",
-                name="Task Test",
-                api="unit-test",
-                provider="unit-test",
-                base_url="",
-                reasoning=False,
-                input=["text"],
-                context_window=4000,
-                max_tokens=500,
-            ),
-            convert_to_llm=lambda items: items,
-            task_mode="plan",
+        _v2_loop_input(
+            "run_recovered_task",
+            prompt="继续旧任务",
+            task_strategy={
+                "enabled": True,
+                "mode": "edit",
+                "recovery_projection": {
+                    "goal": "恢复旧任务",
+                    "task_progress": {
+                        "completed_steps": ["定位失败"],
+                        "pending_steps": ["重新运行相关验证"],
+                        "blocked_steps": ["根据最新失败证据调整方案"],
+                        "completion_satisfied": False,
+                        "completion_reason": "replan_limit_exceeded",
+                    },
+                    "next_action": "报告连续失败并等待用户指示",
+                },
+            },
         ),
-        emit=events.append,
-        stream_fn=fake_stream,
+        AgentLoopPorts(model=CapturingModel(), tools=None),
     )
 
-    created = next(event for event in events if event.get("type") == "task_plan_created")
-    assert result.status == "completed"
-    assert created["plan"]["mode"] == "plan"
-    assert created["plan"]["source"] == "fallback"
-    assert created["plan"]["planSource"] == "fallback"
-    assert created["plan"]["fallback_reason"] == "RuntimeError: planner unavailable"
+    assert result.task is not None
+    assert result.task.completed_steps == ["定位失败"]
+    assert result.task.pending_steps == ["重新运行相关验证"]
+    assert result.task.blocked_steps == ["根据最新失败证据调整方案"]
+    assert "恢复旧任务" in prompts[0]
 
 
-async def _agent_loop_final_verification_grace_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, UserMessage
-    from codepilot.tools import AgentTool, AgentToolResult
+async def _v2_agent_loop_final_verification_grace_case() -> None:
+    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts
+    from codepilot.core.loop import run_agent_loop
+    from codepilot.protocols import AssistantMessage, RunVerification, TextContent, ToolCall
+    from codepilot.tools.ports import ToolObservation
 
-    attempts = 0
-
-    async def fake_stream(_model, _context, _options):
-        nonlocal attempts
-        attempts += 1
-        stream = AssistantMessageEventStream()
-        if attempts == 1:
-            stream.end(
-                AssistantMessage(
-                    content=[ToolCall(id="edit_1", name="edit_test", arguments={})],
-                    stop_reason="toolUse",
-                )
-            )
-            return stream
-        stream.end(
-            AssistantMessage(
-                content=[
-                    ToolCall(
-                        id="verify_1",
-                        name="bash",
-                        arguments={
-                            "command": "python -m pytest test/test_task_planning.py -q"
-                        },
-                    )
-                ],
+    def response(_request, calls):
+        if calls == 1:
+            return AssistantMessage(
+                content=[ToolCall(id="edit_1", name="edit_test", arguments={})],
                 stop_reason="toolUse",
             )
-        )
-        return stream
-
-    async def edit_tool(*_args):
-        return AgentToolResult(
-            content=[TextContent(text="edited")],
-            workspace_changed=True,
-            affected_paths=["src/codepilot/core/task_controller.py"],
-        )
-
-    async def bash_tool(*_args):
-        return AgentToolResult(
-            content=[TextContent(text="passed")],
-            verification={
-                "status": "passed",
-                "command": "python -m pytest test/test_task_planning.py -q",
-                "exit_code": 0,
-                "summary": "passed",
-            },
+        return AssistantMessage(
+            content=[
+                ToolCall(
+                    id="verify_1",
+                    name="bash",
+                    arguments={"command": "python -m pytest test/test_task_planning.py -q"},
+                )
+            ],
+            stop_reason="toolUse",
         )
 
     events: list[dict[str, Any]] = []
     result = await run_agent_loop(
-        prompts=[UserMessage(content="修改代码并运行验证")],
-        context=AgentContext(
-            system_prompt="rules",
-            messages=[],
-            tools=[
-                AgentTool(
-                    name="edit_test",
-                    label="edit",
-                    description="edit",
-                    parameters={},
-                    execute=edit_tool,
-                ),
-                AgentTool(
-                    name="bash",
-                    label="bash",
-                    description="bash",
-                    parameters={},
-                    execute=bash_tool,
-                ),
-            ],
+        _v2_loop_input(
+            "run_final_verification_grace",
+            prompt="修改代码并运行验证",
+            limits=AgentLoopLimits(max_model_turns=3, max_tool_iterations=1, repeated_tool_call_limit=20),
         ),
-        config=AgentLoopConfig(
-            model=_task_test_model(),
-            convert_to_llm=lambda items: items,
-            allow_unmanaged_tools=True,
-            max_tool_iterations=1,
-            repeated_tool_call_limit=20,
+        AgentLoopPorts(
+            model=_TaskScriptedModel(response),
+            tools=_TaskToolPort(
+                {
+                    "edit_test": ToolObservation(
+                        tool_call_id="edit_1",
+                        name="edit_test",
+                        status="success",
+                        content=(TextContent(text="edited"),),
+                        workspace_changed=True,
+                        affected_paths=("src/codepilot/core/task_controller.py",),
+                    ),
+                    "bash": ToolObservation(
+                        tool_call_id="verify_1",
+                        name="bash",
+                        status="success",
+                        content=(TextContent(text="passed"),),
+                        verification=(
+                            RunVerification(
+                                tool_call_id="verify_1",
+                                tool_name="bash",
+                                status="passed",
+                                command="python -m pytest test/test_task_planning.py -q",
+                                exit_code=0,
+                                summary="passed",
+                            ),
+                        ),
+                    ),
+                }
+            ),
+            events=events.append,
         ),
-        emit=events.append,
-        stream_fn=fake_stream,
     )
 
     assert result.status == "completed"
@@ -1258,408 +1304,40 @@ async def _agent_loop_final_verification_grace_case() -> None:
     assert any(event.get("type") == "tool_execution_grace" for event in events)
 
 
-async def _agent_loop_llm_planner_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, Model, TextContent, ToolCall, ToolResultMessage, UserMessage
-    from codepilot.tools import AgentTool, AgentToolResult
+async def _v2_agent_loop_unverified_completion_gate_case() -> None:
+    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts
+    from codepilot.core.loop import run_agent_loop
+    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
+    from codepilot.tools.ports import ToolObservation
 
-    calls: list[str] = []
-
-    async def fake_stream(_model, context, _options):
-        stream = AssistantMessageEventStream()
-        system_prompt = context.system_prompt or ""
-        if "Task Planner" in system_prompt:
-            calls.append("plan")
-            stream.end(
-                AssistantMessage(
-                    content=[
-                        TextContent(
-                            text=(
-                                '{"goal":"实现 planner","steps":['
-                                '{"title":"定位任务模块","kind":"investigate",'
-                                '"acceptance":"找到 TaskController","verification_hint":null},'
-                                '{"title":"修改执行逻辑","kind":"edit",'
-                                '"acceptance":"按 step 推进","verification_hint":"pytest task"}'
-                                ']}'
-                            )
-                        )
-                    ]
-                )
-            )
-            return stream
-        calls.append("execute")
-        assert "## Current Task" in system_prompt
-        assert "定位任务模块" in system_prompt
-        assert "Acceptance: 找到 TaskController" in system_prompt
-        if any(isinstance(message, ToolResultMessage) for message in context.messages):
-            stream.end(AssistantMessage(content=[TextContent(text="done")]))
-        else:
-            stream.end(
-                AssistantMessage(
-                    content=[ToolCall(id="read_1", name="read_test", arguments={})],
-                    stop_reason="toolUse",
-                )
-            )
-        return stream
-
-    async def read_tool(*_args):
-        return AgentToolResult(content=[TextContent(text="read result")])
-
-    result = await run_agent_loop(
-        prompts=[UserMessage(content="实现 planner")],
-        context=AgentContext(
-            system_prompt="rules",
-            messages=[],
-            tools=[
-                AgentTool(
-                    name="read_test",
-                    label="read",
-                    description="read",
-                    parameters={},
-                    execute=read_tool,
-                )
-            ],
-        ),
-        config=AgentLoopConfig(
-            model=Model(
-                id="task-test",
-                name="Task Test",
-                api="unit-test",
-                provider="unit-test",
-                base_url="",
-                reasoning=False,
-                input=["text"],
-                context_window=4000,
-                max_tokens=500,
-            ),
-            convert_to_llm=lambda items: items,
-            allow_unmanaged_tools=True,
-            task_mode="plan",
-        ),
-        emit=lambda _event: None,
-        stream_fn=fake_stream,
+    model = _TaskScriptedModel(
+        lambda request, calls: AssistantMessage(
+            content=[ToolCall(id="edit_1", name="edit_test", arguments={})]
+            if calls == 1
+            else [TextContent(text="done without verification")],
+            stop_reason="toolUse" if calls == 1 else "stop",
+        )
     )
-
-    assert calls[:2] == ["plan", "execute"]
-    assert result.task is not None
-    assert result.task.control_signal["mode"] == "plan"
-    assert result.task.goal == "实现 planner"
-    assert result.task.step_details["定位任务模块"]["acceptance"] == "找到 TaskController"
-
-
-async def _agent_loop_planning_discovery_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage, UserMessage
-    from codepilot.tools import AgentTool, AgentToolResult, ToolMetadata
-
-    calls: list[str] = []
-
-    async def fake_stream(_model, context, _options):
-        stream = AssistantMessageEventStream()
-        system_prompt = context.system_prompt or ""
-        tool_names = [tool.name for tool in context.tools]
-        has_tool_result = any(
-            isinstance(message, ToolResultMessage) for message in context.messages
-        )
-        if "Task Planning Discovery" in system_prompt:
-            calls.append("discovery_tools" if not has_tool_result else "discovery_report")
-            assert tool_names == ["read_test"]
-            if not has_tool_result:
-                stream.end(
-                    AssistantMessage(
-                        content=[ToolCall(id="read_1", name="read_test", arguments={})],
-                        stop_reason="toolUse",
-                    )
-                )
-                return stream
-            stream.end(
-                AssistantMessage(
-                    content=[
-                        TextContent(
-                            text=(
-                                '{"status":"completed",'
-                                '"facts":["TaskController renders task context"],'
-                                '"relevant_files":["src/codepilot/core/task_controller.py"],'
-                                '"risks":["stale verification"],'
-                                '"verification_hints":["python -m pytest test/test_task_planning.py -q"],'
-                                '"open_questions":[]}'
-                            )
-                        )
-                    ]
-                )
-            )
-            return stream
-        if "Task Planner" in system_prompt:
-            calls.append("plan")
-            assert any(
-                isinstance(message, UserMessage)
-                and "TaskController renders task context" in str(message.content)
-                for message in context.messages
-            )
-            stream.end(
-                AssistantMessage(
-                    content=[
-                        TextContent(
-                            text=(
-                                '{"goal":"实现两阶段 plan","steps":['
-                                '{"title":"更新 TaskController 上下文","kind":"edit",'
-                                '"acceptance":"上下文包含 discovery facts",'
-                                '"verification_hint":"python -m pytest test/test_task_planning.py -q"}'
-                                ']}'
-                            )
-                        )
-                    ]
-                )
-            )
-            return stream
-        calls.append("execute")
-        assert "TaskController renders task context" in system_prompt
-        assert not any(
-            isinstance(message, ToolResultMessage) and message.tool_call_id == "read_1"
-            for message in context.messages
-        )
-        stream.end(AssistantMessage(content=[TextContent(text="done")]))
-        return stream
-
-    async def read_tool(*_args):
-        return AgentToolResult(
-            content=[TextContent(text="TaskController source")],
-            details={"path": "src/codepilot/core/task_controller.py"},
-        )
-
-    async def edit_tool(*_args):
-        raise AssertionError("mutating tool must not be visible during discovery")
-
-    events: list[dict[str, Any]] = []
     result = await run_agent_loop(
-        prompts=[UserMessage(content="实现两阶段 plan")],
-        context=AgentContext(
-            system_prompt="rules",
-            messages=[],
-            tools=[
-                AgentTool(
-                    name="read_test",
-                    label="read",
-                    description="read",
-                    parameters={},
-                    execute=read_tool,
-                    metadata=ToolMetadata(
-                        name="read_test",
-                        category="filesystem",
-                        read_only=True,
-                        concurrency_safe=True,
-                        exclusive=False,
-                        requires_approval=False,
-                        risk_level="low",
-                        resource_scope=("workspace",),
-                    ),
-                ),
-                AgentTool(
-                    name="edit_test",
-                    label="edit",
-                    description="edit",
-                    parameters={},
-                    execute=edit_tool,
-                    metadata=ToolMetadata(
+        _v2_loop_input(
+            "run_unverified_gate",
+            prompt="修改代码",
+            limits=AgentLoopLimits(max_model_turns=2),
+        ),
+        AgentLoopPorts(
+            model=model,
+            tools=_TaskToolPort(
+                {
+                    "edit_test": ToolObservation(
+                        tool_call_id="edit_1",
                         name="edit_test",
-                        category="filesystem",
-                        read_only=False,
-                        concurrency_safe=False,
-                        exclusive=True,
-                        requires_approval=False,
-                        risk_level="medium",
-                        resource_scope=("workspace",),
-                    ),
-                ),
-            ],
-        ),
-        config=AgentLoopConfig(
-            model=_task_test_model(),
-            convert_to_llm=lambda items: items,
-            allow_unmanaged_tools=True,
-            task_mode="plan",
-        ),
-        emit=events.append,
-        stream_fn=fake_stream,
-    )
-
-    created = next(event for event in events if event.get("type") == "task_plan_created")
-    assert calls[:4] == ["discovery_tools", "discovery_report", "plan", "execute"]
-    assert result.task is not None
-    assert result.task.control_signal["planning"]["source"] == "llm_with_discovery"
-    assert created["plan"]["planSource"] == "llm_with_discovery"
-    assert [
-        event.get("type")
-        for event in events
-        if str(event.get("type", "")).startswith("planning_")
-    ] == [
-        "planning_discovery_started",
-        "planning_discovery_step",
-        "planning_discovery_completed",
-        "planning_synthesis_started",
-        "planning_synthesis_completed",
-    ]
-
-
-async def _agent_loop_edit_mode_skips_planner_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, TextContent, UserMessage
-
-    calls: list[str] = []
-
-    async def fake_stream(_model, context, _options):
-        stream = AssistantMessageEventStream()
-        system_prompt = context.system_prompt or ""
-        if "Task Planner" in system_prompt:
-            calls.append("plan")
-            stream.end(AssistantMessage(content=[TextContent(text="{}")]))
-            return stream
-        calls.append("execute")
-        stream.end(AssistantMessage(content=[TextContent(text="done")]))
-        return stream
-
-    events: list[dict[str, Any]] = []
-    result = await run_agent_loop(
-        prompts=[UserMessage(content="解释当前项目")],
-        context=AgentContext(system_prompt="rules", messages=[]),
-        config=AgentLoopConfig(
-            model=_task_test_model(),
-            convert_to_llm=lambda items: items,
-        ),
-        emit=events.append,
-        stream_fn=fake_stream,
-    )
-
-    created = next(event for event in events if event.get("type") == "task_plan_created")
-    assert calls == ["execute"]
-    assert result.task is not None
-    assert result.task.control_signal["mode"] == "edit"
-    assert created["plan"]["mode"] == "edit"
-    assert created["plan"]["planSource"] == "default"
-
-
-async def _agent_loop_recovered_task_context_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, Model, TextContent, UserMessage
-
-    async def fake_stream(_model, context, _options):
-        stream = AssistantMessageEventStream()
-        system_prompt = context.system_prompt or ""
-        assert "定位失败" in system_prompt
-        assert "根据最新失败证据调整方案" in system_prompt
-        assert "Next action: 报告连续失败并等待用户指示" in system_prompt
-        stream.end(AssistantMessage(content=[TextContent(text="继续")]))
-        return stream
-
-    result = await run_agent_loop(
-        prompts=[UserMessage(content="继续修复失败测试")],
-        context=AgentContext(
-            system_prompt="rules",
-            messages=[],
-            task_recovery_projection={
-                "goal": "修复失败测试",
-                "task_mode": "plan",
-                "planning": {"phase": "recovered", "source": "recovered"},
-                "task_progress": {
-                    "completed_steps": ["定位失败"],
-                    "pending_steps": ["重新运行相关验证"],
-                    "blocked_steps": ["根据最新失败证据调整方案"],
-                    "completion_satisfied": False,
-                    "completion_reason": "replan_limit_exceeded",
-                },
-                "next_action": "报告连续失败并等待用户指示",
-            },
-        ),
-        config=AgentLoopConfig(
-            model=Model(
-                id="task-test",
-                name="Task Test",
-                api="unit-test",
-                provider="unit-test",
-                base_url="",
-                reasoning=False,
-                input=["text"],
-                context_window=4000,
-                max_tokens=500,
+                        status="success",
+                        workspace_changed=True,
+                        affected_paths=("src/app.py",),
+                    )
+                }
             ),
-            convert_to_llm=lambda items: items,
         ),
-        emit=lambda _event: None,
-        stream_fn=fake_stream,
-    )
-
-    assert result.task is not None
-    assert result.task.completed_steps == ["定位失败"]
-    assert result.task.pending_steps == ["重新运行相关验证"]
-    assert result.task.blocked_steps == ["根据最新失败证据调整方案"]
-
-
-def test_agent_loop_stops_when_replan_limit_is_exceeded() -> None:
-    asyncio.run(_agent_loop_replan_limit_case())
-
-
-def test_agent_loop_does_not_complete_when_completion_gate_is_unsatisfied() -> None:
-    asyncio.run(_agent_loop_unverified_completion_gate_case())
-
-
-async def _agent_loop_unverified_completion_gate_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, Model, TextContent, ToolCall, UserMessage
-    from codepilot.tools import AgentTool, AgentToolResult
-
-    attempts = 0
-
-    async def fake_stream(_model, _context, _options):
-        nonlocal attempts
-        attempts += 1
-        stream = AssistantMessageEventStream()
-        if attempts == 1:
-            stream.end(
-                AssistantMessage(
-                    content=[ToolCall(id="edit_1", name="edit_test", arguments={})],
-                    stop_reason="toolUse",
-                )
-            )
-        else:
-            stream.end(
-                AssistantMessage(content=[TextContent(text="done without verification")])
-            )
-        return stream
-
-    async def edit_tool(*_args):
-        return AgentToolResult(
-            status="success",
-            workspace_changed=True,
-            affected_paths=["src/app.py"],
-        )
-
-    result = await run_agent_loop(
-        prompts=[UserMessage(content="修改代码")],
-        context=AgentContext(
-            system_prompt="rules",
-            messages=[],
-            tools=[
-                AgentTool(
-                    name="edit_test",
-                    label="edit",
-                    description="edit",
-                    parameters={},
-                    execute=edit_tool,
-                )
-            ],
-        ),
-        config=AgentLoopConfig(
-            model=_task_test_model(),
-            convert_to_llm=lambda items: items,
-            allow_unmanaged_tools=True,
-        ),
-        emit=lambda _event: None,
-        stream_fn=fake_stream,
     )
 
     assert result.status == "waiting_user"
@@ -1669,62 +1347,34 @@ async def _agent_loop_unverified_completion_gate_case() -> None:
     assert result.task.completion_reason == "modified_without_fresh_verification"
 
 
-def test_agent_loop_reports_blocked_task_instead_of_completed_after_denied_tool() -> None:
-    asyncio.run(_agent_loop_denied_tool_blocks_completion_case())
-
-
-async def _agent_loop_denied_tool_blocks_completion_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, ToolCall, UserMessage
-    from codepilot.tools import AgentTool, AgentToolResult
-
-    attempts = 0
-
-    async def fake_stream(_model, _context, _options):
-        nonlocal attempts
-        attempts += 1
-        stream = AssistantMessageEventStream()
-        if attempts == 1:
-            stream.end(
-                AssistantMessage(
-                    content=[ToolCall(id="write_1", name="write_test", arguments={})],
-                    stop_reason="toolUse",
-                )
-            )
-        else:
-            stream.end(AssistantMessage(content="final"))
-        return stream
-
-    async def denied_tool(*_args):
-        return AgentToolResult(
-            status="denied",
-            is_error=True,
-            error_code="read_only_mode",
-        )
+async def _v2_agent_loop_denied_tool_blocks_completion_case() -> None:
+    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts
+    from codepilot.core.loop import run_agent_loop
+    from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+    from codepilot.tools.ports import ToolObservation
 
     result = await run_agent_loop(
-        prompts=[UserMessage(content="写入文件")],
-        context=AgentContext(
-            system_prompt="rules",
-            messages=[],
-            tools=[
-                AgentTool(
-                    name="write_test",
-                    label="write",
-                    description="write",
-                    parameters={},
-                    execute=denied_tool,
+        _v2_loop_input("run_denied_tool", prompt="写入文件", limits=AgentLoopLimits(max_model_turns=2)),
+        AgentLoopPorts(
+            model=_TaskScriptedModel(
+                lambda _request, calls: AssistantMessage(
+                    content=[ToolCall(id="write_1", name="write_test", arguments={})]
+                    if calls == 1
+                    else [TextContent(text="final")],
+                    stop_reason="toolUse" if calls == 1 else "stop",
                 )
-            ],
+            ),
+            tools=_TaskToolPort(
+                {
+                    "write_test": ToolObservation(
+                        tool_call_id="write_1",
+                        name="write_test",
+                        status="denied",
+                        metadata={"error_code": "read_only_mode"},
+                    )
+                }
+            ),
         ),
-        config=AgentLoopConfig(
-            model=_task_test_model(),
-            convert_to_llm=lambda items: items,
-            allow_unmanaged_tools=True,
-        ),
-        emit=lambda _event: None,
-        stream_fn=fake_stream,
     )
 
     assert result.status == "waiting_user"
@@ -1734,113 +1384,65 @@ async def _agent_loop_denied_tool_blocks_completion_case() -> None:
     assert result.task.completion_satisfied is False
 
 
-def test_agent_loop_preserves_cancelled_stop_reason() -> None:
-    asyncio.run(_agent_loop_cancelled_stop_reason_case())
-
-
-async def _agent_loop_cancelled_stop_reason_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, ToolCall, UserMessage
-    from codepilot.tools import AgentTool, AgentToolResult
-
-    async def fake_stream(_model, _context, _options):
-        stream = AssistantMessageEventStream()
-        stream.end(
-            AssistantMessage(
-                content=[ToolCall(id="bash_1", name="bash_test", arguments={})],
-                stop_reason="toolUse",
-            )
-        )
-        return stream
-
-    async def cancelled_tool(*_args):
-        return AgentToolResult(status="cancelled", is_error=True)
+async def _v2_agent_loop_cancelled_stop_reason_case() -> None:
+    from codepilot.core.contracts import AgentLoopPorts
+    from codepilot.core.loop import run_agent_loop
+    from codepilot.protocols import AssistantMessage, ToolCall
+    from codepilot.tools.ports import ToolObservation
 
     result = await run_agent_loop(
-        prompts=[UserMessage(content="运行命令")],
-        context=AgentContext(
-            system_prompt="rules",
-            messages=[],
-            tools=[
-                AgentTool(
-                    name="bash_test",
-                    label="bash",
-                    description="bash",
-                    parameters={},
-                    execute=cancelled_tool,
+        _v2_loop_input("run_cancelled", prompt="运行命令"),
+        AgentLoopPorts(
+            model=_TaskScriptedModel(
+                lambda _request, _calls: AssistantMessage(
+                    content=[ToolCall(id="bash_1", name="bash_test", arguments={})],
+                    stop_reason="toolUse",
                 )
-            ],
+            ),
+            tools=_TaskToolPort(
+                {
+                    "bash_test": ToolObservation(
+                        tool_call_id="bash_1",
+                        name="bash_test",
+                        status="cancelled",
+                    )
+                }
+            ),
         ),
-        config=AgentLoopConfig(
-            model=_task_test_model(),
-            convert_to_llm=lambda items: items,
-            allow_unmanaged_tools=True,
-        ),
-        emit=lambda _event: None,
-        stream_fn=fake_stream,
     )
 
     assert result.status == "aborted"
     assert result.stop_reason == "aborted"
 
 
-def test_agent_loop_does_not_complete_after_generic_tool_error() -> None:
-    asyncio.run(_agent_loop_generic_tool_error_case())
-
-
-async def _agent_loop_generic_tool_error_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, ToolCall, UserMessage
-    from codepilot.tools import AgentTool, AgentToolResult
-
-    attempts = 0
-
-    async def fake_stream(_model, _context, _options):
-        nonlocal attempts
-        attempts += 1
-        stream = AssistantMessageEventStream()
-        if attempts == 1:
-            stream.end(
-                AssistantMessage(
-                    content=[ToolCall(id="tool_1", name="custom_tool", arguments={})],
-                    stop_reason="toolUse",
-                )
-            )
-        else:
-            stream.end(AssistantMessage(content="final"))
-        return stream
-
-    async def failing_tool(*_args):
-        return AgentToolResult(
-            status="error",
-            is_error=True,
-            error_code="tool_exception",
-        )
+async def _v2_agent_loop_generic_tool_error_case() -> None:
+    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts
+    from codepilot.core.loop import run_agent_loop
+    from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+    from codepilot.tools.ports import ToolObservation
 
     result = await run_agent_loop(
-        prompts=[UserMessage(content="做一个需要工具的任务")],
-        context=AgentContext(
-            system_prompt="rules",
-            messages=[],
-            tools=[
-                AgentTool(
-                    name="custom_tool",
-                    label="custom",
-                    description="custom",
-                    parameters={},
-                    execute=failing_tool,
+        _v2_loop_input("run_generic_error", prompt="做一个需要工具的任务", limits=AgentLoopLimits(max_model_turns=2)),
+        AgentLoopPorts(
+            model=_TaskScriptedModel(
+                lambda _request, calls: AssistantMessage(
+                    content=[ToolCall(id="tool_1", name="custom_tool", arguments={})]
+                    if calls == 1
+                    else [TextContent(text="final")],
+                    stop_reason="toolUse" if calls == 1 else "stop",
                 )
-            ],
+            ),
+            tools=_TaskToolPort(
+                {
+                    "custom_tool": ToolObservation(
+                        tool_call_id="tool_1",
+                        name="custom_tool",
+                        status="error",
+                        metadata={"error_code": "tool_exception"},
+                    )
+                }
+            ),
         ),
-        config=AgentLoopConfig(
-            model=_task_test_model(),
-            convert_to_llm=lambda items: items,
-            allow_unmanaged_tools=True,
-        ),
-        emit=lambda _event: None,
-        stream_fn=fake_stream,
     )
 
     assert result.status == "waiting_user"
@@ -1850,94 +1452,67 @@ async def _agent_loop_generic_tool_error_case() -> None:
     assert result.task.completion_reason == "incomplete_steps"
 
 
-def test_agent_loop_waits_for_user_when_revert_is_proposed() -> None:
-    asyncio.run(_agent_loop_propose_revert_case())
+async def _v2_agent_loop_propose_revert_case() -> None:
+    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts
+    from codepilot.core.loop import run_agent_loop
+    from codepilot.protocols import AssistantMessage, RunVerification, TextContent, ToolCall
+    from codepilot.tools.ports import ToolObservation
 
-
-async def _agent_loop_propose_revert_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, UserMessage
-    from codepilot.tools import AgentTool, AgentToolResult
-
-    attempts = 0
-
-    async def fake_stream(_model, _context, _options):
-        nonlocal attempts
-        attempts += 1
-        stream = AssistantMessageEventStream()
-        if attempts == 1:
+    def response(_request, calls):
+        if calls == 1:
             call = ToolCall(id="edit_1", name="edit_test", arguments={})
-        elif attempts == 2:
+        elif calls == 2:
             call = ToolCall(id="test_1", name="test_tool", arguments={})
-        elif attempts == 3:
-            call = ToolCall(id="test_2", name="test_tool", arguments={})
         else:
-            stream.end(AssistantMessage(content=[TextContent(text="final")]))
-            return stream
-        stream.end(AssistantMessage(content=[call], stop_reason="toolUse"))
-        return stream
-
-    async def edit_tool(*_args):
-        return AgentToolResult(
-            status="success",
-            workspace_changed=True,
-            affected_paths=["src/app.py"],
-            metadata={
-                "change_evidence": {
-                    "change_kind": "update",
-                    "before_hashes": {"src/app.py": "old"},
-                    "after_hashes": {"src/app.py": "new"},
-                    "affected_paths": ["src/app.py"],
-                    "effect_detection": "direct",
-                    "effect_detection_confidence": "high",
-                    "safe_revert_available": False,
-                }
-            },
-        )
-
-    async def failed_test(*_args):
-        return AgentToolResult(
-            status="error",
-            is_error=True,
-            verification={
-                "status": "failed",
-                "command": "python -m pytest test/test_task.py -q",
-                "exit_code": 1,
-                "summary": "failed",
-            },
-        )
+            call = ToolCall(id="test_2", name="test_tool", arguments={})
+        return AssistantMessage(content=[call], stop_reason="toolUse")
 
     result = await run_agent_loop(
-        prompts=[UserMessage(content="修改实现并验证")],
-        context=AgentContext(
-            system_prompt="rules",
-            messages=[],
-            tools=[
-                AgentTool(
-                    name="edit_test",
-                    label="edit",
-                    description="edit",
-                    parameters={},
-                    execute=edit_tool,
-                ),
-                AgentTool(
-                    name="test_tool",
-                    label="test",
-                    description="test",
-                    parameters={},
-                    execute=failed_test,
-                ),
-            ],
+        _v2_loop_input(
+            "run_propose_revert",
+            prompt="修改实现并验证",
+            limits=AgentLoopLimits(max_model_turns=4, repeated_tool_call_limit=20),
         ),
-        config=AgentLoopConfig(
-            model=_task_test_model(),
-            convert_to_llm=lambda items: items,
-            allow_unmanaged_tools=True,
-            repeated_tool_call_limit=20,
+        AgentLoopPorts(
+            model=_TaskScriptedModel(response),
+            tools=_TaskToolPort(
+                {
+                    "edit_test": ToolObservation(
+                        tool_call_id="edit_1",
+                        name="edit_test",
+                        status="success",
+                        workspace_changed=True,
+                        affected_paths=("src/app.py",),
+                        metadata={
+                            "change_evidence": {
+                                "change_kind": "update",
+                                "before_hashes": {"src/app.py": "old"},
+                                "after_hashes": {"src/app.py": "new"},
+                                "affected_paths": ["src/app.py"],
+                                "effect_detection": "direct",
+                                "effect_detection_confidence": "high",
+                                "safe_revert_available": False,
+                            }
+                        },
+                    ),
+                    "test_tool": ToolObservation(
+                        tool_call_id="test_1",
+                        name="test_tool",
+                        status="error",
+                        verification=(
+                            RunVerification(
+                                tool_call_id="test_1",
+                                tool_name="test_tool",
+                                status="failed",
+                                command="python -m pytest test/test_task.py -q",
+                                exit_code=1,
+                                summary="failed",
+                            ),
+                        ),
+                    ),
+                }
+            ),
         ),
-        emit=lambda _event: None,
-        stream_fn=fake_stream,
     )
 
     assert result.status == "waiting_user"
@@ -1948,79 +1523,46 @@ async def _agent_loop_propose_revert_case() -> None:
     assert result.task.next_action == "报告可能需要撤销的变更并等待用户确认"
 
 
-async def _agent_loop_replan_limit_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, Model, ToolCall, UserMessage
-    from codepilot.tools import AgentTool, AgentToolResult
+async def _v2_agent_loop_replan_limit_case() -> None:
+    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts
+    from codepilot.core.loop import run_agent_loop
+    from codepilot.protocols import AssistantMessage, RunVerification, ToolCall
+    from codepilot.tools.ports import ToolObservation
 
-    attempts = 0
-
-    async def fake_stream(_model, _context, _options):
-        nonlocal attempts
-        attempts += 1
-        stream = AssistantMessageEventStream()
-        stream.end(
-            AssistantMessage(
-                content=[
-                    ToolCall(
-                        id=f"test_{attempts}",
-                        name="bash_test",
-                        arguments={"attempt": attempts},
-                    )
-                ],
-                stop_reason="toolUse",
-            )
-        )
-        return stream
-
-    async def test_tool(*_args):
-        return AgentToolResult(
-            status="error",
-            is_error=True,
-            verification={
-                "status": "failed",
-                "command": "python -m pytest test/test_task.py -q",
-                "exit_code": 1,
-                "summary": "failed",
-            },
-        )
-
-    events: list[dict[str, Any]] = []
     result = await run_agent_loop(
-        prompts=[UserMessage(content="修复失败测试")],
-        context=AgentContext(
-            system_prompt="rules",
-            messages=[],
-            tools=[
-                AgentTool(
-                    name="bash_test",
-                    label="bash",
-                    description="bash",
-                    parameters={},
-                    execute=test_tool,
+        _v2_loop_input(
+            "run_replan_limit",
+            prompt="修复失败测试",
+            limits=AgentLoopLimits(max_model_turns=4, max_tool_iterations=20, repeated_tool_call_limit=20),
+            task_strategy={"enabled": True, "mode": "edit", "max_task_replans_per_run": 1},
+        ),
+        AgentLoopPorts(
+            model=_TaskScriptedModel(
+                lambda _request, calls: AssistantMessage(
+                    content=[ToolCall(id=f"test_{calls}", name="bash_test", arguments={"attempt": calls})],
+                    stop_reason="toolUse",
                 )
-            ],
-        ),
-        config=AgentLoopConfig(
-            model=Model(
-                id="task-test",
-                name="Task Test",
-                api="unit-test",
-                provider="unit-test",
-                base_url="",
-                reasoning=False,
-                input=["text"],
-                context_window=4000,
-                max_tokens=500,
             ),
-            convert_to_llm=lambda items: items,
-            allow_unmanaged_tools=True,
-            repeated_tool_call_limit=20,
-            max_tool_iterations=20,
+            tools=_TaskToolPort(
+                {
+                    "bash_test": ToolObservation(
+                        tool_call_id="test_1",
+                        name="bash_test",
+                        status="error",
+                        verification=(
+                            RunVerification(
+                                tool_call_id="test_1",
+                                tool_name="bash_test",
+                                status="failed",
+                                command="python -m pytest test/test_task.py -q",
+                                exit_code=1,
+                                summary="failed",
+                            ),
+                        ),
+                    )
+                }
+            ),
         ),
-        emit=events.append,
-        stream_fn=fake_stream,
     )
 
     assert result.status == "failed"
@@ -2031,84 +1573,75 @@ async def _agent_loop_replan_limit_case() -> None:
     assert any(
         event.get("type") == "task_decision"
         and event.get("decision", {}).get("reason") == "replan_limit_exceeded"
-        for event in events
+        for event in result.events
     )
 
 
-async def _agent_loop_task_summary_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import (
-        AssistantMessage,
-        Model,
-        TextContent,
-        ToolCall,
-        ToolResultMessage,
-        UserMessage,
-    )
-    from codepilot.tools import AgentTool, AgentToolResult
+def _v2_loop_input(
+    run_id: str,
+    *,
+    prompt: str,
+    limits: Any | None = None,
+    task_strategy: dict[str, Any] | None = None,
+):
+    from codepilot.core.contracts import AgentLoopInput, AgentLoopLimits, RunCorrelation
+    from codepilot.llm.ports import ModelDescriptor
 
-    async def fake_stream(_model, context, _options):
-        stream = AssistantMessageEventStream()
-        assert "## Current Task" in (context.system_prompt or "")
-        if any(isinstance(message, ToolResultMessage) for message in context.messages):
-            stream.end(AssistantMessage(content=[TextContent(text="done")]))
-        else:
-            stream.end(
-                AssistantMessage(
-                    content=[ToolCall(id="read_1", name="read_test", arguments={})],
-                    stop_reason="toolUse",
-                )
+    strategy = {"enabled": True, "mode": "edit"}
+    if task_strategy is not None:
+        strategy.update(task_strategy)
+    return AgentLoopInput(
+        run_id=run_id,
+        correlation=RunCorrelation(session_id="session_1"),
+        user_prompt=prompt,
+        context={"system_prompt": "rules"},
+        model=ModelDescriptor(provider="unit-test", model_id="task-test"),
+        limits=limits or AgentLoopLimits(max_model_turns=4),
+        task_strategy=strategy,
+    )
+
+
+class _TaskScriptedModel:
+    def __init__(self, factory):
+        self._factory = factory
+        self.calls = 0
+
+    async def stream(self, request):
+        from codepilot.llm.ports import LLMCompleted
+
+        self.calls += 1
+        yield LLMCompleted(message=self._factory(request, self.calls))
+
+
+class _TaskToolPort:
+    def __init__(self, observations: dict[str, Any]):
+        self._observations = observations
+        self.calls: list[str] = []
+
+    def catalog(self):
+        return {"tools": sorted(self._observations)}
+
+    async def execute(self, invocation):
+        from dataclasses import replace
+
+        self.calls.append(invocation.name)
+        observation = self._observations.get(invocation.name)
+        if observation is None:
+            from codepilot.protocols import TextContent
+            from codepilot.tools.ports import ToolObservation
+
+            return ToolObservation(
+                tool_call_id=invocation.tool_call_id,
+                name=invocation.name,
+                status="error",
+                content=(TextContent(text=f"Tool {invocation.name} not found"),),
+                metadata={"error_code": "tool_not_found"},
             )
-        return stream
-
-    async def read_tool(*_args):
-        return AgentToolResult(content=[TextContent(text="read result")])
-
-    events: list[dict[str, Any]] = []
-    result = await run_agent_loop(
-        prompts=[UserMessage(content="解释这个文件")],
-        context=AgentContext(
-            system_prompt="rules",
-            messages=[],
-            tools=[
-                AgentTool(
-                    name="read_test",
-                    label="read",
-                    description="read",
-                    parameters={},
-                    execute=read_tool,
-                )
-            ],
-        ),
-        config=AgentLoopConfig(
-            model=Model(
-                id="task-test",
-                name="Task Test",
-                api="unit-test",
-                provider="unit-test",
-                base_url="",
-                reasoning=False,
-                input=["text"],
-                context_window=4000,
-                max_tokens=500,
-            ),
-            convert_to_llm=lambda items: items,
-            allow_unmanaged_tools=True,
-        ),
-        emit=events.append,
-        stream_fn=fake_stream,
-    )
-
-    assert result.task is not None
-    assert result.task.goal == "解释这个文件"
-    assert result.task.completed_steps == ["完成当前请求"]
-    assert result.task.completion_satisfied is True
-    assert any(event["type"] == "task_plan_created" for event in events)
-    assert any(event["type"] == "task_step_updated" for event in events)
-    assert events[-1]["result"].task is result.task
-
-
+        return replace(
+            observation,
+            tool_call_id=invocation.tool_call_id,
+            name=invocation.name,
+        )
 def _failed_verification(tool_call_id: str):
     from codepilot.protocols import ToolResultMessage
 

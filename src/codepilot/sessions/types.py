@@ -1,15 +1,15 @@
-# 新手导读：sessions/types.py 放会话层公共契约，包括命令上下文、生命周期 hook 和会话状态。
-# 关注点：这些类型下沉到 sessions 后，sessions 不再反向依赖 extensions。
+# 新手导读：sessions/types.py 放 SessionController 的初始化配置。
+# 关注点：跨层命令和生命周期 hook 契约位于 protocols.commands，sessions 只消费这些能力。
 
 """
 Session 层的类型定义模块。
 
-本模块定义了 AgentSession 的构造参数类型，将会话编排相关的类型
+本模块定义了 SessionController 的构造参数类型，将会话编排相关的类型
 保留在 sessions 层，使其不依赖 runtime 装配层，实现了良好的分层架构。
 
 主要类型:
     - ConvertToLlmFn: 消息转换函数类型，用于将内部消息格式转换为 LLM 可理解的格式
-    - AgentSessionOptions: 会话的完整配置选项，包含所有初始化参数
+    - SessionOptions: 会话的完整配置选项，包含所有初始化参数
 
 设计原则:
     - 类型定义与实现分离
@@ -21,22 +21,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal, Optional, cast
+from typing import Any, Awaitable, Callable, Optional
 
-from codepilot.core import (
-    AfterToolCallContext,
-    AfterToolCallResult,
-    AgentMessage,
-    BeforeToolCallContext,
-    BeforeToolCallResult,
+from codepilot.core.task_control import (
     PlanningBudgetProfile,
-    PrepareContextFn,
-    StreamFn,
     TaskMode,
+)
+from codepilot.llm.ports import StreamFn
+from codepilot.core.types import (
+    AgentMessage,
+    PrepareContextFn,
     ToolExecutionMode,
 )
 from codepilot.protocols import Message, Model
-from codepilot.tools import AgentTool
+from codepilot.protocols.commands import LifecycleHook, RegisteredCommand
+from codepilot.protocols.tool_hooks import (
+    AfterToolCallContext,
+    AfterToolCallResult,
+    BeforeToolCallContext,
+    BeforeToolCallResult,
+)
 
 # 消息转换函数类型定义
 # 功能: 将内部的 AgentMessage 列表转换为 LLM API 所需的 Message 列表
@@ -44,87 +48,10 @@ from codepilot.tools import AgentTool
 # 使用场景: 在发送消息给 LLM 之前，对消息进行格式转换或预处理
 ConvertToLlmFn = Callable[[list[AgentMessage]], list[Message] | Awaitable[list[Message]]]
 
-CommandSource = Literal["extension", "skill", "builtin", "prompt"]
-_COMMAND_SOURCES = frozenset({"extension", "skill", "builtin", "prompt"})
-
-
 @dataclass
-class SessionLifecycleContext:
-    """Session lifecycle hook context passed to before/after prompt hooks."""
-
-    session: Any
-    text: str
-    is_continue: bool
-    message_count: int
-
-
-LifecycleHook = Callable[[SessionLifecycleContext], None | Awaitable[None]]
-
-
-@dataclass
-class SessionCommandContext:
-    """Slash-command execution context shared by extensions, skills, and interfaces."""
-
-    name: str
-    args: list[str]
-    raw_text: str
-    session: Any
-    message: Any
-
-
-CommandHandler = Callable[[SessionCommandContext], str | None | Awaitable[str | None]]
-
-
-@dataclass
-class RegisteredCommand:
-    """Registered slash command exposed through runtime/interface command routing."""
-
-    name: str
-    handler: CommandHandler
-    description: str | None = None
-    source: CommandSource = "extension"
-
-    def __post_init__(self) -> None:
-        self.name = _require_session_text(self.name, field_name="command name").lstrip("/")
-        if not self.name:
-            raise ValueError("command name cannot be empty")
-        if any(char.isspace() for char in self.name):
-            raise ValueError("command name cannot contain whitespace")
-        if not callable(self.handler):
-            raise TypeError("RegisteredCommand.handler must be callable")
-        self.description = _optional_session_text(
-            self.description,
-            field_name="command description",
-        )
-        self.source = _ensure_command_source(self.source)
-
-
-def _require_session_text(value: object, *, field_name: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError(f"{field_name} must be a string")
-    text = value.strip()
-    if not text:
-        raise ValueError(f"{field_name} cannot be empty")
-    return text
-
-
-def _optional_session_text(value: object, *, field_name: str) -> str | None:
-    if value is None:
-        return None
-    return _require_session_text(value, field_name=field_name)
-
-
-def _ensure_command_source(value: object) -> CommandSource:
-    text = _require_session_text(value, field_name="command source")
-    if text not in _COMMAND_SOURCES:
-        raise ValueError(f"Unknown command source: {value}")
-    return cast(CommandSource, text)
-
-
-@dataclass
-class AgentSessionOptions:
+class SessionOptions:
     """
-    AgentSession 的底层初始化参数配置类。
+    SessionController 的底层初始化参数配置类。
 
     该数据类由 runtime 装配层构造，包含了创建和配置一个 Agent 会话
     所需的所有参数。通过 dataclass 装饰器，自动生成 __init__、__repr__
@@ -132,7 +59,7 @@ class AgentSessionOptions:
 
     属性分类:
         1. 核心配置 (model, workspace_dir, system_prompt)
-        2. 工具相关 (tools, tool_execution, max_tool_calls_per_turn)
+        2. 工具相关 (tool_execution, max_tool_calls_per_turn)
         3. 消息管理 (messages, convert_to_llm)
         4. 任务域开关 (memory_enabled, task_control_enabled)
         5. 重试机制 (retry_enabled, max_retries, retry_base_delay_ms)
@@ -140,13 +67,13 @@ class AgentSessionOptions:
         7. 流式处理 (stream_fn, prepare_context)
 
     典型使用:
-        options = AgentSessionOptions(
+        options = SessionOptions(
             model=my_model,
             workspace_dir="/path/to/workspace",
             system_prompt="你是一个有帮助的助手",
             tools=[...],
         )
-        session = AgentSession(options)
+        controller = create_session_controller(options)
     """
 
     # ==================== 核心配置 ====================
@@ -163,10 +90,6 @@ class AgentSessionOptions:
     system_prompt: str = ""
 
     # ==================== 工具相关 ====================
-
-    # Agent 可使用的工具列表
-    # 每个工具都是 AgentTool 的实例，定义了工具的名称、描述和执行逻辑
-    tools: list[AgentTool] = field(default_factory=list)
 
     # 会话的唯一标识符
     # 如果不提供，系统会自动生成一个新的会话 ID

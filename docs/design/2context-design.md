@@ -12,8 +12,8 @@ Codepilot 的上下文管理不是简单截断历史消息，而是在每次 LLM
 
 | 代码位置 | 职责 |
 |---|---|
-| `src/codepilot/sessions/session.py` 的 `AgentSession._build_context_preparer()` | 创建 `ContextGovernor`，并把 `prepare()` 绑定到 Agent 的 `prepare_context` 回调 |
-| `src/codepilot/core/llm_runner.py` 的 `LLMStreamRunner.stream_assistant_response()` | 每次模型调用前执行 `prepare_context`，然后再转换消息并调用 provider |
+| `src/codepilot/sessions/session.py` 的 `SessionRuntime._build_context_preparer()` | 创建 `ContextGovernor`，供 `PreparedAgentRun.context_port` 调用 |
+| `src/codepilot/core/model_turn.py` 的 `build_model_request()` | 每次模型调用前执行 `ContextPort.prepare()`，然后构造 `LLMRequest` |
 | `src/codepilot/sessions/context/governor.py` 的 `ContextGovernor.prepare()` | 上下文治理主流程 |
 | `src/codepilot/sessions/context/snapshot.py` 的 `SessionSnapshotBuilder.build()` | 整理仓库、工具、artifact、checkpoint、active files 等事实 |
 | `src/codepilot/sessions/context/policy.py` 的 `ContextPressurePolicy.evaluate()` | 计算有效预算和上下文压力 |
@@ -27,10 +27,10 @@ Codepilot 的上下文管理不是简单截断历史消息，而是在每次 LLM
 
 运行流程如下：
 
-1. `AgentSession.__init__()` 初始化 `SessionStore`、`MemoryStore`、`MemoryRetriever`、`TaskRecoveryStore`。
-2. `AgentSession._build_context_preparer()` 创建 `ContextGovernor`，返回 `self.context_governor.prepare`。
-3. `AgentOptions.prepare_context` 保存这个回调。
-4. `LLMStreamRunner.stream_assistant_response()` 在每次模型调用前构造 `ContextPreparationRequest`，包含 `session_id`、`model_context_window`、`model_max_output_tokens`。
+1. `SessionRuntime.__init__()` 初始化 `SessionStore`、`MemoryStore`、`MemoryRetriever`、`TaskRecoveryStore`。
+2. `SessionRuntime._build_context_preparer()` 创建 `ContextGovernor`，返回 `self.context_governor.prepare`。
+3. `SessionController.prepare_run()` / `prepare_resume()` 把这个回调包装成本轮 `PreparedAgentRun.context_port`。
+4. `core/model_turn.py` 在每次模型调用前构造 `ContextPreparationRequest`，包含 `session_id`、`model_context_window`、`model_max_output_tokens`。
 5. `ContextGovernor.prepare(context, request)` 返回新的 `PreparedAgentContext`。
 6. LLM runner 使用准备后的 `system_prompt/messages/tools` 调用模型，并发出 `context_prepared` 事件。
 
@@ -321,7 +321,7 @@ checkpoint 写在 `context_ledger.jsonl` 中，类型是 `checkpoint`。下一�
 
 | 来源 | 事实源 | 如何进入 prompt |
 |---|---|---|
-| 系统规则 | `AgentOptions.system_prompt`，通常包含 AGENTS.md 等规则 | 原样作为 system prompt 开头，并提取规则行进入 `Stable Rules` |
+| 系统规则 | `SessionConversationState.system_prompt`，通常包含 AGENTS.md 等规则 | 原样作为 system prompt 开头，并提取规则行进入 `Stable Rules` |
 | 会话消息 | `messages.jsonl` 还原出的 canonical transcript | 只保留 recent messages；数量由压力决定 |
 | 仓库状态 | `RepositoryTracker.snapshot()` | 进入 repository fingerprint、changed files、stale 判断 |
 | 活跃文件 | `SessionContextState.active_files` | 路径进入 `Working State`，不自动注入源码 |

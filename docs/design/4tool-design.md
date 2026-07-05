@@ -50,23 +50,23 @@ protocols -> llm/tools -> core -> sessions/observability -> extensions -> runtim
 
 ```mermaid
 flowchart TD
-    A["CLI/DingTalk 创建 RuntimeService"] --> B["assemble_runtime()"]
+    A["CLI/DingTalk 调用 RuntimeGateway.open_session()"] --> B["assemble_runtime()"]
     B --> C["assemble_tools() 汇总内置/调用方/扩展/MCP 工具"]
     C --> D["ToolRegistry + ToolRuntime"]
-    D --> E["ToolRuntime.as_agent_tools() 生成模型可用工具适配器"]
-    E --> F["AgentContext.tools"]
-    F --> G["LLMStreamRunner 把 AgentTool.to_spec() 发给模型"]
+    D --> E["ToolRuntimePort 适配为 V2 ToolPort"]
+    E --> F["AgentLoopInput.tools / AgentLoopPorts.tools"]
+    F --> G["ModelPort 把 tool schema 发给模型"]
     G --> H["模型返回 ToolCall"]
-    H --> I["ToolCallCoordinator 准备和调度工具调用"]
-    I --> J["AgentTool.execute 适配器"]
+    H --> I["core/tool_turn.py 执行工具轮"]
+    I --> J["ToolPort.execute(ToolInvocation)"]
     J --> K["ToolRuntime.execute()"]
     K --> L["权限决策 PermissionPolicy"]
     L --> M["参数校验 SchemaValidator"]
     M --> N["审批 ApprovalProvider"]
     N --> O["具体工具执行"]
     O --> P["ToolResultGuard 结果防护"]
-    P --> Q["ToolResultMessage"]
-    Q --> R["Agent 下一轮消息 / TaskController / ContextGovernor / Observability"]
+    P --> Q["ToolObservation / ToolResultMessage"]
+    Q --> R["下一轮模型消息 / TaskRuntime / ContextGovernor / Observability"]
 ```
 
 新人阅读代码时，建议按这条链路走：
@@ -74,15 +74,16 @@ flowchart TD
 1. `src/codepilot/runtime/assembly.py`
 2. `src/codepilot/runtime/bootstrap/tool_assembler.py`
 3. `src/codepilot/tools/execution.py`
-4. `src/codepilot/core/tool_coordinator.py`
-5. `src/codepilot/core/agent_loop.py`
+4. `src/codepilot/tools/ports.py`
+5. `src/codepilot/core/tool_turn.py`
+6. `src/codepilot/core/loop.py`
 6. `src/codepilot/sessions/session.py`
 
 ---
 
 ## 3. 阶段一：runtime 组装工具目录
 
-用户启动 CLI 或 DingTalk 会话时，接口层不会自己创建工具，而是调用 `RuntimeService.create_session()`。这里会进入 `assemble_runtime()`，再调用 `assemble_tools()`。
+用户启动 CLI 或 DingTalk 会话时，接口层不会自己创建工具，而是调用 `RuntimeGateway.open_session()`。这里会进入 `assemble_runtime()`，再调用 `assemble_tools()`。
 
 核心文件：`src/codepilot/runtime/bootstrap/tool_assembler.py`
 
@@ -167,28 +168,30 @@ def to_spec(self) -> Tool:
 
 这就是“模型只能请求，不能执行”的第一层隔离。
 
-`ToolRuntime.as_agent_tools()` 会把注册表里的原始工具包装成 `runtime_managed=True` 的适配器。模型后续调用这些工具时，实际执行入口不是原始工具函数，而是 `ToolRuntime.execute()`。
+V2 中模型可见工具 schema 由 `ToolPort.catalog()` 返回协议层 `Tool`，session
+不再保存 `runtime_managed=True` 的可执行 adapter。模型后续发出的
+`ToolCall` 只会进入 `core/tool_turn.py`，再由 `ToolPort.execute()` 转到
+`ToolRuntime.execute()`。
 
 ---
 
 ## 5. 阶段三：Agent 循环收到模型的 ToolCall
 
-模型返回 `AssistantMessage` 后，`core/agent_loop.py` 会提取里面的 `ToolCall`，交给 `ToolCallCoordinator`。
+模型返回 `AssistantMessage` 后，V2 `core/loop.py` 会提取里面的 `ToolCall`，交给 `core/tool_turn.py`。
 
-核心文件：`src/codepilot/core/tool_coordinator.py`
+核心文件：`src/codepilot/core/tool_turn.py`
 
-`ToolCallCoordinator` 负责的是 Agent loop 视角的调度，不负责真正的安全策略。它主要做四件事：
+`tool_turn` 负责的是 Agent loop 视角的调度，不负责真正的安全策略。它主要做三件事：
 
-1. 检查工具是否在当前 `AgentContext.tools` 中可见。
-2. 拒绝未托管工具，除非配置显式允许 `allow_unmanaged_tools`。
-3. 执行 `before_tool_call` hook，允许项目规则或扩展临时拦截。
-4. 根据 metadata 决定工具串行还是并行执行。
+1. 把模型返回的 `ToolCall` 转成 `ToolInvocation`。
+2. 调用 `ToolPort.execute()`。
+3. 把 `ToolObservation` 转成事件、workspace effects、verification 和必要的 `ToolResultMessage`。
 
-它的 `_prepare()` 很关键：
+它的关键边界是：
 
-- 找不到工具：返回 `tool_not_found` 风格的错误结果。
-- 工具不是 `runtime_managed`：默认拒绝，避免绕过 `ToolRuntime`。
-- before hook 拦截：返回 `denied`，工具不会执行。
+- 找不到工具：由 `ToolPort` / `ToolRuntime` 返回 `tool_not_found` 风格的错误结果。
+- 工具执行：只通过 `ToolPort.execute()`，core 不接触可执行函数对象。
+- before/after hook、权限、审批和结果防护：留在 `ToolRuntime` 安全管线中。
 
 并发调度也在这里：
 
@@ -321,8 +324,9 @@ shell 工具有特殊处理，因为 `bash` 的真实能力太大：
 核心文件：
 
 - `src/codepilot/tools/approval.py`
-- `src/codepilot/runtime/service.py`
-- `src/codepilot/runtime/execution/approval.py`
+- `src/codepilot/tools/ports.py`
+- `src/codepilot/runtime/approvals.py`
+- `src/codepilot/runtime/gateway.py`
 - `src/codepilot/interfaces/cli/approval.py`
 
 当 `PermissionPolicy` 返回 `approval_required` 时，`ToolRuntime` 会调用 `ApprovalProvider.request_approval()`。
@@ -336,20 +340,22 @@ approval_id = ...
 error_code = approval_required
 ```
 
-这条 `ToolResultMessage` 会进入 Agent 运行结果，`RuntimeService` 会从结果中提取 pending approval，保存在内存表 `_pending_approvals` 中。
+这条结果会变成 `ToolObservation(status="approval_required", interruption=ToolInterruption)`，core 返回 `AgentLoopOutcome(status="waiting_approval")`，runtime 再输出 `ApprovalRequiredFrame` 并保存 approval transaction。
 
-CLI 或 DingTalk 后续可以调用：
+CLI 或 DingTalk 后续只提交用户审批动作：
 
-```python
-RuntimeService.approve_tool_call(approval_id, "approve")
+```text
+RuntimeGateway.dispatch(ApprovalDecided(approval_id, decision))
 ```
 
 批准后不是直接执行原始工具函数，而是走：
 
 ```text
-RuntimeService._execute_approved_tool()
-  -> assembly.tool_runtime.execute_approved()
-  -> ToolRuntime._execute(..., granted_approval_id=approval_id)
+RuntimeGateway.dispatch(ApprovalDecided)
+  -> resume_agent_loop()
+  -> ToolPort.resume(ToolResumeDecision)
+  -> ToolRuntimePort.resume()
+  -> ToolRuntime.execute(..., approval_id=...)
 ```
 
 也就是说，审批恢复后仍然会经过：
@@ -453,7 +459,7 @@ MCP、extension、network 工具的输出默认更保守，可能被标记为 `u
 
 ## 11. 阶段七：工具结果回到 Agent 主循环
 
-`ToolCallCoordinator._finalize()` 会把 `AgentToolResult` 转成 `ToolResultMessage`，并发出事件：
+`core/tool_turn.py` 会把 `ToolObservation` 转成 `ToolResultMessage`，并发出事件：
 
 - `tool_execution_start`
 - `tool_execution_update`
@@ -461,7 +467,7 @@ MCP、extension、network 工具的输出默认更保守，可能被标记为 `u
 - `message_start`
 - `message_end`
 
-然后 `agent_loop` 会把 `ToolResultMessage` 加回消息列表，进入下一轮模型调用或任务控制判断。
+然后 V2 `core/loop.py` 会把 `ToolResultMessage` 加回消息列表，进入下一轮模型调用或任务控制判断。
 
 工具结果会被多个模块消费：
 
@@ -493,7 +499,7 @@ MCP、extension、network 工具的输出默认更保守，可能被标记为 `u
 MCP 的 server/tool 风险、scope、输出可信度属于 MCP 接入配置；解析后会转成 `ToolMetadata`。但 MCP 工具真正执行时，仍然会进入：
 
 ```text
-ToolCallCoordinator -> ToolRuntime -> PermissionPolicy -> SchemaValidator -> ApprovalProvider -> ToolResultGuard
+ToolPort -> ToolRuntime -> PermissionPolicy -> SchemaValidator -> ApprovalProvider -> ToolResultGuard
 ```
 
 这样 tools 模块不需要反向了解 MCP server 细节，仍能守住统一执行边界。
@@ -507,7 +513,7 @@ ToolCallCoordinator -> ToolRuntime -> PermissionPolicy -> SchemaValidator -> App
 | 检查位置 | 守住的边界 |
 |---|---|
 | runtime 装配 | 当前会话有哪些工具可以暴露给模型 |
-| `ToolCallCoordinator._prepare()` | 模型这次请求的工具是否在当前上下文可见，是否是 runtime-managed |
+| `ToolPort` / `ToolRuntimePort` | 模型这次请求的工具是否在当前工具目录中可执行 |
 | `before_tool_call` hook | 项目规则或扩展临时拦截 |
 | `PermissionPolicy` | 权限模式、危险参数、shell 风险、metadata 风险 |
 | `SchemaValidator` | 参数形状是否符合工具 schema |
@@ -535,9 +541,11 @@ ToolCallCoordinator -> ToolRuntime -> PermissionPolicy -> SchemaValidator -> App
 | `src/codepilot/tools/shell_safety.py` | shell 分类、环境变量过滤、输出截断 |
 | `src/codepilot/tools/builtins/files.py` | 文件工具具体实现 |
 | `src/codepilot/tools/builtins/shell.py` | shell 工具具体实现 |
+| `src/codepilot/tools/builtins/task_control.py` | `complete_task_step` 这类任务控制工具的可执行定义 |
 | `src/codepilot/runtime/bootstrap/tool_assembler.py` | 工具从哪里来、怎么合并、怎么创建 `ToolRuntime` |
-| `src/codepilot/core/tool_coordinator.py` | Agent loop 怎么调度一批工具调用 |
-| `src/codepilot/runtime/service.py` | 审批恢复如何重新进入工具主链 |
+| `src/codepilot/tools/ports.py` | V2 core 如何通过 ToolPort 调用工具 |
+| `src/codepilot/core/tool_turn.py` | Agent loop 怎么执行一轮工具调用 |
+| `src/codepilot/runtime/gateway.py` | 审批动作如何重新进入工具主链 |
 
 推荐阅读顺序：
 
@@ -545,9 +553,10 @@ ToolCallCoordinator -> ToolRuntime -> PermissionPolicy -> SchemaValidator -> App
 contracts.py
   -> metadata.py
   -> runtime/bootstrap/tool_assembler.py
+  -> tools/ports.py
   -> execution.py
   -> policy.py / argument_schema.py / approval.py / result_safety.py
-  -> core/tool_coordinator.py
+  -> core/tool_turn.py
   -> sessions/context/governor.py
 ```
 

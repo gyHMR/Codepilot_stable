@@ -854,13 +854,44 @@ class FakeRuntime:
         self.cancelled = None
         self.pending_approvals = []
 
-    def create_session(self, options):
+    def open_session(self, options):
         self.created_options = options
         return SimpleNamespace(session_id=options.session_id or "session_1")
 
-    async def send_message(self, session_id, message):
-        self.sent_message = (session_id, message.text)
-        yield {
+    def describe(self, session_id):
+        return SimpleNamespace(pending_approvals=tuple(self.pending_approvals))
+
+    async def dispatch(self, session_id, action):
+        from codepilot.protocols import AgentRunCounters, AgentRunResult, AssistantMessage, TextContent
+        from codepilot.runtime.actions import (
+            ApprovalDecided,
+            CancelledFrame,
+            ProgressFrame,
+            PromptSubmitted,
+            RunCancelled,
+            RunFinishedFrame,
+        )
+
+        if isinstance(action, ApprovalDecided):
+            self.approval = (action.approval_id, action.decision, session_id)
+            yield RunFinishedFrame(
+                record=SimpleNamespace(
+                    run_id="run_approved",
+                    status="completed",
+                    affected_paths=["src/example.py"],
+                    workspace_changed=True,
+                )
+            )
+            return
+        if isinstance(action, RunCancelled):
+            self.cancelled = session_id
+            yield CancelledFrame(session_id=session_id, cancelled=True, reason=action.reason)
+            return
+        if not isinstance(action, PromptSubmitted):
+            return
+
+        self.sent_message = (session_id, action.text)
+        event = {
             "type": "agent_end",
             "runId": "run_1",
             "sessionId": session_id,
@@ -872,35 +903,48 @@ class FakeRuntime:
                 "workspace_changed": True,
             },
         }
-
-    async def approve_tool_call(self, approval_id, decision, *, session_id=None):
-        self.approval = (approval_id, decision, session_id)
-        return SimpleNamespace(
-            run_id="run_approved",
+        final = AssistantMessage(content=[TextContent(text="done")])
+        result = AgentRunResult(
+            run_id="run_1",
+            session_id=session_id,
             status="completed",
+            stop_reason="final_answer",
+            counters=AgentRunCounters(),
+            messages=[final],
+            final_message=final,
             affected_paths=["src/example.py"],
             workspace_changed=True,
         )
-
-    async def cancel_run(self, session_id):
-        self.cancelled = session_id
-        return True
-
-    def list_pending_approvals(self, session_id):
-        return self.pending_approvals
+        yield ProgressFrame(event=event)
+        yield RunFinishedFrame(record=result)
 
 
 class ApprovalNotFoundRuntime(FakeRuntime):
-    async def approve_tool_call(self, approval_id, decision, *, session_id=None):
-        from codepilot.runtime.service import ApprovalNotFoundError
+    async def dispatch(self, session_id, action):
+        from codepilot.runtime.actions import ApprovalDecided, FailedFrame
 
-        self.approval = (approval_id, decision, session_id)
-        raise ApprovalNotFoundError(f"Approval not found: {approval_id}")
+        if isinstance(action, ApprovalDecided):
+            self.approval = (action.approval_id, action.decision, session_id)
+            yield FailedFrame(
+                error={
+                    "code": "approval.not_found",
+                    "message": f"Approval not found: {action.approval_id}",
+                }
+            )
+            return
+        async for frame in super().dispatch(session_id, action):
+            yield frame
 
 
 class ChainedApprovalRuntime(FakeRuntime):
-    async def approve_tool_call(self, approval_id, decision, *, session_id=None):
-        self.approval = (approval_id, decision, session_id)
+    async def dispatch(self, session_id, action):
+        from codepilot.runtime.actions import ApprovalDecided, RunFinishedFrame
+
+        if not isinstance(action, ApprovalDecided):
+            async for frame in super().dispatch(session_id, action):
+                yield frame
+            return
+        self.approval = (action.approval_id, action.decision, session_id)
         self.pending_approvals = [
             {
                 "approval_id": "approval_2",
@@ -911,11 +955,13 @@ class ChainedApprovalRuntime(FakeRuntime):
                 "reason": "next approval required",
             }
         ]
-        return SimpleNamespace(
-            run_id="run_waiting",
-            status="waiting_approval",
-            affected_paths=[],
-            workspace_changed=False,
+        yield RunFinishedFrame(
+            record=SimpleNamespace(
+                run_id="run_waiting",
+                status="waiting_approval",
+                affected_paths=[],
+                workspace_changed=False,
+            ),
         )
 
 
@@ -924,11 +970,11 @@ class FailingOnceRuntime(FakeRuntime):
         super().__init__()
         self.create_attempts = 0
 
-    def create_session(self, options):
+    def open_session(self, options):
         self.create_attempts += 1
         if self.create_attempts == 1:
             raise RuntimeError("temporary failure")
-        return super().create_session(options)
+        return super().open_session(options)
 
 
 class BlockingRuntime(FakeRuntime):
@@ -937,17 +983,36 @@ class BlockingRuntime(FakeRuntime):
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def send_message(self, session_id, message):
-        self.sent_message = (session_id, message.text)
+    async def dispatch(self, session_id, action):
+        from codepilot.protocols import AgentRunCounters, AgentRunResult, AssistantMessage, TextContent
+        from codepilot.runtime.actions import ProgressFrame, PromptSubmitted, RunFinishedFrame
+
+        if not isinstance(action, PromptSubmitted):
+            async for frame in super().dispatch(session_id, action):
+                yield frame
+            return
+        self.sent_message = (session_id, action.text)
         self.started.set()
         await self.release.wait()
-        yield {
+        event = {
             "type": "agent_end",
             "runId": "run_1",
             "sessionId": session_id,
             "status": "completed",
             "result": {"run_id": "run_1", "status": "completed"},
         }
+        final = AssistantMessage(content=[TextContent(text="done")])
+        result = AgentRunResult(
+            run_id="run_1",
+            session_id=session_id,
+            status="completed",
+            stop_reason="final_answer",
+            counters=AgentRunCounters(),
+            messages=[final],
+            final_message=final,
+        )
+        yield ProgressFrame(event=event)
+        yield RunFinishedFrame(record=result)
 
 
 class FakeDingTalkStreamSdk:

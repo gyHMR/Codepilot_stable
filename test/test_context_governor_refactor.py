@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def test_pressure_policy_uses_effective_budget_and_three_levels() -> None:
-    from codepilot.core import ContextPreparationRequest
+    from codepilot.core.types import ContextPreparationRequest
     from codepilot.sessions.context.policy import ContextPressurePolicy
 
     policy = ContextPressurePolicy(
@@ -155,7 +155,7 @@ def test_tool_artifact_ledger_persists_large_outputs_and_projects_light_messages
 def test_context_governor_projects_decision_view_with_checkpoint_and_memory(
     tmp_path: Path,
 ) -> None:
-    from codepilot.core import AgentContext, ContextPreparationRequest
+    from codepilot.core.types import AgentContext, ContextPreparationRequest
     from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage, UserMessage
     from codepilot.sessions.context.governor import ContextGovernor
     from codepilot.sessions.context.policy import ContextPressurePolicy

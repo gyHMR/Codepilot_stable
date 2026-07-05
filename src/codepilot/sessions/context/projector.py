@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from codepilot.core import AgentContext
+from codepilot.core.types import AgentContext
 from codepilot.llm.overflow import estimate_context_tokens
 from codepilot.protocols import (
     AssistantMessage,

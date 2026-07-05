@@ -9,13 +9,13 @@ def test_context_compaction_module_is_removed() -> None:
     assert find_spec("codepilot.sessions.context.compaction") is None
 
 
-def test_agent_session_uses_governor_and_slim_layout(tmp_path: Path) -> None:
+def test_session_runtime_uses_governor_and_slim_layout(tmp_path: Path) -> None:
     from codepilot.protocols import Model
-    from codepilot.sessions import AgentSession
-    from codepilot.sessions.types import AgentSessionOptions
+    from codepilot.sessions.session import SessionRuntime
+    from codepilot.sessions.types import SessionOptions
 
-    session = AgentSession(
-        AgentSessionOptions(
+    session = SessionRuntime(
+        SessionOptions(
             model=Model(
                 id="test",
                 name="Test",
@@ -40,4 +40,4 @@ def test_agent_session_uses_governor_and_slim_layout(tmp_path: Path) -> None:
         assert not (session_dir / "context.jsonl").exists()
         assert not (session_dir / "runs.jsonl").exists()
     finally:
-        session.close()
+        session._close()

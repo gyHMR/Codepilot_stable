@@ -14,13 +14,15 @@ import pytest
 import asyncio
 from unittest.mock import MagicMock, AsyncMock
 from pathlib import Path
+from types import SimpleNamespace
 
 from codepilot.interfaces.cli.renderer import (
     TerminalRenderer,
     SimpleRenderer,
 )
 from codepilot.interfaces.cli.startup import CliStartupState, build_startup_state
-from codepilot.runtime.contracts import SessionStatus
+from codepilot.runtime.views import SessionStatus
+from codepilot.sessions.contracts import SessionCommandRecord
 from codepilot.protocols import AssistantMessage, LLMErrorInfo, TextContent, Usage, Cost
 
 
@@ -95,7 +97,7 @@ class TestTerminalRenderer:
             "type": "tool_execution_start",
             "toolCallId": "read-1",
             "toolName": "read",
-            "args": {"path": "src/codepilot/core/agent_loop.py", "offset": 10, "limit": 20},
+            "args": {"path": "src/codepilot/core/loop.py", "offset": 10, "limit": 20},
         })
         renderer.handle_event({
             "type": "tool_execution_start",
@@ -105,7 +107,7 @@ class TestTerminalRenderer:
         })
 
         rendered = [call.args[0] for call in output.call_args_list]
-        assert "[tool] read  src/codepilot/core/agent_loop.py:10-29" in rendered
+        assert "[tool] read  src/codepilot/core/loop.py:10-29" in rendered
         assert "[tool] ls  src/codepilot" in rendered
 
     def test_tool_target_is_shortened_for_narrow_terminal_readability(self):
@@ -311,19 +313,30 @@ class TestSimpleRenderer:
 
 def test_render_prompt_run_forwards_events_and_final_message():
     from codepilot.interfaces.cli.runner import _render_prompt_run
+    from codepilot.runtime.actions import ProgressFrame, PromptSubmitted, RunFinishedFrame
 
     class FakeRuntime:
         def __init__(self):
             self.sent = None
             self.final_message = AssistantMessage(content=[TextContent(text="done")])
 
-        async def send_message(self, session_id, message):
-            self.sent = (session_id, message.text)
-            yield {"type": "message_update", "delta": "hello"}
-
-        def get_latest_assistant_message(self, session_id):
-            assert session_id == "session_1"
-            return self.final_message
+        async def dispatch(self, session_id, action):
+            assert isinstance(action, PromptSubmitted)
+            self.sent = (session_id, action.text)
+            yield ProgressFrame(event={"type": "message_update", "delta": "hello"})
+            yield RunFinishedFrame(
+                record=type(
+                    "Record",
+                    (),
+                    {
+                        "outcome": type(
+                            "Outcome",
+                            (),
+                            {"final_message": self.final_message},
+                        )()
+                    },
+                )()
+            )
 
     class FakeRenderer:
         def __init__(self):
@@ -348,38 +361,87 @@ def test_render_prompt_run_forwards_events_and_final_message():
 
 def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monkeypatch):
     from codepilot.interfaces.cli.runner import run_rpc
-    from codepilot.runtime.service import SessionBusyError
+    from codepilot.runtime.actions import (
+        CommandFinishedFrame,
+        CommandSubmitted,
+        FailedFrame,
+        ProgressFrame,
+        PromptSubmitted,
+        RunFinishedFrame,
+    )
 
     class FakeRuntime:
         def __init__(self):
             self.prompt_calls = 0
             self.task_mode = "edit"
 
-        async def send_message(self, session_id, message):
+        async def dispatch(self, session_id, action):
             assert session_id == "session_1"
-            self.prompt_calls += 1
-            if self.prompt_calls == 1:
-                assert message.text == "hello"
-                assert message.task_mode == "plan"
-            else:
-                assert message.text == "busy"
-                raise SessionBusyError("Session is already running")
-            yield {"type": "message_update", "delta": "hi"}
+            if isinstance(action, PromptSubmitted):
+                self.prompt_calls += 1
+                if self.prompt_calls == 1:
+                    assert action.text == "hello"
+                    assert action.mode_hint == "plan"
+                    yield ProgressFrame(event={"type": "message_update", "delta": "hi"})
+                    yield RunFinishedFrame(
+                        record=type(
+                            "Record",
+                            (),
+                            {
+                                "run_id": "run_prompt_1",
+                                "session_id": "session_1",
+                                "status": "completed",
+                                "stop_reason": "final_answer",
+                                "final_text": "done from frame",
+                            },
+                        )()
+                    )
+                    return
+                assert action.text == "busy"
+                yield FailedFrame(
+                    error={
+                        "code": "runtime.session_busy",
+                        "message": "Session is already running",
+                    }
+                )
+                return
+            if isinstance(action, CommandSubmitted):
+                assert action.text == "/mode read"
+                self.task_mode = "read"
+                yield CommandFinishedFrame(
+                    record=SessionCommandRecord(
+                        session_id="session_1",
+                        command="/mode read",
+                        handled=True,
+                        output_lines=["task_mode=read"],
+                        data={"task_mode": "read"},
+                    )
+                )
+                return
+            raise AssertionError(f"unexpected action: {action!r}")
 
-        def set_task_mode(self, session_id, mode):
+        def describe(self, session_id):
             assert session_id == "session_1"
-            self.task_mode = mode
-            return mode
-
-        def get_session_state(self, session_id):
-            assert session_id == "session_1"
-            return {
-                "session_id": session_id,
-                "message_count": 2,
-                "entry_ids": ["entry_1"],
-                "leaf_id": "entry_1",
-                "task_mode": self.task_mode,
-            }
+            return SimpleNamespace(
+                status=SessionStatus(
+                    session_id=session_id,
+                    model_id="test/model",
+                    workspace=str(Path.cwd()),
+                    permission_mode="workspace-write",
+                    message_count=2,
+                    leaf_id="entry_1",
+                    task_mode=self.task_mode,
+                ),
+                state={
+                    "session_id": session_id,
+                    "message_count": 2,
+                    "entry_ids": ["entry_1"],
+                    "entries": [{"id": "entry_1"}],
+                    "tree": [{"id": "entry_1"}],
+                    "leaf_id": "entry_1",
+                    "task_mode": self.task_mode,
+                },
+            )
 
     stdin = io.StringIO(
         "\n".join(
@@ -414,6 +476,8 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
                 "session_id": "session_1",
                 "message_count": 2,
                 "entry_ids": ["entry_1"],
+                "entries": [{"id": "entry_1"}],
+                "tree": [{"id": "entry_1"}],
                 "leaf_id": "entry_1",
                 "task_mode": "edit",
             },
@@ -434,6 +498,13 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
     }
     assert messages[4]["command"] == "prompt"
     assert messages[4]["status"] == "ok"
+    assert messages[4]["data"] == {
+        "run_id": "run_prompt_1",
+        "session_id": "session_1",
+        "status": "completed",
+        "stop_reason": "final_answer",
+        "final_text": "done from frame",
+    }
     assert messages[5]["status"] == "error"
     assert messages[5]["command"] == "prompt"
     assert messages[5]["error"]["code"] == "runtime.session_busy"
@@ -484,9 +555,11 @@ def test_rpc_ok_response_requires_command_name() -> None:
         emit_rpc_ok(emitted.append, req_id="request_2", command=" ")
 
 
-def test_rpc_error_mapping_uses_runtime_error_codes() -> None:
+def test_rpc_error_mapping_uses_coded_exception_payloads() -> None:
     from codepilot.interfaces.cli.rpc_protocol import rpc_error_from_exception
-    from codepilot.runtime.service import SessionBusyError
+
+    class SessionBusyError(Exception):
+        code = "runtime.session_busy"
 
     runtime_error = SessionBusyError("Session is already running")
     generic_error = ValueError("missing field")

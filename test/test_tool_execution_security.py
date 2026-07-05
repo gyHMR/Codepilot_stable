@@ -283,7 +283,11 @@ def test_approval_contracts_normalize_identity_and_preview_fields() -> None:
 
 
 def test_tool_runtime_request_and_result_own_execution_boundary_invariants() -> None:
-    from codepilot.tools import AgentToolResult, ToolRuntimeRequest, ToolRuntimeResult
+    from codepilot.tools.contracts import (
+        AgentToolResult,
+        ToolRuntimeRequest,
+        ToolRuntimeResult,
+    )
 
     params = {"path": "a.txt"}
     request = ToolRuntimeRequest(
@@ -328,7 +332,7 @@ def test_tool_runtime_request_and_result_own_execution_boundary_invariants() -> 
 
 
 def test_agent_tool_owns_executable_definition_invariants() -> None:
-    from codepilot.tools import AgentTool, AgentToolResult
+    from codepilot.tools.contracts import AgentTool, AgentToolResult
 
     async def execute(tool_call_id, params, signal=None, on_update=None):
         _ = tool_call_id, params, signal, on_update
@@ -372,7 +376,8 @@ def test_agent_tool_owns_executable_definition_invariants() -> None:
 
 
 def test_tool_registry_owns_tool_metadata_identity_invariants() -> None:
-    from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry
+    from codepilot.tools.contracts import AgentTool, AgentToolResult
+    from codepilot.tools.registry import ToolRegistry
 
     async def execute(tool_call_id, params, signal=None, on_update=None):
         _ = tool_call_id, params, signal, on_update
@@ -431,7 +436,9 @@ async def _deferred_approval_provider_case() -> None:
 
 async def _approval_case() -> None:
     from codepilot.protocols import TextContent
-    from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry, ToolRuntime
+    from codepilot.tools.contracts import AgentTool, AgentToolResult
+    from codepilot.tools.execution import ToolRuntime
+    from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.approval import ApprovalDecision
     from codepilot.tools.policy import PermissionPolicy
     from codepilot.tools.contracts import ToolRuntimeRequest
@@ -629,98 +636,52 @@ async def _workspace_status_case(tmp_path: Path) -> None:
     assert result.details["changed_paths"][0]["path"] == "a.py"
 
 
-def test_coordinator_parallelizes_reads_and_serializes_exclusive_tools() -> None:
-    asyncio.run(_coordinator_scheduling_case())
+def test_v2_tool_turn_executes_calls_in_model_order_and_emits_events() -> None:
+    asyncio.run(_v2_tool_turn_order_case())
 
 
-async def _coordinator_scheduling_case() -> None:
-    from codepilot.core.events import AgentEventEmitter
-    from codepilot.core.tool_coordinator import ToolCallCoordinator
-    from codepilot.core.types import AgentContext, AgentLoopConfig
-    from codepilot.protocols import AssistantMessage, Model, TextContent, ToolCall
-    from codepilot.tools import AgentTool, AgentToolResult
+async def _v2_tool_turn_order_case() -> None:
+    from codepilot.core.tool_turn import execute_tool_turn
+    from codepilot.protocols import TextContent, ToolCall
+    from codepilot.tools.ports import ToolObservation
 
-    active_reads = 0
-    max_active_reads = 0
-    reads_finished = asyncio.Event()
-    read_count = 0
-    write_started_after_reads = False
+    calls: list[str] = []
+    events: list[dict] = []
 
-    async def read_execute(*_args):
-        nonlocal active_reads, max_active_reads, read_count
-        active_reads += 1
-        max_active_reads = max(max_active_reads, active_reads)
-        await asyncio.sleep(0.03)
-        active_reads -= 1
-        read_count += 1
-        if read_count == 2:
-            reads_finished.set()
-        return AgentToolResult(content=[TextContent(text="read")])
+    class OrderedToolPort:
+        def catalog(self):
+            return {"tools": ["read", "write"]}
 
-    async def write_execute(*_args):
-        nonlocal write_started_after_reads
-        write_started_after_reads = reads_finished.is_set()
-        return AgentToolResult(content=[TextContent(text="write")])
+        async def execute(self, invocation):
+            calls.append(invocation.tool_call_id)
+            return ToolObservation(
+                tool_call_id=invocation.tool_call_id,
+                name=invocation.name,
+                status="success",
+                content=(TextContent(text=invocation.name),),
+            )
 
-    read_tool = AgentTool(
-        name="read",
-        label="read",
-        description="read",
-        parameters={},
-        execute=read_execute,
-        runtime_managed=True,
-        metadata=_metadata("read", read_only=True, exclusive=False),
-    )
-    write_tool = AgentTool(
-        name="write",
-        label="write",
-        description="write",
-        parameters={},
-        execute=write_execute,
-        runtime_managed=True,
-        metadata=_metadata("write", read_only=False, exclusive=True),
-    )
-    model = Model(
-        id="test",
-        name="test",
-        api="test",
-        provider="test",
-        base_url="",
-        reasoning=False,
-        input=["text"],
-        context_window=1000,
-        max_tokens=100,
-    )
-    events = []
-    coordinator = ToolCallCoordinator(
-        config=AgentLoopConfig(
-            model=model,
-            convert_to_llm=lambda messages: messages,
-            tool_execution="parallel",
-        ),
-        emitter=AgentEventEmitter(events.append, run_id="run_1", session_id="session_1"),
-    )
-    assistant = AssistantMessage(
-        content=[
+    results = await execute_tool_turn(
+        run_id="run_1",
+        tools=OrderedToolPort(),
+        tool_calls=[
             ToolCall(id="read_1", name="read"),
             ToolCall(id="read_2", name="read"),
             ToolCall(id="write_1", name="write"),
         ],
-        stop_reason="toolUse",
+        emit=events.append,
     )
 
-    results = await coordinator.execute_batch(
-        AgentContext(
-            system_prompt="",
-            messages=[],
-            tools=[read_tool, write_tool],
-        ),
-        assistant,
-    )
-
-    assert len(results) == 3
-    assert max_active_reads == 2
-    assert write_started_after_reads is True
+    assert calls == ["read_1", "read_2", "write_1"]
+    assert [result.tool_call_id for result in results] == calls
+    assert [event["type"] for event in events] == [
+        "tool_execution_start",
+        "tool_execution_end",
+        "tool_execution_start",
+        "tool_execution_end",
+        "tool_execution_start",
+        "tool_execution_end",
+    ]
 
 
 def test_read_supports_line_ranges_and_search_skips_ignored_dirs(tmp_path: Path) -> None:
@@ -957,7 +918,8 @@ async def _shell_clean_tracked_before_hash_case(tmp_path: Path) -> None:
 
 
 def test_external_tool_without_metadata_defaults_to_medium_risk_approval() -> None:
-    from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry
+    from codepilot.tools.contracts import AgentTool, AgentToolResult
+    from codepilot.tools.registry import ToolRegistry
 
     async def execute(*_args):
         return AgentToolResult()
@@ -986,7 +948,8 @@ def test_runtime_exception_preserves_permission_duration_and_approval() -> None:
 
 
 async def _runtime_exception_evidence_case() -> None:
-    from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry
+    from codepilot.tools.contracts import AgentTool, AgentToolResult
+    from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.approval import ApprovalDecision
     from codepilot.tools.policy import PermissionPolicy
     from codepilot.tools.execution import ToolRuntime
@@ -1150,7 +1113,9 @@ def test_tool_runtime_rejects_arguments_that_do_not_match_schema() -> None:
 
 async def _schema_validation_case() -> None:
     from codepilot.protocols import TextContent
-    from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry, ToolRuntime
+    from codepilot.tools.contracts import AgentTool, AgentToolResult
+    from codepilot.tools.execution import ToolRuntime
+    from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.contracts import ToolRuntimeRequest
 
     calls = []
@@ -1224,7 +1189,9 @@ def test_tool_runtime_accepts_injected_schema_validator_and_result_guard() -> No
 
 async def _tool_runtime_injected_guards_case() -> None:
     from codepilot.protocols import TextContent
-    from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry, ToolRuntime
+    from codepilot.tools.contracts import AgentTool, AgentToolResult
+    from codepilot.tools.execution import ToolRuntime
+    from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.argument_schema import SchemaValidationResult
     from codepilot.tools.contracts import ToolRuntimeRequest
 
@@ -1278,7 +1245,9 @@ async def _tool_runtime_injected_guards_case() -> None:
 
 async def _tool_result_guard_case() -> None:
     from codepilot.protocols import TextContent
-    from codepilot.tools import AgentTool, AgentToolResult, ToolRegistry, ToolRuntime
+    from codepilot.tools.contracts import AgentTool, AgentToolResult
+    from codepilot.tools.execution import ToolRuntime
+    from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.contracts import ToolRuntimeRequest
 
     async def execute(*_args):

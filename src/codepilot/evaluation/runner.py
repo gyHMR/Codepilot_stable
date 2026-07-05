@@ -5,9 +5,9 @@ from __future__ import annotations
 
 """Evaluation v2 runner.
 
-The runner is deliberately an adapter around the public RuntimeService API.  It
-does not patch agent internals; after execution it reads run artifacts and turns
-them into typed evidence.
+The runner drives the same UserAction -> RuntimeFrame spine used by interfaces.
+It does not patch agent internals; after execution it reads run artifacts and
+turns them into typed evidence.
 """
 
 import asyncio
@@ -15,13 +15,14 @@ import shutil
 import subprocess
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from codepilot.observability import build_run_trace
-from codepilot.runtime import RuntimeService
-from codepilot.runtime.contracts import UserInput
+from codepilot.protocols import AssistantMessage, TextContent
+from codepilot.runtime import RuntimeGateway
+from codepilot.runtime.actions import FailedFrame, PromptSubmitted, RunFinishedFrame
 
 from .artifacts import EvaluationArtifacts
 from .evidence import (
@@ -36,7 +37,14 @@ from .schema import CheckResult, EvalCase, EvalResult, EvalRunOptions, EvalSuite
 from .scorers import score_metrics
 
 
-RuntimeFactory = Callable[[], RuntimeService]
+RuntimeFactory = Callable[[], Any]
+
+
+@dataclass(frozen=True)
+class PromptRunObservation:
+    final_text: str
+    run_id: str | None = None
+    trace: Any | None = None
 
 
 class EvaluationRunner:
@@ -45,7 +53,7 @@ class EvaluationRunner:
     def __init__(
         self,
         *,
-        runtime_factory: RuntimeFactory = RuntimeService,
+        runtime_factory: RuntimeFactory = RuntimeGateway,
     ) -> None:
         self.runtime_factory = runtime_factory
 
@@ -99,7 +107,7 @@ class EvaluationRunner:
                 workspace_dir=workspace,
                 **options.runtime_overrides,
             )
-            handle = runtime.create_session(session_options)
+            handle = runtime.open_session(session_options)
             steps = case.steps if case.type == "scenario" else []
             prompts = (
                 steps
@@ -110,28 +118,30 @@ class EvaluationRunner:
                 if step.kind == "modify_file":
                     _apply_modify_file(workspace, step.path, step.content or step.text)
                 elif step.kind == "restart":
-                    handle = runtime.create_session(
+                    handle = runtime.open_session(
                         replace(session_options, session_id=handle.session_id)
                     )
                 elif step.kind == "prompt":
-                    await _run_prompt(runtime, handle.session_id, step.text)
+                    observation = await _run_prompt(runtime, handle.session_id, step.text)
+                    final_text = observation.final_text
+                    if observation.run_id:
+                        run_ids.append(observation.run_id)
+                    if observation.trace is not None:
+                        traces.append(observation.trace)
                 elif step.kind in {"verify", "inspect"} and step.check:
                     checks.append(_run_check(workspace, step.check, final_text=final_text))
             if not steps:
                 for prompt_step in prompts:
-                    await _run_prompt(runtime, handle.session_id, prompt_step.text)
-            runs = runtime.list_runs(handle.session_id)
-            run_ids = [
-                str(item.get("run_id"))
-                for item in runs
-                if isinstance(item.get("run_id"), str)
-            ]
-            for run_id in run_ids:
-                result = runtime.get_run_result(handle.session_id, run_id)
-                events = runtime.get_run_events(handle.session_id, run_id)
-                traces.append(build_run_trace(events, result=result))
-            message = runtime.get_latest_assistant_message(handle.session_id)
-            final_text = getattr(message, "content", "") if message is not None else ""
+                    observation = await _run_prompt(
+                        runtime,
+                        handle.session_id,
+                        prompt_step.text,
+                    )
+                    final_text = observation.final_text
+                    if observation.run_id:
+                        run_ids.append(observation.run_id)
+                    if observation.trace is not None:
+                        traces.append(observation.trace)
             checks.extend(
                 _run_case_checks(workspace, case, final_text=final_text)
             )
@@ -191,14 +201,69 @@ def replace_step_prompt(text: str):
 
 
 async def _run_prompt(
-    runtime: RuntimeService,
+    runtime: Any,
     session_id: str,
     text: str,
-) -> None:
-    await asyncio.wait_for(
-        runtime.run_message(session_id, UserInput(text=text)),
-        timeout=None,
+) -> PromptRunObservation:
+    final_message: AssistantMessage | None = None
+    final_text = ""
+    run_id: str | None = None
+    result: Any | None = None
+    events: list[dict[str, Any]] = []
+
+    async def consume() -> None:
+        nonlocal final_message, final_text, run_id, result
+        async for frame in runtime.dispatch(session_id, PromptSubmitted(text=text)):
+            if hasattr(frame, "event"):
+                event = dict(getattr(frame, "event"))
+                events.append(event)
+            elif isinstance(frame, RunFinishedFrame):
+                result = frame.record
+                run_id = _optional_text(_field(frame.record, "run_id"))
+                final_text = _optional_text(_field(frame.record, "final_text")) or ""
+                final_message = _field(frame.record, "final_message")
+                if not final_text:
+                    final_text = _message_text(final_message)
+            elif isinstance(frame, FailedFrame):
+                raise RuntimeError(_frame_error_message(frame))
+
+    await asyncio.wait_for(consume(), timeout=None)
+    return PromptRunObservation(
+        final_text=final_text or _message_text(final_message),
+        run_id=run_id,
+        trace=build_run_trace(events, result=result) if run_id or events else None,
     )
+
+
+def _message_text(message: AssistantMessage | None) -> str:
+    if message is None:
+        return ""
+    parts: list[str] = []
+    for block in message.content:
+        if isinstance(block, TextContent):
+            parts.append(block.text)
+    return "\n".join(parts)
+
+
+def _field(value: object, name: str):
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _frame_error_message(frame: FailedFrame) -> str:
+    error = frame.error
+    message = _field(error, "message") or _field(error, "error") or error
+    return str(message)
 
 
 def _prepare_workspace(case: EvalCase, options: EvalRunOptions) -> Path:

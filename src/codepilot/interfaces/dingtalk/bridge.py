@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# 新手导读：bridge.py 是钉钉消息和 RuntimeService 之间的薄适配层。
+# 新手导读：bridge.py 是钉钉消息和 Runtime UserAction/RuntimeFrame 之间的薄适配层。
 # 关注点：这里做远程入口守门，真正的 Agent 执行仍然交给 runtime/session/tools 主链。
 
 """DingTalk remote-control bridge."""
@@ -12,13 +12,17 @@ from pathlib import Path
 import subprocess
 from typing import Any, AsyncIterator
 
-from codepilot.runtime.contracts import CreateAgentSessionOptions, UserInput
-from codepilot.runtime.service import (
-    ApprovalNotFoundError,
-    RuntimeService,
-    SessionBusyError,
-    SessionNotFoundError,
+from codepilot.runtime.actions import (
+    ApprovalDecided,
+    ApprovalRequiredFrame,
+    CancelledFrame,
+    FailedFrame,
+    ProgressFrame,
+    PromptSubmitted,
+    RunCancelled,
+    RunFinishedFrame,
 )
+from codepilot.runtime import RuntimeGateway, SessionOpenIntent
 
 from .audit import DingTalkAuditLogger
 from .commands import parse_dingtalk_command
@@ -51,10 +55,10 @@ class DingTalkBridge:
         self,
         *,
         config: DingTalkBridgeConfig,
-        runtime: RuntimeService | None = None,
+        runtime: RuntimeGateway | None = None,
     ) -> None:
         self.config = config
-        self.runtime = runtime or RuntimeService()
+        self.runtime = runtime or RuntimeGateway()
         self._session_id = config.session_id
         self._session_ready = False
         self._message_states: OrderedDict[str, str] = OrderedDict()
@@ -267,23 +271,69 @@ class DingTalkBridge:
                 title="Run Accepted",
             )
             emitted = False
-            async for event in self.runtime.send_message(
+            final_emitted = False
+            async for frame in self.runtime.dispatch(
                 session_id,
-                UserInput(text=prompt),
+                PromptSubmitted(text=prompt),
             ):
-                event_dict = _event_to_dict(event)
-                self._audit_runtime_event(inbound, event_dict, command="prompt")
-                for text in render_event(
-                    event_dict,
-                    verbose=self.config.verbose_events,
-                ):
-                    emitted = True
+                if isinstance(frame, ProgressFrame):
+                    event_dict = _event_to_dict(frame.event)
+                    self._audit_runtime_event(inbound, event_dict, command="prompt")
+                    if event_dict.get("type") == "agent_end":
+                        final_emitted = True
+                    for text in render_event(
+                        event_dict,
+                        verbose=self.config.verbose_events,
+                    ):
+                        emitted = True
+                        yield self._reply(
+                            inbound,
+                            text,
+                            format="markdown",
+                            title="Codepilot Run",
+                        )
+                    continue
+                if isinstance(frame, ApprovalRequiredFrame):
+                    event_dict = _approval_frame_to_event(frame)
+                    self._audit_runtime_event(inbound, event_dict, command="prompt")
+                    for text in render_event(event_dict, verbose=True):
+                        emitted = True
+                        yield self._reply(
+                            inbound,
+                            text,
+                            format="markdown",
+                            title="Approval Required",
+                        )
+                    continue
+                if isinstance(frame, RunFinishedFrame):
+                    if not final_emitted:
+                        self._audit_run_record(inbound, frame.record, command="prompt")
+                        emitted = True
+                        final_emitted = True
+                        yield self._reply(
+                            inbound,
+                            render_run_summary(frame.record),
+                            format="markdown",
+                            title="Codepilot Run",
+                        )
+                    continue
+                if isinstance(frame, FailedFrame):
+                    self.audit.record(
+                        "bridge_error",
+                        inbound=inbound,
+                        command="prompt",
+                        session_id=session_id,
+                        status="error",
+                        reason=_frame_error_message(frame),
+                        workspace_state=_remote_workspace_state(self.config.workspace_dir),
+                    )
                     yield self._reply(
                         inbound,
-                        text,
+                        f"Codepilot run failed: {_frame_error_message(frame)}",
                         format="markdown",
-                        title="Codepilot Run",
+                        title="Run Failed",
                     )
+                    return
 
             if not emitted:
                 yield self._reply(
@@ -352,52 +402,62 @@ class DingTalkBridge:
                 format="markdown",
                 title="Approval Received",
             )
-            try:
-                result = await self.runtime.approve_tool_call(
-                    approval_id,
-                    decision,
-                    session_id=session_id,
-                )
-            except (
-                ApprovalNotFoundError,
-                SessionBusyError,
-                SessionNotFoundError,
-            ) as exc:
-                self.audit.record(
-                    "approval_finished",
-                    inbound=inbound,
-                    command=decision,
-                    session_id=session_id,
+            result = None
+            async for frame in self.runtime.dispatch(
+                session_id,
+                ApprovalDecided(
                     approval_id=approval_id,
-                    status="error",
-                    reason=str(exc),
-                    workspace_state=_remote_workspace_state(self.config.workspace_dir),
-                )
-                yield self._reply(
-                    inbound,
-                    _approval_error_message(exc, approval_id=approval_id),
-                    format="markdown",
-                    title="Approval Failed",
-                )
-                return
-            except Exception as exc:  # pragma: no cover - exercised through runtime tests
-                self.audit.record(
-                    "approval_finished",
-                    inbound=inbound,
-                    command=decision,
-                    session_id=session_id,
-                    approval_id=approval_id,
-                    status="error",
-                    reason=str(exc),
-                    workspace_state=_remote_workspace_state(self.config.workspace_dir),
-                )
-                yield self._reply(
-                    inbound,
-                    f"Tool approval failed: {exc}",
-                    format="markdown",
-                    title="Approval Failed",
-                )
-                return
+                    decision=decision,
+                ),
+            ):
+                if isinstance(frame, ProgressFrame):
+                    event_dict = _event_to_dict(frame.event)
+                    self._audit_runtime_event(inbound, event_dict, command=decision)
+                    for text in render_event(
+                        event_dict,
+                        verbose=self.config.verbose_events,
+                    ):
+                        yield self._reply(
+                            inbound,
+                            text,
+                            format="markdown",
+                            title="Approval Result",
+                        )
+                    continue
+                if isinstance(frame, ApprovalRequiredFrame):
+                    event_dict = _approval_frame_to_event(frame)
+                    self._audit_runtime_event(inbound, event_dict, command=decision)
+                    for text in render_event(event_dict, verbose=True):
+                        yield self._reply(
+                            inbound,
+                            text,
+                            format="markdown",
+                            title="Approval Required",
+                        )
+                    continue
+                if isinstance(frame, RunFinishedFrame):
+                    result = frame.record
+                    continue
+                if isinstance(frame, FailedFrame):
+                    message = _frame_error_message(frame)
+                    self.audit.record(
+                        "approval_finished",
+                        inbound=inbound,
+                        command=decision,
+                        session_id=session_id,
+                        approval_id=approval_id,
+                        status="error",
+                        reason=message,
+                        workspace_state=_remote_workspace_state(self.config.workspace_dir),
+                    )
+                    yield self._reply(
+                        inbound,
+                        _approval_error_message(message, approval_id=approval_id),
+                        format="markdown",
+                        title="Approval Failed",
+                    )
+                    return
+
             run_id = _field(result, "run_id") or _field(result, "runId")
             status = _field(result, "status")
             self.audit.record(
@@ -428,8 +488,8 @@ class DingTalkBridge:
     def _ensure_session(self) -> str:
         if self._session_ready and self._session_id:
             return self._session_id
-        handle = self.runtime.create_session(
-            CreateAgentSessionOptions(
+        handle = self.runtime.open_session(
+            SessionOpenIntent(
                 workspace_dir=self.config.workspace_dir,
                 provider=self.config.provider,
                 model_id=self.config.model_id,
@@ -455,8 +515,9 @@ class DingTalkBridge:
         )
 
     def _pending_approvals(self) -> list[object]:
-        if self._session_id and hasattr(self.runtime, "list_pending_approvals"):
-            return list(self.runtime.list_pending_approvals(self._session_id))
+        if self._session_id and hasattr(self.runtime, "describe"):
+            view = self.runtime.describe(self._session_id)
+            return list(getattr(view, "pending_approvals", ()))
         return []
 
     def _audit_runtime_event(
@@ -501,11 +562,41 @@ class DingTalkBridge:
                 workspace_state=_remote_workspace_state(self.config.workspace_dir),
             )
 
+    def _audit_run_record(
+        self,
+        inbound: DingTalkInboundMessage,
+        result: object,
+        *,
+        command: str,
+    ) -> None:
+        run_id = _field(result, "run_id") or _field(result, "runId")
+        status = _field(result, "status")
+        self.audit.record(
+            "run_finished",
+            inbound=inbound,
+            command=command,
+            session_id=self._session_id,
+            run_id=str(run_id) if run_id else None,
+            status=str(status) if status else "completed",
+            workspace_state=_remote_workspace_state(self.config.workspace_dir),
+        )
+
     async def _cancel_text(self) -> str:
         if not self._session_id:
             return "No active Codepilot session to cancel."
-        cancelled = await self.runtime.cancel_run(self._session_id)
-        return "Active Codepilot run cancelled." if cancelled else "No active Codepilot run."
+        async for frame in self.runtime.dispatch(
+            self._session_id,
+            RunCancelled(reason="dingtalk"),
+        ):
+            if isinstance(frame, CancelledFrame):
+                return (
+                    "Active Codepilot run cancelled."
+                    if frame.cancelled
+                    else "No active Codepilot run."
+                )
+            if isinstance(frame, FailedFrame):
+                return f"Codepilot cancel failed: {_frame_error_message(frame)}"
+        return "No active Codepilot run."
 
     @staticmethod
     def _reply(
@@ -656,23 +747,67 @@ def _event_run_id(event: dict[str, Any]) -> str | None:
     return str(value) if value else None
 
 
-def _approval_error_message(exc: Exception, *, approval_id: str) -> str:
-    if isinstance(exc, ApprovalNotFoundError):
+def _approval_frame_to_event(frame: ApprovalRequiredFrame) -> dict[str, Any]:
+    approval = frame.approval
+    interruption = _field(approval, "interruption") or approval
+    risk = _field(interruption, "risk") or _field(approval, "risk")
+    risk_level = _field(risk, "level") or _field(interruption, "risk_level") or "unknown"
+    approval_id = _field(interruption, "approval_id") or _field(approval, "approval_id")
+    tool_name = _field(interruption, "tool_name") or _field(approval, "tool_name") or "tool"
+    arguments = (
+        _field(interruption, "arguments")
+        or _field(interruption, "args")
+        or _field(approval, "arguments")
+        or {}
+    )
+    reason = (
+        _field(interruption, "reason")
+        or _field(approval, "reason")
+        or "approval_required"
+    )
+    return {
+        "type": "tool_execution_end",
+        "toolName": tool_name,
+        "status": "approval_required",
+        "riskLevel": str(risk_level),
+        "args": arguments,
+        "approvalId": approval_id,
+        "errorReason": str(reason),
+        "result": {
+            "status": "approval_required",
+            "approval_id": approval_id,
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "risk_level": str(risk_level),
+            "error_code": str(reason),
+        },
+    }
+
+
+def _frame_error_message(frame: FailedFrame) -> str:
+    error = frame.error
+    message = _field(error, "message") or _field(error, "error") or error
+    return str(message)
+
+
+def _approval_error_message(message: str, *, approval_id: str) -> str:
+    lowered = message.lower()
+    if "not found" in lowered:
         return (
             "Tool approval failed: approval_id not found, not bound to this session, "
-            f"or no longer resumable.\n- approval_id: `{approval_id}`\n- reason: {exc}"
+            f"or no longer resumable.\n- approval_id: `{approval_id}`\n- reason: {message}"
         )
-    if isinstance(exc, SessionBusyError):
+    if "busy" in lowered:
         return (
             "Tool approval failed: the target session is busy.\n"
-            f"- approval_id: `{approval_id}`\n- reason: {exc}"
+            f"- approval_id: `{approval_id}`\n- reason: {message}"
         )
-    if isinstance(exc, SessionNotFoundError):
+    if "session" in lowered and ("not found" in lowered or "not available" in lowered):
         return (
             "Tool approval failed: the target session is not available.\n"
-            f"- approval_id: `{approval_id}`\n- reason: {exc}"
+            f"- approval_id: `{approval_id}`\n- reason: {message}"
         )
-    return f"Tool approval failed: {exc}"
+    return f"Tool approval failed: {message}"
 
 
 __all__ = ["DingTalkBridge"]

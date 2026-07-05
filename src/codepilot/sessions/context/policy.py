@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from codepilot.core import ContextPreparationRequest
+from codepilot.core.types import ContextPreparationRequest
 from codepilot.protocols import ContextPressure
 
 

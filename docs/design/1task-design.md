@@ -6,16 +6,17 @@
 src/codepilot/core/task_control/
   contracts.py    # task_mode、planning budget、discovery report、planning state
   modes.py        # read/edit/plan 的模式策略
-  discovery.py    # plan 模式的只读事实发现
   planner.py      # 基于上下文和 discovery report 生成计划
-  bootstrap.py    # plan 模式启动编排：恢复、discovery、synthesis
-  controller.py   # 任务控制 facade：初始化、工具后更新、完成门控、摘要
+  controller.py   # 任务控制器：初始化、工具后更新、完成门控、摘要
+  rules.py        # 证据提取、验证判断、完成门控和重规划规则
   state.py        # TaskState、TaskStep、AttemptRecord、ChangeSet、ReplanRecord
-  evidence.py     # 从工具结果提取证据、动作意图、错误信息
-  verifier.py     # 解释 verification 工具结果
-  replanner.py    # 失败后的修复和重规划辅助规则
-  stop.py         # 完成门控和 completion steering
-  tools.py        # complete_task_step 运行时管理工具
+  tools.py        # complete_task_step 协议名和识别逻辑
+
+src/codepilot/core/task_runtime.py
+  AgentTaskRuntime # V2 core 与 task_control 的适配层
+
+src/codepilot/tools/builtins/task_control.py
+  complete_task_step # tools 层拥有的可执行内置工具
 ```
 
 任务控制不是一个庞大的 FSM。它更像一条运行期反馈控制链：
@@ -32,7 +33,7 @@ src/codepilot/core/task_control/
   -> 摘要、事件、恢复投影、审计记录
 ```
 
-设计目标是让 Agent 仍然负责语义判断和代码行动，但 Runtime 给它提供边界、证据和完成门槛。
+设计目标是让 Agent 仍然负责语义判断和代码行动，但 Core 里的任务控制链给它提供边界、证据和完成门槛。
 
 ## 1. 总体设计理念
 
@@ -80,23 +81,26 @@ read | edit | plan
 
 ## 2. 用户请求进入后，先确定模式
 
-入口来自 CLI、RPC、DingTalk 或 runtime service。模式最终进入 `AgentLoopConfig.task_mode`。
+入口来自 CLI、RPC、DingTalk，它们先被转成 V2 `UserAction`。模式经过 runtime/session
+装配后进入 `AgentLoopInput.task_strategy`，由 `AgentTaskRuntime.from_strategy()` 创建
+本次 run 的任务控制状态。
 
 配置来源大致是：
 
 ```text
-CLI/RPC/UserInput override
-  -> CreateAgentSessionOptions.task_mode
+CLI/RPC/DingTalk action or open intent
+  -> SessionOpenIntent.task_mode
   -> .codepilot/settings.json task_mode
   -> RuntimeDefaults.task_mode = "edit"
 ```
 
 相关实现：
 
-- `src/codepilot/runtime/config.py`
-- `src/codepilot/runtime/types.py`
-- `src/codepilot/sessions/session.py`
-- `src/codepilot/core/types.py`
+- `src/codepilot/runtime/session_opening.py`
+- `src/codepilot/runtime/bootstrap/config.py`
+- `src/codepilot/sessions/controller.py`
+- `src/codepilot/core/contracts.py`
+- `src/codepilot/core/task_runtime.py`
 - `src/codepilot/core/task_control/modes.py`
 
 ### 2.1 read 模式
@@ -135,7 +139,7 @@ runtime 还会把 `read` 映射到只读权限：
 
 特点：
 
-- 必须经过 `PlanningBootstrap`。
+- 由 session 准备 `task_strategy`，core 通过 `AgentTaskRuntime` 初始化任务状态。
 - 默认复用当前 run 的主模型，不新增独立 planning model。
 - 先做只读 discovery，再 synthesis 计划。
 - 执行期仍回到普通 ReAct 工具循环。
@@ -150,13 +154,13 @@ wide:         6 model rounds, 20 read-only tool calls, 20000 estimated tokens, 1
 
 ## 3. AgentLoop 初始化：决定是否规划
 
-主入口在 `src/codepilot/core/agent_loop.py`。
+V2 主入口在 `src/codepilot/core/loop.py`，任务控制适配在 `src/codepilot/core/task_runtime.py`。
 
-进入 `_run_loop()` 后会创建：
+进入 `run_agent_loop()` 后会通过 `task_strategy` 创建：
 
 ```text
-LLMStreamRunner
-ToolCallCoordinator
+ModelPort / ToolPort
+AgentTaskRuntime
 TaskController
 TaskModePolicy
 ```
@@ -180,84 +184,33 @@ plan:
 task_plan_created
 ```
 
-并确保工具列表里有 runtime managed 工具：
+并确保工具列表里有 tools 层提供的 runtime managed 工具：
 
 ```text
 complete_task_step
 ```
 
 这个工具给模型一个显式动作：当当前步骤验收标准满足时，模型可以调用它完成步骤。但它不能绕过修改后的验证要求。
+core 只解释它返回的 `task_control` metadata；可执行 `AgentTool` 对象由
+`tools/builtins/task_control.py` 创建并交给 `ToolRuntimePort` 执行。
 
-## 4. plan 模式第一阶段：只读事实发现
-
-实现位置：`task_control/discovery.py`。
-
-`PlanningDiscovery` 是一个 scratch ReAct loop：
-
-```text
-当前会话历史 + 本轮用户输入
-  -> scratch AgentContext
-  -> 只暴露 metadata.read_only=True 的工具
-  -> 使用 LLMStreamRunner 调模型
-  -> 使用 ToolCallCoordinator 执行只读工具
-  -> 得到 PlanningDiscoveryReport
-```
-
-关键边界：
-
-- discovery 的 assistant/tool messages 不写回主 `current_context.messages`。
-- 工具只取 read-only metadata；没有 read-only 元数据的工具默认不可见。
-- discovery 仍复用主模型、主 context prepare/transform、API key 和工具协调器。
-- 事件仍正常上报，所以审计能看到 discovery 做过什么。
-
-discovery 的停止原因来自模型和预算共同作用：
-
-```text
-sufficient_evidence
-budget_exhausted
-model_error
-tool_error
-invalid_json
-no_read_only_tools
-```
-
-输出结构是 `PlanningDiscoveryReport`：
-
-```python
-PlanningDiscoveryReport(
-    status="completed|failed|budget_exhausted|skipped",
-    facts=(...),
-    relevant_files=(...),
-    risks=(...),
-    verification_hints=(...),
-    open_questions=(...),
-    evidence_refs=(...),
-    budget=PlanningBudgetUsage(...),
-)
-```
-
-对应事件：
-
-```text
-planning_discovery_started
-planning_discovery_step
-planning_discovery_completed
-```
-
-## 5. plan 模式第二阶段：计划生成
+## 4. plan 模式计划生成
 
 实现位置：
 
-- `task_control/bootstrap.py`
 - `task_control/planner.py`
+- `core/task_runtime.py`
 
-`PlanningBootstrap` 在 discovery 后发起 synthesis：
+V2 里 discovery report 是 `TaskPlanningState` 的可选输入。它可以由后续更强的只读
+规划流程填充，但 task-control 主链不依赖旧的 scratch loop 文件。当前计划生成是：
 
 ```text
-PlanningDiscoveryReport
-  -> TaskPlanner.generate(... discovery_report=...)
+Session task_strategy
+  -> optional PlanningDiscoveryReport
+  -> TaskPlanner.generate(...)
   -> TaskPlanDraft(goal, steps, source)
   -> TaskPlanningState(phase="execution", source=..., budget=..., discovery=...)
+  -> TaskController.initialize(...)
 ```
 
 `TaskPlanner` 要求模型输出 JSON，不要输出 Markdown。它会解析：
@@ -288,7 +241,7 @@ recovered           # 从恢复投影继续执行
 default             # read/edit 的默认轻量任务
 ```
 
-如果 discovery 成功但 planner 解析失败，系统不会直接失败，而是创建 fallback 单步计划，并把失败原因写入：
+如果 planner 解析失败，系统不会直接失败，而是创建 fallback 单步计划，并把失败原因写入：
 
 ```text
 TaskPlanningState.fallback_reason
@@ -304,7 +257,7 @@ task_plan_created
 
 `task_plan_created.plan.planSource` 是 wire 字段，值从 `task.planning.source` 派生，不再维护第二份状态。
 
-## 6. TaskState：运行期任务状态
+## 5. TaskState：运行期任务状态
 
 实现位置：`task_control/state.py`。
 
@@ -388,7 +341,7 @@ verification_refs
 
 这为连续验证失败后的 `propose_revert` 提供证据。
 
-## 7. 每轮模型调用前：把任务状态注入上下文
+## 6. 每轮模型调用前：把任务状态注入上下文
 
 在每次调用模型前，AgentLoop 会更新：
 
@@ -456,7 +409,7 @@ When this step's acceptance criteria are satisfied, call `complete_task_step` ..
 }
 ```
 
-## 8. 模型怎么决定做什么
+## 7. 模型怎么决定做什么
 
 框架不直接替模型选择业务动作。模型看到：
 
@@ -486,7 +439,7 @@ ToolCall(...)
 
 真正执行工具前，仍由权限和工具层决定能否执行。
 
-## 9. 工具执行后：事实进入任务控制
+## 8. 工具执行后：事实进入任务控制
 
 AgentLoop 执行工具后会做三件事：
 
@@ -575,9 +528,9 @@ continue(next_step)
 
 框架不判断业务语义是否“优雅”，只判断工具事实是否支持任务推进。
 
-## 10. 验证失败后怎么重试
+## 9. 验证失败后怎么重试
 
-验证解释在 `task_control/verifier.py`。
+验证解释和完成门控规则集中在 `task_control/rules.py`。
 
 如果工具结果带：
 
@@ -623,7 +576,7 @@ decision=repair
 
 这是学习项目里的轻量重规划，不是复杂的计划树。
 
-## 11. 是否继续、是否结束
+## 10. 是否继续、是否结束
 
 工具后决策只解决“这一批工具结果之后怎么走”。当一轮模型没有更多工具调用后，AgentLoop 会进入完成门控：
 
@@ -631,7 +584,7 @@ decision=repair
 completion = task_controller.check_completion(task, run_state)
 ```
 
-完成门控在 `task_control/stop.py`。
+完成门控在 `task_control/rules.py` 的 `build_completion_check()`。
 
 判断顺序：
 
@@ -660,7 +613,7 @@ completion = task_controller.check_completion(task, run_state)
 
 这就是“完成门控”：模型可以想结束，但框架会在关键证据缺失时把它拉回验证。
 
-## 12. 任务怎么存储和恢复
+## 11. 任务怎么存储和恢复
 
 任务恢复在 `src/codepilot/sessions/history/task_recovery.py`。
 
@@ -731,7 +684,7 @@ projection 已完成:
 
 如果用户在恢复前显式切换 `/mode plan`，当前 session mode 优先于 projection mode。
 
-## 13. 事件和审计
+## 12. 事件和审计
 
 任务控制相关事件包括：
 
@@ -764,7 +717,8 @@ task_recovery_warning
 }
 ```
 
-审计报告在 `src/codepilot/observability/audit.py` 中汇总：
+审计报告由 `src/codepilot/observability/trace.py`、`summary.py` 和 evaluation 只读证据
+链路汇总：
 
 - planning phase
 - plan source
@@ -779,23 +733,23 @@ task_recovery_warning
 
 这样后续可以解释“为什么生成这个计划，计划依据是什么，失败后为什么继续或停止”。
 
-## 14. 与其他模块的边界
+## 13. 与其他模块的边界
 
 ### 14.1 与 AgentLoop
 
 AgentLoop 是执行编排者：
 
-- 创建 TaskController。
-- 在 plan 模式调用 PlanningBootstrap。
+- 通过 `AgentTaskRuntime.from_strategy()` 创建 TaskController。
+- 在 plan 模式消费 session 准备好的 planning 状态。
 - 每轮模型调用前注入 task context。
 - 工具执行后把结果交给 TaskController。
-- 根据 TaskController 和 run_decisions 的结果继续、停止或等待。
+- 根据 TaskController、RunState 和 `core/stopping.py` 的结果继续、停止或等待。
 
 TaskController 不直接调用模型，也不直接执行工具。python -m codepilot.evaluation experiment planning --eval-id exp-planning --repeat 2
 
-### 14.2 与 ToolCallCoordinator
+### 14.2 与 ToolPort / tool_turn
 
-ToolCallCoordinator 负责工具执行、权限、before/after hooks 和事件。
+V2 中 `core/tool_turn.py` 负责一轮工具调用的 loop 编排，`ToolPort` / `ToolRuntime` 负责工具执行、权限、before/after hooks 和事件。
 
 TaskController 只消费工具结果：
 
@@ -831,7 +785,7 @@ TaskController 读取 RunState，但不复制 RunState。
 
 本轮设计暂时只支持任务恢复和审计，不自动把项目事实写入记忆。未来可以考虑沉淀失败经验、用户纠正，但不要把 discovery facts 自动当项目事实长期保存。
 
-## 15. 典型流程
+## 14. 典型流程
 
 ### 15.1 read 模式
 
@@ -868,10 +822,9 @@ TaskController 标记步骤 verified/completed
 ```text
 用户: 重构任务控制逻辑
 task_mode=plan
-PlanningBootstrap 检查恢复投影
-无 active recovery
-PlanningDiscovery 用只读工具收集 facts/relevant_files/risks
-TaskPlanner 基于 discovery report 生成最多 6 步计划
+SessionController 准备 task_strategy 和恢复投影
+AgentTaskRuntime 初始化任务状态
+TaskPlanner 生成最多 6 步计划，或使用 fallback 计划
 TaskController 初始化 TaskState
 AgentLoop 进入普通 ReAct 执行
 每步根据工具事实更新状态
@@ -903,7 +856,7 @@ decision=replan
 继续执行
 ```
 
-## 16. 当前实现的学习型边界
+## 15. 当前实现的学习型边界
 
 当前设计故意保持轻量：
 

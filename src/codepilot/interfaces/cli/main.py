@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# 新手导读：CLI main.py 负责解析命令行参数并创建 RuntimeService。
+# 新手导读：CLI main.py 负责解析命令行参数并创建 RuntimeGateway。
 # 关注点：它是用户从命令行进入项目的第一站。
 
 """
@@ -25,18 +25,17 @@ Codepilot CLI 命令行入口。
 import argparse
 import asyncio
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Sequence
 
-from codepilot.runtime.bootstrap.resources import WorkspaceResourceLoader
-from codepilot.runtime.assembly import (
+from codepilot.runtime import RuntimeGateway, SessionOpenIntent
+from codepilot.runtime.configuration import (
     UnknownRuntimeConfigKeyError,
-    explain_runtime_config,
+    check_workspace_model_config,
+    describe_workspace_config,
+    explain_session_open_config,
 )
-from codepilot.runtime.service import RuntimeService
-from codepilot.runtime.contracts import ConfigValueSource, CreateAgentSessionOptions
 
 from .runner import RunOptions, run
 from .ui import (
@@ -95,31 +94,12 @@ def _init_model_config(workspace: str | Path) -> None:
 
 def _check_model_config(workspace: str | Path) -> None:
     """检查模型配置。"""
-    loader = WorkspaceResourceLoader(workspace)
-    model = loader.load().model
-    if model is None:
-        raise ValueError(f"Model config not found: {loader.model_file}")
-    if model.api_key_env and os.getenv(model.api_key_env):
-        credential_source = f"environment:{model.api_key_env}"
-    elif model.api_key:
-        credential_source = "local-file (do not commit)"
-    else:
-        credential_source = "missing"
-    rows: list[tuple[str, object]] = [
-        ("config", loader.model_file),
-        ("api", model.api),
-        ("provider", model.provider),
-        ("model_id", model.model_id),
-        ("base_url", model.base_url),
-        ("credential", credential_source),
-    ]
-    if credential_source == "missing":
-        rows.append(("status", "MISSING_CREDENTIAL"))
-        rows.append(("next", f"Set {model.api_key_env} or add api_key to {loader.model_file}"))
-        render_key_value_panel("Config Check", rows, border_style="warning")
-    else:
-        rows.append(("status", "valid"))
-        render_key_value_panel("Config Check", rows, border_style="success")
+    view = check_workspace_model_config(workspace)
+    render_key_value_panel(
+        "Config Check",
+        list(view.rows),
+        border_style=view.border_style,
+    )
 
 
 def _show_config(workspace: str | Path) -> None:
@@ -128,29 +108,15 @@ def _show_config(workspace: str | Path) -> None:
     from rich.panel import Panel
 
     console = create_console()
-    loader = WorkspaceResourceLoader(workspace)
-    loaded = loader.load()
-    model = loaded.model
-    settings = loaded.settings
+    view = describe_workspace_config(workspace)
 
     # 模型配置表格
     model_table = Table(show_header=True, box=None, padding=(0, 2))
     model_table.add_column("Key", style="label", width=12)
     model_table.add_column("Value", style="value")
 
-    if model:
-        model_table.add_row("provider", model.provider)
-        model_table.add_row("model_id", model.model_id)
-        model_table.add_row("base_url", model.base_url)
-        model_table.add_row("api", model.api)
-        if model.api_key_env and os.getenv(model.api_key_env):
-            model_table.add_row("credential", f"env:{model.api_key_env}")
-        elif model.api_key:
-            model_table.add_row("credential", "local-file (do not commit)")
-        else:
-            model_table.add_row("credential", "[warning]MISSING[/warning]")
-    else:
-        model_table.add_row("status", "[dim](not configured)[/dim]")
+    for key, value in view.model_rows:
+        model_table.add_row(str(key), str(value))
 
     console.print(Panel(model_table, title="[panel.title]CP // MODEL CONFIG[/panel.title]", border_style="panel.border"))
 
@@ -159,25 +125,13 @@ def _show_config(workspace: str | Path) -> None:
     settings_table.add_column("Key", style="label", width=25)
     settings_table.add_column("Value", style="value")
 
-    if settings:
-        import dataclasses
-        if dataclasses.is_dataclass(settings):
-            for field in dataclasses.fields(settings):
-                value = getattr(settings, field.name)
-                # 跳过 None 值和敏感信息
-                if value is None:
-                    continue
-                if "key" in field.name.lower() or "secret" in field.name.lower():
-                    continue
-                settings_table.add_row(field.name, str(value))
-
-    if settings_table.row_count == 0:
-        settings_table.add_row("status", "[dim](using defaults)[/dim]")
+    for key, value in view.settings_rows:
+        settings_table.add_row(str(key), str(value))
 
     console.print(Panel(settings_table, title="[panel.title]CP // SETTINGS[/panel.title]", border_style="panel.border"))
 
 
-def _explain_config(options: CreateAgentSessionOptions, key: str | None) -> None:
+def _explain_config(options: SessionOpenIntent, key: str | None) -> None:
     """解释配置项的来源。
 
     使用 RuntimeConfigResolver 追踪每个配置项的最终值和来源。
@@ -191,7 +145,7 @@ def _explain_config(options: CreateAgentSessionOptions, key: str | None) -> None
         return
 
     try:
-        resolved = explain_runtime_config(options, key)
+        resolved = explain_session_open_config(options, key)
     except UnknownRuntimeConfigKeyError:
         console.print(f"[error]Unknown config key: {key}[/error]")
     except KeyError as exc:
@@ -208,16 +162,18 @@ def _explain_config(options: CreateAgentSessionOptions, key: str | None) -> None
         console.print(Panel(table, title=f"[panel.title]CP // CONFIG: {key}[/panel.title]", border_style="panel.border"))
 
 
-def _format_source(source: ConfigValueSource) -> str:
+def _format_source(source: object) -> str:
     """格式化配置来源显示。"""
+    kind = str(getattr(source, "kind", "unknown"))
+    location = getattr(source, "location", None)
     source_map = {
         "cli": "CLI argument",
         "session": "restored session",
         "project": "project",
         "default": "built-in default",
     }
-    label = source_map.get(source.kind, source.kind)
-    return f"{label}:{source.location}" if source.location else label
+    label = source_map.get(kind, kind)
+    return f"{label}:{location}" if location else label
 
 
 class CodepilotArgumentParser(argparse.ArgumentParser):
@@ -388,8 +344,8 @@ async def _run_from_args(args: argparse.Namespace) -> int:
 
     主要流程：
     1. 处理 config 子命令
-    2. 将 CLI 参数转换为 CreateAgentSessionOptions
-    3. 通过 RuntimeService 创建 Agent 会话
+    2. 将 CLI 参数转换为 SessionOpenIntent
+    3. 通过 RuntimeGateway 创建 Agent 会话
     4. 执行会话管理操作或正常运行
     5. 确保会话在退出时正确关闭
     """
@@ -410,7 +366,7 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         if args.config_action == "explain":
             provider, model_id = _resolve_model_id(args)
             _explain_config(
-                CreateAgentSessionOptions(
+                SessionOpenIntent(
                     workspace_dir=workspace,
                     provider=provider,
                     model_id=model_id,
@@ -433,10 +389,15 @@ async def _run_from_args(args: argparse.Namespace) -> int:
     run_mode = _resolve_run_mode(args)
     provider, model_id = _resolve_model_id(args)
     permission_mode = _resolve_permission_mode(args)
+    approval_provider = None
+    if run_mode == "interactive":
+        from .approval import CliApprovalProvider
+
+        approval_provider = CliApprovalProvider()
 
     # ── 构建会话配置 ────────────────────────────────────────────
 
-    options = CreateAgentSessionOptions(
+    options = SessionOpenIntent(
         workspace_dir=workspace,
         provider=provider,
         model_id=model_id,
@@ -449,16 +410,13 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         tool_permission_mode=permission_mode,
         task_mode=args.task_mode,
         planning_budget_profile=args.planning_budget_profile,
+        approval_provider=approval_provider,
     )
-    if run_mode == "interactive":
-        from .approval import CliApprovalProvider
-
-        options.approval_provider = CliApprovalProvider()
 
     # ── 创建会话并运行 ──────────────────────────────────────────
 
-    runtime = RuntimeService()
-    handle = runtime.create_session(options)
+    runtime = RuntimeGateway()
+    handle = runtime.open_session(options)
 
     try:
         await run(
@@ -473,7 +431,7 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         )
     finally:
         # 关闭所有会话（包括 fork 出来的新会话）
-        await runtime.aclose_all()
+        await runtime.close_all()
 
     return 0
 
@@ -484,8 +442,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     解析命令行参数，启动异步事件循环执行 Agent 会话。
     捕获 ValueError 并通过 parser.error() 输出友好的错误信息。
     """
-    from codepilot.runtime.service import SessionBusyError, SessionNotFoundError, EmptyInputError
-
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -494,15 +450,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nBye.")
         return 130
-    except SessionNotFoundError as exc:
-        parser.error(str(exc))
-        return 2
-    except SessionBusyError as exc:
-        print(f"Error: {exc}")
-        return 1
-    except EmptyInputError as exc:
-        print(f"Error: {exc}")
-        return 1
     except ValueError as exc:
         parser.error(str(exc))
         return 2

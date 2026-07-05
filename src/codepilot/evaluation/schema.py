@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from codepilot.runtime.contracts import CreateAgentSessionOptions
+from codepilot.runtime import SessionOpenIntent
 
 
 EvalModule = Literal["planning", "context", "memory", "security", "tool"]
@@ -95,7 +95,7 @@ class EvalSuiteResult:
 @dataclass(frozen=True)
 class EvalRunOptions:
     fixtures_root: Path | str
-    session_options: CreateAgentSessionOptions
+    session_options: SessionOpenIntent
     artifact_root: Path | str = ".codepilot/evals"
     eval_id: str | None = None
     include_tags: list[str] = field(default_factory=list)

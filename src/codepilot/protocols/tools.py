@@ -30,6 +30,9 @@ _TOOL_RESULT_STATUSES = frozenset(
     {"success", "error", "denied", "approval_required", "cancelled"}
 )
 
+# Task-control signal tool name shared by core semantics and tools execution.
+TASK_CONTROL_COMPLETE_TOOL = "complete_task_step"
+
 
 @dataclass
 class Tool:
@@ -269,6 +272,7 @@ __all__ = [
     "ToolResultBlock",
     "ToolResultStatus",
     "ToolRiskLevel",
+    "TASK_CONTROL_COMPLETE_TOOL",
     "coerce_tool_result_status",
     "ensure_tool_result_status",
 ]

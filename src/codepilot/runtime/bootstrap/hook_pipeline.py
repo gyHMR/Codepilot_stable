@@ -22,7 +22,7 @@ from __future__ import annotations
 import inspect
 from typing import Any, Awaitable, Callable
 
-from codepilot.core import (
+from codepilot.protocols.tool_hooks import (
     AfterToolCallContext,
     AfterToolCallResult,
     BeforeToolCallContext,

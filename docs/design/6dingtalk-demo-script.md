@@ -270,7 +270,7 @@ No active Codepilot run.
 
 ```powershell
 python -m pytest test/test_cli_refactor.py test/test_cli_shell.py test/test_command_router.py -q
-python -m pytest test/test_runtime_service_refactor.py test/test_tool_execution_security.py test/test_tools_security.py -q
+python -m pytest test/test_runtime_gateway_v2.py test/test_tool_execution_security.py test/test_tools_security.py -q
 ```
 
 检查：

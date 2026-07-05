@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from codepilot.protocols import TextContent
-from codepilot.sessions.types import RegisteredCommand
+from codepilot.protocols.commands import RegisteredCommand
 from codepilot.tools import AgentTool, AgentToolResult, ToolMetadata
 
 from .types import LoadedExtensions, SkillSpec

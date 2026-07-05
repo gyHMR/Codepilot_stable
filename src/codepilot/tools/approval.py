@@ -7,7 +7,8 @@ from __future__ import annotations
 
 本模块只描述“工具执行前是否需要用户决策”的接口：
 ToolRuntime 调用 ApprovalProvider 生成 approval_required 工具结果；
-RuntimeService 负责登记这些待审批项，并在用户批准/拒绝后恢复执行。
+V2 RuntimeGateway 负责登记审批 transaction，ApprovalDecided 再通过
+core.resume_agent_loop() 和 ToolPort.resume() 恢复执行。
 """
 
 from dataclasses import dataclass

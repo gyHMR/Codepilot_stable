@@ -11,15 +11,14 @@ from __future__ import annotations
 import asyncio
 from typing import Callable
 
-from codepilot.tools.approval import (
-    ApprovalDecision,
-    ApprovalRequest,
-    build_approval_request,
-)
-from codepilot.tools.policy import ToolDecision
-from codepilot.tools.contracts import ToolMetadata, ToolRuntimeRequest
-
 from .ui import format_plain_panel
+
+
+class _CliApprovalDecision:
+    def __init__(self, *, approved: bool, reason: str, approval_id: str) -> None:
+        self.approved = approved
+        self.reason = reason
+        self.approval_id = approval_id
 
 
 class CliApprovalProvider:
@@ -40,34 +39,36 @@ class CliApprovalProvider:
 
     async def request_approval(
         self,
-        request: ToolRuntimeRequest,
-        metadata: ToolMetadata | None,
-        decision: ToolDecision,
-    ) -> ApprovalDecision:
+        request: object,
+        metadata: object | None,
+        decision: object,
+    ) -> _CliApprovalDecision:
         """请求用户审批：渲染审批信息，等待用户输入，返回审批结果。"""
-        approval = build_approval_request(request, metadata, decision)
-        self._render(approval)
+        approval_id = str(getattr(request, "tool_call_id", "") or "")
+        self._render(request, metadata, decision)
         answer = await asyncio.to_thread(
             self.input_fn,
             "CP approve once? [y/N] ",
         )
         approved = answer.strip().lower() in {"y", "yes"}
-        return ApprovalDecision(
+        return _CliApprovalDecision(
             approved=approved,
             reason="user_approved" if approved else "user_denied",
-            approval_id=approval.approval_id,
+            approval_id=approval_id,
         )
 
-    def _render(self, approval: ApprovalRequest) -> None:
+    def _render(self, request: object, metadata: object | None, decision: object) -> None:
         """渲染审批提示信息：工具名、原因、风险等级、能力要求和参数预览。"""
+        params = getattr(request, "params", {}) or {}
+        capabilities = getattr(metadata, "capabilities", ()) if metadata is not None else ()
         rows: list[tuple[str, object]] = [
-            ("Tool", approval.tool_name),
-            ("Reason", approval.reason),
-            ("Risk", approval.risk_level),
+            ("Tool", getattr(request, "name", "")),
+            ("Reason", getattr(decision, "reason", "")),
+            ("Risk", getattr(metadata, "risk_level", "unknown") if metadata is not None else "unknown"),
         ]
-        if approval.capabilities:
-            rows.append(("Capabilities", ", ".join(approval.capabilities)))
-        for key, value in approval.params_preview.items():
+        if capabilities:
+            rows.append(("Capabilities", ", ".join(str(item) for item in capabilities)))
+        for key, value in params.items():
             rows.append((key, value))
         self.output_fn("")
         for line in format_plain_panel("Tool approval required", rows):

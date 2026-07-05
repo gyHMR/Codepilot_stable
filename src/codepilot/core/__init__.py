@@ -1,58 +1,40 @@
-# 新手导读：包门面文件：集中导出本层最常用的类型和入口，降低学习时的导入成本。
-# 关注点：core 层负责 Agent 推理循环和工具调度，是“模型想做什么”到“工具怎么跑”的中枢。
+from __future__ import annotations
+
+# 新手导读：core 包门面只放 V2 agent loop 主入口和稳定的核心构件。
+# 关注点：一次 run 从 AgentLoopInput 进入，通过 AgentLoopPorts 访问模型/工具/上下文，最终得到 AgentLoopOutcome。
 
 """
-Codepilot Agent Run 核心模块
-============================
+Codepilot core layer.
 
-本包是 Codepilot Agent 系统的核心层，负责一次 Agent Run 的完整执行循环。
+The default public path is the V2 agent-loop spine:
 
-模块架构：
-    ┌─────────────────────────────────────────────────────────────┐
-    │                      Agent（对外入口）                       │
-    │  提供 run/continue_run、状态管理、事件订阅、串行调度        │
-    └─────────────────────────┬───────────────────────────────────┘
-                              │
-    ┌─────────────────────────▼───────────────────────────────────┐
-    │                  agent_loop（核心循环）                       │
-    │  用户提示 → 模型推理 → 工具执行 → 任务检查 → 返回结果       │
-    └──┬──────────┬──────────┬──────────┬──────────┬──────────────┘
-       │          │          │          │          │
-    ┌──▼──┐   ┌──▼──┐   ┌───▼───┐  ┌───▼───┐  ┌──▼──┐
-    │ LLM │   │工具 │   │任务控 │  │任务规 │  │运行 │
-    │Runner│   │Coord│   │制器   │  │划器   │  │状态 │
-    └─────┘   └─────┘   └───────┘  └───────┘  └─────┘
+    AgentLoopInput + AgentLoopPorts -> run_agent_loop() -> AgentLoopOutcome
 
-主要模块：
-    - agent.py: 对外 Agent 封装，提供 run/continue_run 入口
-    - agent_loop.py: 核心执行循环，协调 LLM 推理和工具执行
-    - llm_runner.py: LLM 流式运行器，处理流式和非流式调用
-    - tool_coordinator.py: 工具调用协调器，管理工具执行生命周期
-    - task_controller.py: 任务控制器，跟踪任务进度并做出决策
-    - task_planner.py: 任务规划器，使用 LLM 生成执行计划
-    - task_state.py: 任务状态定义，包含步骤、尝试记录、变更集合等
-    - task_tools.py: 任务控制内部工具（如 complete_task_step）
-    - run_state.py: 运行状态，记录计数器、受影响路径等事实
-    - run_decisions.py: 纯决策函数，将底层事实转换为运行级决策
-    - types.py: 类型定义，包含 AgentContext、AgentLoopConfig 等
-    - events.py: 事件发射器，为事件注入 run/turn/event 元数据
-    - message_conversion.py: 消息转换，将 Agent 消息转为 LLM 格式
-
-注意：协议事件、运行结果和工具定义由 protocols/tools 层拥有。
-core 门面只导出核心编排对象，避免调用方误以为跨层数据模型属于 core。
+Old core loop entry points have been removed so newcomers start from the V2
+execution contract.
 """
 
-from .agent import Agent, AgentOptions
-from .agent_loop import (
-    run_agent_loop,
-    run_agent_loop_continue,
+from .contracts import (
+    AgentLoopInput,
+    AgentLoopLimits,
+    AgentLoopOutcome,
+    AgentLoopPorts,
+    AgentLoopStatus,
+    AgentResumeInput,
+    ContextPort,
+    RunCorrelation,
+    WorkspaceEffects,
 )
 from .events import AgentEventEmitter
-from .llm_runner import LLMStreamRunner, StreamFn
+from .loop import resume_agent_loop, run_agent_loop
 from .message_conversion import convert_to_llm
 from .run_state import RunState, new_run_id
 from .task_control import (
     COMPLETE_TASK_STEP_TOOL,
+    AttemptRecord,
+    ChangeSet,
+    CompletionCheck,
+    ExecutionDecision,
     PlanSource,
     PlannedTaskStep,
     PlanningBudget,
@@ -61,8 +43,6 @@ from .task_control import (
     PlanningDiscoveryReport,
     PlanningPhase,
     PlanningStatus,
-    PlanningBootstrap,
-    PlanningBootstrapResult,
     TaskController,
     TaskMode,
     TaskModePolicy,
@@ -71,28 +51,16 @@ from .task_control import (
     TaskPlanningState,
     TaskState,
     TaskStep,
-    AttemptRecord,
-    ChangeSet,
-    CompletionCheck,
-    ExecutionDecision,
     build_task_state_from_recovery_projection,
     budget_for_profile,
-    complete_task_step_tool,
     ensure_plan_source,
     ensure_planning_budget_profile,
     ensure_task_mode,
-    has_complete_task_step_tool,
     policy_for_mode,
 )
 from .types import (
-    AfterToolCallContext,
-    AfterToolCallResult,
     AgentContext,
-    AgentLoopConfig,
     AgentMessage,
-    AgentState,
-    BeforeToolCallContext,
-    BeforeToolCallResult,
     ContextPreparationRequest,
     PreparedAgentContext,
     PrepareContextFn,
@@ -100,13 +68,18 @@ from .types import (
 )
 
 __all__ = [
-    "Agent",
-    "AgentOptions",
+    "AgentLoopInput",
+    "AgentLoopLimits",
+    "AgentLoopOutcome",
+    "AgentLoopPorts",
+    "AgentLoopStatus",
+    "AgentResumeInput",
+    "ContextPort",
+    "RunCorrelation",
+    "WorkspaceEffects",
     "run_agent_loop",
-    "run_agent_loop_continue",
+    "resume_agent_loop",
     "AgentEventEmitter",
-    "LLMStreamRunner",
-    "StreamFn",
     "convert_to_llm",
     "RunState",
     "new_run_id",
@@ -120,16 +93,12 @@ __all__ = [
     "PlanningDiscoveryReport",
     "PlanningPhase",
     "PlanningStatus",
-    "PlanningBootstrap",
-    "PlanningBootstrapResult",
     "TaskPlanningState",
     "build_task_state_from_recovery_projection",
     "budget_for_profile",
-    "complete_task_step_tool",
     "ensure_plan_source",
     "ensure_planning_budget_profile",
     "ensure_task_mode",
-    "has_complete_task_step_tool",
     "policy_for_mode",
     "PlannedTaskStep",
     "TaskPlanDraft",
@@ -141,14 +110,8 @@ __all__ = [
     "ExecutionDecision",
     "TaskState",
     "TaskStep",
-    "AfterToolCallContext",
-    "AfterToolCallResult",
     "AgentContext",
-    "AgentLoopConfig",
     "AgentMessage",
-    "AgentState",
-    "BeforeToolCallContext",
-    "BeforeToolCallResult",
     "ContextPreparationRequest",
     "PreparedAgentContext",
     "PrepareContextFn",

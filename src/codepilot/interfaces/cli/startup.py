@@ -11,8 +11,7 @@ into the exact, stable fields the CLI startup banner and toolbar need.
 """
 
 from dataclasses import dataclass, field
-
-from codepilot.runtime.contracts import SessionStatus
+from typing import Any
 
 
 _CLI_PERMISSION_MODES = frozenset({"read-only", "workspace-write", "ask"})
@@ -70,7 +69,7 @@ class CliStartupState:
 
 
 def build_startup_state(
-    status: SessionStatus,
+    status: Any,
     warnings: list[str] | None = None,
 ) -> CliStartupState:
     """Build the CLI startup view model from runtime session status."""

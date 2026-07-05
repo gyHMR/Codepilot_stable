@@ -66,11 +66,6 @@ class MemoryRetriever:
             dropped=dropped,
         )
 
-    def retrieve(self, query: MemoryQuery) -> list[RetrievedMemory]:
-        """Compatibility adapter for callers that only need selected records."""
-
-        return self.recall(query).retrieved
-
     def validate_freshness(self) -> list[MemoryRecord]:
         return []
 

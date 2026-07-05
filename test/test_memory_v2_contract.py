@@ -46,6 +46,13 @@ def test_memory_record_v2_schema_rejects_legacy_kinds() -> None:
             )
 
 
+def test_memory_retriever_exposes_recall_as_single_query_entrypoint() -> None:
+    from codepilot.sessions.memory import MemoryRetriever
+
+    assert hasattr(MemoryRetriever, "recall")
+    assert not hasattr(MemoryRetriever, "retrieve")
+
+
 def test_prompt_correction_supersedes_conflicting_project_memory(tmp_path: Path) -> None:
     from codepilot.sessions.memory import MemoryRecord, MemoryStore, MemoryWriter
 
@@ -214,7 +221,7 @@ def test_context_governor_uses_memory_recall_layers(tmp_path: Path) -> None:
 
 
 async def _context_governor_memory_recall_case(tmp_path: Path) -> None:
-    from codepilot.core import AgentContext, ContextPreparationRequest
+    from codepilot.core.types import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
     from codepilot.sessions.context.governor import ContextGovernor
     from codepilot.sessions.context.state import SessionContextState

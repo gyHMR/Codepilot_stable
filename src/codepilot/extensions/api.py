@@ -5,8 +5,8 @@ from __future__ import annotations
 
 """扩展 API：供扩展的 register(api) 函数调用，注册工具、钩子、命令和提示词。"""
 
+from codepilot.protocols.commands import CommandHandler, LifecycleHook, RegisteredCommand
 from codepilot.tools import AgentTool
-from codepilot.sessions.types import CommandHandler, LifecycleHook, RegisteredCommand
 
 from .types import AfterHook, BeforeHook, LoadedExtensions
 

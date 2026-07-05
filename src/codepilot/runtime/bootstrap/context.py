@@ -6,7 +6,7 @@ from __future__ import annotations
 """
 Runtime 系统提示词启动上下文。
 
-本模块只负责构建创建 AgentSession 时可注入系统提示词的静态启动信息：
+本模块只负责构建创建 SessionController 时可注入系统提示词的静态启动信息：
 - 仓库 bootstrap 概览；
 - 配置/扩展/skills 提供的 prompt guidelines；
 - 配置/扩展/skills 提供的追加系统提示词段落；
@@ -23,9 +23,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from codepilot.extensions.types import LoadedExtensions
-from codepilot.sessions.context.repository_context import (
-    GitInfo,
-    RepositoryBootstrap,
+from codepilot.sessions.repository import (
     build_repository_bootstrap,
     render_repository_context,
 )
@@ -150,10 +148,6 @@ def _clean_tool_snippets(values: Mapping[str, str] | None) -> dict[str, str]:
 
 
 __all__ = [
-    "GitInfo",
-    "RepositoryBootstrap",
     "RuntimeContext",
-    "build_repository_bootstrap",
     "build_runtime_context",
-    "render_repository_context",
 ]

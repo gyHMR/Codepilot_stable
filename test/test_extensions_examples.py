@@ -31,8 +31,6 @@ def test_demo_skill_loads_as_command_and_compact_index() -> None:
             name="demo-review",
             args=[],
             raw_text="/demo-review check this change",
-            session=None,
-            message=None,
         )
     )
 
@@ -61,9 +59,9 @@ def test_demo_skill_registers_load_skill_tool_for_on_demand_content() -> None:
 
 
 def test_demo_extension_registers_command_tool_prompt_and_hook() -> None:
-    from codepilot.core import AfterToolCallContext, AgentContext
-    from codepilot.extensions import SessionCommandContext, load_extensions
+    from codepilot.extensions import AfterToolCallContext, SessionCommandContext, load_extensions
     from codepilot.protocols import AssistantMessage, ToolCall
+    from codepilot.protocols.tool_hooks import ToolHookContextSnapshot
 
     loaded = load_extensions(ROOT, configured_paths=[str(EXAMPLES / "demo_extension.py")])
 
@@ -79,8 +77,6 @@ def test_demo_extension_registers_command_tool_prompt_and_hook() -> None:
             name="demo-extension",
             args=[],
             raw_text="/demo-extension",
-            session=None,
-            message=None,
         )
     )
     assert command_output == "Demo extension is loaded."
@@ -97,7 +93,7 @@ def test_demo_extension_registers_command_tool_prompt_and_hook() -> None:
             args={"text": "hello"},
             result=result,
             is_error=False,
-            context=AgentContext(system_prompt="", messages=[]),
+            context=ToolHookContextSnapshot(system_prompt="", messages=()),
         ),
         None,
     )

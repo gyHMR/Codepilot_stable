@@ -6,9 +6,17 @@ from __future__ import annotations
 """Tool metadata catalog and conservative metadata inference."""
 
 from .contracts import AgentTool, ToolMetadata, ToolRiskLevel
+from codepilot.protocols import TASK_CONTROL_COMPLETE_TOOL
 
 
-READ_ONLY_TOOL_NAMES = {"read", "grep", "find", "ls", "workspace_status"}
+READ_ONLY_TOOL_NAMES = {
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "workspace_status",
+    TASK_CONTROL_COMPLETE_TOOL,
+}
 MUTATING_TOOL_NAMES = {"write", "edit", "bash"}
 
 
@@ -144,6 +152,13 @@ _BUILTIN_TOOL_METADATA: dict[str, ToolMetadata] = {
         risk_level="low",
         resource_scope=("workspace", "git"),
     ),
+    TASK_CONTROL_COMPLETE_TOOL: _builtin_metadata(
+        TASK_CONTROL_COMPLETE_TOOL,
+        category="task_control",
+        read_only=True,
+        risk_level="low",
+        resource_scope=("task",),
+    ),
 }
 
 
@@ -154,6 +169,8 @@ def _infer_category(name: str) -> str:
         return "search"
     if name == "bash":
         return "shell"
+    if name == TASK_CONTROL_COMPLETE_TOOL:
+        return "task_control"
     if name.startswith("mcp_"):
         return "mcp"
     return "extension"

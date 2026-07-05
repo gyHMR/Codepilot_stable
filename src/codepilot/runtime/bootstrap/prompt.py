@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from codepilot.tools import AgentTool
+from typing import Any
 
 from .context import RuntimeContext
 
@@ -127,7 +127,7 @@ PRIORITY_RUNTIME = 90        # 运行时事实
 def build_runtime_system_prompt(
     *,
     base_system_prompt: str,
-    tools: list[AgentTool],
+    tools: list[Any],
     runtime_context: RuntimeContext,
     workspace: Path,
 ) -> str:
@@ -211,7 +211,7 @@ def build_runtime_system_prompt(
 
 
 def _build_default_identity(
-    tools: list[AgentTool],
+    tools: list[Any],
     runtime_context: RuntimeContext,
     *,
     tool_names: list[str] | None = None,
@@ -334,7 +334,7 @@ def _default_tool_snippets() -> dict[str, str]:
     }
 
 
-def _canonical_tool_names(tools: list[AgentTool]) -> list[str]:
+def _canonical_tool_names(tools: list[Any]) -> list[str]:
     """提取工具名称列表（去重并保持顺序）。"""
     names: list[str] = []
     seen: set[str] = set()

@@ -1,17 +1,9 @@
 from __future__ import annotations
 
-# 新手导读：repository_context 定义仓库上下文相关的数据结构和渲染辅助。
-# 关注点：它服务于上下文投影，不直接扫描全部源码塞进 prompt。
+# 新手导读：repository.py 定义会话层可公开消费的仓库引导快照。
+# 关注点：Runtime 可以用它生成启动提示词；ContextGovernor 会在每轮 run 前刷新更动态的上下文。
 
-"""
-Repository bootstrap helpers shared by runtime prompt assembly and session
-context governance.
-
-Runtime uses this module to render static system-prompt bootstrap information
-when a session is created. Sessions also use it to refresh dynamic repository
-snapshots before every model call, so top-level directory changes do not remain
-stale in the model context.
-"""
+"""Repository bootstrap snapshots owned by the sessions layer."""
 
 import subprocess
 from dataclasses import dataclass
@@ -33,7 +25,7 @@ _INTERNAL_TOP_LEVEL_NAMES = {".git", ".codepilot", ".pytest_cache", "__pycache__
 
 @dataclass(frozen=True)
 class GitInfo:
-    """Git 仓库信息。"""
+    """Git repository facts captured for a read-only snapshot."""
 
     root: Path
     branch: str | None = None
@@ -44,7 +36,7 @@ class GitInfo:
 
 @dataclass(frozen=True)
 class RepositoryBootstrap:
-    """仓库引导信息（从工作区目录扫描得到的静态信息）。"""
+    """Static repository facts used when opening a session."""
 
     workspace_root: str
     project_type: str | None
@@ -56,7 +48,7 @@ class RepositoryBootstrap:
 
 
 def build_repository_bootstrap(workspace: Path) -> RepositoryBootstrap:
-    """扫描工作区目录，构建仓库引导信息。"""
+    """Scan the workspace root and build a stable repository bootstrap view."""
 
     root = workspace.resolve()
     entries = _top_level_entries(root)
@@ -81,7 +73,7 @@ def build_repository_bootstrap(workspace: Path) -> RepositoryBootstrap:
 
 
 def render_repository_context(bootstrap: RepositoryBootstrap) -> str:
-    """将仓库引导信息渲染为 Markdown 格式的上下文文本。"""
+    """Render repository bootstrap facts as Markdown for a system prompt."""
 
     project_type = bootstrap.project_type or "unknown"
     manifests = ", ".join(bootstrap.manifest_files) if bootstrap.manifest_files else "(none)"
@@ -112,8 +104,6 @@ def render_repository_context(bootstrap: RepositoryBootstrap) -> str:
 
 
 def _build_git_info(root: Path) -> GitInfo | None:
-    """构建 Git 仓库信息；非 Git 仓库时返回 None。"""
-
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--git-dir"],
@@ -192,8 +182,6 @@ def _build_git_info(root: Path) -> GitInfo | None:
 
 
 def _top_level_entries(root: Path) -> list[str]:
-    """获取工作区根目录的顶层文件和目录列表。"""
-
     if not root.exists() or not root.is_dir():
         return []
     items = sorted(
@@ -220,8 +208,6 @@ def _is_internal_status_line(line: str) -> bool:
 
 
 def _project_type(manifest_files: list[str]) -> str | None:
-    """根据清单文件判断项目类型。"""
-
     for manifest in _MANIFEST_PROJECT_TYPES:
         if manifest in manifest_files:
             return _MANIFEST_PROJECT_TYPES[manifest]

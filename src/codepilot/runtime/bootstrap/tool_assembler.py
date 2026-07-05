@@ -25,6 +25,7 @@ from pathlib import Path
 from codepilot.extensions import load_extensions, load_skills
 from codepilot.extensions.mcp import create_mcp_proxy_tools, parse_mcp_tool_configs
 from codepilot.extensions.types import LoadedExtensions
+from codepilot.protocols import Tool
 from codepilot.tools.builtins import (
     create_builtin_tools,
     get_builtin_tool_metadata,
@@ -38,7 +39,8 @@ from codepilot.tools.shell_safety import ShellExecutionPolicy
 from codepilot.tools.contracts import AgentTool
 
 from .config import RuntimeConfig
-from codepilot.runtime.contracts import CreateAgentSessionOptions, RegisteredTool, RuntimeDiagnostic
+from codepilot.runtime.assembly_types import RegisteredTool, RuntimeDiagnostic
+from codepilot.runtime.assembly_input import RuntimeAssemblyIntent
 
 
 @dataclass(frozen=True)
@@ -46,14 +48,14 @@ class AssembledTools:
     """工具组装结果。
 
     Attributes:
-        tools: 最终的 AgentTool 列表（已注册到 ToolRuntime 并应用权限策略）。
+        tools: 模型可见的工具描述列表（不含执行器）。
         registered_tools: 已注册的工具详细信息列表。
         tool_runtime: 统一工具运行时。
         loaded_extensions: 已加载的扩展信息（包含钩子、命令等）。
         loaded_skills: 已加载的技能信息（包含钩子、命令等）。
         diagnostics: 装配诊断列表。
     """
-    tools: list[AgentTool]
+    tools: list[Tool]
     registered_tools: list[RegisteredTool]
     tool_runtime: ToolRuntime
     loaded_extensions: LoadedExtensions
@@ -115,7 +117,7 @@ def validate_tool_definition(tool: AgentTool) -> list[RuntimeDiagnostic]:
 
 def assemble_tools(
     workspace: Path,
-    options: CreateAgentSessionOptions,
+    options: RuntimeAssemblyIntent,
     config: RuntimeConfig,
 ) -> AssembledTools:
     """组装所有来源的工具并应用权限策略。
@@ -328,7 +330,7 @@ def assemble_tools(
     )
 
     return AssembledTools(
-        tools=runtime.as_agent_tools(),
+        tools=[tool.to_spec() for tool in registry.list()],
         registered_tools=effective_registered_tools,
         tool_runtime=runtime,
         loaded_extensions=loaded_extensions,

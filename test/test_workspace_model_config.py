@@ -10,10 +10,10 @@ from codepilot.interfaces.cli.main import (
     _init_model_config,
     build_parser,
 )
-from codepilot.runtime.assembly import create_agent_session
+from codepilot.runtime.assembly import assemble_runtime
 from codepilot.runtime.bootstrap.model_resolver import resolve_model
 from codepilot.runtime.bootstrap.resources import WorkspaceResourceLoader
-from codepilot.runtime.contracts import CreateAgentSessionOptions
+from codepilot.runtime.assembly_input import RuntimeAssemblyIntent
 
 
 def _write_model_config(workspace, *, api_key: str = "local-key") -> None:
@@ -61,7 +61,7 @@ def test_environment_key_overrides_local_key(tmp_path, monkeypatch) -> None:
 def test_runtime_resolves_workspace_model_and_key(tmp_path) -> None:
     _write_model_config(tmp_path)
     resolved = resolve_model(
-        CreateAgentSessionOptions(workspace_dir=tmp_path),
+        RuntimeAssemblyIntent(workspace_dir=tmp_path),
         inputs=_runtime_inputs(tmp_path),
     )
 
@@ -72,13 +72,20 @@ def test_runtime_resolves_workspace_model_and_key(tmp_path) -> None:
 
 def test_factory_does_not_persist_api_key(tmp_path) -> None:
     _write_model_config(tmp_path, api_key="secret-value")
-    session = create_agent_session(CreateAgentSessionOptions(workspace_dir=tmp_path))
+    controller, assembly = assemble_runtime(RuntimeAssemblyIntent(workspace_dir=tmp_path))
     try:
-        assert session.get_api_key is not None
-        assert session.get_api_key("deepseek") == "secret-value"
-        assert "secret-value" not in session.store.session_file.read_text(encoding="utf-8")
+        assert assembly.session_options.get_api_key is not None
+        assert assembly.session_options.get_api_key("deepseek") == "secret-value"
+        session_file = (
+            tmp_path
+            / ".codepilot"
+            / "sessions"
+            / controller.session_id
+            / "session.json"
+        )
+        assert "secret-value" not in session_file.read_text(encoding="utf-8")
     finally:
-        session.close()
+        controller.close()
 
 
 def test_init_config_creates_editable_template(tmp_path) -> None:
@@ -150,7 +157,8 @@ def test_config_check_and_show_use_sanitized_human_output(tmp_path, capsys) -> N
 
 
 def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import read_restored_session_meta, resolve_runtime_config
+    from codepilot.runtime.bootstrap.config import resolve_runtime_config
+    from codepilot.sessions.metadata import load_session_open_metadata
     from codepilot.sessions.persistence.store import SessionStore
 
     root = tmp_path / ".codepilot"
@@ -168,12 +176,12 @@ def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> Non
     store = SessionStore(tmp_path, "session_restore")
     store.ensure_initialized(model_id="deepseek-v4-pro", provider="deepseek", system_prompt="restored prompt")
 
-    options = CreateAgentSessionOptions(workspace_dir=tmp_path, session_id="session_restore")
+    options = RuntimeAssemblyIntent(workspace_dir=tmp_path, session_id="session_restore")
     inputs = _runtime_inputs(tmp_path, session_id="session_restore")
     resolved = resolve_model(options, inputs=inputs)
     config = resolve_runtime_config(options, inputs=inputs)
 
-    assert read_restored_session_meta(tmp_path, "session_restore") is not None
+    assert load_session_open_metadata(tmp_path, "session_restore") is not None
     assert resolved.model.provider == "deepseek"
     assert resolved.model.id == "deepseek-v4-pro"
     assert config.system_prompt == "restored prompt"
@@ -200,7 +208,7 @@ def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> 
     )
 
     config = resolve_runtime_config(
-        CreateAgentSessionOptions(
+        RuntimeAssemblyIntent(
             workspace_dir=tmp_path,
             retry_enabled=False,
             read_only_mode=False,
@@ -233,7 +241,7 @@ def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
     )
 
     config = resolve_runtime_config(
-        CreateAgentSessionOptions(workspace_dir=tmp_path),
+        RuntimeAssemblyIntent(workspace_dir=tmp_path),
         inputs=_runtime_inputs(tmp_path),
     )
 
@@ -256,7 +264,7 @@ def test_workspace_settings_can_select_task_mode(tmp_path) -> None:
     )
 
     config = resolve_runtime_config(
-        CreateAgentSessionOptions(workspace_dir=tmp_path),
+        RuntimeAssemblyIntent(workspace_dir=tmp_path),
         inputs=_runtime_inputs(tmp_path),
     )
 
@@ -275,7 +283,7 @@ def test_workspace_settings_can_select_planning_budget_profile(tmp_path) -> None
     )
 
     config = resolve_runtime_config(
-        CreateAgentSessionOptions(workspace_dir=tmp_path),
+        RuntimeAssemblyIntent(workspace_dir=tmp_path),
         inputs=_runtime_inputs(tmp_path),
     )
 
@@ -288,7 +296,7 @@ def test_read_task_mode_forces_read_only_permission(tmp_path) -> None:
     from codepilot.runtime.bootstrap.config import resolve_runtime_config
 
     config = resolve_runtime_config(
-        CreateAgentSessionOptions(workspace_dir=tmp_path, task_mode="read"),
+        RuntimeAssemblyIntent(workspace_dir=tmp_path, task_mode="read"),
         inputs=_runtime_inputs(tmp_path),
     )
 
@@ -302,7 +310,7 @@ def test_read_task_mode_rejects_workspace_write_override(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="task_mode=read"):
         resolve_runtime_config(
-            CreateAgentSessionOptions(
+            RuntimeAssemblyIntent(
                 workspace_dir=tmp_path,
                 task_mode="read",
                 tool_permission_mode="workspace-write",
@@ -313,15 +321,10 @@ def test_read_task_mode_rejects_workspace_write_override(tmp_path) -> None:
 
 def _runtime_inputs(tmp_path, *, session_id: str | None = None):
     from codepilot.runtime.bootstrap.config import RuntimeInputs
+    from codepilot.sessions.metadata import load_session_open_metadata
 
     return RuntimeInputs(
         workspace=tmp_path,
         resources=WorkspaceResourceLoader(tmp_path).load(),
-        restored_meta=(
-            __import__("codepilot.sessions.persistence.store", fromlist=["SessionStore"])
-            .SessionStore(tmp_path, session_id)
-            .read_meta()
-            if session_id
-            else None
-        ),
+        restored_meta=load_session_open_metadata(tmp_path, session_id),
     )

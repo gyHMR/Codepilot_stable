@@ -31,8 +31,6 @@ _LAZY_EXPORTS = {
         ".controller",
         "build_task_state_from_recovery_projection",
     ),
-    "PlanningBootstrap": (".bootstrap", "PlanningBootstrap"),
-    "PlanningBootstrapResult": (".bootstrap", "PlanningBootstrapResult"),
     "TaskModePolicy": (".modes", "TaskModePolicy"),
     "policy_for_mode": (".modes", "policy_for_mode"),
     "PlannedTaskStep": (".planner", "PlannedTaskStep"),
@@ -45,8 +43,6 @@ _LAZY_EXPORTS = {
     "TaskState": (".state", "TaskState"),
     "TaskStep": (".state", "TaskStep"),
     "COMPLETE_TASK_STEP_TOOL": (".tools", "COMPLETE_TASK_STEP_TOOL"),
-    "complete_task_step_tool": (".tools", "complete_task_step_tool"),
-    "has_complete_task_step_tool": (".tools", "has_complete_task_step_tool"),
 }
 
 

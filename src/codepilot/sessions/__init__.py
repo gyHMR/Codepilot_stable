@@ -13,58 +13,38 @@ The sessions layer owns four small domains:
 - history: task recovery, branching, and lightweight git rollback
 """
 
-from .context import ContextGovernor, RepositoryBootstrap, RepositoryTracker
-from .history import GitRollbackAction, GitRollbackPlan, GitRollbackResult, SessionCheckpoint
-from .layout import SessionLayout
-from .memory import (
-    MemoryQuery,
-    MemoryRecord,
-    MemoryRetriever,
-    MemoryStore,
-    MemoryWriter,
-    RetrievedMemory,
-    load_global_memory,
-    save_global_memory,
+from .controller import SessionController
+from .contracts import (
+    CancelRunIntent,
+    PreparedAgentRun,
+    SessionCommandIntent,
+    SessionCommandRecord,
+    SessionIntent,
+    SessionResumeIntent,
+    SessionRunIntent,
+    SessionRunRecord,
+    SessionView,
 )
-from .persistence import FreshnessResult, RunStore, SessionStore, new_session_id
-from .session import AgentSession
-from .types import (
-    AgentSessionOptions,
-    CommandHandler,
-    ConvertToLlmFn,
-    LifecycleHook,
-    RegisteredCommand,
-    SessionCommandContext,
-    SessionLifecycleContext,
-)
+from .metadata import SessionOpenMetadata, load_session_open_metadata
+from .persistence import new_session_id
+from .repository import RepositoryBootstrap, build_repository_bootstrap
+from .types import SessionOptions
 
 __all__ = [
-    "AgentSession",
-    "AgentSessionOptions",
-    "CommandHandler",
-    "ConvertToLlmFn",
-    "LifecycleHook",
-    "RegisteredCommand",
-    "SessionCommandContext",
-    "SessionLifecycleContext",
-    "ContextGovernor",
-    "SessionCheckpoint",
-    "GitRollbackAction",
-    "GitRollbackPlan",
-    "GitRollbackResult",
-    "SessionLayout",
-    "SessionStore",
-    "FreshnessResult",
-    "RunStore",
+    "SessionController",
+    "SessionRunIntent",
+    "SessionResumeIntent",
+    "SessionCommandIntent",
+    "CancelRunIntent",
+    "SessionIntent",
+    "PreparedAgentRun",
+    "SessionRunRecord",
+    "SessionCommandRecord",
+    "SessionView",
+    "SessionOpenMetadata",
+    "load_session_open_metadata",
     "RepositoryBootstrap",
-    "RepositoryTracker",
+    "build_repository_bootstrap",
+    "SessionOptions",
     "new_session_id",
-    "load_global_memory",
-    "save_global_memory",
-    "MemoryQuery",
-    "MemoryRecord",
-    "MemoryRetriever",
-    "MemoryStore",
-    "MemoryWriter",
-    "RetrievedMemory",
 ]

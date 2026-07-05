@@ -98,8 +98,8 @@ def test_tool_runtime_requires_approval_for_high_risk_tool() -> None:
     asyncio.run(_run_tool_runtime_requires_approval_for_high_risk_tool())
 
 
-def test_tool_runtime_agent_tool_adapter_preserves_denied_status() -> None:
-    asyncio.run(_run_tool_runtime_agent_tool_adapter_preserves_denied_status())
+def test_tool_runtime_preserves_denied_status() -> None:
+    asyncio.run(_run_tool_runtime_preserves_denied_status())
 
 
 async def _run_tool_runtime_blocks_dangerous_bash_before_execution() -> None:
@@ -197,9 +197,10 @@ async def _run_tool_runtime_requires_approval_for_high_risk_tool() -> None:
     assert result.result.details["status"] == "approval_required"
 
 
-async def _run_tool_runtime_agent_tool_adapter_preserves_denied_status() -> None:
+async def _run_tool_runtime_preserves_denied_status() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
+    from codepilot.tools.contracts import ToolRuntimeRequest
     from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.execution import ToolRuntime
 
@@ -221,14 +222,14 @@ async def _run_tool_runtime_agent_tool_adapter_preserves_denied_status() -> None
             execute=execute,
         )
     )
-    agent_tool = ToolRuntime(registry).as_agent_tools()[0]
-
-    assert getattr(agent_tool, "runtime_managed") is True
-
-    result = await agent_tool.execute(
-        "tool_1",
-        {"command": "rm -rf ."},
+    runtime_result = await ToolRuntime(registry).execute(
+        ToolRuntimeRequest(
+            tool_call_id="tool_1",
+            name="bash",
+            params={"command": "rm -rf ."},
+        )
     )
+    result = runtime_result.result
 
     assert result.is_error
     assert result.status == "denied"
@@ -272,7 +273,7 @@ def test_read_only_tool_assembly_filters_by_metadata(tmp_path: Path) -> None:
     from codepilot.tools import AgentTool, AgentToolResult
     from codepilot.runtime.bootstrap.config import RuntimeConfig
     from codepilot.runtime.bootstrap.tool_assembler import assemble_tools
-    from codepilot.runtime.contracts import CreateAgentSessionOptions
+    from codepilot.runtime.assembly_input import RuntimeAssemblyIntent
 
     async def execute(tool_call_id, params, signal=None, on_update=None):
         _ = tool_call_id, params, signal, on_update
@@ -310,7 +311,7 @@ def test_read_only_tool_assembly_filters_by_metadata(tmp_path: Path) -> None:
     )
     assembled = assemble_tools(
         tmp_path,
-        CreateAgentSessionOptions(workspace_dir=tmp_path, tools=[external_tool]),
+        RuntimeAssemblyIntent(workspace_dir=tmp_path, tools=[external_tool]),
         config,
     )
 
@@ -326,7 +327,8 @@ def test_read_only_tool_assembly_filters_by_metadata(tmp_path: Path) -> None:
 def test_tool_assembly_exposes_skill_loader_tool(tmp_path: Path) -> None:
     from codepilot.runtime.bootstrap.config import RuntimeConfig
     from codepilot.runtime.bootstrap.tool_assembler import assemble_tools
-    from codepilot.runtime.contracts import CreateAgentSessionOptions
+    from codepilot.runtime.assembly_input import RuntimeAssemblyIntent
+    from codepilot.tools.contracts import ToolRuntimeRequest
 
     skill_file = tmp_path / "triage.md"
     skill_file.write_text(
@@ -369,7 +371,7 @@ def test_tool_assembly_exposes_skill_loader_tool(tmp_path: Path) -> None:
 
     assembled = assemble_tools(
         tmp_path,
-        CreateAgentSessionOptions(workspace_dir=tmp_path),
+        RuntimeAssemblyIntent(workspace_dir=tmp_path),
         config,
     )
     tools = {tool.name: tool for tool in assembled.tools}
@@ -377,7 +379,17 @@ def test_tool_assembly_exposes_skill_loader_tool(tmp_path: Path) -> None:
 
     assert "load_skill" in tools
     assert "load_skill" in registered
-    result = asyncio.run(tools["load_skill"].execute("call_skill", {"name": "triage"}))
+    assert not hasattr(tools["load_skill"], "execute")
+    runtime_result = asyncio.run(
+        assembled.tool_runtime.execute(
+            ToolRuntimeRequest(
+                tool_call_id="call_skill",
+                name="load_skill",
+                params={"name": "triage"},
+            )
+        )
+    )
+    result = runtime_result.result
 
     assert not result.is_error
     assert "TRIAGE_SKILL_BODY" in result.content[0].text

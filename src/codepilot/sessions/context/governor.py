@@ -11,7 +11,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from codepilot.core import AgentContext, ContextPreparationRequest, PreparedAgentContext
+from codepilot.core.types import AgentContext, ContextPreparationRequest, PreparedAgentContext
 from codepilot.llm.overflow import estimate_context_tokens
 from codepilot.protocols import (
     ContextCheckpoint,

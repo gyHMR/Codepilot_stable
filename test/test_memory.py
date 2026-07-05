@@ -430,7 +430,7 @@ def test_context_governor_reads_pinned_memory_dynamically(tmp_path: Path) -> Non
 
 
 async def _dynamic_pinned_memory_case(tmp_path: Path) -> None:
-    from codepilot.core import AgentContext, ContextPreparationRequest
+    from codepilot.core.types import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
     from codepilot.sessions.context.governor import ContextGovernor
     from codepilot.sessions.context.state import SessionContextState

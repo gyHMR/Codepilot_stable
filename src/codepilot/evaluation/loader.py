@@ -46,7 +46,7 @@ def load_eval_suite(path: Path | str) -> list[EvalCase]:
 
 
 def parse_eval_case(payload: dict[str, Any], *, source: Path | None = None) -> EvalCase:
-    """Parse a dict into an :class:`EvalCase` without legacy compatibility."""
+    """Parse a dict into the strict v2 :class:`EvalCase` schema."""
 
     if not isinstance(payload, dict):
         raise EvalCaseValidationError("Eval case must be a JSON object")

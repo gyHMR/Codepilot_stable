@@ -1,6 +1,6 @@
 # 钉钉远程入口设计
 
-这份文档按真实运行顺序说明 Codepilot 的钉钉接入。它的定位不是新的 Agent Runtime，而是一个远程 interface：手机端发消息，电脑端桥接进程接收消息，然后仍然把任务交给 `RuntimeService -> AgentSession -> ToolRuntime` 主链执行。
+这份文档按真实运行顺序说明 Codepilot 的钉钉接入。它的定位不是新的 Agent Runtime，而是一个远程 interface：手机端发消息，电脑端桥接进程接收消息，然后把任务交给 V2 主链 `RuntimeGateway.dispatch(UserAction) -> SessionController -> core.run_agent_loop() -> ToolPort` 执行。
 
 如果你要做真实手机端验收，可以直接按 `docs/design/6dingtalk-demo-script.md` 操作；本文负责解释设计边界和安全默认。
 
@@ -107,27 +107,31 @@ Codepilot 继续：审批后的工具调用仍走 ToolRuntime
 工具审批暂停时，Runtime 会保存 pending approval：
 
 ```text
-ToolRuntime.execute()
-  -> approval_required ToolResult
-  -> AgentRunResult(status="waiting_approval")
-  -> RuntimeService._record_pending_approvals()
+ToolPort.execute()
+  -> ToolObservation(status="approval_required", interruption=ToolInterruption)
+  -> AgentLoopOutcome(status="waiting_approval")
+  -> RuntimeFrame.approval_required
+  -> RuntimeGateway 记录 approval transaction
 ```
 
-手机审批后，钉钉桥接层只调用：
+手机审批后，钉钉桥接层只提交 V2 用户动作：
 
 ```text
-RuntimeService.approve_tool_call(approval_id, "approve" 或 "deny")
+RuntimeGateway.dispatch(ApprovalDecided(approval_id, decision))
 ```
 
 批准后的工具不会绕过安全边界。它仍然经过：
 
 ```text
-ToolRuntime.execute_approved()
+RuntimeGateway.dispatch(ApprovalDecided)
+  -> resume_agent_loop()
+  -> ToolPort.resume(ToolResumeDecision)
+  -> ToolRuntimePort.resume()
+  -> ToolRuntime.execute(..., approval_id=...)
   -> schema 校验
   -> 权限/耗时元数据
   -> 真实工具执行
   -> ToolResultGuard
-  -> AgentSession 继续 run
 ```
 
 如果审批后又触发新的高风险工具调用，钉钉会返回新的 pending approval，并附上下一条命令示例：

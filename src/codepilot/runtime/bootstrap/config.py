@@ -6,7 +6,7 @@ from __future__ import annotations
 """
 运行时配置解析模块。
 
-负责将上层传入的 CreateAgentSessionOptions 与工作区资源、
+负责将上层传入的 RuntimeAssemblyIntent 与工作区资源、
 会话恢复元数据、默认值进行多源合并，生成最终的 ResolvedRuntimeConfig。
 
 配置优先级（从高到低）：
@@ -20,17 +20,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
 
-from codepilot.core import (
+from codepilot.core.task_control import (
     PlanningBudgetProfile,
     TaskMode,
-    ToolExecutionMode,
     ensure_planning_budget_profile,
     ensure_task_mode,
 )
-from codepilot.sessions.persistence.store import SessionStore
+from codepilot.core.types import ToolExecutionMode
+from codepilot.sessions.metadata import SessionOpenMetadata, load_session_open_metadata
 
 from .resources import WorkspaceResourceLoader, WorkspaceResources
-from codepilot.runtime.contracts import CreateAgentSessionOptions
+from codepilot.runtime.assembly_input import RuntimeAssemblyIntent
 
 # 配置来源标识
 ConfigSource = str
@@ -107,7 +107,7 @@ class RuntimeInputs:
 
     workspace: Path
     resources: WorkspaceResources | None
-    restored_meta: dict[str, Any] | None
+    restored_meta: SessionOpenMetadata | None
 
 
 @dataclass(frozen=True)
@@ -119,7 +119,7 @@ class ResolvedRuntimeConfig:
 
     Attributes:
         sources: 每个配置项的来源标识（如 "options"、"workspace"、"default"）。
-        其余字段含义见 RuntimeDefaults 和 CreateAgentSessionOptions。
+        其余字段含义见 RuntimeDefaults 和 RuntimeAssemblyIntent。
     """
 
     system_prompt: str
@@ -157,7 +157,7 @@ class ResolvedRuntimeConfig:
 RuntimeConfig = ResolvedRuntimeConfig
 
 
-def load_runtime_inputs(options: CreateAgentSessionOptions) -> RuntimeInputs:
+def load_runtime_inputs(options: RuntimeAssemblyIntent) -> RuntimeInputs:
     """从 options 加载运行时输入数据。
 
     包括工作区路径、工作区资源文件、恢复的会话元数据。
@@ -172,11 +172,11 @@ def load_runtime_inputs(options: CreateAgentSessionOptions) -> RuntimeInputs:
     return RuntimeInputs(
         workspace=workspace,
         resources=resources,
-        restored_meta=read_restored_session_meta(workspace, options.session_id),
+        restored_meta=load_session_open_metadata(workspace, options.session_id),
     )
 
 
-def load_workspace_resources(options: CreateAgentSessionOptions) -> tuple[Path, WorkspaceResources | None]:
+def load_workspace_resources(options: RuntimeAssemblyIntent) -> tuple[Path, WorkspaceResources | None]:
     """加载工作区资源（settings.json、prompt.md 等）。
 
     Args:
@@ -190,23 +190,8 @@ def load_workspace_resources(options: CreateAgentSessionOptions) -> tuple[Path, 
     return workspace, resources
 
 
-def read_restored_session_meta(workspace: Path, session_id: str | None) -> dict[str, Any] | None:
-    """读取已恢复会话的元数据（provider、model_id、system_prompt 等）。
-
-    Args:
-        workspace: 工作区路径。
-        session_id: 会话 ID（None 时直接返回 None）。
-
-    Returns:
-        会话元数据字典；session_id 为 None 或元数据不存在时返回 None。
-    """
-    if not session_id:
-        return None
-    return SessionStore(workspace_dir=workspace, session_id=session_id).read_meta()
-
-
 def resolve_runtime_config(
-    options: CreateAgentSessionOptions,
+    options: RuntimeAssemblyIntent,
     inputs: RuntimeInputs,
     defaults: RuntimeDefaults = RuntimeDefaults(),
 ) -> ResolvedRuntimeConfig:
@@ -228,7 +213,7 @@ def resolve_runtime_config(
     """
     resources = inputs.resources
     settings = resources.settings if resources is not None else None
-    restored = inputs.restored_meta or {}
+    restored = inputs.restored_meta
     sources: dict[str, ConfigSource] = {}
 
     def choose(name: str, *candidates: tuple[ConfigSource, T | None], default: T) -> T:
@@ -244,7 +229,7 @@ def resolve_runtime_config(
     system_prompt = choose(
         "system_prompt",
         ("options", options.system_prompt),
-        ("restored_session", restored.get("system_prompt") if isinstance(restored.get("system_prompt"), str) else None),
+        ("restored_session", restored.system_prompt if restored is not None else None),
         ("workspace", resources.prompt if resources is not None else None),
         ("workspace", settings.system_prompt if settings is not None else None),
         default=defaults.system_prompt,

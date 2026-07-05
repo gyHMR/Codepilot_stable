@@ -26,7 +26,6 @@ from .schema import (
     MetricScore,
 )
 from .scorers import score_metrics
-from .service import EvaluationService
 
 __all__ = [
     "CheckResult",
@@ -41,7 +40,6 @@ __all__ = [
     "EvalSuiteResult",
     "EvaluationArtifacts",
     "EvaluationRunner",
-    "EvaluationService",
     "MetricScore",
     "TaskStepEvidence",
     "ToolCallEvidence",

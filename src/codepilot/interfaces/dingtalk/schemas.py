@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# 新手导读：schemas.py 定义钉钉远程入口和 RuntimeService 之间的稳定数据契约。
+# 新手导读：schemas.py 定义钉钉远程入口和 RuntimeGateway 之间的稳定数据契约。
 # 关注点：钉钉层只描述消息、配置和回复，不直接表达工具执行细节。
 
 """DingTalk interface data contracts."""

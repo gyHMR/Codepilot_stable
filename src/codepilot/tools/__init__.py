@@ -18,18 +18,21 @@ from .builtins import create_builtin_tools
 from .metadata import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES
 from .policy import PermissionPolicy, ToolDecision, ToolPermissionMode, ToolRequest
 from .registry import ToolRegistry
-from .result_safety import ToolResultGuard, apply_result_guard
-from .execution import ToolRuntime
-from .workspace_safety import WorkspaceSandbox
-from .argument_schema import SchemaValidationResult, SchemaValidator, validate_tool_arguments
 from .contracts import (
     AgentTool,
     AgentToolResult,
     AgentToolUpdateCallback,
     ToolMetadata,
     ToolResultStatus,
-    ToolRuntimeRequest,
-    ToolRuntimeResult,
+)
+from .ports import (
+    ToolInterruption,
+    ToolInvocation,
+    ToolObservation,
+    ToolPort,
+    ToolResumeDecision,
+    ToolRiskView,
+    ToolRuntimePort,
 )
 
 
@@ -50,14 +53,12 @@ __all__ = [
     "ToolRegistry",
     "ToolRequest",
     "ToolResultStatus",
-    "ToolRuntime",
-    "ToolRuntimeRequest",
-    "ToolRuntimeResult",
-    "WorkspaceSandbox",
-    "SchemaValidationResult",
-    "SchemaValidator",
-    "ToolResultGuard",
-    "apply_result_guard",
     "create_builtin_tools",
-    "validate_tool_arguments",
+    "ToolInterruption",
+    "ToolInvocation",
+    "ToolObservation",
+    "ToolPort",
+    "ToolResumeDecision",
+    "ToolRiskView",
+    "ToolRuntimePort",
 ]

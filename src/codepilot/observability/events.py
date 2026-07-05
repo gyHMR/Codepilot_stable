@@ -69,8 +69,8 @@ def normalize_event_value(value: Any) -> Any:
 def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
     """Normalize an internal event into the public run-event contract.
 
-    Low-value legacy events return ``{}`` so recorders can skip them without
-    interrupting the running agent.
+    Low-value internal progress events return ``{}`` so recorders can skip them
+    without interrupting the running agent.
     """
 
     raw = normalize_event_value(event)
@@ -127,7 +127,7 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
             **{
                 key: item
                 for key, item in raw.items()
-                if key not in _COMMON_LEGACY_FIELDS
+                if key not in _COMMON_EVENT_FIELDS
             },
         }
     if event_type in RUN_EVENT_TYPES:
@@ -163,7 +163,7 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     return {"total_events": len(events), "event_counts": counts}
 
 
-_COMMON_LEGACY_FIELDS = {
+_COMMON_EVENT_FIELDS = {
     "schema_version",
     "event_id",
     "eventId",
@@ -187,7 +187,7 @@ def _canonical_existing(raw: dict[str, Any]) -> dict[str, Any]:
             for key, item in raw.items()
             if key
             not in {
-                *(_COMMON_LEGACY_FIELDS),
+                *(_COMMON_EVENT_FIELDS),
                 "schema_version",
             }
         },
@@ -365,14 +365,14 @@ def _task_decision(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _task_event(raw: dict[str, Any], legacy_type: str) -> dict[str, Any]:
+def _task_event(raw: dict[str, Any], event_type_hint: str) -> dict[str, Any]:
     task = _dict(raw.get("task"))
     step = _dict(raw.get("step")) or _current_step(task)
     completion = _dict(raw.get("completion"))
-    if legacy_type == "completion_checked":
+    if event_type_hint == "completion_checked":
         event_type = "completion_checked"
     else:
-        event_type = legacy_type
+        event_type = event_type_hint
     return {
         **_base(raw, event_type),
         "task_id": str(task.get("task_id") or raw.get("task_id") or ""),

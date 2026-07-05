@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # 新手导读：ToolRuntime 是所有工具调用的统一安全管线：查找、权限、schema、审批、执行、结果防护。
-# 关注点：理解工具安全策略时，优先从 execute()/execute_approved() 顺序读。
+# 关注点：理解工具安全策略时，优先从 execute() 的权限、schema、审批和结果防护顺序读。
 
 """统一工具执行运行时：集成权限检查、审批流程和工具执行。"""
 
@@ -15,7 +15,6 @@ from codepilot.protocols import TextContent
 from .argument_schema import SchemaValidator
 from .approval import ApprovalProvider, DeferredApprovalProvider
 from .contracts import (
-    AgentTool,
     AgentToolResult,
     AgentToolUpdateCallback,
     ToolResultStatus,
@@ -103,73 +102,15 @@ class ToolRuntime:
     schema_validator: SchemaValidator = field(default_factory=SchemaValidator)  # 参数校验器
     result_guard: ToolResultGuard = field(default_factory=ToolResultGuard)  # 结果防护器
 
-    def as_agent_tools(self) -> list[AgentTool]:
-        """将注册表中的工具转换为 Agent 可用的工具列表（包装权限检查逻辑）。"""
-        adapters: list[AgentTool] = []
-        for tool in self.registry.list():
-            adapter = AgentTool(
-                name=tool.name,
-                label=tool.label,
-                description=tool.description,
-                parameters=tool.parameters,
-                execute=self._make_execute_adapter(tool.name),
-                runtime_managed=True,
-                metadata=self.registry.metadata_for(tool.name),
-            )
-            adapters.append(adapter)
-        return adapters
-
-    def _make_execute_adapter(self, name: str):
-        async def _execute(
-            tool_call_id: str,
-            params: dict[str, Any],
-            signal: Any | None = None,
-            on_update: AgentToolUpdateCallback | None = None,
-        ) -> AgentToolResult:
-            runtime_result = await self.execute(
-                ToolRuntimeRequest(
-                    tool_call_id=tool_call_id,
-                    name=name,
-                    params=params,
-                ),
-                signal=signal,
-                on_update=on_update,
-            )
-            result = runtime_result.result
-            result.is_error = runtime_result.is_error
-            result.status = runtime_result.status
-            result.approved = runtime_result.approved
-            result.approval_id = runtime_result.approval_id
-            if isinstance(result.details, dict):
-                result.details.setdefault("status", runtime_result.status)
-            return result
-
-        return _execute
-
     async def execute(
         self,
         request: ToolRuntimeRequest,
         *,
+        approval_id: str | None = None,
         signal: Any | None = None,
         on_update: AgentToolUpdateCallback | None = None,
     ) -> ToolRuntimeResult:
         """执行工具调用：权限检查 → 参数校验 → 审批 → 执行 → 结果防护。"""
-        return await self._execute(
-            request,
-            signal=signal,
-            on_update=on_update,
-            granted_approval_id=None,
-        )
-
-    async def execute_approved(
-        self,
-        request: ToolRuntimeRequest,
-        *,
-        approval_id: str,
-        signal: Any | None = None,
-        on_update: AgentToolUpdateCallback | None = None,
-    ) -> ToolRuntimeResult:
-        """Execute a user-approved pending tool call through the normal guard path."""
         return await self._execute(
             request,
             signal=signal,

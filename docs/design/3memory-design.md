@@ -25,7 +25,8 @@ Codepilot 的记忆系统不是聊天历史缓存，也不是工具日志仓库�
 | `src/codepilot/sessions/context/governor.py` | 每次模型调用前调用 `MemoryRetriever.recall()` |
 | `src/codepilot/sessions/session.py` | run 生命周期中调用 prompt memory admission 和 finalize memory |
 | `src/codepilot/interfaces/cli/commands.py` | `/memory` 命令 |
-| `src/codepilot/runtime/service.py` | `get_memory_state()` 只读状态接口 |
+| `src/codepilot/sessions/commands.py` / `src/codepilot/sessions/command_state.py` | `/memory` 命令解析、session-owned memory action 和只读 view |
+| `src/codepilot/runtime/views.py` | runtime 只读展示 DTO |
 
 ## 1. 文件和职责边界
 
@@ -86,7 +87,7 @@ updated_at: str
 
 ### 阶段一：创建会话时初始化 memory 组件
 
-`AgentSession.__init__()` 创建：
+`SessionRuntime.__init__()` 创建：
 
 - `MemoryStore`
 - `MemoryWriter`
@@ -96,12 +97,13 @@ updated_at: str
 
 ### 阶段二：run 开始前检查用户输入是否应该记住
 
-每次非 continue 的 `AgentSession.run()` 开始时，会进入 `_start_run_lifecycle()`。
+每次新的用户 turn 进入 `SessionController.prepare_run()` 时，会调用
+`sessions.lifecycle.begin_run_lifecycle()`。
 
 如果 `memory_enabled=True`，session 会调用：
 
 ```python
-self._admit_prompt_memory(text, run_id=run_id)
+admit_prompt_memory(session, text, run_id=run_id)
 ```
 
 内部再调用：
@@ -135,7 +137,7 @@ MemoryWriter.admit_prompt_memory(text, run_id=run_id)
 - 如果是项目边界约束，写固定 `constraint:project_boundary`。
 - 其他输入返回 `should_store=False`。
 
-如果成功写入，`AgentSession._admit_prompt_memory()` 会写一条 `memory_updated` session event。
+如果成功写入，`sessions.lifecycle.admit_prompt_memory()` 会写一条 `memory_updated` session event。
 
 ### 阶段三：每次模型调用前召回 Memory
 
@@ -144,8 +146,8 @@ Memory 的召回不是 run 开始时做，而是在每次模型调用前由上�
 调用链：
 
 ```text
-LLMStreamRunner.stream_assistant_response()
-  -> AgentOptions.prepare_context
+core/model_turn.py
+  -> ContextPort.prepare()
   -> ContextGovernor.prepare()
   -> ContextGovernor._recall_memory()
   -> MemoryRetriever.recall(query)
@@ -196,14 +198,14 @@ dropped: dict[str, str]
 - `retrieved_memory_ids`
 - `memory_retrieval_reasons`
 
-`AgentSession._on_agent_event()` 看到这些 id 后，会追加一条 `memory_retrieved` session event。
+`SessionController` 的本轮 `ContextPort` 看到这些 id 后，会追加一条 `memory_retrieved` session event。
 
 ### 阶段四：工具执行过程中不沉淀长期记忆
 
-工具结果消息结束时，`AgentSession._on_agent_event()` 会调用：
+工具结果消息提交时，`SessionController.commit_run()` 会调用：
 
 ```python
-self._observe_tool_memory(message, run_id=...)
+observe_tool_memory(session, message, run_id=...)
 ```
 
 但当前 `MemoryWriter.observe_tool_result()` 只是保留扩展点，直接返回空列表。
@@ -212,10 +214,10 @@ self._observe_tool_memory(message, run_id=...)
 
 ### 阶段五：run 结束后沉淀经验
 
-`AgentSession._complete_run_lifecycle()` 在 run 结果落盘、task recovery 更新后，如果启用 memory，会调用：
+`sessions.lifecycle.complete_run_lifecycle()` 在 run 结果落盘、task recovery 更新后，如果启用 memory，会调用：
 
 ```python
-self._finalize_memory(result)
+finalize_memory(session, result)
 ```
 
 内部调用：
@@ -456,7 +458,7 @@ CLI 命令在 `src/codepilot/interfaces/cli/commands.py`。
 
 调用 `MemoryStore.mark_status(id, "deleted")`。
 
-`RuntimeService.get_memory_state(session_id)` 返回只读状态：
+V2 中 memory 状态通过 session command / runtime view 返回只读状态：
 
 - pinned 文件路径、字符数、预览。
 - session records。
@@ -475,7 +477,7 @@ ContextGovernor 会把 recalled memory 变成 prompt 中的 Memory Recall 区域
 
 TaskRecovery 保存当前任务目标、步骤、下一步动作。它用于“当前 session 如何继续任务”，不是长期可复用知识。
 
-普通用户任务不会写成 memory；run 开始时 `_begin_task_recovery()` 会处理任务恢复，`_admit_prompt_memory()` 只处理明确长期记忆意图。
+普通用户任务不会写成 memory；run 开始时 `begin_task_recovery()` 会处理任务恢复，`admit_prompt_memory()` 只处理明确长期记忆意图。
 
 ### 与 RunStore
 

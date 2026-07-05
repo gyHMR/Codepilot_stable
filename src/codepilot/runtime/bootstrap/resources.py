@@ -19,7 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from codepilot.core import PlanningBudgetProfile, TaskMode, ToolExecutionMode
+from codepilot.core.task_control import PlanningBudgetProfile, TaskMode
+from codepilot.core.types import ToolExecutionMode
 from codepilot.protocols import Model, ModelCapabilities
 
 

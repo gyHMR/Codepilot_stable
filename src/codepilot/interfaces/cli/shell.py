@@ -20,7 +20,7 @@ from __future__ import annotations
 """
 
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
@@ -28,8 +28,6 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import HTML
-
-from codepilot.interfaces.cli.commands import RuntimeCommand, builtin_commands
 
 
 # 自定义样式
@@ -47,11 +45,14 @@ CODEPILOT_STYLE = Style.from_dict({
 class CommandCompleter(Completer):
     """命令补全器。
 
-    Shell 只消费运行时命令元数据，不维护第二份命令名称或描述。
-    真正的命令语义由 runtime.command_registry 统一定义。
+    Shell 只消费 RuntimeGateway.describe() 返回的命令元数据，
+    不维护第二份命令名称或描述。
     """
 
-    def __init__(self, commands: Iterable[RuntimeCommand]) -> None:
+    def __init__(self, commands: Iterable[Any]) -> None:
+        self.commands = tuple(commands)
+
+    def set_commands(self, commands: Iterable[Any]) -> None:
         self.commands = tuple(commands)
 
     def get_completions(
@@ -71,11 +72,12 @@ class CommandCompleter(Completer):
             return
 
         for cmd in self.commands:
-            if cmd.name.startswith(word):
+            name = str(getattr(cmd, "name", ""))
+            if name.startswith(word):
                 yield Completion(
-                    cmd.name,
+                    name,
                     start_position=-len(word),
-                    display_meta=cmd.description,
+                    display_meta=str(getattr(cmd, "description", "")),
                 )
 
 
@@ -94,6 +96,7 @@ class InteractiveShell:
         *,
         history_dir: str | Path | None = None,
         multiline: bool = False,
+        commands: Iterable[Any] = (),
     ) -> None:
         """初始化 Shell。
 
@@ -110,7 +113,8 @@ class InteractiveShell:
         history_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 创建补全器
-        completer = CommandCompleter(builtin_commands())
+        completer = CommandCompleter(commands)
+        self.completer = completer
 
         # 创建快捷键绑定
         bindings = KeyBindings()
@@ -143,6 +147,9 @@ class InteractiveShell:
             style=CODEPILOT_STYLE,
             multiline=multiline,
         )
+
+    def set_commands(self, commands: Iterable[Any]) -> None:
+        self.completer.set_commands(commands)
 
     async def prompt(
         self,
@@ -246,6 +253,7 @@ def create_shell(
     history_dir: str | Path | None = None,
     multiline: bool = False,
     no_color: bool = False,
+    commands: Iterable[Any] = (),
 ) -> InteractiveShell | None:
     """创建 InteractiveShell 实例。
 
@@ -263,7 +271,11 @@ def create_shell(
         return None
 
     try:
-        return InteractiveShell(history_dir=history_dir, multiline=multiline)
+        return InteractiveShell(
+            history_dir=history_dir,
+            multiline=multiline,
+            commands=commands,
+        )
     except Exception:
         # prompt_toolkit 初始化失败时返回 None
         return None

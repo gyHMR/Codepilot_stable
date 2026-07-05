@@ -19,6 +19,7 @@ from codepilot.tools.shell_safety import ShellExecutionPolicy
 from .files import create_file_tools
 from .search import create_search_tools
 from .shell import create_shell_tools
+from .task_control import create_task_control_tools
 from .workspace_status import create_workspace_tools
 
 
@@ -47,6 +48,7 @@ def create_builtin_tools(
     tools.extend(create_search_tools(sandbox, allow=allow))
     tools.extend(create_workspace_tools(sandbox, allow=allow))
     tools.extend(create_shell_tools(sandbox, allow=allow, policy=shell_policy))
+    tools.extend(create_task_control_tools(allow=allow))
     return tools
 
 
@@ -54,5 +56,6 @@ __all__ = [
     "MUTATING_TOOL_NAMES",
     "READ_ONLY_TOOL_NAMES",
     "create_builtin_tools",
+    "create_task_control_tools",
     "get_builtin_tool_metadata",
 ]

@@ -59,12 +59,12 @@ benchmarks/fixtures/issue_tracker/
 
 ```mermaid
 flowchart TD
-    CLI["CLI<br/>python -m codepilot.evaluation run all"] --> Service["EvaluationService"]
-    Service --> Loader["load_eval_suite<br/>读取 evaluation_v2 JSON"]
+    CLI["CLI<br/>python -m codepilot.evaluation run all"] --> Runner["EvaluationRunner"]
+    Runner --> Loader["load_eval_suite<br/>读取 evaluation_v2 JSON"]
     Loader --> Case["EvalCase<br/>任务定义"]
-    Case --> Runner["EvaluationRunner"]
+    Case --> Runner
     Runner --> Workspace["复制 fixture<br/>准备隔离 workspace"]
-    Workspace --> Runtime["RuntimeService<br/>真实运行 Agent"]
+    Workspace --> Runtime["RuntimeGateway<br/>dispatch UserAction"]
     Runtime --> Trace["RunTrace<br/>由 observability 事件构建"]
     Workspace --> Diff["workspace.diff<br/>文件变化"]
     Trace --> Evidence["EvalEvidence<br/>结构化证据"]
@@ -78,7 +78,7 @@ flowchart TD
 
 这条链路里有几个重要边界。
 
-第一，Evaluation 不直接控制 Agent 内部怎么思考。它通过 `RuntimeService` 创建 session，然后像普通用户一样发送 prompt。
+第一，Evaluation 不直接控制 Agent 内部怎么思考。它通过 `RuntimeGateway.open_session()` 创建 session，然后像普通用户一样提交 `PromptSubmitted` / `CommandSubmitted` 等 `UserAction`。
 
 第二，Evaluation 不用模型回答本身作为唯一判断依据。它会看：
 
@@ -239,8 +239,8 @@ python -m codepilot.evaluation report .codepilot/evals/<eval_id>
 ```text
 1. 复制 fixture 到临时 workspace
 2. 记录 workspace baseline
-3. 创建 RuntimeService session
-4. 执行 task prompt 或 scenario steps
+3. 创建 RuntimeGateway session
+4. 通过 `RuntimeGateway.dispatch()` 执行 task prompt 或 scenario steps
 5. 读取 run ids、run events、run result
 6. 由 observability 构建 RunTrace
 7. 执行 case.checks

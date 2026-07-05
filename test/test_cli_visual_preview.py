@@ -37,7 +37,7 @@ def test_rich_cli_preview_has_compact_coding_agent_hierarchy(monkeypatch) -> Non
         "type": "tool_execution_start",
         "toolCallId": "read-1",
         "toolName": "read",
-        "args": {"path": "src/codepilot/core/agent_loop.py"},
+        "args": {"path": "src/codepilot/core/loop.py"},
     })
     renderer.handle_event({
         "type": "tool_execution_end",
@@ -76,7 +76,7 @@ def test_rich_cli_preview_has_compact_coding_agent_hierarchy(monkeypatch) -> Non
     assert "Codepilot 0.3  cyber engineering console" in preview
     assert "C P" in preview
     assert "deepseek/deepseek-chat" in preview
-    assert "↯ tool read  src/codepilot/core/agent_loop.py" in preview
+    assert "↯ tool read  src/codepilot/core/loop.py" in preview
     assert "◆ ok  614ms" in preview
     assert "CP // PERMISSION REQUIRED" in preview
     assert "bash git status --short" in preview

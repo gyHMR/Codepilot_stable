@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from prompt_toolkit.document import Document
 
 from codepilot.interfaces.cli.shell import CODEPILOT_STYLE, InteractiveShell
-from codepilot.interfaces.cli.commands import builtin_commands
-from codepilot.runtime.contracts import SessionStatus
+from codepilot.runtime.command_catalog import builtin_commands
+from codepilot.runtime.views import SessionStatus
 
 
 def test_shell_uses_coding_agent_prompt_and_visual_styles() -> None:
@@ -36,11 +37,12 @@ def test_shell_command_completion_uses_runtime_command_registry(
             captured["completer"] = kwargs["completer"]
 
     monkeypatch.setattr(shell_module, "PromptSession", FakePromptSession)
-    InteractiveShell(history_dir=tmp_path)
+    commands = builtin_commands()
+    InteractiveShell(history_dir=tmp_path, commands=commands)
 
     completer = captured["completer"]
     completions = list(completer.get_completions(Document("/mem"), None))
-    runtime_memory = next(command for command in builtin_commands() if command.name == "memory")
+    runtime_memory = next(command for command in commands if command.name == "memory")
 
     assert [completion.text for completion in completions] == ["memory"]
     assert completions[0].display_meta_text == runtime_memory.description
@@ -111,18 +113,17 @@ def test_interactive_runner_passes_dynamic_toolbar_and_prompt(monkeypatch) -> No
             calls["status"] = (message, kind)
 
     class FakeRuntime:
-        def get_session_status(self, session_id):
-            return SessionStatus(
-                session_id=session_id,
-                model_id="deepseek/deepseek-chat",
-                workspace="E:/workspace",
-                permission_mode="workspace-write",
-                message_count=0,
-                leaf_id="leaf",
+        def describe(self, session_id):
+            return SimpleNamespace(
+                status=SessionStatus(
+                    session_id=session_id,
+                    model_id="deepseek/deepseek-chat",
+                    workspace="E:/workspace",
+                    permission_mode="workspace-write",
+                    message_count=0,
+                    leaf_id="leaf",
+                )
             )
-
-        def get_workspace(self, _session_id):
-            return Path("E:/workspace")
 
     monkeypatch.setattr(runner, "TerminalRenderer", FakeRenderer)
     monkeypatch.setattr("codepilot.interfaces.cli.shell.create_shell", lambda **_kwargs: FakeShell())
@@ -160,18 +161,17 @@ def test_interactive_runner_exits_when_shell_raises_keyboard_interrupt(monkeypat
             calls["status"] = (message, kind)
 
     class FakeRuntime:
-        def get_session_status(self, session_id):
-            return SessionStatus(
-                session_id=session_id,
-                model_id="deepseek/deepseek-chat",
-                workspace="E:/workspace",
-                permission_mode="workspace-write",
-                message_count=0,
-                leaf_id="leaf",
+        def describe(self, session_id):
+            return SimpleNamespace(
+                status=SessionStatus(
+                    session_id=session_id,
+                    model_id="deepseek/deepseek-chat",
+                    workspace="E:/workspace",
+                    permission_mode="workspace-write",
+                    message_count=0,
+                    leaf_id="leaf",
+                )
             )
-
-        def get_workspace(self, _session_id):
-            return Path("E:/workspace")
 
     monkeypatch.setattr(runner, "TerminalRenderer", FakeRenderer)
     monkeypatch.setattr("codepilot.interfaces.cli.shell.create_shell", lambda **_kwargs: FakeShell())

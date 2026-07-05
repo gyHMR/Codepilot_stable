@@ -60,11 +60,101 @@ def test_cli_parser_builds() -> None:
 def test_sessions_memory_api_is_global_only() -> None:
     import codepilot.sessions as sessions
 
-    assert "load_global_memory" in sessions.__all__
-    assert "save_global_memory" in sessions.__all__
-    assert "load_channel_memory" not in sessions.__all__
-    assert "load_merged_memory" not in sessions.__all__
-    assert "save_channel_memory" not in sessions.__all__
+    assert "SessionController" in sessions.__all__
+    assert "SessionRunIntent" in sessions.__all__
+    assert "SessionRunRecord" in sessions.__all__
+    assert "SessionOpenMetadata" in sessions.__all__
+    assert "load_session_open_metadata" in sessions.__all__
+    assert "RepositoryBootstrap" in sessions.__all__
+    assert "build_repository_bootstrap" in sessions.__all__
+    assert "SessionOptions" in sessions.__all__
+    assert "AgentSession" not in sessions.__all__
+    assert "AgentSessionOptions" not in sessions.__all__
+    assert not hasattr(sessions, "AgentSession")
+    assert not hasattr(sessions, "AgentSessionOptions")
+    assert "SessionStore" not in sessions.__all__
+    assert "RunStore" not in sessions.__all__
+    assert "MemoryStore" not in sessions.__all__
+    assert "MemoryWriter" not in sessions.__all__
+    assert "ContextGovernor" not in sessions.__all__
+    assert "load_global_memory" not in sessions.__all__
+    assert "save_global_memory" not in sessions.__all__
+    assert not hasattr(sessions, "SessionStore")
+    assert not hasattr(sessions, "RunStore")
+    assert not hasattr(sessions, "MemoryStore")
+    assert not hasattr(sessions, "MemoryWriter")
+    assert not hasattr(sessions, "ContextGovernor")
+    assert not hasattr(sessions, "load_global_memory")
+    assert not hasattr(sessions, "save_global_memory")
+    assert hasattr(sessions, "SessionOpenMetadata")
+    assert hasattr(sessions, "load_session_open_metadata")
+    assert hasattr(sessions, "RepositoryBootstrap")
+    assert hasattr(sessions, "build_repository_bootstrap")
+
+
+def test_session_controller_public_surface_matches_v2_contract() -> None:
+    import inspect
+
+    import codepilot.sessions.controller as controller_module
+    from codepilot.sessions.controller import SessionController
+
+    methods = {
+        name
+        for name, value in inspect.getmembers(SessionController, inspect.isfunction)
+        if not name.startswith("_")
+    }
+
+    assert methods == {
+        "apply_command",
+        "claim_derived_controller",
+        "close",
+        "commit_run",
+        "describe",
+        "prepare_resume",
+        "prepare_run",
+        "stage_derived_session",
+        "subscribe",
+    }
+    assert not hasattr(controller_module, "_controller_from_runtime_session")
+    assert not hasattr(SessionController, "_stage_derived_session")
+    assert not hasattr(SessionController, "_pop_derived_controller")
+
+
+def test_extension_command_context_exposes_only_session_view() -> None:
+    from dataclasses import fields
+
+    from codepilot.protocols.commands import SessionCommandContext, SessionCommandView
+
+    context_fields = {field.name for field in fields(SessionCommandContext)}
+    view_fields = {field.name for field in fields(SessionCommandView)}
+
+    assert context_fields == {"name", "args", "raw_text", "session_view"}
+    assert {"session", "message"}.isdisjoint(context_fields)
+    assert view_fields == {
+        "session_id",
+        "workspace_dir",
+        "message_count",
+        "task_mode",
+        "leaf_id",
+    }
+
+
+def test_lifecycle_hook_context_exposes_only_session_view() -> None:
+    from dataclasses import fields
+
+    from codepilot.protocols.commands import SessionLifecycleContext, SessionLifecycleView
+
+    context_fields = {field.name for field in fields(SessionLifecycleContext)}
+    view_fields = {field.name for field in fields(SessionLifecycleView)}
+
+    assert context_fields == {"text", "is_continue", "message_count", "session_view"}
+    assert "session" not in context_fields
+    assert view_fields == {
+        "session_id",
+        "workspace_dir",
+        "message_count",
+        "task_mode",
+    }
 
 
 def test_session_persistence_exports_freshness_contract() -> None:
@@ -80,11 +170,15 @@ def test_session_persistence_exports_freshness_contract() -> None:
 def test_session_context_exports_state_contracts() -> None:
     import codepilot.sessions.context as context
     from codepilot.sessions.context import __all__ as context_exports
+    from importlib.util import find_spec
 
     assert hasattr(context, "ContextFileRole")
     assert hasattr(context, "ContextEvidenceKind")
     assert "ContextFileRole" in context_exports
     assert "ContextEvidenceKind" in context_exports
+    assert "RepositoryBootstrap" not in context_exports
+    assert "build_repository_bootstrap" not in context_exports
+    assert find_spec("codepilot.sessions.context.repository_context") is None
 
 
 def test_no_legacy_top_level_imports() -> None:
@@ -167,6 +261,7 @@ def test_removed_runtime_compat_modules_are_gone() -> None:
         "builtin_tools",
         "cli",
         "context_compiler",
+        "errors",
         "factory",
         "hook_pipeline",
         "model_resolver",
@@ -188,16 +283,70 @@ def test_removed_runtime_compat_modules_are_gone() -> None:
     assert existing == []
 
 
-def test_runtime_public_contract_uses_contracts_module() -> None:
+def test_runtime_public_contracts_and_views_are_separate() -> None:
     import codepilot.runtime as runtime
-    import codepilot.runtime.contracts as contracts
+    import codepilot.runtime.assembly as assembly
+    import codepilot.runtime.assembly_input as assembly_input
+    import codepilot.runtime.assembly_types as assembly_types
+    import codepilot.runtime.gateway as gateway_module
+    import codepilot.runtime.session_opening as session_opening
+    import codepilot.runtime.sessions as runtime_sessions
+    import codepilot.runtime.views as views
+    from importlib.util import find_spec
 
-    assert hasattr(contracts, "CreateAgentSessionOptions")
-    assert hasattr(contracts, "UserInput")
+    assert hasattr(runtime, "SessionOpenIntent")
+    assert hasattr(assembly_input, "RuntimeAssemblyIntent")
+    assert assembly_input.__all__ == ["RuntimeAssemblyIntent", "RuntimePermissionMode"]
+    assert hasattr(assembly_types, "RuntimeAssembly")
+    assert hasattr(assembly_types, "RuntimeDiagnostic")
+    assert hasattr(assembly_types, "CapabilityCatalog")
+    assert hasattr(views, "CommandDescriptor")
+    assert hasattr(views, "SessionStatus")
+    assert not hasattr(assembly_input, "SessionOpenRequest")
+    assert not hasattr(assembly_input, "UserTurn")
+    assert not hasattr(assembly_input, "RuntimeOutput")
+    assert not hasattr(assembly_input, "ApprovalDecision")
+    assert not hasattr(assembly_input, "ApprovalSnapshot")
+    assert not hasattr(assembly_input, "CancellationResult")
+    assert not hasattr(assembly_input, "CommandRequest")
+    assert not hasattr(assembly_input, "SessionRef")
+    assert not hasattr(assembly_input, "CommandDescriptor")
+    assert not hasattr(assembly_input, "CommandResult")
+    assert not hasattr(assembly_input, "SessionSnapshot")
+    assert not hasattr(assembly_input, "SessionStatus")
+    assert not hasattr(assembly_input, "SessionOptions")
+    assert not hasattr(assembly_input, "RuntimeAssembly")
+    assert not hasattr(assembly_input, "RuntimeDiagnostic")
+    assert not hasattr(assembly_input, "CapabilityCatalog")
+    assert not hasattr(assembly_input, "ModelSelection")
+    assert not hasattr(assembly_input, "ToolRuntime")
+    assert not hasattr(assembly_input, "AgentSessionOptions")
     assert not hasattr(runtime, "WorkspaceResourceLoader")
     assert not hasattr(runtime, "build_default_system_prompt")
     assert not hasattr(runtime, "format_commands_for_help")
     assert not hasattr(runtime, "list_runtime_commands")
+    assert not hasattr(runtime.RuntimeGateway, "aclose_all")
+    assert not hasattr(assembly, "create_session_controller")
+    assert gateway_module.__all__ == ["RuntimeGateway"]
+    assert not hasattr(gateway_module, "SessionOpenIntent")
+    assert not hasattr(views, "SessionSnapshot")
+    assert not hasattr(views, "CommandResult")
+    assert session_opening.__all__ == [
+        "AppSessionView",
+        "SessionOpenIntent",
+        "SessionRef",
+    ]
+    assert runtime_sessions.__all__ == [
+        "ActiveRunRegistry",
+        "RuntimeSessionEntry",
+        "RuntimeSessionRegistry",
+    ]
+    assert not hasattr(runtime, "to_runtime_assembly_intent")
+    assert find_spec("codepilot.runtime.service") is None
+    assert find_spec("codepilot.runtime.contracts") is None
+    assert find_spec("codepilot.runtime.commands") is None
+    assert find_spec("codepilot.runtime.execution") is None
+    assert not hasattr(runtime, "create_agent_session")
 
 
 def test_removed_sessions_compat_modules_are_gone() -> None:
@@ -249,6 +398,7 @@ def test_removed_builtin_file_tool_aliases_are_gone(tmp_path: Path) -> None:
     tool_names = {tool.name for tool in create_builtin_tools(tmp_path)}
 
     assert tool_names.isdisjoint(removed_aliases)
+    assert "complete_task_step" in tool_names
     assert READ_ONLY_TOOL_NAMES.isdisjoint(removed_aliases)
     assert MUTATING_TOOL_NAMES.isdisjoint(removed_aliases)
     assert all(get_builtin_tool_metadata(name) is None for name in removed_aliases)
@@ -271,6 +421,7 @@ def test_tools_refactor_exposes_new_lifecycle_modules() -> None:
         "codepilot.tools.builtins.files",
         "codepilot.tools.builtins.search",
         "codepilot.tools.builtins.shell",
+        "codepilot.tools.builtins.task_control",
         "codepilot.tools.builtins.workspace_status",
     )
 
@@ -304,6 +455,37 @@ def test_removed_tools_compat_modules_are_gone() -> None:
     assert existing == []
 
 
+def test_removed_tool_port_transition_adapters_are_gone() -> None:
+    import codepilot.tools.ports as ports
+    from codepilot.tools.execution import ToolRuntime
+
+    assert hasattr(ports, "ToolRuntimePort")
+    assert not hasattr(ports, "ExecutableToolPort")
+    assert not hasattr(ToolRuntime, "execute_approved")
+
+
+def test_tools_top_level_exports_contracts_not_live_runtime() -> None:
+    import codepilot.tools as tools
+    from codepilot.tools import __all__ as tool_exports
+
+    assert "AgentTool" in tool_exports
+    assert "AgentToolResult" in tool_exports
+    assert "ToolPort" in tool_exports
+    assert "ToolRuntimePort" in tool_exports
+    assert "ToolRuntime" not in tool_exports
+    assert "ToolRuntimeRequest" not in tool_exports
+    assert "ToolRuntimeResult" not in tool_exports
+    assert "WorkspaceSandbox" not in tool_exports
+    assert "SchemaValidator" not in tool_exports
+    assert "ToolResultGuard" not in tool_exports
+    assert not hasattr(tools, "ToolRuntime")
+    assert not hasattr(tools, "ToolRuntimeRequest")
+    assert not hasattr(tools, "ToolRuntimeResult")
+    assert not hasattr(tools, "WorkspaceSandbox")
+    assert not hasattr(tools, "SchemaValidator")
+    assert not hasattr(tools, "ToolResultGuard")
+
+
 def test_removed_task_control_helper_modules_are_gone() -> None:
     removed_modules = (
         "codepilot.core.task_control.evidence",
@@ -318,18 +500,97 @@ def test_removed_task_control_helper_modules_are_gone() -> None:
 
 
 def test_removed_run_result_compat_entries_are_gone() -> None:
-    import codepilot.core.agent_loop as agent_loop
-    from codepilot.core import Agent, __all__ as core_exports
-    from codepilot.sessions.session import AgentSession
+    import codepilot.core as core
+    from codepilot.core import __all__ as core_exports
+    import codepilot.sessions.session as session_module
+    from codepilot.sessions.conversation_state import SessionConversationState
+    from codepilot.sessions.types import SessionOptions
 
-    assert not hasattr(Agent, "prompt")
-    assert not hasattr(Agent, "continue_run_result")
-    assert not hasattr(AgentSession, "prompt")
-    assert not hasattr(AgentSession, "prompt_message")
-    assert not hasattr(agent_loop, "run_agent_loop_result")
-    assert not hasattr(agent_loop, "run_agent_loop_continue_result")
+    assert not hasattr(core, "Agent")
+    assert not hasattr(core, "complete_task_step_tool")
+    assert not hasattr(core, "has_complete_task_step_tool")
+    assert "Agent" not in core_exports
+    assert "complete_task_step_tool" not in core_exports
+    assert "has_complete_task_step_tool" not in core_exports
+    assert find_spec("codepilot.core.agent") is None
+    assert find_spec("codepilot.core.agent_loop") is None
+    assert not hasattr(session_module, "AgentSession")
+    assert not hasattr(session_module.SessionRuntime, "prompt")
+    assert not hasattr(session_module.SessionRuntime, "prompt_message")
+    assert not hasattr(session_module.SessionRuntime, "run")
+    assert not hasattr(session_module.SessionRuntime, "continue_run")
+    assert not hasattr(session_module.SessionRuntime, "_start_run_lifecycle")
+    assert not hasattr(session_module.SessionRuntime, "_complete_run_lifecycle")
+    assert not hasattr(session_module.SessionRuntime, "_admit_prompt_memory")
+    assert not hasattr(session_module.SessionRuntime, "_begin_task_recovery")
+    assert not hasattr(session_module.SessionRuntime, "_observe_tool_memory")
+    assert not hasattr(session_module.SessionRuntime, "_finalize_memory")
+    assert not hasattr(session_module.SessionRuntime, "_finalize_task_recovery")
+    assert not hasattr(session_module.SessionRuntime, "_check_context_freshness")
+    assert not hasattr(session_module.SessionRuntime, "_run_lifecycle_hooks")
+    assert not hasattr(session_module.SessionRuntime, "_write_rollback_metadata")
+    assert not hasattr(session_module.SessionRuntime, "messages")
+    assert not hasattr(session_module.SessionRuntime, "last_run_result")
+    assert not hasattr(session_module.SessionRuntime, "last_session_run_record")
+    assert "tools" not in SessionOptions.__dataclass_fields__
+    assert "tools" not in SessionConversationState.__dataclass_fields__
+    assert not hasattr(session_module.SessionRuntime, "last_usage")
+    assert not hasattr(session_module.SessionRuntime, "cumulative_usage")
+    assert not hasattr(session_module.SessionRuntime, "_last_usage")
+    assert not hasattr(session_module.SessionRuntime, "_cumulative_usage")
+    assert not hasattr(session_module.SessionRuntime, "_set_task_mode")
+    assert not hasattr(session_module.SessionRuntime, "_list_entry_ids")
+    assert not hasattr(session_module.SessionRuntime, "_list_entries")
+    assert not hasattr(session_module.SessionRuntime, "_get_leaf_id")
+    assert not hasattr(session_module.SessionRuntime, "_get_entry_path")
+    assert not hasattr(session_module.SessionRuntime, "_get_session_tree")
+    assert not hasattr(session_module.SessionRuntime, "_fork_session")
+    assert not hasattr(session_module.SessionRuntime, "_create_fresh_session")
+    assert not hasattr(session_module.SessionRuntime, "_fork_from_entry")
+    assert not hasattr(session_module.SessionRuntime, "_switch_to_entry")
+    assert not hasattr(session_module.SessionRuntime, "_switch_session")
+    assert not hasattr(session_module.SessionRuntime, "_record_checkpoint")
+    assert not hasattr(session_module.SessionRuntime, "_memory_summary")
+    assert not hasattr(session_module.SessionRuntime, "_list_memory_records")
+    assert not hasattr(session_module.SessionRuntime, "_add_project_memory")
+    assert not hasattr(session_module.SessionRuntime, "_promote_memory")
+    assert not hasattr(session_module.SessionRuntime, "_forget_memory")
+    assert not hasattr(session_module.SessionRuntime, "_memory_status")
+    assert not hasattr(session_module.SessionRuntime, "_context_command_view")
+    assert not hasattr(session_module.SessionRuntime, "_capture_run_rollback_baseline")
+    assert not hasattr(session_module.SessionRuntime, "_rollback_preview_view")
+    assert not hasattr(session_module.SessionRuntime, "_rollback_apply_view")
+    assert not hasattr(session_module.SessionRuntime, "_revert_last_run")
+    assert not hasattr(session_module.SessionRuntime, "_preview_last_run_rollback")
+    assert not hasattr(session_module.SessionRuntime, "_preview_run_rollback")
+    assert not hasattr(session_module.SessionRuntime, "_revert_run")
+    assert not hasattr(session_module.SessionRuntime, "set_task_mode")
+    assert not hasattr(session_module.SessionRuntime, "list_entry_ids")
+    assert not hasattr(session_module.SessionRuntime, "list_entries")
+    assert not hasattr(session_module.SessionRuntime, "get_leaf_id")
+    assert not hasattr(session_module.SessionRuntime, "get_entry_path")
+    assert not hasattr(session_module.SessionRuntime, "get_session_tree")
+    assert not hasattr(session_module.SessionRuntime, "fork_session")
+    assert not hasattr(session_module.SessionRuntime, "fork_from_entry")
+    assert not hasattr(session_module.SessionRuntime, "switch_to_entry")
+    assert not hasattr(session_module.SessionRuntime, "switch_session")
+    assert not hasattr(session_module.SessionRuntime, "record_checkpoint")
+    assert not hasattr(session_module.SessionRuntime, "capture_run_rollback_baseline")
+    assert not hasattr(session_module.SessionRuntime, "revert_last_run")
+    assert not hasattr(session_module.SessionRuntime, "preview_last_run_rollback")
+    assert not hasattr(session_module.SessionRuntime, "preview_run_rollback")
+    assert not hasattr(session_module.SessionRuntime, "revert_run")
     assert "run_agent_loop_result" not in core_exports
     assert "run_agent_loop_continue_result" not in core_exports
+
+
+def test_removed_evaluation_service_facade_is_gone() -> None:
+    import codepilot.evaluation as evaluation
+    from codepilot.evaluation import __all__ as evaluation_exports
+
+    assert find_spec("codepilot.evaluation.service") is None
+    assert not hasattr(evaluation, "EvaluationService")
+    assert "EvaluationService" not in evaluation_exports
 
 
 def test_core_namespace_keeps_cross_layer_contracts_out() -> None:
@@ -343,15 +604,25 @@ def test_core_namespace_keeps_cross_layer_contracts_out() -> None:
     assert not hasattr(core, "AgentRunResult")
     assert not hasattr(core, "AgentTool")
     assert not hasattr(core, "AgentToolResult")
+    assert not hasattr(core, "AfterToolCallResult")
+    assert not hasattr(core, "BeforeToolCallResult")
+    assert not hasattr(core, "AgentLoopConfig")
+    assert not hasattr(core, "AgentState")
+    assert not hasattr(core, "LLMStreamRunner")
     assert not hasattr(core, "ToolCallCoordinator")
     assert "AgentEvent" not in core_exports
     assert "AgentRunResult" not in core_exports
     assert "AgentTool" not in core_exports
     assert "AgentToolResult" not in core_exports
+    assert "AfterToolCallResult" not in core_exports
+    assert "BeforeToolCallResult" not in core_exports
+    assert "AgentLoopConfig" not in core_exports
+    assert "AgentState" not in core_exports
+    assert "LLMStreamRunner" not in core_exports
     assert "ToolCallCoordinator" not in core_exports
     assert AgentRunResult.__module__.startswith("codepilot.protocols")
     assert AgentToolResult.__module__.startswith("codepilot.protocols")
-    assert AfterToolCallResult.__module__ == "codepilot.core.types"
+    assert AfterToolCallResult.__module__ == "codepilot.protocols.tool_hooks"
 
 
 def test_web_interface_package_is_removed() -> None:
@@ -432,7 +703,7 @@ def test_cli_runner_exports_only_run_mode_entrypoints() -> None:
 
 
 def test_cli_run_mode_types_stay_out_of_runtime_contracts() -> None:
-    import codepilot.runtime.contracts as runtime_types
+    import codepilot.runtime.assembly_input as runtime_types
     import codepilot.interfaces.cli.runner as runner
 
     assert hasattr(runner, "RunMode")

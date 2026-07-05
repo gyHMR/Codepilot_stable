@@ -38,6 +38,16 @@ from .context import (
     RepositoryDelta,
     RepositorySnapshot,
 )
+from .commands import (
+    CommandHandler,
+    CommandSource,
+    LifecycleHook,
+    RegisteredCommand,
+    SessionCommandContext,
+    SessionCommandView,
+    SessionLifecycleContext,
+    SessionLifecycleView,
+)
 from .errors import ErrorInfo, ErrorSource, LLMErrorInfo, LLMErrorKind
 from .events import (
     AgentEndEvent,
@@ -94,12 +104,20 @@ from .runs import (
     TaskSummary,
 )
 from .tools import (
+    TASK_CONTROL_COMPLETE_TOOL,
     Tool,
     ToolCall,
     ToolMetadata,
     ToolResult,
     ToolResultStatus,
     ToolRiskLevel,
+)
+from .tool_hooks import (
+    AfterToolCallContext,
+    AfterToolCallResult,
+    BeforeToolCallContext,
+    BeforeToolCallResult,
+    ToolHookContextSnapshot,
 )
 
 
@@ -131,6 +149,15 @@ __all__ = [
     "DroppedContextReason",
     "RepositoryDelta",
     "RepositorySnapshot",
+    # ── 命令与生命周期能力 ──
+    "CommandHandler",
+    "CommandSource",
+    "LifecycleHook",
+    "RegisteredCommand",
+    "SessionCommandContext",
+    "SessionCommandView",
+    "SessionLifecycleContext",
+    "SessionLifecycleView",
     # ── 工具 ──
     "Tool",
     "ToolCall",
@@ -138,6 +165,12 @@ __all__ = [
     "ToolResult",
     "ToolResultStatus",
     "ToolRiskLevel",
+    "TASK_CONTROL_COMPLETE_TOOL",
+    "AfterToolCallContext",
+    "AfterToolCallResult",
+    "BeforeToolCallContext",
+    "BeforeToolCallResult",
+    "ToolHookContextSnapshot",
     # ── LLM ──
     "Api",
     "Cost",

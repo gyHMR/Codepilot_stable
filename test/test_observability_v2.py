@@ -18,7 +18,7 @@ def test_event_recorder_writes_slim_canonical_events(tmp_path: Path) -> None:
             "runId": "run-1",
             "sessionId": "session-1",
             "turnId": 1,
-            "eventId": "legacy-1",
+            "eventId": "raw-1",
             "timestamp": 100,
             "report": {
                 "context_id": "ctx-1",
@@ -38,7 +38,7 @@ def test_event_recorder_writes_slim_canonical_events(tmp_path: Path) -> None:
                         "content": "must not be persisted",
                     }
                 ],
-                "stale_items": ["docs/legacy.md"],
+                "stale_items": ["docs/v1-note.md"],
                 "dropped_items": [{"reason": "budget"}],
                 "retrieved_memory_ids": ["mem-1"],
                 "tokens_by_layer": {"evidence": 120},
@@ -52,7 +52,7 @@ def test_event_recorder_writes_slim_canonical_events(tmp_path: Path) -> None:
 
     assert record["type"] == "context_built"
     assert validate_run_event(record) == []
-    assert record["event_id"] == "legacy-1"
+    assert record["event_id"] == "raw-1"
     assert record["run_id"] == "run-1"
     assert record["turn"] == 1
     assert record["mode"] == "repair"
@@ -85,7 +85,7 @@ def test_event_recorder_redacts_secrets_and_skips_low_value_events(
             "runId": "run-1",
             "sessionId": "session-1",
             "turnId": 1,
-            "eventId": "legacy-turn",
+            "eventId": "raw-turn",
             "timestamp": 100,
         }
     )
@@ -95,7 +95,7 @@ def test_event_recorder_redacts_secrets_and_skips_low_value_events(
             "runId": "run-1",
             "sessionId": "session-1",
             "turnId": 1,
-            "eventId": "legacy-error",
+            "eventId": "raw-error",
             "timestamp": 101,
             "message": "api_key=abc123",
             "api_key": "abc123",
@@ -178,7 +178,7 @@ def test_run_trace_and_summary_are_built_from_canonical_events() -> None:
     assert summary.total_cost == 0.01
 
 
-def test_trace_normalizes_legacy_shapes_even_when_event_names_are_canonical() -> None:
+def test_trace_normalizes_raw_event_shapes_even_when_event_names_are_canonical() -> None:
     events = [
         {
             "type": "memory_retrieved",
@@ -269,3 +269,84 @@ def test_trace_joins_tool_start_args_into_finished_tool_evidence() -> None:
 
     assert evidence.tools[0].args == {"path": "docs/api-contract-v1.md"}
     assert evidence.tools[0].affected_paths == ["docs/api-contract-v1.md"]
+
+
+def test_v2_core_tool_events_normalize_to_observability_records() -> None:
+    import asyncio
+
+    async def run_case() -> None:
+        from codepilot.core.contracts import (
+            AgentLoopInput,
+            AgentLoopLimits,
+            AgentLoopPorts,
+            RunCorrelation,
+        )
+        from codepilot.core.loop import run_agent_loop
+        from codepilot.llm.ports import LLMCompleted, ModelDescriptor
+        from codepilot.observability import event_to_record, summarize_events
+        from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
+        from codepilot.tools.ports import ToolObservation
+
+        class FakeModel:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def stream(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[
+                                ToolCall(
+                                    id="call-read",
+                                    name="read",
+                                    arguments={"path": "README.md"},
+                                )
+                            ]
+                        )
+                    )
+                    return
+                assert isinstance(request.messages[-1], ToolResultMessage)
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text="done")])
+                )
+
+        class FakeTools:
+            def catalog(self):
+                return {"tools": ["read"]}
+
+            async def execute(self, invocation):
+                return ToolObservation(
+                    tool_call_id=invocation.tool_call_id,
+                    name=invocation.name,
+                    status="success",
+                    content=(TextContent(text="body"),),
+                    affected_paths=("README.md",),
+                    workspace_changed=False,
+                )
+
+        outcome = await run_agent_loop(
+            AgentLoopInput(
+                run_id="run-v2",
+                correlation=RunCorrelation(session_id="session-v2"),
+                user_prompt="read file",
+                model=ModelDescriptor(provider="fake", model_id="unit"),
+                limits=AgentLoopLimits(max_model_turns=3),
+            ),
+            AgentLoopPorts(model=FakeModel(), tools=FakeTools()),
+        )
+
+        records = [record for event in outcome.events if (record := event_to_record(event))]
+        summary = summarize_events(records)
+
+        assert summary["event_counts"]["tool_call_started"] == 1
+        assert summary["event_counts"]["tool_call_finished"] == 1
+        tool_started = next(record for record in records if record["type"] == "tool_call_started")
+        tool_finished = next(record for record in records if record["type"] == "tool_call_finished")
+        assert tool_started["args"] == {"path": "README.md"}
+        assert tool_finished["tool_call_id"] == "call-read"
+        assert tool_finished["tool_name"] == "read"
+        assert tool_finished["status"] == "success"
+        assert tool_finished["approved"] is True
+
+    asyncio.run(run_case())

@@ -13,8 +13,8 @@ import sys
 import uuid
 from pathlib import Path
 
-from codepilot.runtime.bootstrap import WorkspaceResourceLoader
-from codepilot.runtime.contracts import CreateAgentSessionOptions
+from codepilot.runtime import SessionOpenIntent
+from codepilot.runtime.configuration import resolve_workspace_session_intent
 
 from .artifacts import EvaluationArtifacts
 from .experiments import (
@@ -25,8 +25,8 @@ from .experiments import (
 )
 from .loader import load_eval_suite
 from .reports import render_comparison_markdown
+from .runner import EvaluationRunner
 from .schema import EvalRunOptions
-from .service import EvaluationService
 
 
 MODULES = ("all", "planning", "context", "memory", "security", "tool")
@@ -95,7 +95,7 @@ def _add_run_args(
 
 
 async def _run_command(args: argparse.Namespace) -> int:
-    service = EvaluationService()
+    runner = EvaluationRunner()
     suite_path = _suite_path(args.module, args.suite_root)
     options = EvalRunOptions(
         fixtures_root=args.fixtures_root,
@@ -106,15 +106,15 @@ async def _run_command(args: argparse.Namespace) -> int:
         session_options=_session_options(args),
     )
     if args.command == "experiment":
-        return await _run_experiment(service, suite_path, options, args)
-    result = await service.run_suite(suite_path, options)
+        return await _run_experiment(runner, suite_path, options, args)
+    result = await runner.run_suite(suite_path, options)
     print(json.dumps(result.summary, ensure_ascii=False, indent=2))
     print(f"Artifacts: {result.artifact_dir}")
     return 0 if all(item.passed for item in result.results) else 1
 
 
 async def _run_experiment(
-    service: EvaluationService,
+    runner: EvaluationRunner,
     suite_path: Path,
     options: EvalRunOptions,
     args: argparse.Namespace,
@@ -135,7 +135,7 @@ async def _run_experiment(
                 session_options=options.session_options,
                 runtime_overrides=overrides,
             )
-            result = await service.run_suite(suite_path, repeat_options)
+            result = await runner.run_suite(suite_path, repeat_options)
             variant_dirs.setdefault(variant, []).append(Path(result.artifact_dir))
     comparison = aggregate_experiment_comparison(
         module=args.module,
@@ -206,29 +206,12 @@ def _load_ab_cases(args: argparse.Namespace) -> list[dict]:
     ]
 
 
-def _session_options(args: argparse.Namespace) -> CreateAgentSessionOptions:
-    if bool(args.provider) != bool(args.model_id):
-        raise ValueError("--provider and --model must be provided together")
-    if args.provider and args.model_id:
-        return CreateAgentSessionOptions(
-            workspace_dir=Path.cwd(),
-            provider=args.provider,
-            model_id=args.model_id,
-        )
-    resources = WorkspaceResourceLoader(Path.cwd()).load()
-    if resources.model is not None:
-        return CreateAgentSessionOptions(
-            workspace_dir=Path.cwd(),
-            model=resources.model.to_model(),
-            get_api_key=resources.model.build_api_key_resolver(),
-        )
-    if resources.settings.provider and resources.settings.model_id:
-        return CreateAgentSessionOptions(
-            workspace_dir=Path.cwd(),
-            provider=resources.settings.provider,
-            model_id=resources.settings.model_id,
-        )
-    raise ValueError("No project model config found; provide --provider and --model")
+def _session_options(args: argparse.Namespace) -> SessionOpenIntent:
+    return resolve_workspace_session_intent(
+        Path.cwd(),
+        provider=args.provider,
+        model_id=args.model_id,
+    )
 
 
 def _suite_path(module: str, root: Path) -> Path:

@@ -23,7 +23,8 @@ from codepilot.llm.models import get_model
 from codepilot.protocols import Model
 
 from .config import RuntimeInputs
-from codepilot.runtime.contracts import ConfigValueSource, CreateAgentSessionOptions
+from codepilot.runtime.assembly_types import ConfigValueSource
+from codepilot.runtime.assembly_input import RuntimeAssemblyIntent
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,7 @@ class ResolvedModel:
 
 
 def resolve_model(
-    options: CreateAgentSessionOptions,
+    options: RuntimeAssemblyIntent,
     inputs: RuntimeInputs,
 ) -> ResolvedModel:
     """按优先级从多种来源解析模型配置。
@@ -83,9 +84,9 @@ def resolve_model(
         )
 
     # 优先级 3：恢复的会话元数据
-    restored_meta = inputs.restored_meta or {}
-    provider = restored_meta.get("provider")
-    model_id = restored_meta.get("model_id")
+    restored_meta = inputs.restored_meta
+    provider = restored_meta.provider if restored_meta is not None else None
+    model_id = restored_meta.model_id if restored_meta is not None else None
     if isinstance(provider, str) and isinstance(model_id, str):
         return ResolvedModel(
             model=get_model(provider, model_id),

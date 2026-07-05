@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 # 新手导读：runtime 组装主入口：把配置、模型、工具、扩展、prompt 和 session 选项串成 RuntimeAssembly。
-# 关注点：想理解项目启动流程，先从 create_agent_session() 的步骤读起。
+# 关注点：想理解项目启动流程，先从 assemble_runtime() 的步骤读起。
 
 """
 Runtime 装配模块。
 
-负责把上层友好的 CreateAgentSessionOptions 装配成一次会话创建所需的
-RuntimeAssembly 和 AgentSession。
+负责把上层友好的 RuntimeAssemblyIntent 装配成一次会话创建所需的
+RuntimeAssembly 和 SessionController。
 
 装配流程：
 1) 加载运行时输入（工作区资源、会话恢复元数据）
@@ -17,7 +17,7 @@ RuntimeAssembly 和 AgentSession。
 5) 构建运行时上下文（仓库信息、提示词准则等）
 6) 构建系统提示词
 7) 组装钩子（before/after tool call、生命周期钩子）
-8) 构造最终的 AgentSessionOptions 并创建 AgentSession
+8) 构造最终的 SessionOptions 并创建 SessionController
 9) 保存装配产物（RuntimeAssembly）
 """
 
@@ -26,39 +26,34 @@ import os
 
 from codepilot.core.message_conversion import convert_to_llm
 from codepilot.llm.env_api_keys import get_env_api_key_name
-from codepilot.sessions.session import AgentSession
+from codepilot.sessions.controller import SessionController
+from codepilot.sessions.controller import create_session_controller as _create_session_controller
+from codepilot.sessions.repository import build_repository_bootstrap
+from codepilot.sessions.types import SessionOptions
 
 from .bootstrap.config import RuntimeInputs, load_runtime_inputs, resolve_runtime_config
-from .bootstrap.context import build_runtime_context, build_repository_bootstrap
+from .bootstrap.context import build_runtime_context
 from .bootstrap.hook_pipeline import compose_after_tool_call, compose_before_tool_call, compose_lifecycle_hooks
 from .bootstrap.model_resolver import ResolvedModel, resolve_model
 from .bootstrap.prompt import build_runtime_system_prompt
 from .bootstrap.tool_assembler import assemble_tools
-from .contracts import (
-    AgentSessionOptions,
+from .assembly_types import (
     CapabilityCatalog,
     ConfigValueSource,
-    CreateAgentSessionOptions,
     ResolvedConfigValue,
     ResolvedRuntimeProfile,
     RuntimeAssembly,
     RuntimeDiagnostic,
 )
+from .assembly_input import RuntimeAssemblyIntent
 
 
 class UnknownRuntimeConfigKeyError(KeyError):
     """请求解释的配置项不属于 Runtime 配置。"""
 
 
-def create_agent_session(options: CreateAgentSessionOptions) -> AgentSession:
-    """创建一个完整装配的 AgentSession。"""
-
-    session, _ = assemble_runtime(options)
-    return session
-
-
-def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, RuntimeAssembly]:
-    """完整装配流程，返回 AgentSession 和 RuntimeAssembly。
+def assemble_runtime(options: RuntimeAssemblyIntent) -> tuple[SessionController, RuntimeAssembly]:
+    """完整装配流程，返回 SessionController 和 RuntimeAssembly。
 
     装配流程：
     1. load_runtime_inputs: 加载工作区资源和会话恢复元数据。
@@ -74,7 +69,7 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
         options: 友好的创建会话选项。
 
     Returns:
-        (AgentSession, RuntimeAssembly) 元组。
+        (SessionController, RuntimeAssembly) 元组。
     """
     diagnostics: list[RuntimeDiagnostic] = []
 
@@ -154,12 +149,11 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
         assembled_tools.loaded_extensions.after_prompt_hooks,
     )
 
-    # 步骤 8：构造最终的 AgentSessionOptions
-    session_options = AgentSessionOptions(
+    # 步骤 8：构造最终的 SessionOptions
+    session_options = SessionOptions(
         model=resolved_model.model,
         workspace_dir=inputs.workspace,
         system_prompt=system_prompt,
-        tools=assembled_tools.tools,
         session_id=options.session_id,
         messages=options.messages,
         thinking_level=config.thinking_level,
@@ -196,10 +190,10 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
             **assembled_tools.loaded_extensions.commands,
         },
     )
-    session = AgentSession(session_options)
+    controller = _create_session_controller(session_options)
     effective_session_options = replace(
         session_options,
-        session_id=session.session_id,
+        session_id=controller.session_id,
     )
     assembly = RuntimeAssembly(
         session_options=effective_session_options,
@@ -210,11 +204,11 @@ def assemble_runtime(options: CreateAgentSessionOptions) -> tuple[AgentSession, 
         diagnostics=diagnostics,
     )
 
-    return session, assembly
+    return controller, assembly
 
 
 def _resolve_credential_source(
-    options: CreateAgentSessionOptions,
+    options: RuntimeAssemblyIntent,
     inputs: RuntimeInputs,
     resolved_model: ResolvedModel,
 ) -> tuple[str, str | None]:
@@ -251,7 +245,7 @@ def _resolve_credential_source(
 
 
 def explain_runtime_config(
-    options: CreateAgentSessionOptions,
+    options: RuntimeAssemblyIntent,
     key: str,
 ) -> ResolvedConfigValue:
     """解析单个配置项的最终值和来源，供 CLI 等接口展示。"""
