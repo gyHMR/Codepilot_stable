@@ -271,9 +271,9 @@ def test_unknown_external_tool_metadata_is_conservative() -> None:
 def test_read_only_tool_assembly_filters_by_metadata(tmp_path: Path) -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
-    from codepilot.runtime.assembly import RuntimeConfig
-    from codepilot.runtime.assembly import assemble_tools
-    from codepilot.runtime.assembly import RuntimeAssemblyIntent
+    from codepilot.runtime.assemble import RuntimeConfig
+    from codepilot.runtime.assemble import assemble_tools
+    from codepilot.runtime.assemble import RuntimeAssemblyIntent
 
     async def execute(tool_call_id, params, signal=None, on_update=None):
         _ = tool_call_id, params, signal, on_update
@@ -325,9 +325,9 @@ def test_read_only_tool_assembly_filters_by_metadata(tmp_path: Path) -> None:
 
 
 def test_tool_assembly_exposes_skill_loader_tool(tmp_path: Path) -> None:
-    from codepilot.runtime.assembly import RuntimeConfig
-    from codepilot.runtime.assembly import assemble_tools
-    from codepilot.runtime.assembly import RuntimeAssemblyIntent
+    from codepilot.runtime.assemble import RuntimeConfig
+    from codepilot.runtime.assemble import assemble_tools
+    from codepilot.runtime.assemble import RuntimeAssemblyIntent
     from codepilot.tools.authoring import ToolRuntimeRequest
 
     skill_file = tmp_path / "triage.md"

@@ -13,7 +13,7 @@ from typing import Any, Mapping
 from codepilot.sessions.contracts import SessionView
 
 from .approvals import ApprovalView
-from .assembly import RuntimeAssemblyIntent
+from .assemble import RuntimeAssemblyIntent
 from .views import CommandDescriptor, SessionStatus
 
 

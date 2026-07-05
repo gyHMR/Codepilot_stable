@@ -5,7 +5,9 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
 
-from codepilot.protocols import AssistantMessage, Context, Message, Model, SimpleStreamOptions
+from codepilot.protocols import AssistantMessage, Context, Message, Model
+
+from .stream import SimpleStreamOptions
 
 
 ProviderSimpleStreamFn = Callable[

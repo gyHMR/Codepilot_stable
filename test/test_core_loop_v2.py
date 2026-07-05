@@ -264,6 +264,54 @@ def test_core_loop_feeds_tool_observation_back_into_model_until_final_answer() -
     asyncio.run(run_case())
 
 
+def test_convert_to_llm_drops_orphan_tool_results_before_provider_call() -> None:
+    from codepilot.core.model_step import convert_to_llm
+    from codepilot.protocols import (
+        AssistantMessage,
+        TextContent,
+        ToolCall,
+        ToolResultMessage,
+        UserMessage,
+    )
+
+    messages = [
+        UserMessage(content="continue"),
+        ToolResultMessage(
+            tool_call_id="missing_call",
+            tool_name="read_file",
+            content=[TextContent(text="orphan output")],
+        ),
+        AssistantMessage(
+            content=[
+                TextContent(text="I can continue."),
+                ToolCall(id="kept_call", name="read_file", arguments={"path": "README.md"}),
+                ToolCall(id="dropped_call", name="read_file", arguments={"path": "old.md"}),
+            ],
+            stop_reason="toolUse",
+        ),
+        ToolResultMessage(
+            tool_call_id="kept_call",
+            tool_name="read_file",
+            content=[TextContent(text="paired output")],
+        ),
+    ]
+
+    converted = convert_to_llm(messages)
+
+    assert not any(
+        isinstance(message, ToolResultMessage)
+        and message.tool_call_id == "missing_call"
+        for message in converted
+    )
+    assistant = next(
+        message for message in converted if isinstance(message, AssistantMessage)
+    )
+    tool_calls = [block for block in assistant.content if isinstance(block, ToolCall)]
+    assert [call.id for call in tool_calls] == ["kept_call"]
+    assert isinstance(converted[-1], ToolResultMessage)
+    assert converted[-1].tool_call_id == "kept_call"
+
+
 def test_core_loop_stops_before_repeated_tool_call_execution() -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import (

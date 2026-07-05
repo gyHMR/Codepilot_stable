@@ -384,7 +384,7 @@ async def apply_session_command(
     arg = rest.strip()
 
     if session is None:
-        return _simple_command(session_id, intent)
+        raise ValueError("Session command handling requires SessionRuntime")
 
     if cmd == "/help":
         return _record(
@@ -618,21 +618,6 @@ async def apply_session_command(
         )
 
     return SessionCommandRecord(session_id=session_id, command=text, handled=False)
-
-
-def _simple_command(session_id: str, intent: SessionCommandIntent) -> SessionCommandRecord:
-    if intent.text == "/status":
-        return _record(
-            session_id,
-            intent.text,
-            output_lines=[f"session {session_id} is ready"],
-        )
-    return SessionCommandRecord(
-        session_id=session_id,
-        command=intent.text,
-        handled=False,
-        output_lines=(f"unknown command: {intent.text}",),
-    )
 
 
 def _context_command(

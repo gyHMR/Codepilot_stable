@@ -80,8 +80,8 @@ def test_old_openai_standard_alias_is_removed() -> None:
 
 def test_runtime_assembly_explicitly_registers_builtin_providers(tmp_path) -> None:
     from codepilot.llm.registry import clear_api_providers, get_api_provider
-    from codepilot.runtime.assembly import assemble_runtime
-    from codepilot.runtime.assembly import RuntimeAssemblyIntent
+    from codepilot.runtime.assemble import assemble_runtime
+    from codepilot.runtime.assemble import RuntimeAssemblyIntent
 
     clear_api_providers()
     assert get_api_provider("openai-compatible") is None

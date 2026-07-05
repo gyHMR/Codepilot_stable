@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-# 新手导读：llm.py 定义 Model、能力、上下文窗口和流式选项等模型协议。
-# 关注点：llm/provider 和 runtime 都依赖这些稳定字段。
+# 新手导读：llm.py 定义跨层共享的模型配置、能力、用量和费用协议。
+# 关注点：provider stream 事件和调用选项属于 llm 内部，不放在 protocols。
 
 """
 LLM 相关类型定义。
@@ -9,19 +9,11 @@ LLM 相关类型定义。
 定义了与大语言模型交互所需的核心类型：
 - 模型配置：Model、ModelCapabilities
 - 用量与费用：Usage、Cost
-- 流式选项：StreamOptions、SimpleStreamOptions
-- 流式事件：LLMStreamEvent
-- 枚举类型：StopReason、ThinkingLevel、LLMStreamEventType
+- 枚举类型：StopReason、ThinkingLevel
 """
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
-
-from .errors import LLMErrorInfo
-
-# 仅在类型检查时导入，避免运行时循环引用
-if TYPE_CHECKING:
-    from .conversation import AssistantMessage, ToolCall
+from typing import Literal, cast
 
 
 # ── 类型别名 ────────────────────────────────────────────────────
@@ -40,23 +32,6 @@ ThinkingLevel = Literal["minimal", "low", "medium", "high", "xhigh"]
 # 模型输入类型：provider 能接收的内容模态。
 ModelInput = Literal["text", "image"]
 _MODEL_INPUT_TYPES = frozenset({"text", "image"})
-
-# LLM 流式事件类型：流式响应过程中可能产生的各类事件
-LLMStreamEventType = Literal[
-    "start",             # 流开始
-    "text_start",        # 文本块开始
-    "text_delta",        # 文本增量
-    "text_end",          # 文本块结束
-    "thinking_start",    # 思考块开始
-    "thinking_delta",    # 思考增量
-    "thinking_end",      # 思考块结束
-    "toolcall_start",    # 工具调用块开始
-    "toolcall_delta",    # 工具调用参数增量
-    "toolcall_end",      # 工具调用块结束
-    "done",              # 流正常结束
-    "error",             # 流异常结束
-]
-
 
 @dataclass
 class Cost:
@@ -307,84 +282,13 @@ def _non_negative_float(value: object, *, field_name: str) -> float:
     return amount
 
 
-@dataclass
-class StreamOptions:
-    """流式调用的通用选项。
-
-    Attributes:
-        temperature: 采样温度（0.0 ~ 1.0），控制输出的随机性。
-        max_tokens: 最大输出 token 数。
-        api_key: API Key（覆盖环境变量）。
-        headers: 调用级自定义请求头。
-        timeout_seconds: 请求超时时间（秒）。
-        session_id: 会话 ID（透传到 provider 用于关联日志）。
-    """
-
-    temperature: float | None = None
-    max_tokens: int | None = None
-    api_key: str | None = None
-    headers: dict[str, str] | None = None
-    timeout_seconds: float | None = None
-    session_id: str | None = None
-
-
-@dataclass
-class SimpleStreamOptions(StreamOptions):
-    """简化版流式调用选项。
-
-    继承自 StreamOptions，额外提供 reasoning 快捷设置。
-
-    Attributes:
-        reasoning: 推理级别（如 "medium"、"high"），None 表示关闭推理。
-    """
-
-    reasoning: ThinkingLevel | None = None
-
-
-class LLMStreamEvent(TypedDict, total=False):
-    """Provider 归一化后的流式事件。
-
-    各 provider 将自己的 SSE 事件转换为此统一格式，
-    上层消费者无需关心底层 API 差异。
-
-    Attributes:
-        type: 事件类型（见 LLMStreamEventType）。
-        partial: 当前的增量 AssistantMessage（包含最新状态）。
-        contentIndex: 当前内容块在消息中的索引。
-        delta: 本次增量的文本片段。
-        content: 内容块完成时的完整文本。
-        toolCall: 工具调用完成时的 ToolCall 对象。
-        reason: done/error 事件的停止原因。
-        message: done 事件的最终完整消息。
-        error: error 事件的错误消息对象。
-        errorInfo: error 事件的结构化错误信息。
-        raw: provider 原始事件数据（用于调试）。
-    """
-
-    type: LLMStreamEventType
-    partial: AssistantMessage
-    contentIndex: int
-    delta: str
-    content: str
-    toolCall: ToolCall
-    reason: str
-    message: AssistantMessage
-    error: AssistantMessage
-    errorInfo: LLMErrorInfo
-    raw: Any
-
-
 __all__ = [
     "Api",
     "Cost",
-    "LLMStreamEvent",
-    "LLMStreamEventType",
     "Model",
     "ModelCapabilities",
     "Provider",
-    "SimpleStreamOptions",
     "StopReason",
-    "StreamOptions",
     "ThinkingLevel",
     "Usage",
 ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -20,6 +21,7 @@ from codepilot.protocols import (
     TextContent,
     ThinkingContent,
     Tool,
+    ToolCall,
     ToolResultMessage,
     Usage,
     UserMessage,
@@ -333,13 +335,76 @@ def _process_tool_result(msg: ToolResultMessage, *, max_chars: int) -> ToolResul
 def _ensure_valid_sequence(messages: list[Message]) -> list[Message]:
     if not messages:
         return messages
+    remaining_tool_results = Counter(
+        message.tool_call_id
+        for message in messages
+        if isinstance(message, ToolResultMessage) and message.tool_call_id
+    )
+    pending_tool_calls: set[str] = set()
     result: list[Message] = []
     for msg in messages:
-        if not result:
+        if isinstance(msg, ToolResultMessage):
+            if msg.tool_call_id:
+                remaining_tool_results[msg.tool_call_id] -= 1
+            if msg.tool_call_id not in pending_tool_calls:
+                continue
+            pending_tool_calls.remove(msg.tool_call_id)
             result.append(msg)
             continue
-        prev = result[-1]
-        if isinstance(prev, AssistantMessage) and isinstance(msg, AssistantMessage):
-            continue
+        if isinstance(msg, AssistantMessage):
+            msg = _assistant_with_provider_safe_tool_calls(
+                msg,
+                remaining_tool_results=remaining_tool_results,
+            )
+            tool_call_ids = [
+                block.id
+                for block in msg.content
+                if isinstance(block, ToolCall) and block.id
+            ]
+            if not msg.content:
+                continue
+            if (
+                result
+                and isinstance(result[-1], AssistantMessage)
+                and not tool_call_ids
+            ):
+                continue
+            pending_tool_calls.update(tool_call_ids)
         result.append(msg)
     return result
+
+
+def _assistant_with_provider_safe_tool_calls(
+    msg: AssistantMessage,
+    *,
+    remaining_tool_results: Counter[str],
+) -> AssistantMessage:
+    tool_calls = [block for block in msg.content if isinstance(block, ToolCall)]
+    if not tool_calls:
+        return msg
+
+    content = [
+        block
+        for block in msg.content
+        if not isinstance(block, ToolCall) or remaining_tool_results[block.id] > 0
+    ]
+    if len(content) == len(msg.content):
+        return msg
+    return AssistantMessage(
+        role=msg.role,
+        content=content,
+        api=msg.api,
+        provider=msg.provider,
+        model=msg.model,
+        usage=msg.usage,
+        stop_reason=(
+            msg.stop_reason
+            if any(isinstance(block, ToolCall) for block in content)
+            else "stop"
+        ),
+        response_id=msg.response_id,
+        error_message=msg.error_message,
+        error_info=msg.error_info,
+        timestamp=msg.timestamp,
+        metadata=dict(msg.metadata),
+    )

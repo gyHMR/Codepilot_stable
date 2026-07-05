@@ -18,13 +18,16 @@ from typing import Any
 import httpx
 
 from ..catalog import get_env_api_key
-from ..stream import classify_llm_error
-from ..stream import AssistantMessageEventStream, llm_event
+from ..stream import (
+    AssistantMessageEventStream,
+    SimpleStreamOptions,
+    StreamOptions,
+    classify_llm_error,
+    llm_event,
+)
 from codepilot.protocols import (
     Context,
     Model,
-    SimpleStreamOptions,
-    StreamOptions,
     TextContent,
     ThinkingContent,
     ToolCall,

@@ -57,7 +57,7 @@ class RuntimeGateway:
         self._active_runs = ActiveRunRegistry()
 
     def open_session(self, intent: _SessionOpenIntent) -> SessionRef:
-        from .assembly import assemble_runtime
+        from .assemble import assemble_runtime
 
         controller, assembly = assemble_runtime(_to_runtime_assembly_intent(intent))
         session_id = controller.session_id

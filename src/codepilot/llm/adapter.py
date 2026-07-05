@@ -11,7 +11,6 @@ from codepilot.protocols import (
     LLMErrorInfo,
     Message,
     Model,
-    SimpleStreamOptions,
 )
 
 from .ports import (
@@ -29,6 +28,7 @@ from .provider_types import (
     ProviderSimpleStreamFn,
 )
 from .registry import complete_simple, stream_simple
+from .stream import SimpleStreamOptions
 
 
 class ProviderModelPort(ModelPort):

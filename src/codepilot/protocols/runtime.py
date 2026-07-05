@@ -20,7 +20,6 @@ from typing import Any, Awaitable, Callable, Literal, TypedDict, cast
 
 from .errors import ErrorInfo
 from .conversation import AssistantMessage, Message, ToolResultMessage, UserMessage
-from .llm import LLMStreamEvent
 from .tools import ToolResult, ToolResultStatus
 
 
@@ -622,7 +621,7 @@ class MessageStartEvent(AgentEventBase):
 class MessageUpdateEvent(AgentEventBase):
     type: Literal["message_update"]
     message: Message
-    assistantMessageEvent: LLMStreamEvent
+    assistantMessageEvent: dict[str, Any]
 
 
 class MessageEndEvent(AgentEventBase):

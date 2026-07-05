@@ -45,14 +45,35 @@ def test_session_controller_does_not_expose_unused_state_queries() -> None:
     assert not hasattr(SessionController, "from_runtime_session")
 
 
-def test_session_controller_prepares_and_commits_run_without_exposing_live_session() -> None:
+def test_session_controller_prepares_and_commits_run_without_exposing_live_session(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import AgentLoopOutcome
-        from codepilot.protocols import AgentRunCounters, AssistantMessage, TextContent
+        from codepilot.protocols import AgentRunCounters, AssistantMessage, Model, TextContent
+        from codepilot.sessions.contracts import SessionOptions
         from codepilot.sessions.contracts import SessionRunIntent
-        from codepilot.sessions.controller import SessionController
+        from codepilot.sessions.controller import _bind_session_runtime
+        from codepilot.sessions.prepare import SessionRuntime
 
-        controller = SessionController(session_id="s1")
+        session = SessionRuntime(
+            SessionOptions(
+                model=Model(
+                    id="session-v2",
+                    name="Session V2",
+                    api="unit-test",
+                    provider="unit-test",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=4000,
+                    max_tokens=500,
+                ),
+                workspace_dir=tmp_path,
+                session_id="s1",
+                memory_enabled=False,
+                task_control_enabled=False,
+            )
+        )
+        controller = _bind_session_runtime(session)
 
         prepared = await controller.prepare_run(SessionRunIntent(text="  hello  "))
         assert prepared.session_id == "s1"
@@ -77,23 +98,56 @@ def test_session_controller_prepares_and_commits_run_without_exposing_live_sessi
         assert controller.describe().message_count == 2
         assert not hasattr(record, "store")
         assert not hasattr(record, "agent")
+        session._close()
 
     asyncio.run(run_case())
 
 
-def test_session_controller_applies_command_as_session_intent() -> None:
+def test_session_controller_applies_command_as_session_intent(tmp_path) -> None:
     async def run_case() -> None:
+        from codepilot.protocols import Model
+        from codepilot.sessions.contracts import SessionOptions
         from codepilot.sessions.contracts import SessionCommandIntent
-        from codepilot.sessions.controller import SessionController
+        from codepilot.sessions.controller import _bind_session_runtime
+        from codepilot.sessions.prepare import SessionRuntime
 
-        controller = SessionController(session_id="s1")
+        session = SessionRuntime(
+            SessionOptions(
+                model=Model(
+                    id="session-v2",
+                    name="Session V2",
+                    api="unit-test",
+                    provider="unit-test",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=4000,
+                    max_tokens=500,
+                ),
+                workspace_dir=tmp_path,
+                session_id="s1",
+                memory_enabled=False,
+                task_control_enabled=False,
+            )
+        )
+        controller = _bind_session_runtime(session)
         record = await controller.apply_command(SessionCommandIntent(text="/status"))
 
         assert record.handled is True
         assert record.output_lines
         assert record.command == "/status"
+        session._close()
 
     asyncio.run(run_case())
+
+
+def test_session_controller_cannot_be_created_without_runtime_session() -> None:
+    import pytest
+
+    from codepilot.sessions.controller import SessionController
+
+    with pytest.raises(ValueError, match="SessionController requires SessionRuntime"):
+        SessionController(session_id="s1")
 
 
 def test_session_controller_drives_real_session_lifecycle(tmp_path) -> None:

@@ -14,13 +14,11 @@ api -> provider 实现的注册中心。
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
-from .stream import AssistantMessageEventStream
+from .stream import AssistantMessageEventStream, SimpleStreamOptions, StreamOptions
 from codepilot.protocols import (
     AssistantMessage,
     Context,
     Model,
-    SimpleStreamOptions,
-    StreamOptions,
 )
 
 StreamFn = Callable[[Model, Context, StreamOptions | None], AssistantMessageEventStream]

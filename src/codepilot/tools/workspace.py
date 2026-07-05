@@ -67,8 +67,8 @@ def _sha256_file(path: Path) -> str:
 
 # ── Shell execution safety ─────────────────────────────────────────
 
-# Shell 命令分类：验证型/修改型/高风险/未知
-ShellCommandClass = Literal["verification", "mutation", "high_risk", "unknown"]
+# Shell 命令分类：验证型/只读型/修改型/高风险/未知
+ShellCommandClass = Literal["verification", "read_only", "mutation", "high_risk", "unknown"]
 
 _HIGH_RISK_PATTERNS = (
     r"\brm\s+-(?:[a-z]*r[a-z]*f|[a-z]*f[a-z]*r)\b",
@@ -104,6 +104,21 @@ _VERIFICATION_PREFIXES = (
     "npm run test",
     "npm run lint",
     "npm run build",
+)
+_READ_ONLY_PREFIXES = (
+    "dir",
+    "type",
+    "where",
+    "ver",
+    "python --version",
+    "python -v",
+    "py --version",
+    "py -v",
+    "pip --version",
+    "node --version",
+    "npm --version",
+    "git branch",
+    "git remote",
 )
 _MUTATION_PREFIXES = (
     "ruff format",
@@ -168,9 +183,15 @@ def classify_shell_command(command: str) -> ShellCommandClass:
     if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _HIGH_RISK_PATTERNS):
         return "high_risk"
     first = _first_command(normalized)
+    if _has_shell_redirection(first):
+        return "unknown"
     if any(_matches_command_prefix(first, prefix) for prefix in _VERIFICATION_PREFIXES):
         return "verification"
+    if any(_matches_command_prefix(first, prefix) for prefix in _READ_ONLY_PREFIXES):
+        return "read_only"
     if any(_matches_command_prefix(first, prefix) for prefix in _MUTATION_PREFIXES):
+        return "mutation"
+    if _is_python_workspace_script(first):
         return "mutation"
     return "unknown"
 
@@ -178,6 +199,10 @@ def classify_shell_command(command: str) -> ShellCommandClass:
 def _matches_command_prefix(command: str, prefix: str) -> bool:
     prefix = " ".join(prefix.strip().lower().split())
     return command == prefix or command.startswith(prefix + " ")
+
+
+def _has_shell_redirection(command: str) -> bool:
+    return bool(re.search(r"(?:>>?|<)", command))
 
 
 def build_shell_environment(extra_allowed: tuple[str, ...] = ()) -> dict[str, str]:
@@ -218,14 +243,27 @@ def _first_command(command: str) -> str:
     if not segments:
         return ""
     if len(segments) > 1:
-        verification_segments = [
-            segment for segment in segments if not _is_safe_env_setup(segment)
+        command_segments = [
+            segment
+            for segment in segments
+            if not _is_safe_env_setup(segment) and not _is_safe_directory_setup(segment)
         ]
-        if verification_segments and all(
-            classify_shell_command(segment) == "verification"
-            for segment in verification_segments
-        ):
-            return verification_segments[0]
+        if command_segments:
+            classes = [classify_shell_command(segment) for segment in command_segments]
+            if all(item in {"verification", "read_only", "mutation"} for item in classes):
+                if "mutation" in classes:
+                    return next(
+                        segment
+                        for segment, item in zip(command_segments, classes)
+                        if item == "mutation"
+                    )
+                if "verification" in classes:
+                    return next(
+                        segment
+                        for segment, item in zip(command_segments, classes)
+                        if item == "verification"
+                    )
+                return command_segments[0]
         return "<compound>"
     return segments[0]
 
@@ -237,6 +275,46 @@ def _is_safe_env_setup(command: str) -> bool:
         or re.fullmatch(r"\$env:pythonpath\s*=.*", normalized)
         or re.fullmatch(r"export\s+pythonpath=.*", normalized)
     )
+
+
+def _is_safe_directory_setup(command: str) -> bool:
+    target = _directory_setup_target(command)
+    return target is not None and _is_safe_relative_shell_path(target)
+
+
+def _directory_setup_target(command: str) -> str | None:
+    normalized = " ".join(command.strip().lower().split())
+    match = re.fullmatch(r"(?:cd|chdir|pushd)\s+(?:/d\s+)?(.+)", normalized)
+    if match is None:
+        return None
+    return _strip_shell_quotes(match.group(1))
+
+
+def _is_python_workspace_script(command: str) -> bool:
+    normalized = " ".join(command.strip().lower().split())
+    match = re.fullmatch(r"(?:python|python3|py)\s+([^\s]+\.py)(?:\s+.*)?", normalized)
+    if match is None:
+        return False
+    return _is_safe_relative_shell_path(_strip_shell_quotes(match.group(1)))
+
+
+def _strip_shell_quotes(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1].strip()
+    return text
+
+
+def _is_safe_relative_shell_path(value: str) -> bool:
+    text = value.strip().replace("\\", "/")
+    if not text or text.startswith(("/", "~")):
+        return False
+    if re.match(r"^[a-z]:", text):
+        return False
+    if any(marker in text for marker in ("$", "%", "`", "|", "&", ";", "<", ">")):
+        return False
+    parts = [part for part in text.split("/") if part]
+    return bool(parts) and ".." not in parts
 
 
 __all__ = [

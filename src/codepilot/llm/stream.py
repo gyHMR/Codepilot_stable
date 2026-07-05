@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Coroutine
-from typing import Any, AsyncIterator, Optional, cast
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Literal, Optional, TypedDict, cast
 
 import httpx
 
@@ -27,9 +28,9 @@ from codepilot.protocols import (
     AssistantMessage,
     LLMErrorInfo,
     LLMErrorKind,
-    LLMStreamEvent,
-    LLMStreamEventType,
     Model,
+    ThinkingLevel,
+    ToolCall,
 )
 
 from .estimation import (
@@ -45,6 +46,51 @@ from .estimation import (
 
 # 哨兵对象：标记事件流结束
 _SENTINEL = object()
+
+
+LLMStreamEventType = Literal[
+    "start",
+    "text_start",
+    "text_delta",
+    "text_end",
+    "thinking_start",
+    "thinking_delta",
+    "thinking_end",
+    "toolcall_start",
+    "toolcall_delta",
+    "toolcall_end",
+    "done",
+    "error",
+]
+
+
+@dataclass
+class StreamOptions:
+    temperature: float | None = None
+    max_tokens: int | None = None
+    api_key: str | None = None
+    headers: dict[str, str] | None = None
+    timeout_seconds: float | None = None
+    session_id: str | None = None
+
+
+@dataclass
+class SimpleStreamOptions(StreamOptions):
+    reasoning: ThinkingLevel | None = None
+
+
+class LLMStreamEvent(TypedDict, total=False):
+    type: LLMStreamEventType
+    partial: AssistantMessage
+    contentIndex: int
+    delta: str
+    content: str
+    toolCall: ToolCall
+    reason: str
+    message: AssistantMessage
+    error: AssistantMessage
+    errorInfo: LLMErrorInfo
+    raw: Any
 
 
 def llm_event(event_type: LLMStreamEventType, **payload: object) -> LLMStreamEvent:
@@ -214,6 +260,10 @@ __all__ = [
     "AssistantMessageEventStream",
     "CHARS_PER_TOKEN",
     "IMAGE_TOKEN_ESTIMATE",
+    "LLMStreamEvent",
+    "LLMStreamEventType",
+    "SimpleStreamOptions",
+    "StreamOptions",
     "TOOL_SCHEMA_TOKEN_ESTIMATE",
     "classify_llm_error",
     "estimate_context_tokens",

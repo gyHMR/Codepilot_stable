@@ -148,9 +148,13 @@ class PermissionPolicy:
                 return ToolDecision("deny", "read_only_mode", details)
             if classification == "verification" and self.mode == "workspace-write":
                 return ToolDecision("allow", "verification_command", details)
+            if classification == "read_only" and self.mode == "workspace-write":
+                return ToolDecision("allow", "safe_read_only_command", details)
+            if classification == "mutation" and self.mode == "workspace-write":
+                return ToolDecision("allow", "workspace_mutation_command", details)
             if self.mode == "ask":
                 return ToolDecision("approval_required", "ask_mode", details)
-            if classification in {"unknown", "mutation"}:
+            if classification == "unknown":
                 return ToolDecision(
                     "approval_required",
                     f"{classification}_shell_command",

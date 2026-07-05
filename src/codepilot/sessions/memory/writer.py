@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from codepilot.protocols import AgentRunResult, ToolResultMessage
+from codepilot.protocols import AgentRunResult
 
 from .experience import ExperienceExtractor, MemoryConsolidator, memory_key_for_text
 from .files import sanitize_memory_text
@@ -104,15 +104,6 @@ class MemoryWriter:
             source=source,
         )
         return MemoryConsolidator(self.store).upsert_project_record(record)
-
-    def observe_tool_result(
-        self,
-        _message: ToolResultMessage,
-        *,
-        run_id: str | None = None,
-    ) -> list[MemoryRecord]:
-        _ = run_id
-        return []
 
     def finalize_run(self, result: AgentRunResult) -> list[MemoryRecord]:
         extractor = ExperienceExtractor()

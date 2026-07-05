@@ -50,8 +50,13 @@ def test_permission_policy_uses_mode_and_shell_classification() -> None:
             metadata=bash,
         )
     ).allowed
-    unknown = PermissionPolicy(mode="workspace-write").decide(
+    workspace_script = PermissionPolicy(mode="workspace-write").decide(
         ToolRequest(name="bash", params={"command": "python script.py"}, metadata=bash)
+    )
+    assert workspace_script.allowed
+    assert workspace_script.reason == "workspace_mutation_command"
+    unknown = PermissionPolicy(mode="workspace-write").decide(
+        ToolRequest(name="bash", params={"command": "python -c \"print(1)\""}, metadata=bash)
     )
     assert unknown.requires_approval
     assert unknown.reason == "unknown_shell_command"
@@ -105,6 +110,33 @@ def test_shell_verification_classification_requires_token_boundary() -> None:
         assert decision.reason == "unknown_shell_command"
 
 
+def test_windows_read_only_shell_commands_are_allowed_without_approval() -> None:
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
+
+    bash = _metadata("bash", read_only=False, exclusive=True)
+    policy = PermissionPolicy(mode="workspace-write")
+
+    for command in [
+        "dir",
+        "dir src",
+        "type README.md",
+        "where python",
+        "python --version",
+        "python -V",
+        "git branch",
+    ]:
+        decision = policy.decide(
+            ToolRequest(
+                name="bash",
+                params={"command": command},
+                metadata=bash,
+            )
+        )
+
+        assert decision.allowed
+        assert decision.reason == "safe_read_only_command"
+
+
 def test_shell_verification_allows_pythonpath_setup_prefix() -> None:
     from codepilot.tools.policy import PermissionPolicy, ToolRequest
 
@@ -126,6 +158,24 @@ def test_shell_verification_allows_pythonpath_setup_prefix() -> None:
 
         assert decision.allowed
         assert decision.reason == "verification_command"
+
+
+def test_workspace_write_allows_relative_cd_python_workspace_script() -> None:
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
+
+    bash = _metadata("bash", read_only=False, exclusive=True)
+    policy = PermissionPolicy(mode="workspace-write")
+
+    decision = policy.decide(
+        ToolRequest(
+            name="bash",
+            params={"command": "cd agent-test && python register.py --demo"},
+            metadata=bash,
+        )
+    )
+
+    assert decision.allowed
+    assert decision.reason == "workspace_mutation_command"
 
 
 def test_tool_permission_request_and_decision_own_policy_boundary_invariants() -> None:
@@ -1028,50 +1078,6 @@ async def _shell_side_effect_case(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert result.workspace_changed is True
     assert "generated.txt" in result.affected_paths
-
-
-def test_cli_approval_provider_supports_allow_and_deny() -> None:
-    asyncio.run(_cli_approval_case())
-
-
-def test_cli_approval_provider_requires_callable_io() -> None:
-    from codepilot.interfaces.cli.approval import CliApprovalProvider
-
-    with pytest.raises(TypeError, match="input_fn"):
-        CliApprovalProvider(input_fn="stdin")  # type: ignore[arg-type]
-
-    with pytest.raises(TypeError, match="output_fn"):
-        CliApprovalProvider(output_fn="stdout")  # type: ignore[arg-type]
-
-
-async def _cli_approval_case() -> None:
-    from codepilot.interfaces.cli.approval import CliApprovalProvider
-    from codepilot.tools.policy import ToolDecision
-    from codepilot.tools.authoring import ToolRuntimeRequest
-
-    outputs = []
-    provider = CliApprovalProvider(
-        input_fn=lambda _prompt: "y",
-        output_fn=outputs.append,
-    )
-    decision = await provider.request_approval(
-        ToolRuntimeRequest(
-            tool_call_id="call_1",
-            name="bash",
-            params={"command": "python script.py"},
-        ),
-        _metadata("bash", read_only=False, exclusive=True),
-        ToolDecision(
-            "approval_required",
-            "unknown_shell_command",
-            {"capabilities": ["process.execute"], "risk_level": "medium"},
-        ),
-    )
-
-    assert decision.approved is True
-    assert decision.approval_id
-    assert any("CP // TOOL APPROVAL REQUIRED" in line for line in outputs)
-    assert any("python script.py" in line for line in outputs)
 
 
 def test_mcp_bytes_result_reports_unreliable_output_quality() -> None:

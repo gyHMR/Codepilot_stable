@@ -389,12 +389,6 @@ async def _run_from_args(args: argparse.Namespace) -> int:
     run_mode = _resolve_run_mode(args)
     provider, model_id = _resolve_model_id(args)
     permission_mode = _resolve_permission_mode(args)
-    approval_provider = None
-    if run_mode == "interactive":
-        from .approval import CliApprovalProvider
-
-        approval_provider = CliApprovalProvider()
-
     # ── 构建会话配置 ────────────────────────────────────────────
 
     options = SessionOpenIntent(
@@ -410,7 +404,6 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         tool_permission_mode=permission_mode,
         task_mode=args.task_mode,
         planning_budget_profile=args.planning_budget_profile,
-        approval_provider=approval_provider,
     )
 
     # ── 创建会话并运行 ──────────────────────────────────────────

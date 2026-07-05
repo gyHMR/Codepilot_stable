@@ -113,7 +113,6 @@ def test_session_controller_public_surface_matches_v2_contract() -> None:
         "prepare_resume",
         "prepare_run",
         "stage_derived_session",
-        "subscribe",
     }
     assert not hasattr(controller_module, "_controller_from_runtime_session")
     assert not hasattr(SessionController, "_stage_derived_session")
@@ -285,7 +284,7 @@ def test_removed_runtime_compat_modules_are_gone() -> None:
 
 def test_runtime_public_contracts_and_views_are_separate() -> None:
     import codepilot.runtime as runtime
-    import codepilot.runtime.assembly as assembly
+    import codepilot.runtime.assemble as assembly
     import codepilot.runtime.gateway as gateway_module
     import codepilot.runtime.opening as session_opening
     import codepilot.runtime.sessions as runtime_sessions
@@ -339,8 +338,8 @@ def test_runtime_public_contracts_and_views_are_separate() -> None:
     assert find_spec("codepilot.runtime.contracts") is None
     assert find_spec("codepilot.runtime.commands") is None
     assert find_spec("codepilot.runtime.execution") is None
-    assert find_spec("codepilot.runtime.assembly_input") is None
-    assert find_spec("codepilot.runtime.assembly_types") is None
+    assert find_spec("codepilot.runtime.assemble_input") is None
+    assert find_spec("codepilot.runtime.assemble_types") is None
     assert find_spec("codepilot.runtime.session_opening") is None
     assert find_spec("codepilot.runtime.command_catalog") is None
     assert find_spec("codepilot.runtime.bootstrap") is None
@@ -718,7 +717,7 @@ def test_cli_runner_exports_compact_run_and_rpc_entrypoints() -> None:
 
 
 def test_cli_run_mode_types_stay_out_of_runtime_contracts() -> None:
-    import codepilot.runtime.assembly as runtime_types
+    import codepilot.runtime.assemble as runtime_types
     import codepilot.interfaces.cli.runner as runner
 
     assert hasattr(runner, "RunMode")

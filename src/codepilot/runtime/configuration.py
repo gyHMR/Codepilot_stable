@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from .opening import SessionOpenIntent, _to_runtime_assembly_intent
 
 if TYPE_CHECKING:
-    from .assembly import ResolvedConfigValue
+    from .assemble import ResolvedConfigValue
 
 
 class UnknownRuntimeConfigKeyError(KeyError):
@@ -43,7 +43,7 @@ def explain_session_open_config(
 ) -> "ResolvedConfigValue":
     """Explain one resolved config value for a public open-session intent."""
 
-    from .assembly import (
+    from .assemble import (
         UnknownRuntimeConfigKeyError as AssemblyConfigKeyError,
         explain_runtime_config,
     )
@@ -71,7 +71,7 @@ def resolve_workspace_session_intent(
             provider=provider,
             model_id=model_id,
         )
-    from .assembly import WorkspaceResourceLoader
+    from .assemble import WorkspaceResourceLoader
 
     resources = WorkspaceResourceLoader(workspace_path).load()
     if resources.model is not None:
@@ -92,7 +92,7 @@ def resolve_workspace_session_intent(
 def check_workspace_model_config(workspace: str | Path) -> WorkspaceConfigCheck:
     """Return a sanitized model-config health view for a workspace."""
 
-    from .assembly import WorkspaceResourceLoader
+    from .assemble import WorkspaceResourceLoader
 
     loader = WorkspaceResourceLoader(workspace)
     model = loader.load().model
@@ -125,7 +125,7 @@ def check_workspace_model_config(workspace: str | Path) -> WorkspaceConfigCheck:
 def describe_workspace_config(workspace: str | Path) -> WorkspaceConfigView:
     """Return sanitized model and settings rows for interface rendering."""
 
-    from .assembly import WorkspaceResourceLoader
+    from .assemble import WorkspaceResourceLoader
 
     loaded = WorkspaceResourceLoader(workspace).load()
     model = loaded.model

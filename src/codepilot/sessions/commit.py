@@ -7,7 +7,7 @@ import logging
 from typing import Any
 
 from codepilot.core.contracts import AgentLoopOutcome
-from codepilot.protocols import AgentRunResult, ToolResultMessage
+from codepilot.protocols import AgentRunResult
 
 from .contracts import PreparedAgentRun, RollbackBaselineRef, SessionRunRecord
 from .history.git_rollback import GitRollbackBaseline, build_rollback_metadata
@@ -41,12 +41,6 @@ async def commit_runtime_run(
         session.conversation.append_messages(committed_messages)
         for message in committed_messages:
             session.store.append_message(message)
-            if session.memory_enabled and isinstance(message, ToolResultMessage):
-                observe_tool_memory(
-                    session,
-                    message,
-                    run_id=prepared.run_id,
-                )
         session.conversation.remember_result(result)
     committed = await complete_run_lifecycle(
         session,
@@ -148,36 +142,6 @@ def write_rollback_metadata(
         ),
     )
 
-def observe_tool_memory(
-    session: Any,
-    message: ToolResultMessage,
-    *,
-    run_id: str | None,
-) -> None:
-    """Let the memory writer observe a tool result without exposing memory stores."""
-
-    try:
-        records = session.memory_writer.observe_tool_result(message, run_id=run_id)
-        for record in records:
-            session.store.append_event(
-                {
-                    "type": "memory_updated",
-                    "sessionId": session.session_id,
-                    "memoryId": record.id,
-                    "kind": record.kind,
-                }
-            )
-    except Exception as exc:
-        logger.warning("failed to observe tool memory: %s", exc)
-        session.store.append_event(
-            {
-                "type": "memory_warning",
-                "sessionId": session.session_id,
-                "operation": "observe_tool_result",
-                "message": str(exc),
-            }
-        )
-
 def finalize_memory(session: Any, result: AgentRunResult) -> None:
     """Extract durable memory after a run has completed."""
 
@@ -239,7 +203,6 @@ __all__ = [
     "complete_run_lifecycle",
     "finalize_memory",
     "finalize_task_recovery",
-    "observe_tool_memory",
     "session_run_record_from_result",
     "write_rollback_metadata",
 ]

@@ -10,7 +10,7 @@ Protocols 子包公共索引。
 子模块分工：
 - conversation.py: 内容块、消息、上下文和模型工具调用意图
 - tools.py: 工具定义、工具结果和工具元数据
-- llm.py: 模型配置、用量统计、流式事件
+- llm.py: 模型配置、能力和用量统计
 - runtime.py: 运行结果、运行状态和运行时事件
 - errors.py: 错误信息结构
 
@@ -97,14 +97,10 @@ from .runtime import (
 from .llm import (
     Api,
     Cost,
-    LLMStreamEvent,
-    LLMStreamEventType,
     Model,
     ModelCapabilities,
     Provider,
-    SimpleStreamOptions,
     StopReason,
-    StreamOptions,
     ThinkingLevel,
     Usage,
 )
@@ -174,9 +170,7 @@ __all__ = [
     "Model",
     "ModelCapabilities",
     "Provider",
-    "SimpleStreamOptions",
     "StopReason",
-    "StreamOptions",
     "ThinkingLevel",
     "Usage",
     # ── Run 结果 ──
@@ -194,9 +188,6 @@ __all__ = [
     "ensure_runtime_event_type",
     "RuntimeEvent",
     "RuntimeEventType",
-    # ── LLM 流式事件 ──
-    "LLMStreamEvent",
-    "LLMStreamEventType",
     # ── 错误 ──
     "ErrorInfo",
     "LLMErrorInfo",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -10,10 +11,10 @@ from codepilot.interfaces.cli.main import (
     _init_model_config,
     build_parser,
 )
-from codepilot.runtime.assembly import assemble_runtime
-from codepilot.runtime.assembly import resolve_model
-from codepilot.runtime.assembly import WorkspaceResourceLoader
-from codepilot.runtime.assembly import RuntimeAssemblyIntent
+from codepilot.runtime.assemble import assemble_runtime
+from codepilot.runtime.assemble import resolve_model
+from codepilot.runtime.assemble import WorkspaceResourceLoader
+from codepilot.runtime.assemble import RuntimeAssemblyIntent
 
 
 def _write_model_config(workspace, *, api_key: str = "local-key") -> None:
@@ -114,6 +115,37 @@ def test_cli_defaults_leave_runtime_config_unspecified() -> None:
     assert args.task_mode is None
 
 
+def test_cli_interactive_uses_runtime_deferred_approval_path(tmp_path, monkeypatch) -> None:
+    from codepilot.interfaces.cli import main as cli_main
+
+    captured = {}
+
+    class FakeRuntime:
+        def open_session(self, intent):
+            captured["intent"] = intent
+
+            class Handle:
+                session_id = "session_1"
+
+            return Handle()
+
+        async def close_all(self):
+            captured["closed"] = True
+
+    async def fake_run(options):
+        captured["run_mode"] = options.mode
+
+    monkeypatch.setattr(cli_main, "RuntimeGateway", FakeRuntime)
+    monkeypatch.setattr(cli_main, "run", fake_run)
+
+    args = build_parser().parse_args(["--cwd", str(tmp_path)])
+
+    assert asyncio.run(cli_main._run_from_args(args)) == 0
+    assert captured["run_mode"] == "interactive"
+    assert captured["intent"].approval_provider is None
+    assert captured["closed"] is True
+
+
 def test_cli_rejects_removed_legacy_options() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--mode", "print", "--prompt", "hello"])
@@ -157,7 +189,7 @@ def test_config_check_and_show_use_sanitized_human_output(tmp_path, capsys) -> N
 
 
 def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> None:
-    from codepilot.runtime.assembly import resolve_runtime_config
+    from codepilot.runtime.assemble import resolve_runtime_config
     from codepilot.sessions.storage import load_session_open_metadata
     from codepilot.sessions.storage import SessionStore
 
@@ -189,7 +221,7 @@ def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> Non
 
 
 def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> None:
-    from codepilot.runtime.assembly import resolve_runtime_config
+    from codepilot.runtime.assemble import resolve_runtime_config
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -231,7 +263,7 @@ def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> 
 
 
 def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
-    from codepilot.runtime.assembly import resolve_runtime_config
+    from codepilot.runtime.assemble import resolve_runtime_config
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -254,7 +286,7 @@ def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
 
 
 def test_workspace_settings_can_select_task_mode(tmp_path) -> None:
-    from codepilot.runtime.assembly import resolve_runtime_config
+    from codepilot.runtime.assemble import resolve_runtime_config
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -273,7 +305,7 @@ def test_workspace_settings_can_select_task_mode(tmp_path) -> None:
 
 
 def test_workspace_settings_can_select_planning_budget_profile(tmp_path) -> None:
-    from codepilot.runtime.assembly import resolve_runtime_config
+    from codepilot.runtime.assemble import resolve_runtime_config
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -293,7 +325,7 @@ def test_workspace_settings_can_select_planning_budget_profile(tmp_path) -> None
 
 
 def test_read_task_mode_forces_read_only_permission(tmp_path) -> None:
-    from codepilot.runtime.assembly import resolve_runtime_config
+    from codepilot.runtime.assemble import resolve_runtime_config
 
     config = resolve_runtime_config(
         RuntimeAssemblyIntent(workspace_dir=tmp_path, task_mode="read"),
@@ -306,7 +338,7 @@ def test_read_task_mode_forces_read_only_permission(tmp_path) -> None:
 
 
 def test_read_task_mode_rejects_workspace_write_override(tmp_path) -> None:
-    from codepilot.runtime.assembly import resolve_runtime_config
+    from codepilot.runtime.assemble import resolve_runtime_config
 
     with pytest.raises(ValueError, match="task_mode=read"):
         resolve_runtime_config(
@@ -320,7 +352,7 @@ def test_read_task_mode_rejects_workspace_write_override(tmp_path) -> None:
 
 
 def _runtime_inputs(tmp_path, *, session_id: str | None = None):
-    from codepilot.runtime.assembly import RuntimeInputs
+    from codepilot.runtime.assemble import RuntimeInputs
     from codepilot.sessions.storage import load_session_open_metadata
 
     return RuntimeInputs(
