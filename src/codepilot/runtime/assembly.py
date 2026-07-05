@@ -19,7 +19,7 @@ from codepilot.core.contracts import (
     AgentMessage,
     ToolExecutionMode,
 )
-from codepilot.llm.adapter import ProviderSimpleStreamFn
+from codepilot.llm.provider_types import ProviderSimpleStreamFn
 from codepilot.protocols import Model
 from codepilot.protocols.commands import (
     AfterToolCallContext,
@@ -307,6 +307,8 @@ class RuntimeAssembly:
     repository: RepositoryBootstrap
     capabilities: CapabilityCatalog
     tool_runtime: ToolRuntime
+    model_port: Any
+    tool_port: Any
     diagnostics: tuple[RuntimeDiagnostic, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -2403,10 +2405,12 @@ import os
 from codepilot.core.model_step import convert_to_llm
 from codepilot.llm.catalog import get_env_api_key_name
 from codepilot.llm.registry import register_builtin_api_providers
+from codepilot.llm.adapter import ProviderModelPort
 from codepilot.sessions.controller import SessionController
 from codepilot.sessions.controller import create_session_controller as _create_session_controller
 from codepilot.sessions.contracts import SessionOptions
 from codepilot.sessions.storage import build_repository_bootstrap
+from codepilot.tools.adapter import ToolRuntimePort
 
 
 
@@ -2564,6 +2568,17 @@ def assemble_runtime(options: RuntimeAssemblyIntent) -> tuple[SessionController,
         repository=build_repository_bootstrap(inputs.workspace),
         capabilities=capability_catalog,
         tool_runtime=assembled_tools.tool_runtime,
+        model_port=ProviderModelPort(
+            model=effective_session_options.model,
+            stream_fn=effective_session_options.stream_fn,
+            convert_messages=effective_session_options.convert_to_llm,
+            get_api_key=effective_session_options.get_api_key,
+        ),
+        tool_port=ToolRuntimePort(
+            assembled_tools.tool_runtime,
+            before_tool_call=effective_session_options.before_tool_call,
+            after_tool_call=effective_session_options.after_tool_call,
+        ),
         diagnostics=diagnostics,
     )
 

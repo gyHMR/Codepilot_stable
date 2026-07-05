@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from codepilot.llm.stream import estimate_context_tokens
+from codepilot.llm.estimation import estimate_context_tokens
 from codepilot.protocols import ContextArtifactRef, TextContent, ToolResultMessage
 from codepilot.sessions.storage import SessionLayout
 

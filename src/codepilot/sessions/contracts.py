@@ -15,7 +15,7 @@ from codepilot.core.contracts import (
     ToolExecutionMode,
 )
 from codepilot.core.task import PlanningBudgetProfile, TaskMode
-from codepilot.llm.adapter import ProviderSimpleStreamFn
+from codepilot.llm.provider_types import ProviderSimpleStreamFn
 from codepilot.protocols import AgentEvent, Message
 from codepilot.protocols import Model
 from codepilot.protocols.commands import (

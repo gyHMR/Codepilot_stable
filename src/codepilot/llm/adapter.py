@@ -4,10 +4,8 @@ from __future__ import annotations
 # 关注点：端口契约在 ports.py；这里才允许接触 provider registry、event stream 和模型能力细节。
 
 from collections.abc import AsyncIterator
-from typing import Awaitable, Callable
 
 from codepilot.protocols import (
-    AssistantMessage,
     Context,
     ImageContent,
     LLMErrorInfo,
@@ -24,26 +22,13 @@ from .ports import (
     LLMTextDelta,
     ModelPort,
 )
+from .provider_types import (
+    ProviderApiKeyResolver,
+    ProviderCompleteFn,
+    ProviderMessageConverter,
+    ProviderSimpleStreamFn,
+)
 from .registry import complete_simple, stream_simple
-from .stream import AssistantMessageEventStream
-
-
-ProviderSimpleStreamFn = Callable[
-    [Model, Context, SimpleStreamOptions | None],
-    AssistantMessageEventStream | Awaitable[AssistantMessageEventStream],
-]
-ProviderCompleteFn = Callable[
-    [Model, Context, SimpleStreamOptions | None],
-    AssistantMessage | Awaitable[AssistantMessage],
-]
-ProviderMessageConverter = Callable[
-    [list[Message]],
-    list[Message] | Awaitable[list[Message]],
-]
-ProviderApiKeyResolver = Callable[
-    [str],
-    str | None | Awaitable[str | None],
-]
 
 
 class ProviderModelPort(ModelPort):

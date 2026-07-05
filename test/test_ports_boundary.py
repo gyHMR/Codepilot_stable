@@ -169,6 +169,7 @@ def test_core_does_not_import_concrete_llm_or_tool_adapters() -> None:
     forbidden = {
         "codepilot.llm.adapter",
         "codepilot.llm.registry",
+        "codepilot.llm.stream",
         "codepilot.tools.adapter",
         "codepilot.tools.engine",
     }
@@ -178,18 +179,32 @@ def test_core_does_not_import_concrete_llm_or_tool_adapters() -> None:
         assert _has_forbidden_import(path, forbidden) == []
 
 
-def test_runtime_uses_adapter_modules_for_concrete_ports() -> None:
+def test_runtime_gateway_does_not_construct_concrete_ports() -> None:
     gateway = SRC / "runtime" / "gateway.py"
-    imports = _imports(gateway)
+    forbidden = {
+        "codepilot.llm.adapter",
+        "codepilot.tools.adapter",
+        "codepilot.tools.engine",
+    }
 
-    assert "codepilot.llm.adapter" in imports
-    assert "codepilot.tools.adapter" in imports
+    assert _has_forbidden_import(gateway, forbidden) == []
 
 
-def test_session_and_runtime_config_do_not_import_concrete_model_port() -> None:
+def test_sessions_do_not_import_llm_or_tools_internals() -> None:
+    forbidden = {
+        "codepilot.llm.adapter",
+        "codepilot.llm.stream",
+        "codepilot.tools.workspace",
+    }
+    session_files = sorted((SRC / "sessions").rglob("*.py"))
+
+    for path in session_files:
+        assert _has_forbidden_import(path, forbidden) == []
+
+
+def test_session_config_does_not_import_concrete_model_port() -> None:
     checked = [
         SRC / "sessions" / "contracts.py",
-        SRC / "runtime" / "assembly.py",
     ]
 
     for path in checked:

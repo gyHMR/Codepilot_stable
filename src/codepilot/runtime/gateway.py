@@ -58,29 +58,16 @@ class RuntimeGateway:
 
     def open_session(self, intent: _SessionOpenIntent) -> SessionRef:
         from .assembly import assemble_runtime
-        from codepilot.tools.adapter import ToolRuntimePort
 
         controller, assembly = assemble_runtime(_to_runtime_assembly_intent(intent))
         session_id = controller.session_id
-        from codepilot.llm.adapter import ProviderModelPort
 
         self._sessions.add(
             session_id,
             controller,
             assembly=assembly,
-            model_port=self._model_port
-            or ProviderModelPort(
-                model=assembly.session_options.model,
-                stream_fn=assembly.session_options.stream_fn,
-                convert_messages=assembly.session_options.convert_to_llm,
-                get_api_key=assembly.session_options.get_api_key,
-            ),
-            tool_port=self._tool_port
-            or ToolRuntimePort(
-                assembly.tool_runtime,
-                before_tool_call=assembly.session_options.before_tool_call,
-                after_tool_call=assembly.session_options.after_tool_call,
-            ),
+            model_port=self._model_port or assembly.model_port,
+            tool_port=self._tool_port or assembly.tool_port,
         )
         return SessionRef(session_id=session_id)
 

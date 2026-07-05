@@ -327,27 +327,18 @@ def test_task_planner_fallback_keeps_parse_diagnostics() -> None:
 
 async def _task_planner_fallback_reason_case() -> None:
     from codepilot.core import TaskPlanner
-    from codepilot.protocols import Model, UserMessage
+    from codepilot.llm.ports import LLMFailed, LLMRequest, ModelDescriptor
+    from codepilot.protocols import UserMessage
 
-    async def broken_stream(*_args):
-        raise RuntimeError("planner unavailable")
+    class BrokenModelPort:
+        async def stream(self, _request: LLMRequest):
+            yield LLMFailed(error=RuntimeError("planner unavailable"))
 
     draft = await TaskPlanner().generate(
-        model=Model(
-            id="task-test",
-            name="Task Test",
-            api="unit-test",
-            provider="unit-test",
-            base_url="",
-            reasoning=False,
-            input=["text"],
-            context_window=4000,
-            max_tokens=500,
-        ),
+        model=ModelDescriptor(provider="unit-test", model_id="task-test"),
         messages=[UserMessage(content="修复任务规划")],
-        convert_to_llm=lambda items: items,
+        model_port=BrokenModelPort(),
         fallback_goal="修复任务规划",
-        stream_fn=broken_stream,
     )
 
     assert draft.source == "fallback"

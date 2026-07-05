@@ -27,19 +27,23 @@ from __future__ import annotations
     4. 返回 TaskPlanDraft，供 TaskController.initialize() 使用
 """
 
-import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, cast
+from typing import cast
 
-from codepilot.llm.stream import AssistantMessageEventStream
+from codepilot.llm.ports import (
+    LLMCompleted,
+    LLMCorrelation,
+    LLMFailed,
+    LLMOptions,
+    LLMRequest,
+    ModelDescriptor,
+    ModelPort,
+)
 from codepilot.protocols import (
     AssistantMessage,
-    Context,
     Message,
-    Model,
-    SimpleStreamOptions,
     TextContent,
     UserMessage,
 )
@@ -53,12 +57,6 @@ AgentMessage = Message
 _MAX_PLANNED_STEPS = 6
 _MAX_FIELD_CHARS = 240
 _TASK_PLAN_SOURCES = frozenset({"llm", "llm_with_discovery", "fallback"})
-
-
-async def maybe_await(value: object) -> object:
-    if asyncio.isfuture(value) or asyncio.iscoroutine(value):
-        return await value
-    return value
 
 
 @dataclass(frozen=True)
@@ -167,12 +165,6 @@ class TaskPlanDraft:
         )
 
 
-StreamFn = Callable[
-    [Model, Context, SimpleStreamOptions | None],
-    AssistantMessageEventStream | Awaitable[AssistantMessageEventStream],
-]
-
-
 class TaskPlanner:
     """轻量级 LLM 任务规划器：生成和解析任务执行计划。
 
@@ -181,7 +173,7 @@ class TaskPlanner:
         draft = await planner.generate(
             model=model,
             messages=messages,
-            convert_to_llm=convert_to_llm,
+            model_port=model_port,
             fallback_goal="完成当前请求",
         )
         # draft.steps 包含规范化后的步骤列表
@@ -190,14 +182,13 @@ class TaskPlanner:
     async def generate(
         self,
         *,
-        model: Model,
+        model: ModelDescriptor,
         messages: list[AgentMessage],
-        convert_to_llm: Callable[[list[AgentMessage]], list[Message] | Awaitable[list[Message]]],
+        model_port: ModelPort | None,
         fallback_goal: str,
-        stream_fn: StreamFn | None = None,
-        api_key: str | None = None,
         session_id: str | None = None,
         discovery_report: PlanningDiscoveryReport | None = None,
+        options: LLMOptions | None = None,
     ) -> TaskPlanDraft:
         """向 LLM 请求生成初始执行计划，失败时返回安全的降级计划。
 
@@ -209,46 +200,51 @@ class TaskPlanner:
         5. 失败时返回单步降级计划
 
         Args:
-            model: LLM 模型信息。
+            model: LLM 模型描述。
             messages: 当前消息列表。
-            convert_to_llm: 消息转换函数。
+            model_port: core-facing 模型端口。
             fallback_goal: 降级计划的目标描述。
-            stream_fn: 可选的流式调用函数。
-            api_key: 可选的 API Key。
             session_id: 可选的会话 ID。
 
         Returns:
             TaskPlanDraft: 经过验证的执行计划。
         """
         try:
-            llm_messages = await maybe_await(convert_to_llm(list(messages)))
-            context = Context(
-                system_prompt=_planner_system_prompt(),
-                messages=[
-                    *llm_messages,
-                    *(
-                        [
-                            UserMessage(
-                                content=_render_discovery_for_planner(discovery_report)
-                            )
-                        ]
-                        if discovery_report is not None
-                        else []
-                    ),
-                    UserMessage(
-                        content=(
-                            "请为当前用户请求生成一个简洁执行计划。"
-                            "只输出 JSON，不要输出 Markdown。"
+            if model_port is None:
+                raise RuntimeError("planner model port is required")
+            planner_messages: list[Message] = [
+                *list(messages),
+                *(
+                    [
+                        UserMessage(
+                            content=_render_discovery_for_planner(discovery_report)
                         )
-                    ),
-                ],
-                tools=[],
+                    ]
+                    if discovery_report is not None
+                    else []
+                ),
+                UserMessage(
+                    content=(
+                        "请为当前用户请求生成一个简洁执行计划。"
+                        "只输出 JSON，不要输出 Markdown。"
+                    )
+                ),
+            ]
+            request = LLMRequest(
+                model=model,
+                messages=tuple(planner_messages),
+                system_prompt=_planner_system_prompt(),
+                options=options or LLMOptions(),
+                correlation=LLMCorrelation(session_id=session_id or ""),
             )
-            options = SimpleStreamOptions(api_key=api_key, session_id=session_id)
-            if stream_fn is None:
-                raise RuntimeError("planner stream function is required")
-            stream = await maybe_await(stream_fn(model, context, options))
-            message = await stream.result()
+            message: AssistantMessage | None = None
+            async for event in model_port.stream(request):
+                if isinstance(event, LLMFailed):
+                    raise RuntimeError(str(event.error))
+                if isinstance(event, LLMCompleted):
+                    message = event.message
+            if message is None:
+                raise RuntimeError("planner model port did not return a message")
             draft = self.parse_plan_message(message, fallback_goal=fallback_goal)
             if (
                 discovery_report is not None

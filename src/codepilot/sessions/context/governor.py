@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from codepilot.core.contracts import AgentContext, ContextPreparationRequest, PreparedAgentContext
-from codepilot.llm.stream import estimate_context_tokens
+from codepilot.llm.estimation import estimate_context_tokens
 from codepilot.protocols import (
     ContextCheckpoint,
     ContextReport,

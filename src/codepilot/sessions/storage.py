@@ -348,7 +348,7 @@ from codepilot.observability import (
 )
 from codepilot.observability.events import normalize_event_value
 from codepilot.protocols import AgentRunResult, ToolResultMessage
-from codepilot.tools.workspace import file_state_for_path
+from codepilot.sessions.workspace_state import file_state_for_path
 
 
 

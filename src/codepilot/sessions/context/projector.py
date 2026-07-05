@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from codepilot.core.contracts import AgentContext
-from codepilot.llm.stream import estimate_context_tokens
+from codepilot.llm.estimation import estimate_context_tokens
 from codepilot.protocols import (
     AssistantMessage,
     ContextArtifactRef,
