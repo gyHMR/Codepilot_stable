@@ -90,7 +90,7 @@ class ToolRuntimePort(ToolPort):
         return observation
 
     async def resume(self, decision: ToolResumeDecision) -> ToolObservation:
-        pending = self._pending.pop(decision.approval_id, None)
+        pending = self._pending.get(decision.approval_id)
         if pending is None:
             return ToolObservation(
                 tool_call_id="",
@@ -104,6 +104,7 @@ class ToolRuntimePort(ToolPort):
             )
         request = pending.request
         if decision.decision == "deny":
+            self._pending.pop(decision.approval_id, None)
             return ToolObservation(
                 tool_call_id=request.tool_call_id,
                 name=request.name,
@@ -120,12 +121,14 @@ class ToolRuntimePort(ToolPort):
             approval_id=decision.approval_id,
         )
         result = await self._run_after_hook(pending.invocation, result)
-        return _observation_from_runtime_result(
+        observation = _observation_from_runtime_result(
             pending.invocation.run_id,
             request,
             result,
             approval_id=decision.approval_id,
         )
+        self._pending.pop(decision.approval_id, None)
+        return observation
 
     async def _run_before_hook(
         self,

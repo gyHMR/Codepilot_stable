@@ -178,6 +178,89 @@ def test_core_loop_turns_tool_approval_observation_into_waiting_outcome() -> Non
     asyncio.run(run_case())
 
 
+def test_core_loop_preserves_completed_tool_results_before_approval_pause() -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import (
+            AgentLoopInput,
+            AgentLoopLimits,
+            AgentLoopPorts,
+            RunCorrelation,
+        )
+        from codepilot.core.loop import run_agent_loop
+        from codepilot.llm.ports import LLMCompleted, ModelDescriptor
+        from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
+        from codepilot.tools.ports import ToolInterruption, ToolObservation, ToolRiskView
+
+        class FakeModel:
+            async def stream(self, request):
+                _ = request
+                yield LLMCompleted(
+                    message=AssistantMessage(
+                        content=[
+                            ToolCall(id="read_1", name="read", arguments={"path": "a.py"}),
+                            ToolCall(id="write_1", name="write", arguments={"path": "a.py"}),
+                            ToolCall(id="bash_1", name="bash", arguments={"command": "pytest"}),
+                        ]
+                    )
+                )
+
+        class FakeTools:
+            def __init__(self) -> None:
+                self.executed: list[str] = []
+
+            def catalog(self):
+                return {"tools": ["read", "write", "bash"]}
+
+            async def execute(self, invocation):
+                self.executed.append(invocation.tool_call_id)
+                if invocation.name == "write":
+                    return ToolObservation(
+                        tool_call_id=invocation.tool_call_id,
+                        name=invocation.name,
+                        status="approval_required",
+                        interruption=ToolInterruption(
+                            approval_id="approval1",
+                            run_id=invocation.run_id,
+                            tool_call_id=invocation.tool_call_id,
+                            tool_name=invocation.name,
+                            arguments=invocation.arguments,
+                            risk=ToolRiskView(level="medium"),
+                        ),
+                    )
+                return ToolObservation(
+                    tool_call_id=invocation.tool_call_id,
+                    name=invocation.name,
+                    status="success",
+                    content=(TextContent(text="read result"),),
+                )
+
+        tools = FakeTools()
+        outcome = await run_agent_loop(
+            AgentLoopInput(
+                run_id="run1",
+                correlation=RunCorrelation(session_id="s1"),
+                messages=[],
+                user_prompt="change files",
+                context={},
+                model=ModelDescriptor(provider="fake", model_id="unit"),
+                limits=AgentLoopLimits(max_model_turns=1),
+            ),
+            AgentLoopPorts(model=FakeModel(), tools=tools),
+        )
+
+        assert outcome.status == "waiting_approval"
+        assert tools.executed == ["read_1", "write_1"]
+        tool_results = [
+            message
+            for message in outcome.new_messages
+            if isinstance(message, ToolResultMessage)
+        ]
+        assert [message.tool_call_id for message in tool_results] == ["read_1"]
+        assert tool_results[0].status == "success"
+
+    asyncio.run(run_case())
+
+
 def test_core_loop_feeds_tool_observation_back_into_model_until_final_answer() -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import (

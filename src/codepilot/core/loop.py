@@ -840,10 +840,19 @@ async def _run_loop_body(
         )
         all_observations.extend(observations)
         tool_iterations += 1
-        tool_calls_count += len(tool_calls)
+        tool_calls_count += len(observations)
 
         approvals = approval_observations(observations)
         if approvals:
+            completed_tool_messages = [
+                to_tool_result_message(observation)
+                for observation in observations
+                if observation.status != "approval_required"
+            ]
+            for message in completed_tool_messages:
+                messages.append(message)
+                new_messages.append(message)
+                _emit_message(recorder, message)
             if task_runtime is not None:
                 approval_messages = [
                     to_tool_result_message(
@@ -857,14 +866,22 @@ async def _run_loop_body(
                     )
                     for observation in approvals
                 ]
-                task_runtime.after_tool_results(approval_messages)
+                task_runtime.after_tool_results(
+                    [*completed_tool_messages, *approval_messages]
+                )
                 recorder.emit(
                     {
                         "type": "task_step_updated",
                         "task": task_runtime.event_payload(),
                     }
                 )
-            recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+            recorder.emit(
+                {
+                    "type": "turn_end",
+                    "message": assistant,
+                    "toolResults": completed_tool_messages,
+                }
+            )
             recorder.emit({"type": "agent_end", "status": "waiting_approval"})
             return AgentLoopOutcome(
                 run_id=input.run_id,
