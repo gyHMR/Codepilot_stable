@@ -734,6 +734,60 @@ async def _v2_tool_turn_order_case() -> None:
     ]
 
 
+def test_v2_tool_turn_stops_at_first_approval_request() -> None:
+    asyncio.run(_v2_tool_turn_stops_at_approval_case())
+
+
+async def _v2_tool_turn_stops_at_approval_case() -> None:
+    from codepilot.core.tool_step import execute_tool_turn
+    from codepilot.protocols import TextContent, ToolCall
+    from codepilot.tools.ports import ToolInterruption, ToolObservation, ToolRiskView
+
+    calls: list[str] = []
+    events: list[dict] = []
+
+    class ApprovalToolPort:
+        def catalog(self):
+            return {"tools": ["read", "write", "bash"]}
+
+        async def execute(self, invocation):
+            calls.append(invocation.tool_call_id)
+            if invocation.name == "write":
+                return ToolObservation(
+                    tool_call_id=invocation.tool_call_id,
+                    name=invocation.name,
+                    status="approval_required",
+                    interruption=ToolInterruption(
+                        approval_id="approval_1",
+                        run_id=invocation.run_id,
+                        tool_call_id=invocation.tool_call_id,
+                        tool_name=invocation.name,
+                        risk=ToolRiskView(level="medium"),
+                    ),
+                )
+            return ToolObservation(
+                tool_call_id=invocation.tool_call_id,
+                name=invocation.name,
+                status="success",
+                content=(TextContent(text=invocation.name),),
+            )
+
+    results = await execute_tool_turn(
+        run_id="run_1",
+        tools=ApprovalToolPort(),
+        tool_calls=[
+            ToolCall(id="read_1", name="read"),
+            ToolCall(id="write_1", name="write"),
+            ToolCall(id="bash_1", name="bash"),
+        ],
+        emit=events.append,
+    )
+
+    assert calls == ["read_1", "write_1"]
+    assert [result.tool_call_id for result in results] == ["read_1", "write_1"]
+    assert events[-1]["status"] == "approval_required"
+
+
 def test_read_supports_line_ranges_and_search_skips_ignored_dirs(tmp_path: Path) -> None:
     asyncio.run(_bounded_read_search_case(tmp_path))
 
@@ -1183,6 +1237,77 @@ async def _schema_validation_case() -> None:
     assert wrong_type.result.error_code == "invalid_tool_arguments"
     assert "limit" in wrong_type.result.content[0].text
     assert calls == []
+
+
+def test_tool_runtime_validates_schema_before_requesting_approval() -> None:
+    asyncio.run(_schema_before_approval_case())
+
+
+async def _schema_before_approval_case() -> None:
+    from codepilot.protocols import TextContent
+    from codepilot.tools.authoring import AgentTool, AgentToolResult, ToolMetadata
+    from codepilot.tools.engine import ToolRuntime
+    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.authoring import ToolRuntimeRequest
+    from codepilot.tools.policy import ApprovalDecision, PermissionPolicy
+
+    approval_requests: list[str] = []
+
+    class Approval:
+        async def request_approval(self, request, metadata, decision):
+            approval_requests.append(request.tool_call_id)
+            return ApprovalDecision(
+                approved=False,
+                approval_id="approval_1",
+                deferred=True,
+            )
+
+    async def execute(tool_call_id, params, signal=None, on_update=None):
+        _ = tool_call_id, params, signal, on_update
+        return AgentToolResult(content=[TextContent(text="should not run")])
+
+    registry = ToolRegistry()
+    registry.register(
+        AgentTool(
+            name="danger",
+            label="Danger",
+            description="Requires approval but also schema checked.",
+            parameters={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            execute=execute,
+        ),
+        metadata=ToolMetadata(
+            name="danger",
+            category="filesystem",
+            read_only=False,
+            concurrency_safe=False,
+            exclusive=True,
+            requires_approval=True,
+            risk_level="high",
+            resource_scope=("workspace",),
+        ),
+    )
+    runtime = ToolRuntime(
+        registry,
+        permission_policy=PermissionPolicy(mode="workspace-write"),
+        approval_provider=Approval(),
+    )
+
+    result = await runtime.execute(
+        ToolRuntimeRequest(
+            tool_call_id="call_1",
+            name="danger",
+            params={},
+        )
+    )
+
+    assert result.status == "error"
+    assert result.result.error_code == "invalid_tool_arguments"
+    assert approval_requests == []
 
 
 def test_tool_result_guard_redacts_secrets_and_marks_prompt_injection() -> None:

@@ -166,6 +166,89 @@ def test_tool_runtime_port_denied_resume_does_not_execute_pending_tool() -> None
     asyncio.run(run_case())
 
 
+def test_tool_runtime_port_keeps_pending_when_approved_runtime_raises() -> None:
+    async def run_case() -> None:
+        from codepilot.protocols import TextContent
+        from codepilot.tools.adapter import ToolRuntimePort
+        from codepilot.tools.authoring import AgentToolResult, ToolRuntimeResult
+        from codepilot.tools.ports import ToolInvocation, ToolResumeDecision
+
+        class Registry:
+            def list(self):
+                return []
+
+        class FlakyRuntime:
+            registry = Registry()
+
+            def __init__(self) -> None:
+                self.resume_attempts = 0
+
+            async def execute(self, request, *, approval_id=None):
+                if approval_id is None:
+                    return ToolRuntimeResult(
+                        result=AgentToolResult(
+                            tool_call_id=request.tool_call_id,
+                            tool_name=request.name,
+                            content=[TextContent(text="approval needed")],
+                            status="approval_required",
+                            error_code="approval_required",
+                            approval_id="approval_1",
+                            details={
+                                "status": "approval_required",
+                                "approval_id": "approval_1",
+                            },
+                        ),
+                        status="approval_required",
+                        is_error=True,
+                        approved=False,
+                        approval_id="approval_1",
+                    )
+                self.resume_attempts += 1
+                if self.resume_attempts == 1:
+                    raise RuntimeError("transient runtime failure")
+                return ToolRuntimeResult(
+                    result=AgentToolResult(
+                        tool_call_id=request.tool_call_id,
+                        tool_name=request.name,
+                        content=[TextContent(text="resumed")],
+                    ),
+                    status="success",
+                    approved=True,
+                    approval_id=approval_id,
+                )
+
+        runtime = FlakyRuntime()
+        port = ToolRuntimePort(runtime)  # type: ignore[arg-type]
+        deferred = await port.execute(
+            ToolInvocation(
+                run_id="run1",
+                tool_call_id="call1",
+                name="danger",
+                arguments={},
+            )
+        )
+        assert deferred.interruption is not None
+
+        decision = ToolResumeDecision(
+            approval_id=deferred.interruption.approval_id,
+            decision="approve",
+        )
+        try:
+            await port.resume(decision)
+        except RuntimeError as exc:
+            assert "transient" in str(exc)
+        else:
+            raise AssertionError("first resume should raise")
+
+        resumed = await port.resume(decision)
+
+        assert runtime.resume_attempts == 2
+        assert resumed.status == "success"
+        assert resumed.content[0].text == "resumed"
+
+    asyncio.run(run_case())
+
+
 def test_tool_runtime_port_runs_before_and_after_hooks_with_protocol_snapshot() -> None:
     async def run_case() -> None:
         from codepilot.protocols import AssistantMessage, TextContent, Tool, UserMessage

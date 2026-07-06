@@ -68,6 +68,8 @@ async def execute_tool_turn(
         observations.append(observation)
         if emit is not None:
             emit(_tool_end_event(observation))
+        if observation.status == "approval_required" and observation.interruption is not None:
+            break
     return observations
 
 
