@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import uuid
 from typing import Any
 
 from codepilot.protocols.commands import SessionCommandContext, SessionCommandView
@@ -32,7 +33,7 @@ from .history.git_rollback import (
     plan_run_rollback,
     revert_run_changes,
 )
-from .memory import load_global_memory, render_memory
+from .memory import MemoryRecord, load_global_memory, render_memory
 
 
 def cumulative_usage(session: Any) -> dict[str, Any]:
@@ -72,8 +73,8 @@ def set_task_mode(session: Any, mode: TaskMode | str) -> TaskMode:
             }
         )
     projection = session.task_recovery.load_projection()
-    if projection is not None and projection.get("task_mode") != normalized:
-        projection["task_mode"] = normalized
+    if projection is not None and projection.get("current_mode") != normalized:
+        projection["current_mode"] = normalized
         session.task_recovery.save_projection(projection)
     return normalized
 
@@ -140,7 +141,7 @@ def list_memory_records(session: Any, scope: str) -> list[dict[str, str]]:
     elif scope == "project":
         records = [record for record in records if record.scope == "project"]
     elif scope in {"correction", "constraint", "decision", "experience"}:
-        records = [record for record in records if record.kind == scope]
+        records = [record for record in records if record.type == scope]
     elif scope in {"deleted", "superseded"}:
         records = [record for record in records if record.status == scope]
     else:
@@ -149,11 +150,46 @@ def list_memory_records(session: Any, scope: str) -> list[dict[str, str]]:
         {
             "id": record.id,
             "scope": str(record.scope),
-            "kind": str(record.kind),
+            "kind": str(record.type),
             "status": str(record.status),
             "text": render_memory(record),
         }
         for record in records
+    ]
+
+
+def search_memory_records(session: Any, query: str) -> list[dict[str, str]]:
+    """Search memory records by id, subject, content, keyword, or path."""
+
+    terms = [part.lower() for part in query.split() if part.strip()]
+    if not terms:
+        return []
+    matches = []
+    for record in session.memory_store.all_records():
+        haystack = " ".join(
+            [
+                record.id,
+                record.type,
+                record.scope,
+                record.subject,
+                record.predicate,
+                record.value,
+                record.content,
+                " ".join(record.keywords),
+                " ".join(record.paths),
+            ]
+        ).lower()
+        if all(term in haystack for term in terms):
+            matches.append(record)
+    return [
+        {
+            "id": record.id,
+            "scope": str(record.scope),
+            "kind": str(record.type),
+            "status": str(record.status),
+            "text": render_memory(record),
+        }
+        for record in matches
     ]
 
 
@@ -167,11 +203,72 @@ def add_project_memory(session: Any, text: str) -> str:
             "sessionId": session.session_id,
             "action": "add",
             "memoryId": record.id,
-            "kind": record.kind,
+            "kind": record.type,
             "scope": record.scope,
         }
     )
     return record.id
+
+
+def approve_memory(session: Any, memory_id: str) -> str:
+    record = session.memory_store.mark_status(memory_id, "active")
+    _record_memory_event(session, "approve", record)
+    return record.id
+
+
+def edit_memory(session: Any, memory_id: str, content: str) -> str:
+    record = session.memory_store.get(memory_id)
+    if record is None:
+        raise ValueError(f"Memory not found: {memory_id}")
+    record.content = content
+    record.value = content
+    record.confidence = "explicit"
+    record.source = "user_explicit"
+    record.created_by_session_id = record.created_by_session_id or session.session_id
+    updated = session.memory_store.update(record)
+    _record_memory_event(session, "edit", updated)
+    return updated.id
+
+
+def disable_memory(session: Any, memory_id: str) -> str:
+    record = session.memory_store.mark_status(memory_id, "disabled")
+    _record_memory_event(session, "disable", record)
+    return record.id
+
+
+def delete_memory(session: Any, memory_id: str) -> str:
+    record = session.memory_store.mark_status(memory_id, "deleted")
+    _record_memory_event(session, "delete", record)
+    return record.id
+
+
+def supersede_memory(session: Any, memory_id: str, content: str) -> str:
+    old = session.memory_store.get(memory_id)
+    if old is None:
+        raise ValueError(f"Memory not found: {memory_id}")
+    old.status = "superseded"
+    session.memory_store.update(old)
+    new = MemoryRecord(
+        id=f"mem_{uuid.uuid4().hex[:12]}",
+        type=old.type,
+        scope=old.scope,
+        subject=old.subject,
+        predicate=old.predicate,
+        value=content,
+        content=content,
+        keywords=list(old.keywords),
+        paths=list(old.paths),
+        status="active",
+        source="user_explicit",
+        confidence="explicit",
+        priority=old.priority,
+        created_by_session_id=session.session_id,
+        evidence_refs=[f"session:{session.session_id}"],
+        supersedes=[old.id],
+    )
+    created = session.memory_store.update(new)
+    _record_memory_event(session, "supersede", created, source_memory_id=old.id)
+    return created.id
 
 
 def promote_memory(session: Any, memory_id: str) -> str:
@@ -204,6 +301,27 @@ def forget_memory(session: Any, memory_id: str) -> str:
         }
     )
     return record.id
+
+
+def _record_memory_event(
+    session: Any,
+    action: str,
+    record: MemoryRecord,
+    *,
+    source_memory_id: str | None = None,
+) -> None:
+    payload = {
+        "type": "memory_updated",
+        "sessionId": session.session_id,
+        "action": action,
+        "memoryId": record.id,
+        "kind": record.type,
+        "scope": record.scope,
+        "status": record.status,
+    }
+    if source_memory_id:
+        payload["sourceMemoryId"] = source_memory_id
+    session.store.append_event(payload)
 
 
 def context_command_view(session: Any, detail: str) -> dict[str, Any]:
@@ -424,7 +542,7 @@ async def apply_session_command(
             return _record(
                 session_id,
                 text,
-                output_lines=[str(exc), "usage: /mode read|edit|plan"],
+                output_lines=[str(exc), "usage: /mode read|plan|build"],
             )
         return _record(
             session_id,
@@ -717,14 +835,26 @@ def _memory_command(
                 f"  Project active   : {summary['project_active']}",
                 f"  Superseded       : {summary['superseded']}",
                 f"  Deleted          : {summary['deleted']}",
-                "Use /memory list [session|project|correction|experience|deleted], /memory add <text>,",
-                "    /memory promote <id>, or /memory forget <id>.",
+                "Use /memory list|search|approve|edit|disable|delete|supersede.",
             ],
         )
     if action == "list":
         scope = value or "all"
         records = list_memory_records(session, scope)
         lines = ["=== Memory Records ==="]
+        lines.extend(
+            f"  {record['id']} [{record['scope']}/{record['kind']}/{record['status']}] "
+            f"{record['text'][:160]}"
+            for record in records
+        )
+        if len(lines) == 1:
+            lines.append("  (none)")
+        return _record(session_id, text, output_lines=lines)
+    if action == "search":
+        if not value:
+            return _record(session_id, text, output_lines=["usage: /memory search <query>"])
+        records = search_memory_records(session, value)
+        lines = ["=== Memory Search ==="]
         lines.extend(
             f"  {record['id']} [{record['scope']}/{record['kind']}/{record['status']}] "
             f"{record['text'][:160]}"
@@ -743,6 +873,33 @@ def _memory_command(
             return _record(session_id, text, output_lines=["usage: /memory promote <memory_id>"])
         promoted_id = promote_memory(session, value)
         return _record(session_id, text, output_lines=[f"memory promoted: {value} -> {promoted_id}"])
+    if action == "approve":
+        if not value:
+            return _record(session_id, text, output_lines=["usage: /memory approve <memory_id>"])
+        approved_id = approve_memory(session, value)
+        return _record(session_id, text, output_lines=[f"memory approved: {approved_id}"])
+    if action == "edit":
+        memory_id, _, content = value.partition(" ")
+        if not memory_id or not content.strip():
+            return _record(session_id, text, output_lines=["usage: /memory edit <memory_id> <content>"])
+        edited_id = edit_memory(session, memory_id, content.strip())
+        return _record(session_id, text, output_lines=[f"memory edited: {edited_id}"])
+    if action == "disable":
+        if not value:
+            return _record(session_id, text, output_lines=["usage: /memory disable <memory_id>"])
+        disabled_id = disable_memory(session, value)
+        return _record(session_id, text, output_lines=[f"memory disabled: {disabled_id}"])
+    if action == "delete":
+        if not value:
+            return _record(session_id, text, output_lines=["usage: /memory delete <memory_id>"])
+        deleted_id = delete_memory(session, value)
+        return _record(session_id, text, output_lines=[f"memory deleted: {deleted_id}"])
+    if action == "supersede":
+        memory_id, _, content = value.partition(" ")
+        if not memory_id or not content.strip():
+            return _record(session_id, text, output_lines=["usage: /memory supersede <memory_id> <replacement content>"])
+        new_id = supersede_memory(session, memory_id, content.strip())
+        return _record(session_id, text, output_lines=[f"memory superseded: {memory_id} -> {new_id}"])
     if action == "forget":
         if not value:
             return _record(session_id, text, output_lines=["usage: /memory forget <memory_id>"])
@@ -873,10 +1030,14 @@ def _format_rollback_result(result: dict) -> list[str]:
 __all__ = [
     "add_project_memory",
     "apply_session_command",
+    "approve_memory",
     "capture_run_rollback_baseline",
     "context_command_view",
     "create_fresh_session",
     "cumulative_usage",
+    "delete_memory",
+    "disable_memory",
+    "edit_memory",
     "forget_memory",
     "fork_from_entry",
     "get_entry_path",
@@ -894,5 +1055,7 @@ __all__ = [
     "rollback_apply_view",
     "rollback_preview_view",
     "set_task_mode",
+    "search_memory_records",
+    "supersede_memory",
     "switch_to_entry",
 ]

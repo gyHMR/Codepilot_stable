@@ -59,7 +59,7 @@ def _bind_session_runtime(session: "SessionRuntime") -> "SessionController":
 class SessionController:
     session_id: str
     model: ModelDescriptor = field(default_factory=lambda: ModelDescriptor(provider="local", model_id="v2-test"))
-    task_mode: str = "edit"
+    task_mode: str = "build"
     _session: Any | None = None
     _last_run_id: str | None = None
     _derived_controllers: dict[str, "SessionController"] = field(default_factory=dict)

@@ -332,7 +332,7 @@ async def _task_finish_exits_tool_loop_case() -> None:
             "run_finish",
             prompt="运行验证",
             limits=AgentLoopLimits(max_tool_iterations=1, repeated_tool_call_limit=20),
-            task_strategy=TaskStrategy(enabled=True, mode="edit"),
+            task_strategy=TaskStrategy(enabled=True, mode="build"),
         ),
         AgentLoopPorts(model=model, tools=tools),
     )

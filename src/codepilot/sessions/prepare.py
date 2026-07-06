@@ -374,7 +374,7 @@ def runtime_task_strategy(
 ) -> TaskStrategy:
     return TaskStrategy(
         enabled=bool(getattr(session, "task_control_enabled", False)),
-        mode=mode_hint or getattr(session, "task_mode", "edit"),
+        mode=mode_hint or getattr(session, "task_mode", "build"),
         recovery_projection=session._active_task_recovery_projection(),
         planning_budget_profile=getattr(
             session,
@@ -398,13 +398,26 @@ class RuntimeSessionContextPort:
 
     async def prepare(self, request: dict[str, Any]) -> dict[str, Any]:
         session = self._session
+        request_context = request.get("context")
+        request_context = request_context if isinstance(request_context, dict) else {}
+        raw_task_signal = (
+            request_context.get("task_control_signal")
+            or request_context.get("task_signal")
+        )
+        task_signal = raw_task_signal if isinstance(raw_task_signal, dict) else None
         prepared = await maybe_await(
             session.prepare_context(
                 AgentContext(
                     system_prompt=str(request.get("system_prompt", "")),
                     messages=list(request.get("messages", ())),
                     tools=list(request.get("tools", ())),
+                    current_task=(
+                        str(request_context.get("current_task"))
+                        if request_context.get("current_task") is not None
+                        else None
+                    ),
                     task_recovery_projection=session._active_task_recovery_projection(),
+                    task_signal=task_signal,
                 ),
                 ContextPreparationRequest(
                     session_id=session.session_id,
@@ -478,7 +491,7 @@ def admit_prompt_memory(session: Any, text: str, *, run_id: str | None) -> None:
                 "type": "memory_updated",
                 "sessionId": session.session_id,
                 "memoryId": record.id,
-                "kind": record.kind,
+                "kind": record.type,
             }
         )
     except Exception as exc:

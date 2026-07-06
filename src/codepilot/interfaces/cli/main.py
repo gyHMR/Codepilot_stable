@@ -250,8 +250,8 @@ Examples:
     parser.add_argument(
         "--task-mode",
         default=None,
-        choices=["read", "edit", "plan"],
-        help="Task mode for this session (default: edit)",
+        choices=["read", "plan", "build"],
+        help="Task mode for this session (default: build)",
     )
     parser.add_argument(
         "--planning-budget",

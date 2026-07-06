@@ -43,7 +43,7 @@ PLAIN_CP_MARK = (
 )
 
 _CLI_PERMISSION_MODES = frozenset({"read-only", "workspace-write", "ask"})
-_CLI_TASK_MODES = frozenset({"read", "edit", "plan"})
+_CLI_TASK_MODES = frozenset({"read", "plan", "build"})
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ class CliStartupState:
     workspace: str
     session_id: str
     permission_mode: str = "workspace-write"
-    task_mode: str = "edit"
+    task_mode: str = "build"
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -211,7 +211,7 @@ Options:
   --resume SESSION_ID        Resume an existing session
   --model PROVIDER/MODEL     Override model for this run
   --permission-mode MODE     read-only | workspace-write | ask
-  --task-mode MODE           read | edit | plan
+  --task-mode MODE           read | plan | build
   --planning-budget PROFILE  conservative | balanced | wide
   --verbose                  Show debug events and config sources
   --no-color                 Disable colored terminal UI

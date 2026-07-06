@@ -14,36 +14,79 @@ def _session_store(tmp_path: Path, session_id: str = "session_memory_v2"):
     return store
 
 
-def test_memory_record_v2_schema_rejects_legacy_kinds() -> None:
+def _record(
+    memory_id: str,
+    *,
+    memory_type: str,
+    subject: str,
+    content: str,
+    scope: str = "project",
+    keywords: list[str] | None = None,
+    paths: list[str] | None = None,
+    status: str = "active",
+    source: str = "user",
+):
+    from codepilot.sessions.memory import MemoryRecord
+
+    return MemoryRecord(
+        id=memory_id,
+        type=memory_type,
+        scope=scope,
+        subject=subject,
+        predicate="is",
+        value=content,
+        content=content,
+        keywords=keywords or [],
+        paths=paths or [],
+        status=status,
+        source=source,
+    )
+
+
+def test_memory_record_v3_schema_keeps_structured_payload() -> None:
     from codepilot.sessions.memory import MemoryRecord
 
     record = MemoryRecord(
         id="mem_constraint",
+        type="constraint",
         scope="project",
-        kind="constraint",
+        subject="constraint:project_boundary",
+        predicate="is",
+        value="Keep Codepilot explainable and demo-friendly.",
+        content="Keep Codepilot explainable and demo-friendly.",
+        keywords=["topic:architecture"],
+        paths=["docs/design/2context-design.md"],
         status="active",
-        key="constraint:project_boundary",
-        text="Keep Codepilot explainable and demo-friendly.",
-        triggers=["topic:architecture"],
-        related_paths=["docs/design/2context-design.md"],
         evidence_refs=["user:prompt"],
         source="user",
     )
 
-    assert record.text == "Keep Codepilot explainable and demo-friendly."
+    assert record.content == "Keep Codepilot explainable and demo-friendly."
     assert record.is_retrievable
-    assert record.to_dict()["schema_version"] == 2
+    assert record.to_dict()["schema_version"] == 3
 
-    for legacy_kind in ("task", "file", "failure", "project"):
-        with pytest.raises(ValueError, match="Unknown memory kind"):
-            MemoryRecord(
-                id=f"mem_{legacy_kind}",
-                scope="session",
-                kind=legacy_kind,
-                key=f"legacy:{legacy_kind}",
-                text="legacy",
-                source="run",
-            )
+    with pytest.raises(TypeError):
+        MemoryRecord(
+            id="legacy",
+            scope="session",
+            kind="task",  # type: ignore[call-arg]
+            key="legacy:task",
+            text="legacy",
+            source="run",
+        )
+
+    with pytest.raises(ValueError, match="Unsupported memory schema_version"):
+        MemoryRecord.from_dict(
+            {
+                "schema_version": 2,
+                "id": "legacy",
+                "scope": "session",
+                "kind": "task",
+                "key": "legacy:task",
+                "text": "legacy",
+                "source": "run",
+            }
+        )
 
 
 def test_memory_retriever_exposes_recall_as_single_query_entrypoint() -> None:
@@ -53,19 +96,66 @@ def test_memory_retriever_exposes_recall_as_single_query_entrypoint() -> None:
     assert not hasattr(MemoryRetriever, "retrieve")
 
 
+def test_memory_store_normalizes_legacy_jsonl_at_read_boundary(tmp_path: Path) -> None:
+    import json
+
+    from codepilot.sessions.memory import MemoryStore
+
+    session_store = _session_store(tmp_path)
+    memory_file = session_store.layout.project_memory_file
+    memory_file.parent.mkdir(parents=True, exist_ok=True)
+    memory_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "id": "legacy",
+                "scope": "project",
+                "kind": "constraint",
+                "key": "constraint:legacy",
+                "text": "Legacy memory text.",
+                "triggers": ["always"],
+                "related_paths": ["src/app.py"],
+                "source": "user",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    store = MemoryStore(session_store)
+    record = store.load_project()[0]
+
+    assert record.type == "constraint"
+    assert record.subject == "constraint:legacy"
+    assert record.content == "Legacy memory text."
+    assert record.keywords == ["always"]
+    assert record.paths == ["src/app.py"]
+
+    store.update(record)
+    payloads = [
+        json.loads(line)
+        for line in memory_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    latest = payloads[-1]
+    assert "kind" not in latest
+    assert "key" not in latest
+    assert "text" not in latest
+
+
 def test_prompt_correction_supersedes_conflicting_project_memory(tmp_path: Path) -> None:
-    from codepilot.sessions.memory import MemoryRecord, MemoryStore, MemoryWriter
+    from codepilot.sessions.memory import MemoryStore, MemoryWriter
 
     store = MemoryStore(_session_store(tmp_path))
     old = store.update(
-        MemoryRecord(
-            id="mem_old",
-            scope="project",
-            kind="constraint",
-            key="constraint:context_design",
-            text="Context should keep every tool output inline.",
-            triggers=["topic:context"],
-            source="user",
+        _record(
+            "mem_old",
+            memory_type="constraint",
+            subject="constraint:context_design",
+            content="Context should keep every tool output inline.",
+            keywords=["topic:context"],
         )
     )
     writer = MemoryWriter(store=store, workspace_dir=tmp_path)
@@ -76,12 +166,13 @@ def test_prompt_correction_supersedes_conflicting_project_memory(tmp_path: Path)
     )
 
     assert correction is not None
-    assert correction.kind == "correction"
+    assert correction.type == "correction"
     assert correction.scope == "project"
-    assert correction.key == "constraint:context_design"
-    assert correction.supersedes == [old.id]
-    assert "artifact 引用" in correction.text
-    assert store.get(old.id).status == "superseded"
+    assert correction.subject == "constraint:context_design"
+    assert correction.status == "candidate"
+    assert correction.supersedes == []
+    assert "artifact 引用" in correction.content
+    assert store.get(old.id).status == "active"
 
 
 def test_verified_experience_merges_and_promotes_after_repeat(tmp_path: Path) -> None:
@@ -129,67 +220,58 @@ def test_verified_experience_merges_and_promotes_after_repeat(tmp_path: Path) ->
 
     assert len(first) == 1
     assert first[0].scope == "session"
-    assert first[0].kind == "experience"
+    assert first[0].type == "experience"
     assert second[0].occurrences == 2
     project = store.load_project()
-    assert [record.kind for record in project] == ["experience"]
-    assert project[0].key == second[0].key
+    assert [record.type for record in project] == ["experience"]
+    assert project[0].subject == second[0].subject
     assert project[0].source == "promoted"
 
 
 def test_memory_recall_orders_layers_and_excludes_inactive(tmp_path: Path) -> None:
-    from codepilot.sessions.memory import MemoryQuery, MemoryRecord, MemoryRetriever, MemoryStore
+    from codepilot.sessions.memory import MemoryQuery, MemoryRetriever, MemoryStore
     from codepilot.sessions.memory.files import save_global_memory
 
     store = MemoryStore(_session_store(tmp_path))
     save_global_memory(tmp_path, "Always prefer focused tests before broad test suites.")
     for record in [
-        MemoryRecord(
-            id="mem_exp",
+        _record(
+            "mem_exp",
             scope="session",
-            kind="experience",
-            key="experience:edit:multiple_matches",
-            text="When edit reports multiple_matches, read the target area first.",
-            triggers=["intent:edit_file", "error:multiple_matches"],
-            related_paths=["src/app.py"],
-            evidence_refs=["tool:bad", "tool:good", "verification:pytest"],
+            memory_type="experience",
+            subject="experience:edit:multiple_matches",
+            content="When edit reports multiple_matches, read the target area first.",
+            keywords=["intent:edit_file", "error:multiple_matches"],
+            paths=["src/app.py"],
             source="run",
         ),
-        MemoryRecord(
-            id="mem_decision",
-            scope="project",
-            kind="decision",
-            key="decision:memory_contract",
-            text="Memory stores durable knowledge only.",
-            triggers=["topic:memory"],
-            source="user",
+        _record(
+            "mem_decision",
+            memory_type="decision",
+            subject="decision:memory_contract",
+            content="Memory stores durable knowledge only.",
+            keywords=["topic:memory"],
         ),
-        MemoryRecord(
-            id="mem_constraint",
-            scope="project",
-            kind="constraint",
-            key="constraint:project_boundary",
-            text="Keep the project learning-oriented.",
-            triggers=["always", "topic:architecture"],
-            source="user",
+        _record(
+            "mem_constraint",
+            memory_type="constraint",
+            subject="constraint:project_boundary",
+            content="Keep the project learning-oriented.",
+            keywords=["always", "topic:architecture"],
         ),
-        MemoryRecord(
-            id="mem_correction",
-            scope="project",
-            kind="correction",
-            key="constraint:context_design",
-            text="Do not inline old large tool outputs; use artifact refs.",
-            triggers=["topic:context"],
-            source="user",
+        _record(
+            "mem_correction",
+            memory_type="correction",
+            subject="constraint:context_design",
+            content="Do not inline old large tool outputs; use artifact refs.",
+            keywords=["topic:context"],
         ),
-        MemoryRecord(
-            id="mem_deleted",
-            scope="project",
-            kind="constraint",
-            key="constraint:deleted",
-            text="Deleted memory",
+        _record(
+            "mem_deleted",
+            memory_type="constraint",
+            subject="constraint:deleted",
+            content="Deleted memory",
             status="deleted",
-            source="user",
         ),
     ]:
         store.update(record)
@@ -229,20 +311,18 @@ async def _context_governor_memory_recall_case(tmp_path: Path) -> None:
 
     class FakeMemoryRetriever:
         def recall(self, _query):
-            correction = MemoryRecord(
-                id="mem_correction",
-                scope="project",
-                kind="correction",
-                key="constraint:context_design",
-                text="Use artifact refs for old large tool outputs.",
-                source="user",
+            correction = _record(
+                "mem_correction",
+                memory_type="correction",
+                subject="constraint:context_design",
+                content="Use artifact refs for old large tool outputs.",
             )
-            experience = MemoryRecord(
-                id="mem_exp",
+            experience = _record(
+                "mem_exp",
                 scope="session",
-                kind="experience",
-                key="experience:edit:multiple_matches",
-                text="Read target area before retrying edit.",
+                memory_type="experience",
+                subject="experience:edit:multiple_matches",
+                content="Read target area before retrying edit.",
                 source="run",
             )
             return MemoryRecall(

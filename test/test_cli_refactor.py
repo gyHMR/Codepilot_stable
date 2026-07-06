@@ -183,7 +183,7 @@ class TestTerminalRenderer:
         assert "+- C P -+" in rendered
         assert "deepseek/deepseek-chat" in rendered
         assert "workspace-write" in rendered
-        assert "edit" in rendered
+        assert "build" in rendered
         assert "session-1.." in rendered
         assert "╭─" not in rendered
         assert "│ Model" not in rendered
@@ -202,7 +202,7 @@ class TestTerminalRenderer:
 
         assert "<b>deepseek/deepseek-chat</b>" in toolbar
         assert "workspace-write" in toolbar
-        assert "edit" in toolbar
+        assert "build" in toolbar
         assert "/help" in toolbar
         assert "Ctrl+C" in toolbar
 
@@ -491,7 +491,7 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
     class FakeRuntime:
         def __init__(self):
             self.prompt_calls = 0
-            self.task_mode = "edit"
+            self.task_mode = "build"
 
         async def dispatch(self, session_id, action):
             assert session_id == "session_1"
@@ -597,7 +597,7 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
                 "entries": [{"id": "entry_1"}],
                 "tree": [{"id": "entry_1"}],
                 "leaf_id": "entry_1",
-                "task_mode": "edit",
+                "task_mode": "build",
             },
         }
     assert messages[2] == {
@@ -870,7 +870,7 @@ class TestCliStartupState:
         assert state.workspace == "/path/to/workspace"
         assert state.session_id == "test_session_123"
         assert state.permission_mode == "read-only"
-        assert state.task_mode == "edit"
+        assert state.task_mode == "build"
         assert state.warnings == ("Test warning",)
 
     def test_build_startup_state_defaults(self):
@@ -921,7 +921,7 @@ class TestCliStartupState:
         assert state.workspace == "/workspace"
         assert state.session_id == "session_1"
         assert state.permission_mode == "read-only"
-        assert state.task_mode == "edit"
+        assert state.task_mode == "build"
         assert state.warnings == ("Runtime warning",)
 
         with pytest.raises(ValueError, match="model_id"):
@@ -981,7 +981,7 @@ class TestSessionStatus:
         assert status.model_id == "deepseek/deepseek-chat"
         assert status.workspace == "/workspace"
         assert status.permission_mode == "read-only"
-        assert status.task_mode == "edit"
+        assert status.task_mode == "build"
         assert status.message_count == 42
         assert status.leaf_id == "leaf_456"
         assert status.is_running is True
@@ -998,7 +998,7 @@ class TestSessionStatus:
         )
 
         assert status.is_running is False
-        assert status.task_mode == "edit"
+        assert status.task_mode == "build"
 
 
 # ── 配置脱敏测试 ─────────────────────────────────────────────────

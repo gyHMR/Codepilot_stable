@@ -164,7 +164,7 @@ class RetryPolicy:
 @dataclass(frozen=True)
 class TaskStrategy:
     enabled: bool = False
-    mode: TaskMode = "edit"
+    mode: TaskMode = "build"
     goal: str | None = None
     steps: tuple[Any, ...] = ()
     planning: TaskPlanningState | None = None

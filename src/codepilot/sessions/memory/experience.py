@@ -150,19 +150,24 @@ class MemoryConsolidator:
         existing = _active_by_key(
             self.store.load_session(),
             key=candidate.key,
-            kind="experience",
+            memory_type="experience",
         )
         if existing is None:
             record = MemoryRecord(
                 id=_new_memory_id(),
                 scope="session",
-                kind="experience",
-                key=candidate.key,
-                text=candidate.text,
-                triggers=list(candidate.triggers),
-                related_paths=list(candidate.related_paths),
+                type="experience",
+                subject=candidate.key,
+                predicate="is",
+                value=candidate.text,
+                content=candidate.text,
+                keywords=list(candidate.triggers),
+                paths=list(candidate.related_paths),
                 evidence_refs=list(candidate.evidence_refs),
-                source="run",
+                source="task_summary",
+                confidence="observed",
+                created_by_session_id=self.store.session_id,
+                created_by_run_id=run_id,
             )
         else:
             record = _merge_record(existing, candidate)
@@ -172,24 +177,25 @@ class MemoryConsolidator:
         return record
 
     def upsert_project_record(self, record: MemoryRecord) -> MemoryRecord:
+        if record.status == "candidate":
+            return self.store.update(record)
         existing = _active_by_key(
             self.store.load_project(),
-            key=record.key,
-            kind=record.kind,
+            key=record.subject,
+            memory_type=record.type,
         )
         if existing is not None:
-            existing.text = record.text
-            existing.triggers = _dedupe([*existing.triggers, *record.triggers])
-            existing.related_paths = _dedupe(
-                [*existing.related_paths, *record.related_paths]
-            )
+            existing.content = record.content
+            existing.value = record.value
+            existing.keywords = _dedupe([*existing.keywords, *record.keywords])
+            existing.paths = _dedupe([*existing.paths, *record.paths])
             existing.evidence_refs = _dedupe(
                 [*existing.evidence_refs, *record.evidence_refs]
             )
             existing.supersedes = _dedupe([*existing.supersedes, *record.supersedes])
             existing.occurrences += max(record.occurrences, 1)
             return self.store.update(existing)
-        superseded = _active_conflicts(self.store.load_project(), record.key, record.kind)
+        superseded = _active_conflicts(self.store.load_project(), record.subject, record.type)
         for old in superseded:
             old.status = "superseded"
             self.store.update(old)
@@ -200,28 +206,33 @@ class MemoryConsolidator:
     def _promote_experience(self, session_record: MemoryRecord, *, run_id: str | None) -> MemoryRecord:
         existing = _active_by_key(
             self.store.load_project(),
-            key=session_record.key,
-            kind="experience",
+            key=session_record.subject,
+            memory_type="experience",
         )
         if existing is not None:
             existing.occurrences = max(existing.occurrences, session_record.occurrences)
-            existing.triggers = _dedupe([*existing.triggers, *session_record.triggers])
-            existing.related_paths = _dedupe([*existing.related_paths, *session_record.related_paths])
+            existing.keywords = _dedupe([*existing.keywords, *session_record.keywords])
+            existing.paths = _dedupe([*existing.paths, *session_record.paths])
             existing.evidence_refs = _dedupe([*existing.evidence_refs, *session_record.evidence_refs])
             return self.store.update(existing)
         promoted = MemoryRecord(
             id=_new_memory_id(),
             scope="project",
-            kind="experience",
-            key=session_record.key,
-            text=session_record.text,
-            triggers=list(session_record.triggers),
-            related_paths=list(session_record.related_paths),
+            type="experience",
+            subject=session_record.subject,
+            predicate=session_record.predicate,
+            value=session_record.value,
+            content=session_record.content,
+            keywords=list(session_record.keywords),
+            paths=list(session_record.paths),
             evidence_refs=[
                 *session_record.evidence_refs,
                 *([f"run:{run_id}"] if run_id else []),
             ],
             source="promoted",
+            confidence="observed",
+            created_by_session_id=self.store.session_id,
+            created_by_run_id=run_id,
             occurrences=session_record.occurrences,
             supersedes=[session_record.id],
         )
@@ -246,15 +257,15 @@ def _active_by_key(
     records: list[MemoryRecord],
     *,
     key: str,
-    kind: str,
+    memory_type: str,
 ) -> MemoryRecord | None:
     return next(
         (
             record
             for record in records
             if record.status == "active"
-            and record.key == key
-            and record.kind == kind
+            and record.subject == key
+            and record.type == memory_type
         ),
         None,
     )
@@ -263,29 +274,29 @@ def _active_by_key(
 def _active_conflicts(
     records: list[MemoryRecord],
     key: str,
-    kind: str,
+    memory_type: str,
 ) -> list[MemoryRecord]:
-    if kind == "correction":
+    if memory_type == "correction":
         return [
             record
             for record in records
             if record.status == "active"
-            and record.key == key
-            and record.kind != "correction"
+            and record.subject == key
+            and record.type != "correction"
         ]
     return [
         record
         for record in records
         if record.status == "active"
-        and record.key == key
-        and record.kind == kind
+        and record.subject == key
+        and record.type == memory_type
     ]
 
 
 def _merge_record(record: MemoryRecord, candidate: ExperienceCandidate) -> MemoryRecord:
     record.occurrences += 1
-    record.triggers = _dedupe([*record.triggers, *candidate.triggers])
-    record.related_paths = _dedupe([*record.related_paths, *candidate.related_paths])
+    record.keywords = _dedupe([*record.keywords, *candidate.triggers])
+    record.paths = _dedupe([*record.paths, *candidate.related_paths])
     record.evidence_refs = _dedupe([*record.evidence_refs, *candidate.evidence_refs])
     return record
 

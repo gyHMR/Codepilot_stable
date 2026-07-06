@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# 新手导读：ContextProjector 把会话事实投影成 stable rules、working state、memory、evidence 和 recent messages。
+# 新手导读：ContextProjector 把会话事实投影成 System、Task State、Working Set、Memory 和 Conversation 五层。
 # 关注点：它决定最终进入模型 prompt 的信息结构。
 
 """ContextProjector：把 SessionSnapshot 投影成本轮 prompt 视图。"""
@@ -22,6 +22,7 @@ from codepilot.protocols import (
     UserMessage,
 )
 
+from .compactor import ContextCompactResult
 from .ledger import ToolArtifactLedger
 from .state import ActiveFile, ContextEvidence
 
@@ -36,7 +37,7 @@ class ContextProjection:
 
 
 class ContextProjector:
-    """按 stable/working/memory/evidence/recent 层生成本轮决策视图。"""
+    """按五层上下文生成本轮决策视图。"""
 
     def __init__(self, *, ledger: ToolArtifactLedger) -> None:
         self.ledger = ledger
@@ -71,21 +72,43 @@ class ContextProjector:
         changed_files: list[str],
         memory_lines: list[str],
         evidence_lines: list[str],
+        compact_result: ContextCompactResult | None = None,
+        emergency_trim: bool = False,
     ) -> ContextProjection:
         view = ContextView(
             stable_rules=stable_rules(context.system_prompt),
-            working_state=working_state_lines(
+            task_state=task_state_lines(
                 context,
                 checkpoint=checkpoint,
+                compact_result=compact_result,
+                emergency_trim=emergency_trim,
+            ),
+            working_set=working_set_lines(
                 active_files=active_files,
                 changed_files=changed_files,
+                evidence_lines=evidence_lines,
+                compact_result=compact_result,
+                emergency_trim=emergency_trim,
             ),
-            recalled_memory=memory_lines,
-            evidence=evidence_lines,
-            recent_messages=recent_message_lines(context.messages, pressure.level),
+            recalled_memory=compacted_memory_lines(
+                memory_lines,
+                compact_result=compact_result,
+                emergency_trim=emergency_trim,
+            ),
+            conversation=compacted_conversation_lines(
+                context.messages,
+                pressure.level,
+                compact_result=compact_result,
+                emergency_trim=emergency_trim,
+            ),
             tools=[tool.name for tool in context.tools],
         )
-        messages = self.project_messages(context.messages, pressure.level)
+        messages = self.project_messages(
+            context.messages,
+            pressure.level,
+            compact_result=compact_result,
+            emergency_trim=emergency_trim,
+        )
         return ContextProjection(
             view=view,
             messages=messages,
@@ -96,11 +119,19 @@ class ContextProjector:
         self,
         messages: list[Message],
         pressure_level: str,
+        *,
+        compact_result: ContextCompactResult | None = None,
+        emergency_trim: bool = False,
     ) -> list[Message]:
-        keep_recent = {"normal": 10, "tight": 6, "critical": 4}.get(
-            pressure_level,
-            6,
-        )
+        if emergency_trim:
+            keep_recent = 1
+        elif compact_result is not None:
+            keep_recent = 2
+        else:
+            keep_recent = {"normal": 10, "tight": 6, "critical": 4}.get(
+                pressure_level,
+                6,
+            )
         selected = list(messages[-keep_recent:])
         out: list[Message] = []
         for message in selected:
@@ -108,7 +139,9 @@ class ContextProjector:
                 out.append(
                     self.ledger.project_tool_result(
                         message,
-                        preserve_full=pressure_level == "normal",
+                        preserve_full=pressure_level == "normal"
+                        and compact_result is None
+                        and not emergency_trim,
                     )
                 )
             else:
@@ -134,25 +167,112 @@ def stable_rules(system_prompt: str) -> list[str]:
     return instruction_lines or lines[:8]
 
 
-def working_state_lines(
+def task_state_lines(
     context: AgentContext,
     *,
     checkpoint: ContextCheckpoint | None,
-    active_files: list[str],
-    changed_files: list[str],
+    compact_result: ContextCompactResult | None = None,
+    emergency_trim: bool = False,
 ) -> list[str]:
     lines: list[str] = []
     if context.current_task:
         lines.append(context.current_task)
+    if context.task_signal:
+        signal_parts = [
+            f"{key}={value}"
+            for key, value in context.task_signal.items()
+            if isinstance(value, str) and value
+            and key in {"phase", "action_intent", "recent_error_code", "next_action"}
+        ]
+        if signal_parts:
+            lines.append("Task signal: " + ", ".join(signal_parts))
     if checkpoint is not None:
         lines.append(f"Checkpoint goal: {checkpoint.goal}")
         if checkpoint.next_actions:
             lines.append(f"Next actions: {', '.join(checkpoint.next_actions)}")
-    if active_files:
-        lines.append(f"Active files: {', '.join(active_files[:12])}")
-    if changed_files:
-        lines.append(f"Changed files: {', '.join(changed_files[:12])}")
+    if compact_result is not None:
+        if compact_result.recovery_summary:
+            lines.append(
+                "Compact summary: "
+                + _compact_line(
+                    compact_result.recovery_summary,
+                    limit=220 if emergency_trim else 800,
+                )
+            )
+        lines.extend(
+            _limit_lines(
+                compact_result.task_state_lines,
+                count=1 if emergency_trim else 4,
+                limit=180 if emergency_trim else 500,
+            )
+        )
     return lines
+
+
+def working_set_lines(
+    *,
+    active_files: list[str],
+    changed_files: list[str],
+    evidence_lines: list[str],
+    compact_result: ContextCompactResult | None = None,
+    emergency_trim: bool = False,
+) -> list[str]:
+    lines: list[str] = []
+    if active_files:
+        limit = 4 if emergency_trim else 12
+        lines.append(f"Active files: {', '.join(active_files[:limit])}")
+    if changed_files:
+        limit = 4 if emergency_trim else 12
+        lines.append(f"Changed files: {', '.join(changed_files[:limit])}")
+    if compact_result is not None and compact_result.working_set_lines:
+        lines.extend(
+            _limit_lines(
+                compact_result.working_set_lines,
+                count=2 if emergency_trim else 6,
+                limit=180 if emergency_trim else 500,
+            )
+        )
+    else:
+        lines.extend(evidence_lines[: 4 if emergency_trim else 12])
+    return lines
+
+
+def compacted_memory_lines(
+    memory_lines: list[str],
+    *,
+    compact_result: ContextCompactResult | None,
+    emergency_trim: bool,
+) -> list[str]:
+    if compact_result is not None and compact_result.memory_lines:
+        return _limit_lines(
+            compact_result.memory_lines,
+            count=1 if emergency_trim else 3,
+            limit=180 if emergency_trim else 500,
+        )
+    return _limit_lines(
+        memory_lines,
+        count=1 if emergency_trim else len(memory_lines),
+        limit=180 if emergency_trim else 500,
+    )
+
+
+def compacted_conversation_lines(
+    messages: list[Message],
+    pressure_level: str,
+    *,
+    compact_result: ContextCompactResult | None,
+    emergency_trim: bool,
+) -> list[str]:
+    if compact_result is not None and compact_result.conversation_lines:
+        return _limit_lines(
+            compact_result.conversation_lines,
+            count=1 if emergency_trim else 3,
+            limit=180 if emergency_trim else 500,
+        )
+    return recent_message_lines(
+        messages,
+        "critical" if emergency_trim else pressure_level,
+    )
 
 
 def recent_message_lines(messages: list[Message], pressure_level: str) -> list[str]:
@@ -167,11 +287,11 @@ def recent_message_lines(messages: list[Message], pressure_level: str) -> list[s
 
 def compose_system_prompt(system_prompt: str, view: ContextView) -> str:
     sections = [
-        ("Stable Rules", view.stable_rules),
-        ("Working State", view.working_state),
-        ("Memory Recall", view.recalled_memory),
-        ("Evidence", view.evidence),
-        ("Recent Turns", view.recent_messages),
+        ("System", view.stable_rules),
+        ("Task State", view.task_state),
+        ("Working Set", view.working_set),
+        ("Memory", view.recalled_memory),
+        ("Conversation", view.conversation),
     ]
     parts = [system_prompt.rstrip()]
     for name, lines in sections:
@@ -183,11 +303,11 @@ def compose_system_prompt(system_prompt: str, view: ContextView) -> str:
 
 def section_reports(view: ContextView, total_budget: int) -> list[ContextSectionReport]:
     sections = {
-        "stable_rules": view.stable_rules,
-        "working_state": view.working_state,
-        "recalled_memory": view.recalled_memory,
-        "evidence": view.evidence,
-        "recent_messages": view.recent_messages,
+        "system": view.stable_rules,
+        "task_state": view.task_state,
+        "working_set": view.working_set,
+        "memory": view.recalled_memory,
+        "conversation": view.conversation,
     }
     each_budget = max(1, total_budget // max(1, len(sections)))
     return [
@@ -206,11 +326,11 @@ def section_reports(view: ContextView, total_budget: int) -> list[ContextSection
 
 def tokens_by_layer(view: ContextView) -> dict[str, int]:
     return {
-        "stable_rules": estimate_lines(view.stable_rules),
-        "working_state": estimate_lines(view.working_state),
-        "recalled_memory": estimate_lines(view.recalled_memory),
-        "evidence": estimate_lines(view.evidence),
-        "recent_messages": estimate_lines(view.recent_messages),
+        "system": estimate_lines(view.stable_rules),
+        "task_state": estimate_lines(view.task_state),
+        "working_set": estimate_lines(view.working_set),
+        "memory": estimate_lines(view.recalled_memory),
+        "conversation": estimate_lines(view.conversation),
     }
 
 
@@ -329,10 +449,10 @@ def selected_item_summaries(
 
     for section in [
         "stable_rules",
-        "working_state",
+        "task_state",
+        "working_set",
         "recalled_memory",
-        "evidence",
-        "recent_messages",
+        "conversation",
     ]:
         for index, value in enumerate(getattr(view, section)):
             out.append(
@@ -465,6 +585,19 @@ def _compact_evidence_content(content: str) -> str:
     if important:
         return " | ".join(important[:6])[:400]
     return f"{len(lines)} lines, {len(content)} chars archived"
+
+
+def _compact_line(value: object, *, limit: int) -> str:
+    return " ".join(str(value or "").strip().split())[:limit]
+
+
+def _limit_lines(values: list[str], *, count: int, limit: int) -> list[str]:
+    out: list[str] = []
+    for value in values[:count]:
+        text = _compact_line(value, limit=limit)
+        if text:
+            out.append(text)
+    return out
 
 
 __all__ = [

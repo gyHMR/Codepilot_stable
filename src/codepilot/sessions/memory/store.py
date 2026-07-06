@@ -12,7 +12,13 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .records import MEMORY_SCHEMA_VERSION, MemoryRecord, MemoryStatus, utc_now_iso
+from .records import (
+    MEMORY_SCHEMA_VERSION,
+    MemoryRecord,
+    MemoryStatus,
+    normalize_memory_record_payload,
+    utc_now_iso,
+)
 
 if TYPE_CHECKING:
     from ..storage import SessionStore
@@ -46,34 +52,26 @@ class MemoryStore:
         self.project_compact_after_lines = project_compact_after_lines
 
     def load_session(self) -> list[MemoryRecord]:
-        if not self.session_file.exists():
-            return []
-        try:
-            payload = json.loads(self.session_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            logger.warning("failed to load session memory file=%s", self.session_file)
-            return []
-        if not isinstance(payload, dict):
-            return []
-        if payload.get("schema_version") != MEMORY_SCHEMA_VERSION:
-            logger.warning("ignoring unsupported session memory schema")
-            return []
-        records = payload.get("records", [])
-        return _records_from_values(records)
+        return [
+            record for record in self._load_all_records()
+            if record.scope == "session" or record.scope.startswith("session:")
+        ]
 
     def save_session(self, records: list[MemoryRecord]) -> None:
-        self.session_file.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "schema_version": MEMORY_SCHEMA_VERSION,
-            "session_id": self.session_id,
-            "records": [
-                record.to_dict()
-                for record in _prune_records(records, self.max_session_records)
-            ],
-        }
-        _atomic_write_json(self.session_file, payload)
+        kept_session = _prune_records(records, self.max_session_records)
+        others = [
+            record for record in self._load_all_records()
+            if not (record.scope == "session" or record.scope.startswith("session:"))
+        ]
+        self._write_memory_log([*others, *kept_session])
 
     def load_project(self) -> list[MemoryRecord]:
+        return [
+            record for record in self._load_all_records()
+            if record.scope == "project" or record.scope.startswith("project:")
+        ]
+
+    def _load_all_records(self) -> list[MemoryRecord]:
         if not self.project_file.exists():
             return []
         latest: dict[str, MemoryRecord] = {}
@@ -82,7 +80,7 @@ class MemoryStore:
                 continue
             try:
                 raw = json.loads(line)
-                record = MemoryRecord.from_dict(raw) if isinstance(raw, dict) else None
+                record = MemoryRecord.from_dict(normalize_memory_record_payload(raw))
             except (json.JSONDecodeError, ValueError, TypeError):
                 logger.warning("skipping invalid project memory line")
                 continue
@@ -98,12 +96,15 @@ class MemoryStore:
             self.compact_project()
 
     def compact_project(self) -> list[MemoryRecord]:
-        records = _prune_records(self.load_project(), self.max_project_records)
+        records = _prune_records(self._load_all_records(), self.max_project_records)
+        self._write_memory_log(records)
+        return records
+
+    def _write_memory_log(self, records: list[MemoryRecord]) -> None:
         self.project_file.parent.mkdir(parents=True, exist_ok=True)
         with self.project_file.open("w", encoding="utf-8", newline="\n") as handle:
             for record in records:
                 handle.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
-        return records
 
     def upsert_session(self, record: MemoryRecord) -> MemoryRecord:
         records = self.load_session()
@@ -118,7 +119,7 @@ class MemoryStore:
 
     def update(self, record: MemoryRecord) -> MemoryRecord:
         record.updated_at = utc_now_iso()
-        if record.scope == "project":
+        if record.scope == "project" or record.scope.startswith("project:"):
             self.append_project(record)
         else:
             self.upsert_session(record)
@@ -142,7 +143,7 @@ class MemoryStore:
         return None
 
     def all_records(self) -> list[MemoryRecord]:
-        return [*self.load_session(), *self.load_project()]
+        return self._load_all_records()
 
     def active_records(self) -> list[MemoryRecord]:
         return [record for record in self.all_records() if record.status == "active"]
@@ -156,10 +157,14 @@ def _records_from_values(values: object) -> list[MemoryRecord]:
         if not isinstance(value, dict):
             continue
         try:
-            records.append(MemoryRecord.from_dict(value))
+            records.append(MemoryRecord.from_dict(normalize_memory_record_payload(value)))
         except (TypeError, ValueError):
             logger.warning("skipping invalid session memory record")
     return records
+
+
+def _is_session_scope(record: MemoryRecord) -> bool:
+    return record.scope == "session" or record.scope.startswith("session:")
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -197,8 +202,8 @@ def _record_rank(index: int, record: MemoryRecord) -> tuple[int, int, int, int, 
     }
     return (
         1 if record.status == "active" else 0,
-        kind_rank.get(record.kind, 0),
-        1 if "always" in record.triggers else 0,
+        kind_rank.get(record.type, 0),
+        1 if "always" in record.keywords else 0,
         record.occurrences,
         record.updated_at,
         index,

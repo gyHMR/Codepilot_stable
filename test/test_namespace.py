@@ -395,9 +395,16 @@ def test_removed_builtin_file_tool_aliases_are_gone(tmp_path: Path) -> None:
 
     assert tool_names.isdisjoint(removed_aliases)
     assert "complete_task_step" in tool_names
+    assert "task_update" in tool_names
     assert READ_ONLY_TOOL_NAMES.isdisjoint(removed_aliases)
     assert MUTATING_TOOL_NAMES.isdisjoint(removed_aliases)
     assert all(get_builtin_tool_metadata(name) is None for name in removed_aliases)
+
+    task_update_metadata = get_builtin_tool_metadata("task_update")
+    assert task_update_metadata is not None
+    assert task_update_metadata.category == "task_control"
+    assert task_update_metadata.read_only is True
+    assert task_update_metadata.risk_level == "low"
 
 
 def test_tools_refactor_exposes_new_lifecycle_modules() -> None:

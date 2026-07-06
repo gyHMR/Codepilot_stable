@@ -233,7 +233,7 @@ class WorkspaceResourceLoader:
         task_mode = (
             raw_task_mode
             if isinstance(raw_task_mode, str)
-            and raw_task_mode in {"read", "edit", "plan"}
+            and raw_task_mode in {"read", "plan", "build"}
             else None
         )
         raw_planning_budget_profile = raw.get("planning_budget_profile")

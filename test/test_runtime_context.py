@@ -84,7 +84,7 @@ def test_runtime_prompt_includes_skill_index_without_skill_body(tmp_path: Path) 
         system_prompt="",
         thinking_level="off",
         tool_execution="parallel",
-        task_mode="edit",
+        task_mode="build",
         planning_budget_profile="balanced",
         retry_enabled=True,
         max_retries=2,

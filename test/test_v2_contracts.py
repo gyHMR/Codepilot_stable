@@ -111,7 +111,7 @@ def test_core_contracts_describe_loop_stage_without_session_objects() -> None:
         context={"system_prompt": "sys"},
         model=ModelDescriptor(provider="fake", model_id="unit"),
         tools=[],
-        task_strategy=TaskStrategy(mode="edit"),
+        task_strategy=TaskStrategy(mode="build"),
         limits=AgentLoopLimits(max_model_turns=3),
     )
     assert loop_input.correlation.session_id == "s1"

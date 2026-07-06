@@ -99,7 +99,7 @@ class ResolvedRuntimeProfile:
     credential_source: str
     credential_location: str | None = None
     permission_mode: RuntimePermissionMode = "workspace-write"
-    task_mode: TaskMode = "edit"
+    task_mode: TaskMode = "build"
     planning_budget_profile: PlanningBudgetProfile = "balanced"
     sources: Mapping[str, ConfigValueSource] = field(default_factory=dict)
 

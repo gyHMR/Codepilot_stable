@@ -181,10 +181,10 @@ class ContextView:
     """本轮模型调用实际消费的分层上下文视图。"""
 
     stable_rules: list[str] = field(default_factory=list)
-    working_state: list[str] = field(default_factory=list)
+    task_state: list[str] = field(default_factory=list)
+    working_set: list[str] = field(default_factory=list)
     recalled_memory: list[str] = field(default_factory=list)
-    evidence: list[str] = field(default_factory=list)
-    recent_messages: list[str] = field(default_factory=list)
+    conversation: list[str] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)
 
 
@@ -213,6 +213,7 @@ class ContextReport:
     checkpoint_created: ContextCheckpoint | None = None
     artifact_refs: list[ContextArtifactRef] = field(default_factory=list)
     tokens_by_layer: dict[str, int] = field(default_factory=dict)
+    compact_summary: str = ""
     prefix_hash: str | None = None
     dynamic_hash: str | None = None
 

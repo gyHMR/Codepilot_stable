@@ -9,13 +9,13 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Mapping, cast
 
 
-TaskMode = Literal["read", "edit", "plan"]
+TaskMode = Literal["read", "plan", "build"]
 PlanningBudgetProfile = Literal["conservative", "balanced", "wide"]
 PlanningPhase = Literal["none", "discovery", "synthesis", "execution", "recovered"]
 PlanningStatus = Literal["skipped", "completed", "failed", "budget_exhausted"]
 PlanSource = Literal["default", "llm", "llm_with_discovery", "fallback", "recovered"]
 
-_TASK_MODES = frozenset({"read", "edit", "plan"})
+_TASK_MODES = frozenset({"read", "plan", "build"})
 _PLANNING_BUDGET_PROFILES = frozenset({"conservative", "balanced", "wide"})
 _PLANNING_PHASES = frozenset({"none", "discovery", "synthesis", "execution", "recovered"})
 _PLANNING_STATUSES = frozenset({"skipped", "completed", "failed", "budget_exhausted"})

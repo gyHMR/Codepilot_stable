@@ -29,7 +29,7 @@ class SessionConversationState:
     system_prompt: str = ""
     messages: list[AgentMessage] = field(default_factory=list)
     thinking_level: ThinkingLevel | str = "off"
-    task_mode: TaskMode = "edit"
+    task_mode: TaskMode = "build"
     stream_message: Message | None = None
     error: str | None = None
     pending_tool_calls: set[str] = field(default_factory=set)

@@ -46,6 +46,10 @@ class SessionLayout:
         return self.session_dir / "events.jsonl"
 
     @property
+    def task_state_file(self) -> Path:
+        return self.session_dir / "task_state.json"
+
+    @property
     def session_memory_file(self) -> Path:
         return self.session_dir / "memory.json"
 
@@ -59,7 +63,7 @@ class SessionLayout:
 
     @property
     def project_memory_file(self) -> Path:
-        return self.codepilot_dir / "memory" / "project.jsonl"
+        return self.codepilot_dir / "memory" / "memories.jsonl"
 
     @property
     def pinned_memory_file(self) -> Path:
@@ -633,10 +637,10 @@ class RunStore:
 Canonical layout:
 
 .codepilot/sessions/<session_id>/
-  - session.json      session metadata, leaf pointer, task recovery projection
+  - session.json      session metadata and leaf pointer
   - messages.jsonl    canonical transcript tree
   - events.jsonl      lazily-created lightweight session events
-  - memory.json       lazily-created session durable memory
+  - task_state.json   authoritative current task state
 """
 
 import hashlib
@@ -659,6 +663,147 @@ def new_session_id() -> str:
     return f"session_{uuid.uuid4().hex[:12]}"
 
 
+_TASK_STATE_KEYS = {
+    "schema_version",
+    "task_id",
+    "raw_user_request",
+    "current_mode",
+    "approval_state",
+    "goal",
+    "proposed_plan",
+    "approved_plan",
+    "current_step_id",
+    "steps",
+    "verification_status",
+    "evidence_refs",
+    "blocked_reason",
+    "recovery_summary",
+    "source_run_id",
+    "created_at",
+    "updated_at",
+}
+_TASK_STEP_STATUSES = {"pending", "in_progress", "completed", "blocked"}
+_TASK_STEP_KINDS = {"investigate", "edit", "verify", "summarize", "other"}
+_TASK_MODES = {"read", "plan", "build"}
+
+
+def normalize_task_state_payload(raw: object) -> dict[str, Any] | None:
+    """Return canonical task_state.json payload from canonical or legacy data."""
+
+    if not isinstance(raw, dict):
+        return None
+    state = canonicalize_task_state_for_write(raw)
+    progress = raw.get("task_progress")
+    if not isinstance(state.get("steps"), list) and isinstance(progress, dict):
+        state["steps"] = _legacy_task_progress_steps(progress)
+    if "current_mode" not in state:
+        state["current_mode"] = _task_mode(raw.get("task_mode"), default="build")
+    else:
+        state["current_mode"] = _task_mode(state.get("current_mode"), default="build")
+    state.setdefault("schema_version", 1)
+    state.setdefault("approval_state", "none")
+    state.setdefault("proposed_plan", None)
+    state.setdefault("approved_plan", None)
+    state.setdefault("current_step_id", _first_active_step_id(state.get("steps")))
+    state.setdefault("steps", [])
+    state.setdefault("verification_status", _legacy_verification_status(progress))
+    state.setdefault("evidence_refs", [])
+    state.setdefault("blocked_reason", _legacy_blocked_reason(progress))
+    state.setdefault("recovery_summary", "")
+    return state
+
+
+def canonicalize_task_state_for_write(state: dict[str, Any]) -> dict[str, Any]:
+    """Strip historical task fields before persisting task_state.json."""
+
+    return {
+        key: value
+        for key, value in state.items()
+        if key in _TASK_STATE_KEYS
+    }
+
+
+def _legacy_task_progress_steps(progress: dict[str, Any]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    details = progress.get("step_details")
+    step_details = details if isinstance(details, dict) else {}
+
+    def add(raw: object, status: str) -> None:
+        if not isinstance(raw, list):
+            return
+        for item in raw:
+            title = " ".join(str(item).strip().split())
+            if not title or title in seen:
+                continue
+            seen.add(title)
+            detail = step_details.get(title)
+            detail_map = detail if isinstance(detail, dict) else {}
+            steps.append(
+                {
+                    "id": f"step_{len(steps) + 1}",
+                    "title": title[:160],
+                    "status": status,
+                    "kind": _task_step_kind(detail_map.get("kind")),
+                    "acceptance": _optional_task_text(detail_map.get("acceptance")),
+                    "verification_hint": _optional_task_text(
+                        detail_map.get("verification_hint")
+                    ),
+                }
+            )
+
+    add(progress.get("completed_steps"), "completed")
+    add(progress.get("blocked_steps"), "blocked")
+    add(progress.get("pending_steps"), "pending")
+    return steps
+
+
+def _first_active_step_id(steps: object) -> str | None:
+    if not isinstance(steps, list):
+        return None
+    for item in steps:
+        if not isinstance(item, dict):
+            continue
+        if item.get("status") in {"in_progress", "pending"}:
+            step_id = item.get("id")
+            return step_id if isinstance(step_id, str) and step_id else None
+    return None
+
+
+def _legacy_verification_status(progress: object) -> str:
+    if not isinstance(progress, dict):
+        return "unknown"
+    if progress.get("completion_satisfied") is True:
+        return "passed"
+    if progress.get("blocked_steps"):
+        return "revision_needed"
+    return "unknown"
+
+
+def _legacy_blocked_reason(progress: object) -> str | None:
+    if not isinstance(progress, dict):
+        return None
+    reason = progress.get("completion_reason")
+    return reason if isinstance(reason, str) and reason else None
+
+
+def _task_mode(value: object, *, default: str) -> str:
+    text = value.strip() if isinstance(value, str) else ""
+    return text if text in _TASK_MODES else default
+
+
+def _task_step_kind(value: object) -> str:
+    text = value.strip() if isinstance(value, str) else ""
+    return text if text in _TASK_STEP_KINDS else "other"
+
+
+def _optional_task_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = " ".join(str(value).strip().split())
+    return text[:240] or None
+
+
 class SessionStore:
     """Session fact store: metadata, transcript tree, and lightweight events."""
 
@@ -670,6 +815,7 @@ class SessionStore:
         self.session_file = self.layout.session_file
         self.messages_file = self.layout.messages_file
         self.events_file = self.layout.session_events_file
+        self.task_state_file = self.layout.task_state_file
         self.memory_file = self.layout.session_memory_file
         self.event_recorder = EventRecorder(self.events_file)
         self.run_store = RunStore(self.workspace_dir, self.session_id)
@@ -693,7 +839,6 @@ class SessionStore:
                     "system_prompt": system_prompt,
                     "system_prompt_hash": _hash_text(system_prompt),
                     "leaf_id": None,
-                    "task_recovery": None,
                     "created_at": _utc_now_iso(),
                     "updated_at": _utc_now_iso(),
                 }
@@ -726,12 +871,31 @@ class SessionStore:
         return state
 
     def load_task_recovery(self) -> dict[str, Any] | None:
-        state = self.read_meta() or {}
-        projection = state.get("task_recovery")
-        return dict(projection) if isinstance(projection, dict) else None
+        return self.load_task_state()
 
     def save_task_recovery(self, projection: dict[str, Any] | None) -> None:
-        self.update_meta({"task_recovery": projection})
+        if projection is None:
+            if self.task_state_file.exists():
+                self.task_state_file.unlink()
+            self.touch_updated_at()
+            return
+        self.save_task_state(projection)
+
+    def load_task_state(self) -> dict[str, Any] | None:
+        if not self.task_state_file.exists():
+            return None
+        data = json.loads(self.task_state_file.read_text(encoding="utf-8"))
+        return normalize_task_state_payload(data)
+
+    def save_task_state(self, state: dict[str, Any]) -> None:
+        canonical = canonicalize_task_state_for_write(state)
+        self.task_state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.task_state_file.write_text(
+            json.dumps(canonical, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        self.touch_updated_at()
 
     def append_message(self, message: Message) -> str:
         lines = self._read_message_lines()
@@ -943,12 +1107,11 @@ class SessionStore:
                     encoding="utf-8",
                     newline="\n",
                 )
-        target.update_meta(
-            {
-                "parent_session_id": self.session_id,
-                "task_recovery": state.get("task_recovery"),
-            }
-        )
+        if self.task_state_file.exists():
+            task_state = self.load_task_state()
+            if task_state is not None:
+                target.save_task_state(task_state)
+        target.update_meta({"parent_session_id": self.session_id})
         target.append_event(
             {
                 "type": "session_forked",

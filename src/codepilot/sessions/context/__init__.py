@@ -6,6 +6,7 @@ from __future__ import annotations
 """Dynamic context governance for Agent sessions."""
 
 from .checkpoint import ContextCheckpointManager
+from .compactor import ContextCompactRequest, ContextCompactResult
 from .governor import ContextGovernor
 from .ledger import ToolArtifactLedger, ToolLedgerEntry
 from .policy import ContextPressurePolicy
@@ -34,6 +35,8 @@ __all__ = [
     "FileSummary",
     "SessionContextState",
     "ContextGovernor",
+    "ContextCompactRequest",
+    "ContextCompactResult",
     "ContextPressurePolicy",
     "ContextProjection",
     "ContextProjector",

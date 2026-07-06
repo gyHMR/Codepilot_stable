@@ -28,13 +28,15 @@ def _memory_record(
 
     return MemoryRecord(
         id=memory_id,
+        type=kind,
         scope=scope,
-        kind=kind,
         status=status,
-        key=key or f"{kind}:test:{memory_id}",
-        text=text or f"{kind} memory {memory_id}",
-        triggers=triggers or [],
-        related_paths=["src/app.py"] if kind == "experience" else [],
+        subject=key or f"{kind}:test:{memory_id}",
+        predicate="is",
+        value=text or f"{kind} memory {memory_id}",
+        content=text or f"{kind} memory {memory_id}",
+        keywords=triggers or [],
+        paths=["src/app.py"] if kind == "experience" else [],
         evidence_refs=["tool:verify"] if kind == "experience" else [],
         source="run" if kind == "experience" else "user",
     )
@@ -102,7 +104,7 @@ def test_memory_store_persists_session_and_project_records(tmp_path: Path) -> No
 
     assert store.load_session() == [session_record]
     assert [record.id for record in store.load_project()] == ["mem_project"]
-    assert store.load_project()[0].to_dict()["schema_version"] == 2
+    assert store.load_project()[0].to_dict()["schema_version"] == 3
 
 
 def test_memory_store_prunes_session_records_to_capacity(tmp_path: Path) -> None:
@@ -149,17 +151,15 @@ def test_memory_store_compacts_project_log_to_capacity(tmp_path: Path) -> None:
     assert {record.id for record in records} == {"project_2", "project_3"}
 
 
-def test_memory_record_v2_schema_rejects_legacy_values() -> None:
+def test_memory_record_v3_schema_rejects_unsupported_values() -> None:
     from codepilot.sessions.memory import MemoryRecord
 
-    with pytest.raises(ValueError, match="Unknown memory kind"):
-        _memory_record("bad", kind="task")
     with pytest.raises(ValueError, match="Unknown memory status"):
         _memory_record("bad_status", status="stale")
     with pytest.raises(ValueError, match="Unsupported memory schema_version"):
         MemoryRecord.from_dict(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "id": "legacy",
                 "scope": "session",
                 "kind": "task",
@@ -183,10 +183,11 @@ def test_memory_writer_admits_explicit_remember_prompt(tmp_path: Path) -> None:
 
     assert record is not None
     assert record.scope == "project"
-    assert record.kind == "constraint"
-    assert record.source == "user"
-    assert "always" in record.triggers
-    assert "notify-close-42" in record.text
+    assert record.type == "constraint"
+    assert record.source == "user_explicit"
+    assert record.created_by_run_id == "run_explicit"
+    assert "always" in record.keywords
+    assert "notify-close-42" in record.content
 
 
 def test_memory_writer_records_user_correction_and_supersedes_conflict(
@@ -211,9 +212,10 @@ def test_memory_writer_records_user_correction_and_supersedes_conflict(
     )
 
     assert record is not None
-    assert record.kind == "correction"
-    assert record.key == "constraint:context_design"
-    assert store.get(old.id).status == "superseded"
+    assert record.type == "correction"
+    assert record.subject == "constraint:context_design"
+    assert record.status == "candidate"
+    assert store.get(old.id).status == "active"
 
 
 def test_memory_writer_does_not_store_ordinary_or_production_prompt(
@@ -239,10 +241,10 @@ def test_prompt_memory_admission_explains_durable_boundary() -> None:
     assert ordinary.should_store is False
     assert ordinary.reason == "ordinary_task_prompt"
     assert explicit.should_store is True
-    assert explicit.kind == "constraint"
-    assert "always" in explicit.triggers
+    assert explicit.type == "constraint"
+    assert "always" in explicit.keywords
     assert correction.should_store is True
-    assert correction.kind == "correction"
+    assert correction.type == "correction"
 
 
 def test_memory_writer_extracts_verified_experience_from_edit_repair_loop(
@@ -258,10 +260,10 @@ def test_memory_writer_extracts_verified_experience_from_edit_repair_loop(
     assert len(records) == 1
     experience = records[0]
     assert experience.scope == "session"
-    assert experience.kind == "experience"
-    assert experience.key == "experience:edit:multiple_matches"
-    assert "error:multiple_matches" in experience.triggers
-    assert "path:src/app.py" in experience.triggers
+    assert experience.type == "experience"
+    assert experience.subject == "experience:edit:multiple_matches"
+    assert "error:multiple_matches" in experience.keywords
+    assert "path:src/app.py" in experience.keywords
     assert "tool:run_1_bad" in experience.evidence_refs
     assert "old_text is not unique" in render_memory(experience).lower()
 
@@ -278,7 +280,7 @@ def test_memory_writer_merges_and_promotes_repeated_verified_experience(
     second = writer.finalize_run(_verified_edit_repair_result("run_2"))[0]
 
     assert second.occurrences == 2
-    assert [record.kind for record in store.load_project()] == ["experience"]
+    assert [record.type for record in store.load_project()] == ["experience"]
     assert store.load_project()[0].source == "promoted"
 
 
@@ -497,8 +499,12 @@ def test_task_recovery_store_projects_unfinished_task_summary(tmp_path: Path) ->
     )
 
     assert projection["goal"] == "修复上下文治理"
-    assert projection["task_progress"]["completed_steps"] == ["阅读代码"]
-    assert projection["next_action"] == "继续补测试"
+    assert "task_progress" not in projection
+    assert "next_action" not in projection
+    assert [(step["title"], step["status"]) for step in projection["steps"]] == [
+        ("阅读代码", "completed"),
+        ("补测试", "in_progress"),
+    ]
     assert recovery.active_projection() is not None
 
 
@@ -528,6 +534,7 @@ def test_task_recovery_clears_next_action_when_completion_is_satisfied(
         )
     )
 
-    assert projection["next_action"] is None
-    assert projection["task_progress"]["completion_satisfied"] is True
+    assert "next_action" not in projection
+    assert "task_progress" not in projection
+    assert all(step["status"] == "completed" for step in projection["steps"])
     assert recovery.active_projection() is None

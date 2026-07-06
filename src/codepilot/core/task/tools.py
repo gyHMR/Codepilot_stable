@@ -5,12 +5,14 @@ from __future__ import annotations
 
 """Task-control tool signal names understood by core."""
 
-from codepilot.protocols import TASK_CONTROL_COMPLETE_TOOL
+from codepilot.protocols import TASK_CONTROL_COMPLETE_TOOL, TASK_CONTROL_UPDATE_TOOL
 
 
 COMPLETE_TASK_STEP_TOOL = TASK_CONTROL_COMPLETE_TOOL
+TASK_UPDATE_TOOL = TASK_CONTROL_UPDATE_TOOL
 
 
 __all__ = [
     "COMPLETE_TASK_STEP_TOOL",
+    "TASK_UPDATE_TOOL",
 ]

@@ -60,7 +60,7 @@ from .rules import (
     verification_command,
     verification_failure_note,
 )
-from .tools import COMPLETE_TASK_STEP_TOOL
+from .tools import COMPLETE_TASK_STEP_TOOL, TASK_UPDATE_TOOL
 from .state import (
     AttemptRecord,
     ChangeSet,
@@ -71,6 +71,7 @@ from .state import (
     TaskState,
     TaskStep,
     TaskStepKind,
+    TaskStepStatus,
 )
 from codepilot.protocols import Message
 
@@ -100,7 +101,7 @@ class TaskController:
         goal: str | None = None,
         acceptance_criteria: Iterable[str] | None = None,
         constraints: Iterable[str] | None = None,
-        mode: TaskMode | str = "edit",
+        mode: TaskMode | str = "build",
         planning: TaskPlanningState | Mapping[str, object] | None = None,
         max_replans_per_run: int | None = None,
         task_recovery_projection: Mapping[str, object] | None = None,
@@ -266,6 +267,14 @@ class TaskController:
                     evidence_refs=evidence_refs(results),
                 )
                 if step.failure_count >= 2:
+                    if task.mode == "build":
+                        step.block(
+                            "revision_needed",
+                            evidence_refs=evidence_refs(results),
+                        )
+                        task.phase = "waiting"
+                        task.next_action = "报告连续验证失败并等待用户决定是否回到 plan"
+                        return self._decision(task, "stop", "revision_needed")
                     if should_propose_revert_after_repeated_failure(
                         failure_count=step.failure_count,
                         has_change_sets=bool(task.change_sets),
@@ -296,6 +305,8 @@ class TaskController:
         if has_passed_verification(results):
             self._complete_verified_steps(task, results)
             self._mark_latest_changes_verified(task, results)
+        elif self._has_task_update_signal(results):
+            self._apply_task_update_signal(task, results)
         elif self._has_complete_step_signal(results):
             self._complete_current_step_from_signal(task, results)
         else:
@@ -436,7 +447,8 @@ class TaskController:
                 lines.append(f"Verification hint: {current.verification_hint}")
             lines.append(
                 "When this step's acceptance criteria are satisfied, call "
-                f"`{COMPLETE_TASK_STEP_TOOL}` with a short evidence-backed summary."
+                f"`{TASK_UPDATE_TOOL}` with the current step id, completed status, "
+                "a short summary, and evidence_refs."
             )
         if task.next_action:
             lines.append(f"Next action: {task.next_action}")
@@ -613,6 +625,9 @@ class TaskController:
     def _has_complete_step_signal(self, results: list[ToolResultMessage]) -> bool:
         return any(complete_step_payload(result) is not None for result in results)
 
+    def _has_task_update_signal(self, results: list[ToolResultMessage]) -> bool:
+        return any(_task_update_payload(result) is not None for result in results)
+
     def _record_attempt(
         self,
         task: TaskState,
@@ -743,7 +758,7 @@ class TaskController:
         step = task.current_step()
         if step is None:
             return
-        refs = evidence_refs(results)
+        refs: list[str] = []
         summaries: list[str] = []
         for result in results:
             payload = complete_step_payload(result)
@@ -759,6 +774,10 @@ class TaskController:
                     for item in raw_refs
                     if isinstance(item, str) and item.strip()
                 )
+        if not refs:
+            step.note = "task_update rejected: missing_evidence"
+            task.recent_error_code = "task_update_rejected"
+            return
         step.complete(
             summary=summaries[-1] if summaries else "步骤已完成",
             evidence_refs=refs,
@@ -767,6 +786,58 @@ class TaskController:
         task.recent_failure_type = None
         task.advance_to_next_open_step()
         task.phase = "finished" if task.current_step_id is None else "acting"
+
+    def _apply_task_update_signal(
+        self,
+        task: TaskState,
+        results: list[ToolResultMessage],
+    ) -> None:
+        step = task.current_step()
+        if step is None:
+            return
+        for result in results:
+            payload = _task_update_payload(result)
+            if payload is None:
+                continue
+            step_id = payload.get("step_id")
+            if step_id != step.id:
+                step.note = "task_update rejected: wrong_step"
+                task.recent_error_code = "task_update_rejected"
+                return
+            proposed_status = payload.get("proposed_status")
+            raw_refs = payload.get("evidence_refs")
+            refs: list[str] = []
+            if isinstance(raw_refs, list):
+                refs = [
+                    str(item).strip()
+                    for item in raw_refs
+                    if isinstance(item, str) and item.strip()
+                ]
+            if proposed_status == "completed" and not refs:
+                step.note = "task_update rejected: missing_evidence"
+                task.recent_error_code = "task_update_rejected"
+                return
+            summary = payload.get("summary")
+            summary_text = summary.strip() if isinstance(summary, str) else None
+            if proposed_status == "completed":
+                step.complete(summary=summary_text, evidence_refs=refs)
+                task.recent_error_code = None
+                task.recent_failure_type = None
+                task.advance_to_next_open_step()
+                task.phase = "finished" if task.current_step_id is None else "acting"
+                return
+            if proposed_status == "blocked":
+                note = summary_text or "task_update blocked"
+                step.block(note, evidence_refs=refs)
+                task.phase = "waiting"
+                task.recent_error_code = "task_update_blocked"
+                return
+            step.mark_in_progress()
+            step.note = summary_text
+            step.add_evidence_refs(refs)
+            task.phase = "acting"
+            task.recent_error_code = None
+            return
 
     def _mark_latest_changes_failed(
         self,
@@ -910,6 +981,18 @@ def _step_fields(raw: object) -> tuple[str, TaskStepKind, str | None, str | None
         )
     return _compact(raw, limit=_MAX_STEP_TITLE_CHARS), "other", None, None
 
+
+def _task_update_payload(result: ToolResultMessage) -> Mapping[str, object] | None:
+    if result.tool_name != TASK_UPDATE_TOOL:
+        return None
+    payload = result.metadata.get("task_control")
+    if not isinstance(payload, Mapping):
+        return None
+    if payload.get("action") != "update_step":
+        return None
+    return payload
+
+
 def _optional_text(value: object) -> str | None:
     text = _compact(value, limit=240)
     return text or None
@@ -940,84 +1023,75 @@ def build_task_state_from_recovery_projection(
     ``build_task_recovery_projection`` 生成相同结构。
     """
 
-    progress = recovery_projection.get("task_progress")
-    if not isinstance(progress, Mapping):
-        return None
-
-    goal = str(recovery_projection.get("goal") or _goal_from_prompts(prompts)).strip()
-    if not goal:
-        goal = _goal_from_prompts(prompts)
-    recovered_mode = ensure_task_mode(
-        recovery_projection.get("task_mode") or mode or "edit"
-    )
-    planning = TaskPlanningState(phase="recovered", source="recovered")
-
-    steps: list[TaskStep] = []
-    seen: set[str] = set()
-    details = progress.get("step_details")
-    step_details = details if isinstance(details, Mapping) else {}
-
-    def add_steps(raw: object, status: str) -> None:
-        if not isinstance(raw, list):
-            return
-        for value in raw:
-            title = " ".join(str(value).strip().split())
-            if not title or title in seen:
-                continue
-            seen.add(title)
-            raw_detail = step_details.get(title)
-            detail = raw_detail if isinstance(raw_detail, Mapping) else {}
-            steps.append(
-                TaskStep(
-                    id=f"step_{len(steps) + 1}",
-                    title=title[:_MAX_STEP_TITLE_CHARS],
-                    status=status,  # type: ignore[arg-type]
-                    kind=_coerce_task_step_kind(detail.get("kind")),
-                    acceptance=(
-                        str(detail.get("acceptance"))
-                        if detail.get("acceptance") is not None
-                        else None
-                    ),
-                    verification_hint=(
-                        str(detail.get("verification_hint"))
-                        if detail.get("verification_hint") is not None
-                        else None
-                    ),
-                )
+    canonical_steps = recovery_projection.get("steps")
+    if isinstance(canonical_steps, list):
+        steps = _steps_from_canonical_projection(canonical_steps)
+        if steps:
+            goal = _goal_from_recovery_projection(recovery_projection, prompts)
+            recovered_mode = _safe_task_mode(
+                recovery_projection.get("current_mode")
+                or mode
+                or "build"
             )
-            if len(steps) >= _MAX_STEPS:
-                return
+            planning = (
+                task_planning_state_from_mapping(recovery_projection.get("planning"))
+                if isinstance(recovery_projection.get("planning"), Mapping)
+                else TaskPlanningState(phase="recovered", source="recovered")
+            )
+            current_step_id = _compact(
+                recovery_projection.get("current_step_id"),
+                limit=80,
+            )
+            if not any(step.id == current_step_id for step in steps):
+                current = next(
+                    (
+                        step
+                        for step in steps
+                        if step.status in {"in_progress", "pending"}
+                    ),
+                    None,
+                )
+                current_step_id = current.id if current else None
+            current_step = next(
+                (step for step in steps if step.id == current_step_id),
+                None,
+            )
+            if current_step is not None and current_step.status == "pending":
+                current_step.mark_in_progress()
+            next_action = recovery_projection.get("next_action")
+            blocked_reason = recovery_projection.get("blocked_reason")
+            blocked_text = (
+                str(blocked_reason)
+                if isinstance(blocked_reason, str) and blocked_reason
+                else ""
+            )
+            task = TaskState(
+                task_id=_compact(
+                    recovery_projection.get("task_id"),
+                    limit=120,
+                )
+                or f"task_{uuid.uuid4().hex[:12]}",
+                goal=goal,
+                steps=steps,
+                mode=recovered_mode,
+                planning=planning,
+                current_step_id=current_step_id or None,
+                phase="acting" if current_step_id else "finished",
+                next_action=(
+                    str(next_action)
+                    if isinstance(next_action, str) and next_action
+                    else (current_step.title if current_step else None)
+                ),
+                completion_satisfied=bool(
+                    all(step.status == "completed" for step in steps)
+                ),
+                completion_reason=blocked_text,
+            )
+            if blocked_text:
+                task.recent_error_code = blocked_text
+            return task
 
-    add_steps(progress.get("completed_steps"), "completed")
-    add_steps(progress.get("blocked_steps"), "blocked")
-    add_steps(progress.get("pending_steps"), "pending")
-    if not steps:
-        return None
-
-    current = next(
-        (step for step in steps if step.status == "pending"),
-        None,
-    )
-    if current is not None:
-        current.mark_in_progress()
-
-    next_action = recovery_projection.get("next_action")
-    return TaskState(
-        task_id=f"task_{uuid.uuid4().hex[:12]}",
-        goal=goal,
-        steps=steps,
-        mode=recovered_mode,
-        planning=planning,
-        current_step_id=current.id if current else None,
-        phase="acting" if current else "waiting",
-        next_action=(
-            str(next_action)
-            if isinstance(next_action, str) and next_action
-            else (current.title if current else None)
-        ),
-        completion_satisfied=bool(progress.get("completion_satisfied", False)),
-        completion_reason=str(progress.get("completion_reason", "")),
-    )
+    return None
 
 
 def _compact(value: object, *, limit: int) -> str:
@@ -1031,5 +1105,76 @@ def _coerce_task_step_kind(value: object) -> TaskStepKind:
     if text in TASK_STEP_KINDS:
         return cast(TaskStepKind, text)
     return "other"
+
+
+def _coerce_task_step_status(value: object) -> TaskStepStatus:
+    text = _compact(value, limit=40)
+    if text in {"pending", "in_progress", "completed", "blocked"}:
+        return cast(TaskStepStatus, text)
+    return "pending"
+
+
+def _safe_task_mode(value: object) -> TaskMode:
+    try:
+        return ensure_task_mode(value)
+    except ValueError:
+        return "build"
+
+
+def _goal_from_recovery_projection(
+    recovery_projection: Mapping[str, object],
+    prompts: Iterable[AgentMessage],
+) -> str:
+    raw_goal = recovery_projection.get("goal")
+    if isinstance(raw_goal, Mapping):
+        raw_goal = raw_goal.get("value")
+    goal = _compact(raw_goal, limit=1200)
+    if not goal:
+        goal = _compact(recovery_projection.get("raw_user_request"), limit=1200)
+    return goal or _goal_from_prompts(prompts)
+
+
+def _steps_from_canonical_projection(raw_steps: list[object]) -> list[TaskStep]:
+    steps: list[TaskStep] = []
+    seen_ids: set[str] = set()
+    for raw in raw_steps:
+        if not isinstance(raw, Mapping):
+            continue
+        title = _compact(raw.get("title"), limit=_MAX_STEP_TITLE_CHARS)
+        if not title:
+            continue
+        step_id = _compact(raw.get("id"), limit=80) or f"step_{len(steps) + 1}"
+        if step_id in seen_ids:
+            step_id = f"step_{len(steps) + 1}"
+        seen_ids.add(step_id)
+        step = TaskStep(
+            id=step_id,
+            title=title,
+            status=_coerce_task_step_status(raw.get("status")),
+            kind=_coerce_task_step_kind(raw.get("kind")),
+            acceptance=_optional_text(raw.get("acceptance")),
+            verification_hint=_optional_text(raw.get("verification_hint")),
+        )
+        summary = _optional_text(raw.get("summary"))
+        if summary:
+            step.summary = summary
+        note = _optional_text(raw.get("note"))
+        if note:
+            step.note = note
+        step.add_evidence_refs(_projection_text_list(raw.get("evidence_refs")))
+        steps.append(step)
+        if len(steps) >= _MAX_STEPS:
+            break
+    return steps
+
+
+def _projection_text_list(value: object) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [
+        text
+        for item in value
+        if (text := _compact(item, limit=160))
+    ]
 
 __all__ = ["TaskController", "build_task_state_from_recovery_projection"]

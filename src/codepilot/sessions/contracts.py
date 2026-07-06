@@ -45,7 +45,7 @@ class SessionOptions:
     max_tool_calls_per_turn: int = 8
     memory_enabled: bool = True
     task_control_enabled: bool = True
-    task_mode: TaskMode = "edit"
+    task_mode: TaskMode = "build"
     planning_budget_profile: PlanningBudgetProfile = "balanced"
     max_task_replans_per_run: int = 2
     convert_to_llm: Optional[ConvertToLlmFn] = None
@@ -127,7 +127,7 @@ class SessionView:
     session_id: str
     message_count: int = 0
     last_run_id: str | None = None
-    task_mode: str = "edit"
+    task_mode: str = "build"
     context: dict[str, Any] = field(default_factory=dict)
 
 

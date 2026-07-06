@@ -72,7 +72,7 @@ class RuntimeDefaults:
     system_prompt: str = ""
     thinking_level: str = "off"
     tool_execution: ToolExecutionMode = "parallel"
-    task_mode: TaskMode = "edit"
+    task_mode: TaskMode = "build"
     planning_budget_profile: PlanningBudgetProfile = "balanced"
     max_tool_calls_per_turn: int = 8
     retry_enabled: bool = True
@@ -297,7 +297,7 @@ def resolve_runtime_config(
         ("workspace", settings.read_only_mode if settings is not None else None),
         default=defaults.read_only_mode,
     )
-    if task_mode == "read":
+    if task_mode in {"read", "plan"}:
         read_only_mode = True
     tool_permission_mode = choose(
         "tool_permission_mode",
@@ -307,6 +307,8 @@ def resolve_runtime_config(
     )
     if task_mode == "read" and options.tool_permission_mode not in {None, "read-only"}:
         raise ValueError("task_mode=read requires tool_permission_mode=read-only")
+    if task_mode == "plan" and options.tool_permission_mode not in {None, "read-only"}:
+        raise ValueError("task_mode=plan requires tool_permission_mode=read-only")
     if read_only_mode:
         tool_permission_mode = "read-only"
     block_dangerous_bash = choose(

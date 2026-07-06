@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# 新手导读：这里定义 read/edit/plan 等任务模式对应的默认行为和提示。
+# 新手导读：这里定义 read/plan/build 等任务模式对应的默认行为和提示。
 # 关注点：当 CLI 切换任务模式时，最终会影响这些策略。
 
 """Task mode policy for Codepilot's user-facing run behavior."""
@@ -39,18 +39,19 @@ def policy_for_mode(mode: TaskMode | str) -> TaskModePolicy:
         return TaskModePolicy(
             mode="plan",
             planner_required=True,
-            default_step_title="按计划完成当前请求",
+            read_only=True,
+            default_step_title="生成待批准计划",
             guidance=(
-                "Plan mode: follow the generated plan step by step, verify changes, "
-                "and replan when evidence shows the current path is failing."
+                "Plan mode: inspect context and produce a proposed plan for user "
+                "approval. Do not modify files."
             ),
         )
     return TaskModePolicy(
-        mode="edit",
+        mode="build",
         default_step_title="完成当前请求",
         guidance=(
-            "Edit mode: make the smallest useful change, collect evidence, and "
-            "verify when the workspace changes."
+            "Build mode: execute the approved or current plan, collect evidence, "
+            "and stop for user revision instead of automatic replanning."
         ),
     )
 

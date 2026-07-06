@@ -65,7 +65,51 @@ class ToolLedgerEntry:
                 if data.get("error_code") is not None
                 else None
             ),
-        )
+            )
+
+
+def normalize_context_view_payload(raw: object) -> dict[str, list[str]]:
+    """Normalize historical context view aliases to the canonical five layers."""
+
+    data = raw if isinstance(raw, dict) else {}
+    return {
+        "stable_rules": _string_list(data.get("stable_rules")),
+        "task_state": _string_list(
+            data.get("task_state")
+            if "task_state" in data
+            else data.get("working_state")
+        ),
+        "working_set": _string_list(
+            data.get("working_set")
+            if "working_set" in data
+            else data.get("evidence")
+        ),
+        "recalled_memory": _string_list(data.get("recalled_memory")),
+        "conversation": _string_list(
+            data.get("conversation")
+            if "conversation" in data
+            else data.get("recent_messages")
+        ),
+        "tools": _string_list(data.get("tools")),
+    }
+
+
+def normalize_context_ledger_entry(raw: object) -> dict[str, Any] | None:
+    """Normalize one context_ledger.jsonl entry without exposing legacy fields."""
+
+    if not isinstance(raw, dict):
+        return None
+    entry = dict(raw)
+    context_view = entry.get("context_view")
+    if isinstance(context_view, dict):
+        entry["context_view"] = normalize_context_view_payload(context_view)
+    return entry
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
 
 
 class ToolArtifactLedger:
@@ -237,4 +281,9 @@ def _projection_text(
     )
 
 
-__all__ = ["ToolArtifactLedger", "ToolLedgerEntry"]
+__all__ = [
+    "ToolArtifactLedger",
+    "ToolLedgerEntry",
+    "normalize_context_ledger_entry",
+    "normalize_context_view_payload",
+]

@@ -27,10 +27,13 @@ PROJECT_CONSTRAINT_KNOWLEDGE = (
 class MemoryAdmissionDecision:
     should_store: bool
     reason: str
-    kind: str | None = None
-    key: str | None = None
-    text: str | None = None
-    triggers: list[str] | None = None
+    type: str | None = None
+    subject: str | None = None
+    content: str | None = None
+    keywords: list[str] | None = None
+    status: str = "active"
+    source: str = "task_summary"
+    confidence: str = "inferred"
 
 
 def decide_prompt_memory_admission(text: str) -> MemoryAdmissionDecision:
@@ -41,32 +44,42 @@ def decide_prompt_memory_admission(text: str) -> MemoryAdmissionDecision:
         return MemoryAdmissionDecision(False, "empty_after_sanitization")
     if _is_correction(safe_text):
         clean = _strip_memory_marker(safe_text)
+        durable = _has_long_term_marker(safe_text)
         return MemoryAdmissionDecision(
             should_store=True,
             reason="user_correction",
-            kind="correction",
-            key=memory_key_for_text("constraint", clean),
-            text=clean,
-            triggers=_triggers_for_text(clean),
+            type="correction",
+            subject=memory_key_for_text("constraint", clean),
+            content=clean,
+            keywords=_triggers_for_text(clean),
+            status="active" if durable else "candidate",
+            source="user_correction",
+            confidence="explicit",
         )
     if _is_explicit_memory(safe_text):
         clean = _strip_memory_marker(safe_text)
         return MemoryAdmissionDecision(
             should_store=True,
             reason="explicit_memory_request",
-            kind="constraint",
-            key=memory_key_for_text("constraint", clean),
-            text=clean,
-            triggers=["always", *_triggers_for_text(clean)],
+            type="constraint",
+            subject=memory_key_for_text("constraint", clean),
+            content=clean,
+            keywords=["always", *_triggers_for_text(clean)],
+            status="active",
+            source="user_explicit",
+            confidence="explicit",
         )
     if _is_project_boundary_constraint(safe_text):
         return MemoryAdmissionDecision(
             should_store=True,
             reason="durable_project_constraint",
-            kind="constraint",
-            key="constraint:project_boundary",
-            text=PROJECT_CONSTRAINT_KNOWLEDGE,
-            triggers=["always", "topic:architecture"],
+            type="constraint",
+            subject="constraint:project_boundary",
+            content=PROJECT_CONSTRAINT_KNOWLEDGE,
+            keywords=["always", "topic:architecture"],
+            status="active",
+            source="user_explicit",
+            confidence="explicit",
         )
     return MemoryAdmissionDecision(False, "ordinary_task_prompt")
 
@@ -89,19 +102,24 @@ class MemoryWriter:
         run_id: str | None = None,
     ) -> MemoryRecord | None:
         decision = decide_prompt_memory_admission(text)
-        if not decision.should_store or not decision.kind or not decision.key or not decision.text:
+        if not decision.should_store or not decision.type or not decision.subject or not decision.content:
             return None
-        source = "user"
         evidence_refs = [f"run:{run_id}"] if run_id else []
         record = MemoryRecord(
             id=_new_memory_id(),
             scope="project",
-            kind=decision.kind,  # type: ignore[arg-type]
-            key=decision.key,
-            text=decision.text,
-            triggers=decision.triggers or [],
+            type=decision.type,
+            subject=decision.subject,
+            predicate="is",
+            value=decision.content,
+            content=decision.content,
+            keywords=decision.keywords or [],
+            status=decision.status,
             evidence_refs=evidence_refs,
-            source=source,
+            source=decision.source,
+            confidence=decision.confidence,
+            created_by_session_id=self.store.session_id,
+            created_by_run_id=run_id,
         )
         return MemoryConsolidator(self.store).upsert_project_record(record)
 
@@ -123,14 +141,19 @@ class MemoryWriter:
         if not content:
             raise ValueError("Memory content is empty after sensitive-data filtering")
         kind = "decision" if _looks_like_decision(content) else "constraint"
+        memory_content = _strip_decision_marker(content)
         record = MemoryRecord(
             id=_new_memory_id(),
             scope="project",
-            kind=kind,  # type: ignore[arg-type]
-            key=memory_key_for_text(kind, content),
-            text=_strip_decision_marker(content),
-            triggers=["always", *_triggers_for_text(content)] if kind == "constraint" else _triggers_for_text(content),
-            source="command",
+            type=kind,
+            subject=memory_key_for_text(kind, content),
+            predicate="is",
+            value=memory_content,
+            content=memory_content,
+            keywords=["always", *_triggers_for_text(content)] if kind == "constraint" else _triggers_for_text(content),
+            source="user_explicit",
+            confidence="explicit",
+            created_by_session_id=self.store.session_id,
         )
         return MemoryConsolidator(self.store).upsert_project_record(record)
 
@@ -140,18 +163,22 @@ class MemoryWriter:
             raise ValueError(f"Memory not found: {memory_id}")
         if source.status != "active":
             raise ValueError("Only active memory can be promoted")
-        if source.scope != "session" or source.kind != "experience":
+        if source.scope != "session" or source.type != "experience":
             raise ValueError("Only session experience memory can be promoted")
         promoted = MemoryRecord(
             id=_new_memory_id(),
             scope="project",
-            kind="experience",
-            key=source.key,
-            text=source.text,
-            triggers=list(source.triggers),
-            related_paths=list(source.related_paths),
+            type="experience",
+            subject=source.subject,
+            predicate=source.predicate,
+            value=source.value,
+            content=source.content,
+            keywords=list(source.keywords),
+            paths=list(source.paths),
             evidence_refs=list(source.evidence_refs),
             source="promoted",
+            confidence="observed",
+            created_by_session_id=self.store.session_id,
             supersedes=[source.id],
             occurrences=source.occurrences,
         )
@@ -159,6 +186,10 @@ class MemoryWriter:
 
 
 def _is_explicit_memory(text: str) -> bool:
+    return _has_long_term_marker(text)
+
+
+def _has_long_term_marker(text: str) -> bool:
     lowered = text.lower()
     return any(
         marker in lowered
@@ -169,6 +200,9 @@ def _is_explicit_memory(text: str) -> bool:
             "remember:",
             "remember that",
             "以后",
+            "默认",
+            "总是",
+            "always",
         )
     )
 

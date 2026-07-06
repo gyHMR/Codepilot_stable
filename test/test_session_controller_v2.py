@@ -272,7 +272,7 @@ def test_session_controller_carries_task_control_through_core_and_recovery(tmp_p
 
             assert result.task is not None
             assert result.task.goal == "finish the v2 task spine"
-            assert result.task.control_signal["mode"] == "edit"
+            assert result.task.control_signal["mode"] == "build"
             assert result.task.control_signal["phase"] == "finished"
             assert seen_system_prompts
             assert seen_system_prompts[0] is not None
@@ -280,7 +280,8 @@ def test_session_controller_carries_task_control_through_core_and_recovery(tmp_p
             assert "## Current Task" in seen_system_prompts[0]
             assert projection is not None
             assert projection["goal"] == "finish the v2 task spine"
-            assert projection["task_progress"]["completion_satisfied"] is True
+            assert "task_progress" not in projection
+            assert all(step["status"] == "completed" for step in projection["steps"])
         finally:
             session._close()
 

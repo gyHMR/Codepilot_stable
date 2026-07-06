@@ -347,7 +347,7 @@ class TaskState:
     constraints: list[str] = field(default_factory=list)                         # 约束条件
     acceptance_criteria: list[str] = field(default_factory=list)                 # 验收标准
     steps: list[TaskStep] = field(default_factory=list)                          # 步骤列表
-    mode: TaskMode = "edit"                                                      # 用户任务模式
+    mode: TaskMode = "build"                                                     # 用户任务模式
     planning: TaskPlanningState = field(default_factory=TaskPlanningState)        # 规划控制状态
     current_step_id: str | None = None                                           # 当前步骤 ID
     phase: TaskPhase = "understanding"                                           # 当前阶段

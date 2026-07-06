@@ -153,7 +153,7 @@ def finalize_memory(session: Any, result: AgentRunResult) -> None:
                     "type": "memory_updated",
                     "sessionId": session.session_id,
                     "memoryId": record.id,
-                    "kind": record.kind,
+                    "kind": record.type,
                 }
             )
     except Exception as exc:
@@ -180,11 +180,7 @@ def finalize_task_recovery(session: Any, result: AgentRunResult) -> None:
                 "sessionId": session.session_id,
                 "runId": result.run_id,
                 "goal": projection.get("goal"),
-                "completionSatisfied": (
-                    projection.get("task_progress", {}) or {}
-                ).get("completion_satisfied")
-                if isinstance(projection.get("task_progress"), dict)
-                else None,
+                "completionSatisfied": _task_state_completion_satisfied(projection),
             }
         )
     except Exception as exc:
@@ -197,6 +193,17 @@ def finalize_task_recovery(session: Any, result: AgentRunResult) -> None:
                 "message": str(exc),
             }
         )
+
+
+def _task_state_completion_satisfied(projection: dict[str, object]) -> bool | None:
+    steps = projection.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return None
+    return all(
+        isinstance(step, dict) and step.get("status") == "completed"
+        for step in steps
+    )
+
 
 __all__ = [
     "commit_runtime_run",

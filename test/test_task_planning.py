@@ -701,24 +701,12 @@ def test_replan_preserves_completed_steps_and_stops_after_limit() -> None:
     run.collect_tool_results([second])
     decision = controller.after_tool_results(task, run, [second])
 
-    assert decision.action == "replan"
-    assert decision.reason == "repeated_step_failure"
-    assert task.replan_count == 1
-    assert task.steps[0].title == "根据最新失败证据调整方案"
-    assert task.steps[0].status == "in_progress"
-    assert task.steps[1].title == "重新运行相关验证"
-    assert task.replans
-    assert task.replans[-1].trigger == "verification_failed"
-
-    for call_id in ["test_3", "test_4", "test_5", "test_6"]:
-        failed = _failed_verification(call_id)
-        run.collect_tool_results([failed])
-        decision = controller.after_tool_results(task, run, [failed])
-
     assert decision.action == "stop"
-    assert decision.reason == "replan_limit_exceeded"
+    assert decision.reason == "revision_needed"
+    assert task.replan_count == 0
     assert task.steps[0].status == "blocked"
-    assert task.next_action == "报告连续失败并等待用户指示"
+    assert task.steps[0].note == "revision_needed"
+    assert task.next_action == "报告连续验证失败并等待用户决定是否回到 plan"
 
 
 def test_task_controller_respects_configured_replan_limit() -> None:
@@ -739,17 +727,10 @@ def test_task_controller_respects_configured_replan_limit() -> None:
         run.collect_tool_results([failed])
         decision = controller.after_tool_results(task, run, [failed])
 
-    assert decision.action == "replan"
-    assert task.replan_count == 1
-    assert task.max_replans_per_run == 1
-
-    for call_id in ["test_3", "test_4"]:
-        failed = _failed_verification(call_id)
-        run.collect_tool_results([failed])
-        decision = controller.after_tool_results(task, run, [failed])
-
     assert decision.action == "stop"
-    assert decision.reason == "replan_limit_exceeded"
+    assert decision.reason == "revision_needed"
+    assert task.replan_count == 0
+    assert task.max_replans_per_run == 1
 
 
 def test_repeated_failed_verification_after_change_proposes_revert() -> None:
@@ -791,11 +772,12 @@ def test_repeated_failed_verification_after_change_proposes_revert() -> None:
     run.collect_tool_results([second])
     decision = controller.after_tool_results(task, run, [second])
 
-    assert decision.action == "propose_revert"
-    assert task.rollback_required is True
-    assert task.rollback_targets == ["src/app.py"]
+    assert decision.action == "stop"
+    assert decision.reason == "revision_needed"
+    assert task.rollback_required is False
+    assert task.rollback_targets == []
     assert task.change_sets
-    assert task.change_sets[-1].status == "revert_required"
+    assert task.change_sets[-1].status == "failed"
 
 
 def test_task_controller_exports_control_signal_and_attempts() -> None:
@@ -837,23 +819,25 @@ def test_task_controller_rebuilds_task_state_from_memory_projection() -> None:
     task = controller.initialize(
         [UserMessage(content="继续修复失败测试")],
         task_recovery_projection={
+            "schema_version": 1,
             "goal": "修复失败测试",
-            "task_mode": "plan",
+            "current_mode": "plan",
             "planning": {"phase": "recovered", "source": "recovered"},
-            "task_progress": {
-                "completed_steps": ["定位失败"],
-                "pending_steps": ["重新运行相关验证"],
-                "blocked_steps": ["根据最新失败证据调整方案"],
-                "completion_satisfied": False,
-                "completion_reason": "replan_limit_exceeded",
-                "step_details": {
-                    "重新运行相关验证": {
-                        "kind": "verify",
-                        "acceptance": "验证失败已修复",
-                        "verification_hint": "python -m pytest test/test_task.py -q",
-                    }
+            "current_step_id": "step_3",
+            "steps": [
+                {"id": "step_1", "title": "定位失败", "status": "completed"},
+                {"id": "step_2", "title": "根据最新失败证据调整方案", "status": "blocked"},
+                {
+                    "id": "step_3",
+                    "title": "重新运行相关验证",
+                    "status": "pending",
+                    "kind": "verify",
+                    "acceptance": "验证失败已修复",
+                    "verification_hint": "python -m pytest test/test_task.py -q",
                 },
-            },
+            ],
+            "verification_status": "revision_needed",
+            "blocked_reason": "replan_limit_exceeded",
             "next_action": "报告连续失败并等待用户指示",
         },
     )
@@ -886,22 +870,24 @@ def test_task_recovery_projection_mapping_builds_task_state() -> None:
     task = build_task_state_from_recovery_projection(
         [UserMessage(content="继续修复")],
         {
+            "schema_version": 1,
             "goal": "恢复任务",
-            "task_mode": "read",
-            "task_progress": {
-                "completed_steps": ["定位失败"],
-                "blocked_steps": ["等待审批"],
-                "pending_steps": ["重新运行验证"],
-                "completion_satisfied": False,
-                "completion_reason": "blocked_steps",
-                "step_details": {
-                    "重新运行验证": {
-                        "kind": "verify",
-                        "acceptance": "验证通过",
-                        "verification_hint": "pytest task",
-                    }
+            "current_mode": "read",
+            "current_step_id": "step_3",
+            "steps": [
+                {"id": "step_1", "title": "定位失败", "status": "completed"},
+                {"id": "step_2", "title": "等待审批", "status": "blocked"},
+                {
+                    "id": "step_3",
+                    "title": "重新运行验证",
+                    "status": "pending",
+                    "kind": "verify",
+                    "acceptance": "验证通过",
+                    "verification_hint": "pytest task",
                 },
-            },
+            ],
+            "verification_status": "revision_needed",
+            "blocked_reason": "blocked_steps",
             "next_action": "继续验证",
         },
     )
@@ -929,17 +915,20 @@ def test_task_recovery_projection_coerces_unknown_step_kind() -> None:
     task = build_task_state_from_recovery_projection(
         [UserMessage(content="继续旧任务")],
         {
+            "schema_version": 1,
             "goal": "恢复旧任务",
-            "task_progress": {
-                "pending_steps": ["部署预览"],
-                "step_details": {
-                    "部署预览": {
-                        "kind": "deploy",
-                        "acceptance": "预览环境可访问",
-                        "verification_hint": "curl localhost",
-                    }
+            "current_mode": "build",
+            "current_step_id": "step_1",
+            "steps": [
+                {
+                    "id": "step_1",
+                    "title": "部署预览",
+                    "status": "pending",
+                    "kind": "deploy",
+                    "acceptance": "预览环境可访问",
+                    "verification_hint": "curl localhost",
                 },
-            },
+            ],
         },
     )
 
@@ -947,6 +936,58 @@ def test_task_recovery_projection_coerces_unknown_step_kind() -> None:
     assert task.steps[0].kind == "other"
     assert task.steps[0].acceptance == "预览环境可访问"
     assert task.steps[0].verification_hint == "curl localhost"
+
+
+def test_task_controller_rebuilds_from_authoritative_task_state() -> None:
+    from codepilot.core import build_task_state_from_recovery_projection
+    from codepilot.protocols import UserMessage
+
+    task = build_task_state_from_recovery_projection(
+        [UserMessage(content="继续")],
+        {
+            "schema_version": 1,
+            "task_id": "task_existing",
+            "raw_user_request": "修复任务恢复",
+            "current_mode": "build",
+            "approval_state": "approved",
+            "goal": "修复任务恢复",
+            "approved_plan": {"steps": [{"id": "step_1", "title": "阅读代码"}]},
+            "current_step_id": "step_2",
+            "steps": [
+                {
+                    "id": "step_1",
+                    "title": "阅读代码",
+                    "status": "completed",
+                    "kind": "investigate",
+                    "evidence_refs": ["tool:read_1"],
+                },
+                {
+                    "id": "step_2",
+                    "title": "补充恢复测试",
+                    "status": "in_progress",
+                    "kind": "verify",
+                    "acceptance": "恢复测试通过",
+                    "verification_hint": "python -m pytest test/test_task_planning.py -q",
+                },
+            ],
+            "verification_status": "unknown",
+            "evidence_refs": ["tool:read_1"],
+            "blocked_reason": None,
+            "recovery_summary": "Goal: 修复任务恢复",
+        },
+    )
+
+    assert task is not None
+    assert task.task_id == "task_existing"
+    assert task.goal == "修复任务恢复"
+    assert task.mode == "build"
+    assert task.current_step_id == "step_2"
+    assert [(step.title, step.status) for step in task.steps] == [
+        ("阅读代码", "completed"),
+        ("补充恢复测试", "in_progress"),
+    ]
+    assert task.steps[1].kind == "verify"
+    assert task.steps[1].verification_hint == "python -m pytest test/test_task_planning.py -q"
 
 
 def test_v2_agent_loop_emits_task_events_and_result_summary() -> None:
@@ -1200,16 +1241,27 @@ async def _v2_agent_loop_recovered_task_context_case() -> None:
             prompt="继续旧任务",
             task_strategy=TaskStrategy(
                 enabled=True,
-                mode="edit",
+                mode="build",
                 recovery_projection={
+                    "schema_version": 1,
                     "goal": "恢复旧任务",
-                    "task_progress": {
-                        "completed_steps": ["定位失败"],
-                        "pending_steps": ["重新运行相关验证"],
-                        "blocked_steps": ["根据最新失败证据调整方案"],
-                        "completion_satisfied": False,
-                        "completion_reason": "replan_limit_exceeded",
-                    },
+                    "current_mode": "build",
+                    "current_step_id": "step_3",
+                    "steps": [
+                        {"id": "step_1", "title": "定位失败", "status": "completed"},
+                        {
+                            "id": "step_2",
+                            "title": "根据最新失败证据调整方案",
+                            "status": "blocked",
+                        },
+                        {
+                            "id": "step_3",
+                            "title": "重新运行相关验证",
+                            "status": "pending",
+                        },
+                    ],
+                    "verification_status": "revision_needed",
+                    "blocked_reason": "replan_limit_exceeded",
                     "next_action": "报告连续失败并等待用户指示",
                 },
             ),
@@ -1510,9 +1562,9 @@ async def _v2_agent_loop_propose_revert_case() -> None:
     assert result.status == "waiting_user"
     assert result.stop_reason == "task_blocked"
     assert result.task is not None
-    assert result.task.control_signal["rollback_required"] is True
-    assert result.task.control_signal["rollback_targets"] == ["src/app.py"]
-    assert result.task.next_action == "报告可能需要撤销的变更并等待用户确认"
+    assert result.task.control_signal["rollback_required"] is False
+    assert result.task.control_signal["rollback_targets"] == []
+    assert result.task.next_action == "报告连续验证失败并等待用户决定是否回到 plan"
 
 
 async def _v2_agent_loop_replan_limit_case() -> None:
@@ -1528,7 +1580,7 @@ async def _v2_agent_loop_replan_limit_case() -> None:
             limits=AgentLoopLimits(max_model_turns=4, max_tool_iterations=20, repeated_tool_call_limit=20),
             task_strategy=TaskStrategy(
                 enabled=True,
-                mode="edit",
+                mode="build",
                 max_replans_per_run=1,
             ),
         ),
@@ -1561,14 +1613,14 @@ async def _v2_agent_loop_replan_limit_case() -> None:
         ),
     )
 
-    assert result.status == "failed"
-    assert result.stop_reason == "replan_limit"
+    assert result.status == "waiting_user"
+    assert result.stop_reason == "task_blocked"
     assert result.task is not None
-    assert result.task.blocked_steps == ["根据最新失败证据调整方案"]
-    assert result.task.next_action == "报告连续失败并等待用户指示"
+    assert result.task.blocked_steps == ["完成当前请求"]
+    assert result.task.next_action == "报告连续验证失败并等待用户决定是否回到 plan"
     assert any(
         event.get("type") == "task_decision"
-        and event.get("decision", {}).get("reason") == "replan_limit_exceeded"
+        and event.get("decision", {}).get("reason") == "revision_needed"
         for event in result.events
     )
 
@@ -1590,7 +1642,7 @@ def _v2_loop_input(
         context={"system_prompt": "rules"},
         model=ModelDescriptor(provider="unit-test", model_id="task-test"),
         limits=limits or AgentLoopLimits(max_model_turns=4),
-        task_strategy=task_strategy or TaskStrategy(enabled=True, mode="edit"),
+        task_strategy=task_strategy or TaskStrategy(enabled=True, mode="build"),
     )
 
 

@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 
 from codepilot.protocols.tools import (
+    TASK_CONTROL_UPDATE_TOOL,
     Tool,
     ToolMetadata,
     ToolResult,
@@ -173,6 +174,7 @@ READ_ONLY_TOOL_NAMES = {
     "ls",
     "workspace_status",
     TASK_CONTROL_COMPLETE_TOOL,
+    TASK_CONTROL_UPDATE_TOOL,
 }
 MUTATING_TOOL_NAMES = {"write", "edit", "bash"}
 
@@ -316,6 +318,13 @@ _BUILTIN_TOOL_METADATA: dict[str, ToolMetadata] = {
         risk_level="low",
         resource_scope=("task",),
     ),
+    TASK_CONTROL_UPDATE_TOOL: _builtin_metadata(
+        TASK_CONTROL_UPDATE_TOOL,
+        category="task_control",
+        read_only=True,
+        risk_level="low",
+        resource_scope=("task",),
+    ),
 }
 
 
@@ -326,7 +335,7 @@ def _infer_category(name: str) -> str:
         return "search"
     if name == "bash":
         return "shell"
-    if name == TASK_CONTROL_COMPLETE_TOOL:
+    if name in {TASK_CONTROL_COMPLETE_TOOL, TASK_CONTROL_UPDATE_TOOL}:
         return "task_control"
     if name.startswith("mcp_"):
         return "mcp"

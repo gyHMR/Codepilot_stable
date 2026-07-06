@@ -9,7 +9,6 @@ from .experience import ExperienceExtractor, MemoryConsolidator
 from .files import load_global_memory, sanitize_memory_text, save_global_memory
 from .records import (
     MEMORY_SCHEMA_VERSION,
-    MemoryKind,
     MemoryQuery,
     MemoryRecall,
     MemoryRecord,
@@ -17,6 +16,7 @@ from .records import (
     MemorySource,
     MemoryStatus,
     RetrievedMemory,
+    normalize_memory_record_payload,
 )
 from .rendering import render_memory
 from .retriever import MemoryRetriever
@@ -27,7 +27,6 @@ from .writer import MemoryAdmissionDecision, MemoryWriter, decide_prompt_memory_
 __all__ = [
     "MEMORY_SCHEMA_VERSION",
     "ExperienceExtractor",
-    "MemoryKind",
     "MemoryAdmissionDecision",
     "MemoryConsolidator",
     "MemoryQuery",
@@ -40,6 +39,7 @@ __all__ = [
     "MemoryStore",
     "MemoryWriter",
     "decide_prompt_memory_admission",
+    "normalize_memory_record_payload",
     "RetrievedMemory",
     "load_global_memory",
     "render_memory",

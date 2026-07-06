@@ -106,6 +106,7 @@ from .llm import (
 )
 from .tools import (
     TASK_CONTROL_COMPLETE_TOOL,
+    TASK_CONTROL_UPDATE_TOOL,
     Tool,
     ToolMetadata,
     ToolResult,
@@ -159,6 +160,7 @@ __all__ = [
     "ToolResultStatus",
     "ToolRiskLevel",
     "TASK_CONTROL_COMPLETE_TOOL",
+    "TASK_CONTROL_UPDATE_TOOL",
     "AfterToolCallContext",
     "AfterToolCallResult",
     "BeforeToolCallContext",

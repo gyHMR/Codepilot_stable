@@ -14,8 +14,8 @@ def render_memory(record: MemoryRecord) -> str:
         "constraint": "Constraint",
         "decision": "Decision",
         "experience": "Experience",
-    }[record.kind]
-    return f"{label}: {record.text}"
+    }.get(record.type, "Memory")
+    return f"{label}: {record.content}"
 
 
 __all__ = ["render_memory"]

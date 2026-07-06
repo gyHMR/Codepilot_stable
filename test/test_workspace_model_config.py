@@ -319,7 +319,7 @@ def test_workspace_settings_can_select_planning_budget_profile(tmp_path) -> None
         inputs=_runtime_inputs(tmp_path),
     )
 
-    assert config.task_mode == "edit"
+    assert config.task_mode == "build"
     assert config.planning_budget_profile == "wide"
     assert config.sources["planning_budget_profile"] == "workspace"
 
@@ -345,6 +345,33 @@ def test_read_task_mode_rejects_workspace_write_override(tmp_path) -> None:
             RuntimeAssemblyIntent(
                 workspace_dir=tmp_path,
                 task_mode="read",
+                tool_permission_mode="workspace-write",
+            ),
+            inputs=_runtime_inputs(tmp_path),
+        )
+
+
+def test_plan_task_mode_forces_read_only_permission(tmp_path) -> None:
+    from codepilot.runtime.assemble import resolve_runtime_config
+
+    config = resolve_runtime_config(
+        RuntimeAssemblyIntent(workspace_dir=tmp_path, task_mode="plan"),
+        inputs=_runtime_inputs(tmp_path),
+    )
+
+    assert config.task_mode == "plan"
+    assert config.read_only_mode is True
+    assert config.tool_permission_mode == "read-only"
+
+
+def test_plan_task_mode_rejects_workspace_write_override(tmp_path) -> None:
+    from codepilot.runtime.assemble import resolve_runtime_config
+
+    with pytest.raises(ValueError, match="task_mode=plan"):
+        resolve_runtime_config(
+            RuntimeAssemblyIntent(
+                workspace_dir=tmp_path,
+                task_mode="plan",
                 tool_permission_mode="workspace-write",
             ),
             inputs=_runtime_inputs(tmp_path),

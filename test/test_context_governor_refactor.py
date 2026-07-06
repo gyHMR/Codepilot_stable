@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+
+import pytest
 
 
 def test_pressure_policy_uses_effective_budget_and_three_levels() -> None:
@@ -82,10 +85,10 @@ def test_context_protocols_describe_view_checkpoint_and_artifacts() -> None:
     )
     view = ContextView(
         stable_rules=["AGENTS.md: keep UTF-8"],
-        working_state=["goal: fix failing tests"],
+        task_state=["goal: fix failing tests"],
         recalled_memory=["previous pytest failure required cwd setup"],
-        evidence=["pytest failed before fix"],
-        recent_messages=["user: fix tests"],
+        working_set=["pytest failed before fix"],
+        conversation=["user: fix tests"],
         tools=["read", "shell"],
     )
     report = ContextReport(
@@ -98,7 +101,7 @@ def test_context_protocols_describe_view_checkpoint_and_artifacts() -> None:
         context_view=view,
         checkpoint_created=checkpoint,
         artifact_refs=[artifact],
-        tokens_by_layer={"stable_rules": 20, "evidence": 40},
+        tokens_by_layer={"system": 20, "working_set": 40},
         prefix_hash="prefix",
         dynamic_hash="dynamic",
     )
@@ -113,6 +116,37 @@ def test_context_protocols_describe_view_checkpoint_and_artifacts() -> None:
 
     with pytest.raises(ValueError, match="Unknown context pressure level"):
         ContextPressure(level="panic", effective_budget=1, estimated_tokens=2)
+
+
+def test_context_ledger_normalizer_maps_legacy_view_aliases() -> None:
+    from codepilot.sessions.context.ledger import normalize_context_view_payload
+
+    payload = normalize_context_view_payload(
+        {
+            "stable_rules": ["AGENTS.md"],
+            "working_state": ["goal: old"],
+            "evidence": ["pytest failed"],
+            "recent_messages": ["user: fix"],
+            "recalled_memory": ["memory"],
+            "tools": ["read"],
+        }
+    )
+
+    assert payload == {
+        "stable_rules": ["AGENTS.md"],
+        "task_state": ["goal: old"],
+        "working_set": ["pytest failed"],
+        "recalled_memory": ["memory"],
+        "conversation": ["user: fix"],
+        "tools": ["read"],
+    }
+
+
+def test_context_view_rejects_legacy_alias_fields() -> None:
+    from codepilot.protocols import ContextView
+
+    with pytest.raises(TypeError):
+        ContextView(working_state=["legacy"])  # type: ignore[call-arg]
 
 
 def test_tool_artifact_ledger_persists_large_outputs_and_projects_light_messages(
@@ -173,11 +207,13 @@ def test_context_governor_projects_decision_view_with_checkpoint_and_memory(
                     RetrievedMemory(
                         record=MemoryRecord(
                             id="mem_1",
-                            kind="experience",
+                            type="experience",
                             scope="session",
-                            key="experience:verification:cwd_setup",
-                            text="Previous pytest failure required cwd setup.",
-                            triggers=["error:verification_failed", "intent:debug_failure"],
+                            subject="experience:verification:cwd_setup",
+                            predicate="is",
+                            value="Previous pytest failure required cwd setup.",
+                            content="Previous pytest failure required cwd setup.",
+                            keywords=["error:verification_failed", "intent:debug_failure"],
                             source="run",
                         ),
                         score=90,
@@ -257,6 +293,368 @@ def test_context_governor_projects_decision_view_with_checkpoint_and_memory(
     assert (session_dir / "context_ledger.jsonl").exists()
     assert not (session_dir / "context_views.jsonl").exists()
     assert not (session_dir / "checkpoints.jsonl").exists()
+
+
+def test_context_governor_counts_tool_schemas_in_budget_estimates(
+    tmp_path: Path,
+) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import Tool, UserMessage
+    from codepilot.sessions.context.governor import ContextGovernor
+    from codepilot.sessions.context.policy import ContextPressurePolicy
+    from codepilot.sessions.context.state import SessionContextState
+
+    tools = [
+        Tool(
+            name=f"tool_{index}",
+            description="A model-visible tool with schema budget.",
+            parameters={"type": "object", "properties": {"value": {"type": "string"}}},
+        )
+        for index in range(4)
+    ]
+    governor = ContextGovernor(
+        workspace_dir=tmp_path,
+        session_id="session_tool_budget",
+        state=SessionContextState(workspace_dir=tmp_path),
+        pressure_policy=ContextPressurePolicy(
+            safety_margin_tokens=0,
+            tight_ratio=0.72,
+            critical_ratio=0.90,
+        ),
+    )
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(
+                system_prompt="System rules.",
+                messages=[UserMessage(content="Use the available tools.")],
+                tools=tools,
+            ),
+            ContextPreparationRequest(
+                session_id="session_tool_budget",
+                model_context_window=1100,
+                model_max_output_tokens=100,
+            ),
+        )
+    )
+
+    assert prepared.report.estimated_tokens_before >= 800
+    assert prepared.report.estimated_tokens_after >= 800
+    assert prepared.report.pressure.level == "tight"
+    assert "tight_budget_pressure" in prepared.report.pressure.reasons
+
+
+def test_context_governor_rechecks_projected_context_and_archives_tool_output(
+    tmp_path: Path,
+) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
+    from codepilot.sessions.context.governor import ContextGovernor
+    from codepilot.sessions.context.policy import ContextPressurePolicy
+    from codepilot.sessions.context.state import SessionContextState
+    from codepilot.sessions.memory.records import MemoryRecall
+
+    class LargeMemoryRetriever:
+        def recall(self, _query) -> MemoryRecall:
+            return MemoryRecall(pinned_text="memory pressure " * 120)
+
+    raw_output = "RAW_TOOL_LINE_DO_NOT_INLINE\n" * 100
+    governor = ContextGovernor(
+        workspace_dir=tmp_path,
+        session_id="session_projection_budget",
+        state=SessionContextState(workspace_dir=tmp_path),
+        memory_retriever=LargeMemoryRetriever(),
+        pressure_policy=ContextPressurePolicy(
+            safety_margin_tokens=0,
+            tight_ratio=0.72,
+            critical_ratio=0.90,
+        ),
+    )
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(
+                system_prompt="System rules.",
+                messages=[
+                    UserMessage(content="Review the recent shell output."),
+                    ToolResultMessage(
+                        tool_call_id="call_projection",
+                        tool_name="shell",
+                        content=[TextContent(text=raw_output)],
+                        status="success",
+                    ),
+                ],
+            ),
+            ContextPreparationRequest(
+                session_id="session_projection_budget",
+                model_context_window=1000,
+                model_max_output_tokens=0,
+            ),
+        )
+    )
+    rendered_tool_results = "\n".join(
+        getattr(block, "text", "")
+        for message in prepared.messages
+        if isinstance(message, ToolResultMessage)
+        for block in message.content
+    )
+
+    assert prepared.report.pressure.level == "normal"
+    assert prepared.report.estimated_tokens_after < prepared.report.pressure.effective_budget
+    assert "[Tool output archived]" in rendered_tool_results
+    assert "RAW_TOOL_LINE_DO_NOT_INLINE" not in rendered_tool_results
+
+
+def test_critical_checkpoint_prefers_task_goal_over_latest_continue_prompt(
+    tmp_path: Path,
+) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
+    from codepilot.sessions.context.governor import ContextGovernor
+    from codepilot.sessions.context.policy import ContextPressurePolicy
+    from codepilot.sessions.context.state import SessionContextState
+
+    governor = ContextGovernor(
+        workspace_dir=tmp_path,
+        session_id="session_checkpoint_goal",
+        state=SessionContextState(workspace_dir=tmp_path),
+        pressure_policy=ContextPressurePolicy(
+            safety_margin_tokens=0,
+            tight_ratio=0.50,
+            critical_ratio=0.60,
+        ),
+    )
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(
+                system_prompt="System rules.",
+                messages=[
+                    UserMessage(content="请修复上下文链路。"),
+                    ToolResultMessage(
+                        tool_call_id="call_critical",
+                        tool_name="shell",
+                        content=[TextContent(text="critical pressure\n" * 200)],
+                        status="success",
+                    ),
+                    UserMessage(content="继续"),
+                ],
+                current_task="Goal: repair the context governor budget chain.",
+            ),
+            ContextPreparationRequest(
+                session_id="session_checkpoint_goal",
+                model_context_window=500,
+                model_max_output_tokens=0,
+            ),
+        )
+    )
+
+    assert prepared.report.pressure.level == "critical"
+    assert prepared.report.checkpoint_created is not None
+    assert (
+        prepared.report.checkpoint_created.goal
+        == "Goal: repair the context governor budget chain."
+    )
+
+
+def test_critical_context_uses_llm_compactor_and_writes_compact_summary(
+    tmp_path: Path,
+) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
+    from codepilot.sessions.context.compactor import ContextCompactResult
+    from codepilot.sessions.context.governor import ContextGovernor
+    from codepilot.sessions.context.policy import ContextPressurePolicy
+    from codepilot.sessions.context.state import SessionContextState
+
+    class FakeCompactor:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def compact(self, request):
+            self.calls.append(request)
+            return ContextCompactResult(
+                recovery_summary="LLM compact: keep the failing assertion and next pytest command.",
+                task_state_lines=["Compacted task: fix context budget loop."],
+                working_set_lines=["Compacted evidence: pytest failed in context governor."],
+                conversation_lines=["Compacted conversation: user asked to continue."],
+                evidence_refs=["tool:call_critical"],
+            )
+
+    compactor = FakeCompactor()
+    governor = ContextGovernor(
+        workspace_dir=tmp_path,
+        session_id="session_llm_compact",
+        state=SessionContextState(workspace_dir=tmp_path),
+        pressure_policy=ContextPressurePolicy(
+            safety_margin_tokens=0,
+            tight_ratio=0.50,
+            critical_ratio=0.60,
+        ),
+        context_compactor=compactor,
+    )
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(
+                system_prompt="System rules.",
+                messages=[
+                    UserMessage(content="请修复上下文压缩。"),
+                    ToolResultMessage(
+                        tool_call_id="call_critical",
+                        tool_name="shell",
+                        content=[TextContent(text="critical raw output\n" * 400)],
+                        status="error",
+                        verification={"status": "failed"},
+                    ),
+                    UserMessage(content="继续"),
+                ],
+                current_task="Goal: implement LLM compact.",
+            ),
+            ContextPreparationRequest(
+                session_id="session_llm_compact",
+                model_context_window=900,
+                model_max_output_tokens=0,
+            ),
+        )
+    )
+
+    assert len(compactor.calls) == 1
+    assert prepared.report.pressure.level != "critical"
+    assert "llm_compact" in prepared.report.pressure.reasons
+    assert "LLM compact: keep the failing assertion" in prepared.system_prompt
+    task_state = json.loads(
+        (
+            tmp_path
+            / ".codepilot"
+            / "sessions"
+            / "session_llm_compact"
+            / "task_state.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert task_state["recovery_summary"].startswith("LLM compact:")
+    ledger_line = (
+        tmp_path
+        / ".codepilot"
+        / "sessions"
+        / "session_llm_compact"
+        / "context_ledger.jsonl"
+    ).read_text(encoding="utf-8").splitlines()[-1]
+    ledger = json.loads(ledger_line)
+    assert ledger["compact_summary"].startswith("LLM compact:")
+
+
+def test_critical_context_emergency_trims_when_compact_still_critical(
+    tmp_path: Path,
+) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
+    from codepilot.sessions.context.compactor import ContextCompactResult
+    from codepilot.sessions.context.governor import ContextGovernor
+    from codepilot.sessions.context.policy import ContextPressurePolicy
+    from codepilot.sessions.context.state import SessionContextState
+
+    class VerboseCompactor:
+        async def compact(self, _request):
+            return ContextCompactResult(
+                recovery_summary="verbose compact summary " * 500,
+                task_state_lines=["verbose task line " * 200],
+                working_set_lines=["verbose evidence line " * 200],
+                conversation_lines=["verbose conversation line " * 200],
+            )
+
+    governor = ContextGovernor(
+        workspace_dir=tmp_path,
+        session_id="session_emergency_trim",
+        state=SessionContextState(workspace_dir=tmp_path),
+        pressure_policy=ContextPressurePolicy(
+            safety_margin_tokens=0,
+            tight_ratio=0.50,
+            critical_ratio=0.60,
+        ),
+        context_compactor=VerboseCompactor(),
+    )
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(
+                system_prompt="System rules.",
+                messages=[
+                    UserMessage(content="请修复上下文压缩。"),
+                    ToolResultMessage(
+                        tool_call_id="call_critical",
+                        tool_name="shell",
+                        content=[TextContent(text="critical raw output\n" * 400)],
+                        status="error",
+                    ),
+                    UserMessage(content="继续"),
+                ],
+                current_task="Goal: implement emergency trim.",
+            ),
+            ContextPreparationRequest(
+                session_id="session_emergency_trim",
+                model_context_window=1000,
+                model_max_output_tokens=0,
+            ),
+        )
+    )
+
+    assert prepared.report.pressure.level != "critical"
+    assert "emergency_context_trim" in prepared.report.pressure.reasons
+    assert "verbose compact summary " * 20 not in prepared.system_prompt
+    assert len(prepared.messages) <= 2
+
+
+def test_critical_context_fails_closed_when_emergency_still_exceeds_budget(
+    tmp_path: Path,
+) -> None:
+    import pytest
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import Tool, UserMessage
+    from codepilot.sessions.context.compactor import ContextCompactResult
+    from codepilot.sessions.context.governor import ContextGovernor
+    from codepilot.sessions.context.policy import ContextPressurePolicy
+    from codepilot.sessions.context.state import SessionContextState
+
+    class SmallCompactor:
+        async def compact(self, _request):
+            return ContextCompactResult(recovery_summary="small compact summary")
+
+    tools = [
+        Tool(
+            name=f"tool_{index}",
+            description="tool schema pressure",
+            parameters={"type": "object", "properties": {"value": {"type": "string"}}},
+        )
+        for index in range(8)
+    ]
+    governor = ContextGovernor(
+        workspace_dir=tmp_path,
+        session_id="session_fail_closed",
+        state=SessionContextState(workspace_dir=tmp_path),
+        pressure_policy=ContextPressurePolicy(
+            safety_margin_tokens=0,
+            tight_ratio=0.50,
+            critical_ratio=0.60,
+        ),
+        context_compactor=SmallCompactor(),
+    )
+
+    with pytest.raises(RuntimeError, match="context remains critical"):
+        asyncio.run(
+            governor.prepare(
+                AgentContext(
+                    system_prompt="System rules.",
+                    messages=[UserMessage(content="Use tools.")],
+                    tools=tools,
+                ),
+                ContextPreparationRequest(
+                    session_id="session_fail_closed",
+                    model_context_window=1000,
+                    model_max_output_tokens=0,
+                ),
+            )
+        )
 
 
 def test_context_compiler_is_not_public_sessions_api() -> None:
