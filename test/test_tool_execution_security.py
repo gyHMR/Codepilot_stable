@@ -137,6 +137,93 @@ def test_windows_read_only_shell_commands_are_allowed_without_approval() -> None
         assert decision.reason == "safe_read_only_command"
 
 
+def test_common_preview_shell_commands_are_allowed_without_approval() -> None:
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
+
+    bash = _metadata("bash", read_only=False, exclusive=True)
+    policy = PermissionPolicy(mode="workspace-write")
+
+    for command in [
+        "head -5 agent-test/chatbot.py",
+        "tail -20 README.md",
+        "cat pyproject.toml",
+        "wc -l src/codepilot/runtime/gateway.py",
+        "grep -n RuntimeGateway src/codepilot/runtime/gateway.py",
+        "rg -n RuntimeGateway src/codepilot",
+        "sed -n '1,20p' README.md",
+        "Get-Content README.md -TotalCount 5",
+        "Select-String -Path README.md -Pattern Codepilot",
+    ]:
+        decision = policy.decide(
+            ToolRequest(
+                name="bash",
+                params={"command": command},
+                metadata=bash,
+            )
+        )
+
+        assert decision.allowed
+        assert decision.reason == "safe_read_only_command"
+
+
+def test_ask_mode_allows_read_only_shell_previews_without_approval() -> None:
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
+
+    bash = _metadata("bash", read_only=False, exclusive=True)
+    policy = PermissionPolicy(mode="ask")
+
+    preview = policy.decide(
+        ToolRequest(
+            name="bash",
+            params={"command": "head -5 agent-test/chatbot.py agent-test/register.py"},
+            metadata=bash,
+        )
+    )
+    mutation = policy.decide(
+        ToolRequest(
+            name="bash",
+            params={"command": "cd agent-test && python register.py --demo"},
+            metadata=bash,
+        )
+    )
+    unknown = policy.decide(
+        ToolRequest(
+            name="bash",
+            params={"command": "python -c \"print(1)\""},
+            metadata=bash,
+        )
+    )
+
+    assert preview.allowed
+    assert preview.reason == "safe_read_only_command"
+    assert mutation.requires_approval
+    assert mutation.reason == "ask_mode"
+    assert unknown.requires_approval
+    assert unknown.reason == "ask_mode"
+
+
+def test_preview_shell_commands_with_pipes_or_redirects_still_need_approval() -> None:
+    from codepilot.tools.policy import PermissionPolicy, ToolRequest
+
+    bash = _metadata("bash", read_only=False, exclusive=True)
+    policy = PermissionPolicy(mode="workspace-write")
+
+    for command in [
+        "cat README.md | python -c \"print(1)\"",
+        "head -5 README.md > preview.txt",
+    ]:
+        decision = policy.decide(
+            ToolRequest(
+                name="bash",
+                params={"command": command},
+                metadata=bash,
+            )
+        )
+
+        assert decision.requires_approval
+        assert decision.reason == "unknown_shell_command"
+
+
 def test_shell_verification_allows_pythonpath_setup_prefix() -> None:
     from codepilot.tools.policy import PermissionPolicy, ToolRequest
 
@@ -252,7 +339,7 @@ def test_default_approval_provider_defers_execution_with_approval_id() -> None:
 
 
 def test_approval_contracts_normalize_identity_and_preview_fields() -> None:
-    from codepilot.tools.policy import ApprovalDecision, ApprovalRequest
+    from codepilot.tools.approval import ApprovalDecision, ApprovalRequest
 
     decision = ApprovalDecision(
         approved=True,
@@ -427,7 +514,7 @@ def test_agent_tool_owns_executable_definition_invariants() -> None:
 
 def test_tool_registry_owns_tool_metadata_identity_invariants() -> None:
     from codepilot.tools.authoring import AgentTool, AgentToolResult
-    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.registry import ToolRegistry
 
     async def execute(tool_call_id, params, signal=None, on_update=None):
         _ = tool_call_id, params, signal, on_update
@@ -461,7 +548,7 @@ def test_tool_registry_owns_tool_metadata_identity_invariants() -> None:
 
 
 async def _deferred_approval_provider_case() -> None:
-    from codepilot.tools.policy import DeferredApprovalProvider
+    from codepilot.tools.approval import DeferredApprovalProvider
     from codepilot.tools.policy import ToolDecision
     from codepilot.tools.authoring import ToolRuntimeRequest
 
@@ -488,8 +575,8 @@ async def _approval_case() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools.authoring import AgentTool, AgentToolResult
     from codepilot.tools.engine import ToolRuntime
-    from codepilot.tools.authoring import ToolRegistry
-    from codepilot.tools.policy import ApprovalDecision
+    from codepilot.tools.registry import ToolRegistry
+    from codepilot.tools.approval import ApprovalDecision
     from codepilot.tools.policy import PermissionPolicy
     from codepilot.tools.authoring import ToolRuntimeRequest
 
@@ -1023,7 +1110,7 @@ async def _shell_clean_tracked_before_hash_case(tmp_path: Path) -> None:
 
 def test_external_tool_without_metadata_defaults_to_medium_risk_approval() -> None:
     from codepilot.tools.authoring import AgentTool, AgentToolResult
-    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.registry import ToolRegistry
 
     async def execute(*_args):
         return AgentToolResult()
@@ -1053,8 +1140,8 @@ def test_runtime_exception_preserves_permission_duration_and_approval() -> None:
 
 async def _runtime_exception_evidence_case() -> None:
     from codepilot.tools.authoring import AgentTool, AgentToolResult
-    from codepilot.tools.authoring import ToolRegistry
-    from codepilot.tools.policy import ApprovalDecision
+    from codepilot.tools.registry import ToolRegistry
+    from codepilot.tools.approval import ApprovalDecision
     from codepilot.tools.policy import PermissionPolicy
     from codepilot.tools.engine import ToolRuntime
     from codepilot.tools.authoring import ToolRuntimeRequest
@@ -1175,7 +1262,7 @@ async def _schema_validation_case() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools.authoring import AgentTool, AgentToolResult
     from codepilot.tools.engine import ToolRuntime
-    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.authoring import ToolRuntimeRequest
 
     calls = []
@@ -1245,11 +1332,13 @@ def test_tool_runtime_validates_schema_before_requesting_approval() -> None:
 
 async def _schema_before_approval_case() -> None:
     from codepilot.protocols import TextContent
-    from codepilot.tools.authoring import AgentTool, AgentToolResult, ToolMetadata
+    from codepilot.protocols import ToolMetadata
+    from codepilot.tools.authoring import AgentTool, AgentToolResult
     from codepilot.tools.engine import ToolRuntime
-    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.authoring import ToolRuntimeRequest
-    from codepilot.tools.policy import ApprovalDecision, PermissionPolicy
+    from codepilot.tools.approval import ApprovalDecision
+    from codepilot.tools.policy import PermissionPolicy
 
     approval_requests: list[str] = []
 
@@ -1314,6 +1403,12 @@ def test_tool_result_guard_redacts_secrets_and_marks_prompt_injection() -> None:
     asyncio.run(_tool_result_guard_case())
 
 
+def test_builtin_read_preserves_local_code_facts_and_reports_read_paths(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_builtin_read_facts_case(tmp_path))
+
+
 def test_tool_runtime_accepts_injected_schema_validator_and_result_guard() -> None:
     asyncio.run(_tool_runtime_injected_guards_case())
 
@@ -1322,8 +1417,8 @@ async def _tool_runtime_injected_guards_case() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools.authoring import AgentTool, AgentToolResult
     from codepilot.tools.engine import ToolRuntime
-    from codepilot.tools.authoring import ToolRegistry
-    from codepilot.tools.engine import SchemaValidationResult
+    from codepilot.tools.registry import ToolRegistry
+    from codepilot.tools.validation import SchemaValidationResult
     from codepilot.tools.authoring import ToolRuntimeRequest
 
     class Validator:
@@ -1378,7 +1473,7 @@ async def _tool_result_guard_case() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools.authoring import AgentTool, AgentToolResult
     from codepilot.tools.engine import ToolRuntime
-    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.authoring import ToolRuntimeRequest
 
     async def execute(*_args):
@@ -1424,6 +1519,51 @@ async def _tool_result_guard_case() -> None:
     assert guard["redacted"] is True
     assert guard["prompt_injection_suspected"] is True
     assert guard["output_trust"] == "untrusted"
+
+
+async def _builtin_read_facts_case(tmp_path: Path) -> None:
+    from codepilot.tools.authoring import ToolRuntimeRequest
+    from codepilot.tools.registry import ToolRegistry
+    from codepilot.tools.builtins import create_builtin_tools
+    from codepilot.tools.engine import ToolRuntime
+
+    source = tmp_path / "app.py"
+    source.write_text(
+        "\n".join(
+            [
+                "import os",
+                'api_key = os.getenv("OPENAI_API_KEY")',
+                'support_email = "dev@example.com"',
+                'literal_secret = "sk-abcdefghijklmnopqrstuvwxyz123456"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    registry = ToolRegistry()
+    registry.extend(create_builtin_tools(tmp_path, enabled_names=["read"]))
+    runtime = ToolRuntime(registry)
+
+    result = await runtime.execute(
+        ToolRuntimeRequest(
+            tool_call_id="read_1",
+            name="read",
+            params={"path": "app.py"},
+        )
+    )
+
+    text = result.result.content[0].text
+    assert result.status == "success"
+    assert 'api_key = os.getenv("OPENAI_API_KEY")' in text
+    assert "dev@example.com" in text
+    assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in text
+    assert "[REDACTED_SECRET]" in text
+    assert result.result.metadata["read_paths"] == ["app.py"]
+    assert result.result.metadata["file_state"]["path"] == "app.py"
+    guard = result.result.metadata["result_guard"]
+    assert "email" not in guard["findings"]
+    assert "secret_assignment" not in guard["findings"]
 
 
 def test_mcp_tool_policy_populates_metadata_and_output_trust() -> None:

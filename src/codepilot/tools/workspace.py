@@ -107,8 +107,21 @@ _VERIFICATION_PREFIXES = (
 )
 _READ_ONLY_PREFIXES = (
     "dir",
+    "ls",
+    "pwd",
     "type",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "grep",
+    "rg",
+    "sed -n",
     "where",
+    "findstr",
+    "select-string",
+    "get-content",
+    "gc",
     "ver",
     "python --version",
     "python -v",
@@ -202,7 +215,7 @@ def _matches_command_prefix(command: str, prefix: str) -> bool:
 
 
 def _has_shell_redirection(command: str) -> bool:
-    return bool(re.search(r"(?:>>?|<)", command))
+    return bool(re.search(r"(?:>>?|<|\|)", command))
 
 
 def build_shell_environment(extra_allowed: tuple[str, ...] = ()) -> dict[str, str]:

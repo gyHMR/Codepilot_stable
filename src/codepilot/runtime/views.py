@@ -5,7 +5,7 @@ from typing import Literal, cast
 
 from codepilot.core.task import TaskMode, ensure_task_mode
 
-from .assemble import RuntimePermissionMode
+from .config import RuntimePermissionMode
 
 
 CommandSource = Literal["builtin", "extension", "skill", "prompt"]

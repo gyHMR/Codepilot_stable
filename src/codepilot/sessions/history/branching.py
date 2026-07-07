@@ -11,7 +11,7 @@ from ..contracts import SessionOptions
 from ..storage import SessionStore, new_session_id
 
 if TYPE_CHECKING:
-    from ..prepare import SessionRuntime
+    from ..runtime import SessionRuntime
 
 
 def build_session_options_from_existing(
@@ -32,8 +32,11 @@ def build_session_options_from_existing(
         tool_execution=session.tool_execution,
         max_tool_calls_per_turn=session.max_tool_calls_per_turn,
         memory_enabled=session.memory_enabled,
+        task_control_enabled=session.task_control_enabled,
         task_mode=session.task_mode,
         planning_budget_profile=session.planning_budget_profile,
+        max_task_replans_per_run=session.max_task_replans_per_run,
+        convert_to_llm=session.convert_to_llm,
         get_api_key=session.get_api_key,
         retry_enabled=session.retry_enabled,
         max_retries=session.max_retries,
@@ -44,13 +47,14 @@ def build_session_options_from_existing(
         before_tool_call=session.before_tool_call,
         after_tool_call=session.after_tool_call,
         stream_fn=session.stream_fn,
+        prepare_context=getattr(session, "_custom_prepare_context", None),
     )
 
 
 def create_fresh_session(old: "SessionRuntime") -> "SessionRuntime":
     """创建一个空的兄弟会话（保留运行时设置，清空消息历史）。"""
 
-    from ..prepare import SessionRuntime
+    from ..runtime import SessionRuntime
 
     return SessionRuntime(
         build_session_options_from_existing(
@@ -63,7 +67,7 @@ def create_fresh_session(old: "SessionRuntime") -> "SessionRuntime":
 def fork_session(session: "SessionRuntime", from_entry_id: str | None = None) -> "SessionRuntime":
     """从指定条目或当前叶子分叉一个新会话。"""
 
-    from ..prepare import SessionRuntime
+    from ..runtime import SessionRuntime
 
     new_id = new_session_id()
     fork_store = session.store.fork_to(new_id, from_entry_id=from_entry_id)

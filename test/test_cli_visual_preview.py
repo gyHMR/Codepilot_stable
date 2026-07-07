@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import StringIO
+from types import SimpleNamespace
 
 from rich.console import Console
 
@@ -33,25 +34,29 @@ def test_rich_cli_preview_has_compact_coding_agent_hierarchy(monkeypatch) -> Non
             permission_mode="workspace-write",
         )
     )
-    renderer.handle_event({
+    renderer.render_progress_event({
         "type": "tool_execution_start",
         "toolCallId": "read-1",
         "toolName": "read",
         "args": {"path": "src/codepilot/core/loop.py"},
     })
-    renderer.handle_event({
+    renderer.render_progress_event({
         "type": "tool_execution_end",
         "toolCallId": "read-1",
         "toolName": "read",
         "status": "success",
         "isError": False,
     })
-    renderer.handle_event({
-        "type": "tool_approval_required",
-        "toolName": "bash",
-        "args": {"command": "git status --short"},
-        "riskLevel": "medium",
-    })
+    renderer.render_approval_required(
+        SimpleNamespace(
+            approval=SimpleNamespace(
+                tool_name="bash",
+                arguments={"command": "git status --short"},
+                risk=SimpleNamespace(level="medium"),
+                approval_id="approval_1",
+            )
+        )
+    )
     info = LLMErrorInfo(
         code="llm.provider_response",
         message="400 Bad Request",
@@ -62,7 +67,7 @@ def test_rich_cli_preview_has_compact_coding_agent_hierarchy(monkeypatch) -> Non
         status_code=400,
         details={"response_text": '{"error":{"message":"Invalid request"}}'},
     )
-    renderer.handle_event({
+    renderer.render_progress_event({
         "type": "error",
         "error": info.code,
         "message": info.message,
@@ -76,10 +81,11 @@ def test_rich_cli_preview_has_compact_coding_agent_hierarchy(monkeypatch) -> Non
     assert "Codepilot 0.3  cyber engineering console" in preview
     assert "C P" in preview
     assert "deepseek/deepseek-chat" in preview
-    assert "↯ tool read  src/codepilot/core/loop.py" in preview
+    assert "↯ reading read  src/codepilot/core/loop.py" in preview
     assert "◆ ok  614ms" in preview
     assert "CP // PERMISSION REQUIRED" in preview
-    assert "bash git status --short" in preview
+    assert "bash" in preview
+    assert "git status --short" in preview
     assert "CP // ERROR · llm.provider_response" in preview
     assert 'Provider response: {"error":{"message":"Invalid request"}}' in preview
     assert "Neural workspace online" in preview
@@ -96,7 +102,7 @@ def test_rich_error_title_treats_error_code_as_plain_text() -> None:
         force_terminal=False,
     )
 
-    renderer.handle_event({
+    renderer.render_progress_event({
         "type": "error",
         "error": "provider[invalid]",
         "message": "Request failed",

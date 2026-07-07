@@ -88,7 +88,7 @@ def test_session_store_uses_slim_layout_and_lazy_files(tmp_path: Path) -> None:
     assert not (session_dir / "session.jsonl").exists()
     assert not (session_dir / "context.jsonl").exists()
     assert not (session_dir / "runs.jsonl").exists()
-    assert not (session_dir / "task_recovery.json").exists()
+    assert not (session_dir / "task_state_legacy.json").exists()
 
     store.append_message(UserMessage(content="hello"))
 

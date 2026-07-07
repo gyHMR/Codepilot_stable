@@ -9,7 +9,7 @@ def test_cli_command_delegates_to_runtime_application_command() -> None:
 
 
 async def _run_cli_command_delegation_case() -> None:
-    from codepilot.interfaces.cli.commands import handle_cli_command
+    from codepilot.interfaces.cli.interactive import dispatch_command
     from codepilot.runtime.actions import CommandFinishedFrame, CommandSubmitted
 
     class FakeRuntime:
@@ -35,7 +35,7 @@ async def _run_cli_command_delegation_case() -> None:
             )
 
     runtime = FakeRuntime()
-    result = await handle_cli_command(runtime, "session_1", "/status")
+    result = await dispatch_command(runtime, "session_1", "/status")
 
     assert runtime.received == ("session_1", "/status")
     assert result.handled is True
@@ -43,10 +43,10 @@ async def _run_cli_command_delegation_case() -> None:
     assert result.switched_session_id == "session_2"
 
 
-def test_render_prompt_run_consumes_runtime_stream_result() -> None:
-    from codepilot.interfaces.cli.runner import _render_prompt_run
+def test_render_dispatch_consumes_runtime_stream_result() -> None:
+    from codepilot.interfaces.cli.interactive import render_dispatch
     from codepilot.protocols import AssistantMessage, TextContent
-    from codepilot.runtime.actions import ProgressFrame, PromptSubmitted, RunFinishedFrame
+    from codepilot.runtime.actions import ProgressFrame, RunFinishedFrame
 
     final = AssistantMessage(content=[TextContent(text="done")])
 
@@ -55,8 +55,7 @@ def test_render_prompt_run_consumes_runtime_stream_result() -> None:
             self.sent = None
 
         async def dispatch(self, session_id, action):
-            assert isinstance(action, PromptSubmitted)
-            self.sent = (session_id, action.text)
+            self.sent = (session_id, action)
             yield ProgressFrame(event={"type": "message_update"})
             yield RunFinishedFrame(
                 record=type(
@@ -80,18 +79,18 @@ def test_render_prompt_run_consumes_runtime_stream_result() -> None:
             self.events = []
             self.final = None
 
-        def handle_event(self, event):
+        def render_progress_event(self, event):
             self.events.append(event)
 
-        def render_final(self, message):
-            self.final = message
+        def render_final(self, record):
+            self.final = record.outcome.final_message
 
     runtime = FakeRuntime()
     renderer = FakeRenderer()
 
-    asyncio.run(_render_prompt_run(runtime, "session_1", "hello", renderer))
+    asyncio.run(render_dispatch(runtime.dispatch("session_1", object()), renderer))
 
-    assert runtime.sent == ("session_1", "hello")
+    assert runtime.sent[0] == "session_1"
     assert renderer.events == [{"type": "message_update"}]
     assert renderer.final is final
 

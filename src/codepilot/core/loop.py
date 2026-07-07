@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+"""The core agent loop.
+
+This file is the whole orchestration story:
+
+1. ask the model for one assistant message;
+2. run any tool calls in that message;
+3. append tool observations;
+4. repeat until there is a final answer, an approval pause, or a limit/error.
+"""
+
 import asyncio
 import time
 from dataclasses import dataclass, replace
@@ -14,7 +24,6 @@ from codepilot.protocols import (
     AssistantMessage,
     ErrorInfo,
     Message,
-    TaskSummary,
     TextContent,
     ToolCall,
     ToolResultMessage,
@@ -31,12 +40,12 @@ from .contracts import (
     PreparedContext,
     RetryPolicy,
     TaskStrategy,
+    WorkspaceEffects,
 )
-from .model_step import run_model_turn, tool_catalog_for_request
+from .model_step import ModelTurnResult, run_model_turn, tool_catalog_for_request
 from .state import RunState
 from .task import (
     CompletionCheck,
-    ExecutionDecision,
     TaskController,
     TaskPlanningState,
     budget_for_profile,
@@ -52,26 +61,63 @@ from .tool_step import (
 )
 
 
-ToolCallSignature = tuple[tuple[str, tuple[tuple[str, str], ...]], ...]
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+async def maybe_await(value: Any) -> Any:
+    if asyncio.isfuture(value) or asyncio.iscoroutine(value):
+        return await value
+    return value
+
+
+class AgentEventEmitter:
+    """Small public helper for tests and adapters that need enriched events."""
+
+    def __init__(
+        self,
+        sink: AgentEventSink,
+        *,
+        run_id: str,
+        session_id: str | None = None,
+    ) -> None:
+        self._sink = sink
+        self.run_id = _required_text(run_id, "run_id")
+        self.session_id = _optional_text(session_id)
+        self.turn_id = 0
+        self._event_seq = 0
+
+    async def emit(self, event: dict[str, Any]) -> None:
+        event_type = ensure_runtime_event_type(event.get("type"))
+        if event_type == "turn_start":
+            self.turn_id += 1
+        self._event_seq += 1
+        enriched = {
+            **event,
+            "type": event_type,
+            "runId": self.run_id,
+            "sessionId": self.session_id,
+            "turnId": self.turn_id,
+            "eventId": f"{self.run_id}:{self._event_seq}",
+            "timestamp": now_ms(),
+        }
+        await maybe_await(self._sink(enriched))  # type: ignore[arg-type]
 
 
 @dataclass
-class AgentTaskRuntime:
-    """Loop-local adapter that keeps task control out of session/runtime layers."""
-
+class _TaskRuntime:
     controller: TaskController
     task: TaskState
-    run_state: "RunState"
+    run_state: RunState
 
     @classmethod
-    def from_strategy(
+    def create(
         cls,
         *,
         strategy: TaskStrategy,
         messages: list[Message],
-        run_id: str,
-        session_id: str | None,
-    ) -> "AgentTaskRuntime | None":
+        run_state: RunState,
+    ) -> "_TaskRuntime | None":
         if not strategy.enabled:
             return None
         policy = policy_for_mode(strategy.mode)
@@ -90,387 +136,66 @@ class AgentTaskRuntime:
             mode=policy.mode,
             planning=planning,
             max_replans_per_run=strategy.max_replans_per_run,
-            task_recovery_projection=strategy.recovery_projection,
+            task_state=strategy.task_state,
         )
-        return cls(
-            controller=controller,
-            task=task,
-            run_state=RunState(run_id=run_id, session_id=session_id),
-        )
-
-    def context_text(self) -> str:
-        return self.controller.render_context(self.task)
+        return cls(controller=controller, task=task, run_state=run_state)
 
     def event_payload(self) -> dict[str, object]:
         return self.controller.event_payload(self.task)
 
-    def after_tool_results(
-        self,
-        results: list[ToolResultMessage],
-    ) -> ExecutionDecision:
-        self.run_state.collect_tool_results(results)
+    def control_signal(self) -> dict[str, object]:
+        return self.controller.control_signal(self.task)
+
+    def after_tool_results(self, results: list[ToolResultMessage]):
         return self.controller.after_tool_results(self.task, self.run_state, results)
 
-    def snapshot(self) -> TaskSummary:
-        return self.controller.summarize(self.task)
-
-    def complete(self) -> tuple[TaskSummary, CompletionCheck]:
-        check = self.controller.check_completion(self.task, self.run_state)
-        return self.controller.summarize(self.task), check
+    def check_completion(self) -> CompletionCheck:
+        return self.controller.check_completion(self.task, self.run_state)
 
     def completion_steering(self, check: CompletionCheck) -> UserMessage:
         return self.controller.completion_steering(check)
 
-    def needs_final_verification_grace(self, tool_calls: list[ToolCall]) -> bool:
-        return (
-            self.run_state.workspace_changed
-            and not self.run_state.fresh_verification_passed
-            and any(_looks_like_verification_call(call) for call in tool_calls)
-        )
-
-    def merge_observation_summary(
-        self,
-        *,
-        affected_paths: tuple[str, ...],
-        workspace_changed: bool,
-        verification: list[Any],
-    ) -> None:
-        self.run_state.affected_paths.update(affected_paths)
-        self.run_state.workspace_changed = (
-            self.run_state.workspace_changed or workspace_changed
-        )
-        self.run_state.verification = list(verification)
-        self.run_state.fresh_verification_passed = any(
-            getattr(item, "status", None) == "passed" for item in verification
-        )
-
-
-@dataclass(frozen=True)
-class ToolExecutionGate:
-    should_execute: bool
-    reason: str = "allowed"
-    code: str | None = None
-    message: str | None = None
-    stop_reason: str | None = None
-
-
-@dataclass(frozen=True)
-class PostToolDecision:
-    should_stop: bool
-    reason: str
-    status: AgentRunStatus | None = None
-    stop_reason: AgentRunStopReason | None = None
-    error: ErrorInfo | None = None
-    force_completion_check: bool = False
-
-
-@dataclass(frozen=True)
-class CompletionDecision:
-    should_stop: bool
-    should_continue: bool
-    reason: str
-    status: AgentRunStatus | None = None
-    stop_reason: AgentRunStopReason | None = None
-
-
-def now_ms() -> int:
-    return int(time.time() * 1000)
-
-
-async def maybe_await(value: Any) -> Any:
-    if asyncio.isfuture(value) or asyncio.iscoroutine(value):
-        return await value
-    return value
-
-
-class AgentEventEmitter:
-    """Emit agent events with run, turn, sequence, and timestamp metadata."""
-
-    def __init__(
-        self,
-        sink: AgentEventSink,
-        *,
-        run_id: str,
-        session_id: str | None = None,
-    ) -> None:
-        self._sink = sink
-        self._session_id = _optional_event_text(session_id)
-        self.run_id = _require_event_text(run_id, field_name="run_id")
-        self.turn_id = 0
-        self._event_seq = 0
-
-    async def emit(self, event: dict[str, Any]) -> None:
-        if not isinstance(event, dict):
-            raise TypeError("event must be a dict")
-        event_type = ensure_runtime_event_type(event.get("type"))
-        if event_type == "turn_start":
-            self.turn_id += 1
-
-        self._event_seq += 1
-        enriched = {
-            **event,
-            "type": event_type,
-            "runId": self.run_id,
-            "turnId": self.turn_id,
-            "eventId": f"{self.run_id}:{self._event_seq}",
-            "timestamp": now_ms(),
-            "sessionId": self._session_id,
-        }
-        value = self._sink(enriched)  # type: ignore[arg-type]
-        if asyncio.isfuture(value) or asyncio.iscoroutine(value):
-            await value
-
-
-def _clean_event_text(value: object) -> str:
-    return str(value).strip() if value is not None else ""
-
-
-def _optional_event_text(value: object) -> str | None:
-    text = _clean_event_text(value)
-    return text or None
-
-
-def _require_event_text(value: object, *, field_name: str) -> str:
-    text = _clean_event_text(value)
-    if not text:
-        raise ValueError(f"event {field_name} cannot be empty")
-    return text
-
-
-def completed_outcome(
-    run_id: str,
-    messages: list[AssistantMessage | ToolResultMessage],
-    final_message: AssistantMessage,
-    events: list[AgentEvent],
-    *,
-    model_attempts: int,
-    tool_iterations: int = 0,
-    tool_calls: int = 0,
-    usage: Any = None,
-    observations: list[ToolObservation] | None = None,
-    task: TaskSummary | None = None,
-) -> AgentLoopOutcome:
-    return AgentLoopOutcome(
-        run_id=run_id,
-        status="completed",
-        stop_reason="final_answer",
-        new_messages=list(messages),
-        final_message=final_message,
-        counters=AgentRunCounters(
-            model_attempts=model_attempts,
-            tool_iterations=tool_iterations,
-            tool_calls=tool_calls,
-        ),
-        usage=usage,
-        verification=verification(observations or []),
-        workspace_effects=workspace_effects(observations or []),
-        events=events,
-        task=task,
-    )
-
-
-def last_assistant(
-    messages: list[AssistantMessage | ToolResultMessage],
-) -> AssistantMessage | None:
-    for message in reversed(messages):
-        if isinstance(message, AssistantMessage):
-            return message
-    return None
-
-
-def tool_call_signature(tool_calls: list[ToolCall]) -> ToolCallSignature:
-    return tuple(
-        (
-            call.name,
-            tuple(sorted((key, repr(value)) for key, value in call.arguments.items())),
-        )
-        for call in tool_calls
-    )
-
-
-def tool_execution_gate(
-    *,
-    tool_iterations: int,
-    tool_calls: list[ToolCall],
-    current_signature: ToolCallSignature | None,
-    repeated_count: int,
-    max_tool_iterations: int,
-    repeated_tool_call_limit: int,
-) -> ToolExecutionGate:
-    if max_tool_iterations >= 0 and tool_iterations >= max_tool_iterations:
-        return ToolExecutionGate(
-            should_execute=False,
-            reason="max_iterations",
-            code="run.max_iterations",
-            message=f"Stopped after reaching max_tool_iterations={max_tool_iterations}",
-            stop_reason="max_iterations",
-        )
-    if (
-        current_signature is not None
-        and repeated_tool_call_limit >= 0
-        and repeated_count > repeated_tool_call_limit
-    ):
-        return ToolExecutionGate(
-            should_execute=False,
-            reason="repeated_tool_call",
-            code="run.repeated_tool_call",
-            message="Stopped after repeated identical tool calls",
-            stop_reason="repeated_tool_call",
-        )
-    return ToolExecutionGate(should_execute=True)
-
-
-def post_tool_decision(
-    tool_results: list[ToolResultMessage],
-    task_decision: ExecutionDecision | None,
-) -> PostToolDecision:
-    if any(result.status == "approval_required" for result in tool_results):
-        return PostToolDecision(
-            should_stop=True,
-            reason="approval_required",
-            status="waiting_approval",
-            stop_reason="approval_required",
-        )
-    if any(result.status == "cancelled" for result in tool_results):
-        return PostToolDecision(
-            should_stop=True,
-            reason="cancelled",
-            status="aborted",
-            stop_reason="aborted",
-        )
-    if task_decision is None:
-        return PostToolDecision(should_stop=False, reason="continue")
-    if task_decision.action == "propose_revert":
-        return PostToolDecision(
-            should_stop=True,
-            reason=task_decision.reason,
-            status="waiting_user",
-            stop_reason="task_blocked",
-        )
-    if task_decision.action == "finish":
-        return PostToolDecision(
-            should_stop=False,
-            reason="finish",
-            force_completion_check=True,
-        )
-    if task_decision.action != "stop":
-        return PostToolDecision(should_stop=False, reason=task_decision.reason)
-    if task_decision.reason == "replan_limit_exceeded":
-        return PostToolDecision(
-            should_stop=True,
-            reason=task_decision.reason,
-            status="failed",
-            stop_reason="replan_limit",
-            error=ErrorInfo(
-                code="run.replan_limit",
-                message=task_decision.reason,
-                retryable=False,
-                source="runtime",
-            ),
-        )
-    return PostToolDecision(
-        should_stop=True,
-        reason=task_decision.reason,
-        status="waiting_user",
-        stop_reason="task_blocked",
-    )
-
-
-def completion_decision(check: CompletionCheck) -> CompletionDecision:
-    if check.satisfied:
-        return CompletionDecision(
-            should_stop=False,
-            should_continue=False,
-            reason=check.reason,
-        )
-    if check.can_continue:
-        return CompletionDecision(
-            should_stop=False,
-            should_continue=True,
-            reason=check.reason,
-        )
-    return CompletionDecision(
-        should_stop=True,
-        should_continue=False,
-        reason=check.reason,
-        status="waiting_user",
-        stop_reason=(
-            "task_blocked" if check.reason == "blocked_steps" else "task_incomplete"
-        ),
-    )
-
-
-def with_task_context(
-    context: PreparedContext,
-    runtime: AgentTaskRuntime | None,
-) -> PreparedContext:
-    if runtime is None:
-        return context
-    return PreparedContext(
-        {
-            **dict(context),
-            "current_task": runtime.context_text(),
-            "task_control_signal": runtime.controller.control_signal(runtime.task),
-        }
-    )
-
-
-def _looks_like_verification_call(call: ToolCall) -> bool:
-    name = call.name.lower()
-    if any(marker in name for marker in ("test", "verify", "check", "pytest")):
-        return True
-    command = call.arguments.get("command") or call.arguments.get("cmd")
-    if not isinstance(command, str):
-        return False
-    return any(marker in command.lower() for marker in ("pytest", "test", "compile", "lint"))
+    def summary(self):
+        return self.controller.summarize(self.task)
 
 
 async def run_agent_loop(
     input: AgentLoopInput,
     ports: AgentLoopPorts,
 ) -> AgentLoopOutcome:
-    recorder = _LoopEventRecorder(input, ports)
+    recorder = _EventRecorder(input, ports)
+    run_state = RunState(
+        run_id=input.run_id,
+        session_id=input.correlation.session_id,
+    )
+    new_messages: list[Message] = []
+    messages = list(input.messages)
+
     recorder.emit({"type": "agent_start"})
     recorder.emit({"type": "turn_start"})
 
-    if ports.model is None:
-        assistant = AssistantMessage(content=[TextContent(text=input.user_prompt or "")])
-        _emit_message(recorder, assistant)
-        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
-        recorder.emit({"type": "agent_end", "status": "completed"})
-        return completed_outcome(
-            input.run_id,
-            [assistant],
-            assistant,
-            recorder.events,
-            model_attempts=0,
-        )
-
-    messages = list(input.messages)
     if input.user_prompt is not None:
         user_message = UserMessage(content=input.user_prompt)
         messages.append(user_message)
         _emit_message(recorder, user_message)
-    task_runtime = AgentTaskRuntime.from_strategy(
+
+    task_runtime = _TaskRuntime.create(
         strategy=input.task_strategy,
         messages=messages,
-        run_id=input.run_id,
-        session_id=input.correlation.session_id,
+        run_state=run_state,
     )
     if task_runtime is not None:
-        recorder.emit(
-            {
-                "type": "task_plan_created",
-                "task": task_runtime.event_payload(),
-            }
-        )
+        recorder.emit({"type": "task_plan_created", "task": task_runtime.event_payload()})
 
-    return await _run_loop_body(
+    return await _drive_loop(
         input=input,
         ports=ports,
         recorder=recorder,
         messages=messages,
+        new_messages=new_messages,
+        run_state=run_state,
         task_runtime=task_runtime,
+        first_turn_started=True,
     )
 
 
@@ -504,7 +229,12 @@ async def resume_agent_loop(
         limits=input.limits,
         retry_policy=input.retry_policy,
     )
-    recorder = _LoopEventRecorder(loop_input, ports)
+    recorder = _EventRecorder(loop_input, ports)
+    run_state = RunState(input.run_id, input.correlation.session_id)
+    messages = list(input.messages)
+    new_messages: list[Message] = []
+    observations: list[ToolObservation] = []
+
     recorder.emit({"type": "agent_start"})
     recorder.emit({"type": "turn_start"})
     recorder.emit(
@@ -524,117 +254,96 @@ async def resume_agent_loop(
             reason=input.reason,
         )
     )
+    observations.append(observation)
     recorder.emit(_resume_tool_end_event(input.approval_id, observation))
+
     tool_message = to_tool_result_message(
         observation,
         approval_id=input.approval_id,
         approved=input.decision == "approve",
     )
-    messages = [*input.messages, tool_message]
+    messages.append(tool_message)
+    new_messages.append(tool_message)
     _emit_message(recorder, tool_message)
-    task_runtime = AgentTaskRuntime.from_strategy(
+    run_state.collect_tool_results([tool_message])
+    run_state.counters.tool_iterations += 1
+
+    task_runtime = _TaskRuntime.create(
         strategy=input.task_strategy,
         messages=messages,
-        run_id=input.run_id,
-        session_id=input.correlation.session_id,
+        run_state=run_state,
     )
     if task_runtime is not None:
-        task_runtime.after_tool_results([tool_message])
+        decision = task_runtime.after_tool_results([tool_message])
+        recorder.emit({"type": "task_step_updated", "task": task_runtime.event_payload()})
         recorder.emit(
             {
-                "type": "task_step_updated",
+                "type": "task_decision",
+                "decision": {
+                    "action": decision.action,
+                    "reason": decision.reason,
+                    "next_action": decision.next_action,
+                },
                 "task": task_runtime.event_payload(),
             }
         )
 
-    return await _run_loop_body(
+    return await _drive_loop(
         input=loop_input,
         ports=ports,
         recorder=recorder,
         messages=messages,
+        new_messages=new_messages,
+        run_state=run_state,
         task_runtime=task_runtime,
-        initial_new_messages=[tool_message],
-        initial_observations=[observation],
-        initial_tool_iterations=1,
-        initial_tool_calls=1,
+        observations=observations,
+        first_turn_started=True,
     )
 
 
-async def _run_loop_body(
+async def _drive_loop(
     *,
     input: AgentLoopInput,
     ports: AgentLoopPorts,
-    recorder: "_LoopEventRecorder",
-    messages: list[Any],
-    task_runtime: AgentTaskRuntime | None,
-    initial_new_messages: list[ToolResultMessage] | None = None,
-    initial_observations: list[ToolObservation] | None = None,
-    initial_tool_iterations: int = 0,
-    initial_tool_calls: int = 0,
+    recorder: "_EventRecorder",
+    messages: list[Message],
+    new_messages: list[Message],
+    run_state: RunState,
+    task_runtime: _TaskRuntime | None,
+    observations: list[ToolObservation] | None = None,
+    first_turn_started: bool,
 ) -> AgentLoopOutcome:
-    new_messages: list[Any] = list(initial_new_messages or [])
-    model_attempts = 0
-    tool_iterations = initial_tool_iterations
-    tool_calls_count = initial_tool_calls
-    all_observations: list[ToolObservation] = list(initial_observations or [])
+    all_observations = list(observations or [])
     usage = None
     max_model_turns = max(1, input.limits.max_model_turns)
-    first_model_turn = True
-    model_retries = 0
-    last_tool_signature = None
-    repeated_tool_signature_count = 0
-    final_verification_grace_used = False
 
-    for model_turn_index in range(max_model_turns):
-        if first_model_turn:
-            first_model_turn = False
-        else:
+    for turn_index in range(max_model_turns):
+        if turn_index > 0 or not first_turn_started:
             recorder.emit({"type": "turn_start"})
 
-        while True:
-            model_turn = await run_model_turn(
-                _with_current_task(input, task_runtime),
-                ports,
-                messages,
-                emit=recorder.emit,
-            )
-            model_attempts += 1
-            if model_turn.error is None:
-                break
-            retry = _next_model_retry(input.retry_policy, model_retries)
-            if retry is not None:
-                model_retries += 1
-                recorder.emit(
-                    {
-                        "type": "model_retry_start",
-                        "attempt": model_retries,
-                        "maxAttempts": _max_model_attempts(input.retry_policy),
-                        "delayMs": retry,
-                        "error": model_turn.error,
-                    }
-                )
-                if retry > 0:
-                    await asyncio.sleep(retry / 1000.0)
-                continue
+        model_turn = await _model_turn_with_retries(
+            input=input,
+            ports=ports,
+            recorder=recorder,
+            messages=messages,
+            run_state=run_state,
+            task_runtime=task_runtime,
+        )
+        if model_turn.error is not None:
             recorder.emit({"type": "error", "error": model_turn.error})
             recorder.emit({"type": "turn_end", "message": None, "toolResults": []})
             recorder.emit({"type": "agent_end", "status": "failed"})
-            return AgentLoopOutcome(
-                run_id=input.run_id,
+            return _outcome(
+                input=input,
                 status="failed",
                 stop_reason="model_error",
-                new_messages=list(new_messages),
-                counters=AgentRunCounters(
-                    model_attempts=model_attempts,
-                    tool_iterations=tool_iterations,
-                    tool_calls=tool_calls_count,
-                ),
-                workspace_effects=workspace_effects(all_observations),
+                new_messages=new_messages,
+                final_message=None,
+                run_state=run_state,
+                observations=all_observations,
                 events=recorder.events,
-                task=_task_summary(
-                    task_runtime,
-                    observations=all_observations,
-                ),
+                task_runtime=task_runtime,
+                usage=usage,
                 error=model_turn.error,
             )
 
@@ -645,184 +354,58 @@ async def _run_loop_body(
         _emit_message(recorder, assistant)
 
         tool_calls = [block for block in assistant.content if isinstance(block, ToolCall)]
-        if not tool_calls or ports.tools is None:
-            task, check = _complete_task_if_needed(
-                task_runtime,
+        if not tool_calls:
+            outcome = _finish_or_steer(
+                input=input,
+                recorder=recorder,
+                messages=messages,
+                new_messages=new_messages,
+                assistant=assistant,
+                run_state=run_state,
+                task_runtime=task_runtime,
                 observations=all_observations,
-            )
-            if task is not None:
-                recorder.emit(
-                    {
-                        "type": "completion_checked",
-                        "task": task_runtime.event_payload() if task_runtime else {},
-                        "completion_satisfied": task.completion_satisfied,
-                        "completion_reason": task.completion_reason,
-                    }
-                )
-                decision = completion_decision(check)
-                if decision.should_continue:
-                    steering = task_runtime.completion_steering(check) if task_runtime else None
-                    if steering is not None and model_turn_index + 1 < max_model_turns:
-                        messages.append(steering)
-                        new_messages.append(steering)
-                        _emit_message(recorder, steering)
-                        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
-                        continue
-                    decision = completion_decision(_without_continuation_budget(check))
-                if decision.should_stop:
-                    recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
-                    recorder.emit({"type": "agent_end", "status": decision.status})
-                    return AgentLoopOutcome(
-                        run_id=input.run_id,
-                        status=decision.status or "waiting_user",
-                        stop_reason=decision.stop_reason or "task_incomplete",
-                        new_messages=list(new_messages),
-                        final_message=assistant,
-                        counters=AgentRunCounters(
-                            model_attempts=model_attempts,
-                            tool_iterations=tool_iterations,
-                            tool_calls=tool_calls_count,
-                        ),
-                        usage=usage,
-                        verification=verification(all_observations),
-                        workspace_effects=workspace_effects(all_observations),
-                        events=recorder.events,
-                        task=task,
-                    )
-            recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
-            recorder.emit({"type": "agent_end", "status": "completed"})
-            return completed_outcome(
-                input.run_id,
-                list(new_messages),
-                assistant,
-                recorder.events,
-                model_attempts=model_attempts,
-                tool_iterations=tool_iterations,
-                tool_calls=tool_calls_count,
                 usage=usage,
-                observations=all_observations,
-                task=task,
+                turn_index=turn_index,
+                max_model_turns=max_model_turns,
             )
+            if outcome is not None:
+                return outcome
+            continue
 
-        if (
-            input.limits.max_tool_calls is not None
-            and tool_calls_count + len(tool_calls) > input.limits.max_tool_calls
-        ):
-            recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
-            recorder.emit({"type": "agent_end", "status": "failed"})
-            return AgentLoopOutcome(
-                run_id=input.run_id,
-                status="failed",
-                stop_reason="tool_call_limit",
-                new_messages=list(new_messages),
-                final_message=assistant,
-                counters=AgentRunCounters(
-                    model_attempts=model_attempts,
-                    tool_iterations=tool_iterations,
-                    tool_calls=tool_calls_count,
-                ),
-                usage=usage,
-                workspace_effects=workspace_effects(all_observations),
-                events=recorder.events,
-                task=_task_summary(
-                    task_runtime,
-                    observations=all_observations,
-                ),
-                )
-
-        if (
-            input.limits.max_tool_calls_per_turn is not None
-            and len(tool_calls) > input.limits.max_tool_calls_per_turn
-        ):
-            error = {
-                "code": "run.max_tool_calls_per_turn",
-                "message": (
-                    "Stopped after model requested "
-                    f"{len(tool_calls)} tool calls in one turn "
-                    f"(max={input.limits.max_tool_calls_per_turn})"
-                ),
-            }
+        if ports.tools is None:
+            error = {"code": "core.missing_tool_port", "message": "Model requested tools but no ToolPort was provided"}
             recorder.emit({"type": "error", "error": error})
             recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
             recorder.emit({"type": "agent_end", "status": "failed"})
-            return AgentLoopOutcome(
-                run_id=input.run_id,
+            return _outcome(
+                input=input,
                 status="failed",
-                stop_reason="tool_call_limit",
-                new_messages=list(new_messages),
+                stop_reason="missing_tool_port",
+                new_messages=new_messages,
                 final_message=assistant,
-                counters=AgentRunCounters(
-                    model_attempts=model_attempts,
-                    tool_iterations=tool_iterations,
-                    tool_calls=tool_calls_count,
-                ),
-                usage=usage,
-                verification=verification(all_observations),
-                workspace_effects=workspace_effects(all_observations),
+                run_state=run_state,
+                observations=all_observations,
                 events=recorder.events,
-                task=_task_snapshot(task_runtime),
+                task_runtime=task_runtime,
+                usage=usage,
                 error=error,
             )
 
-        signature = tool_call_signature(tool_calls)
-        if signature == last_tool_signature:
-            repeated_tool_signature_count += 1
-        else:
-            last_tool_signature = signature
-            repeated_tool_signature_count = 1
-        gate = tool_execution_gate(
-            tool_iterations=tool_iterations,
+        limit_outcome = _tool_limit_outcome(
+            input=input,
+            recorder=recorder,
+            assistant=assistant,
             tool_calls=tool_calls,
-            current_signature=signature,
-            repeated_count=repeated_tool_signature_count,
-            max_tool_iterations=input.limits.max_tool_iterations,
-            repeated_tool_call_limit=input.limits.repeated_tool_call_limit,
+            new_messages=new_messages,
+            run_state=run_state,
+            observations=all_observations,
+            task_runtime=task_runtime,
+            usage=usage,
         )
-        if not gate.should_execute:
-            if (
-                gate.reason == "max_iterations"
-                and not final_verification_grace_used
-                and task_runtime is not None
-                and task_runtime.needs_final_verification_grace(tool_calls)
-            ):
-                final_verification_grace_used = True
-                recorder.emit(
-                    {
-                        "type": "tool_execution_grace",
-                        "reason": "final_verification_at_iteration_limit",
-                        "max_tool_iterations": input.limits.max_tool_iterations,
-                        "tool_calls": [
-                            {"id": call.id, "name": call.name}
-                            for call in tool_calls
-                        ],
-                    }
-                )
-            else:
-                error = {"code": gate.code, "message": gate.message}
-                assistant.stop_reason = gate.stop_reason or assistant.stop_reason
-                recorder.emit({"type": "error", "error": error})
-                recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
-                recorder.emit({"type": "agent_end", "status": "failed"})
-                return AgentLoopOutcome(
-                    run_id=input.run_id,
-                    status="failed",
-                    stop_reason=gate.stop_reason or gate.reason,
-                    new_messages=list(new_messages),
-                    final_message=assistant,
-                    counters=AgentRunCounters(
-                        model_attempts=model_attempts,
-                        tool_iterations=tool_iterations,
-                        tool_calls=tool_calls_count,
-                    ),
-                    usage=usage,
-                    verification=verification(all_observations),
-                    workspace_effects=workspace_effects(all_observations),
-                    events=recorder.events,
-                    task=_task_snapshot(task_runtime),
-                    error=error,
-                )
+        if limit_outcome is not None:
+            return limit_outcome
 
-        observations = await execute_tool_turn(
+        turn_observations = await execute_tool_turn(
             run_id=input.run_id,
             session_id=input.correlation.session_id,
             assistant_message=assistant,
@@ -838,83 +421,25 @@ async def _run_loop_body(
             tool_calls=tool_calls,
             emit=recorder.emit,
         )
-        all_observations.extend(observations)
-        tool_iterations += 1
-        tool_calls_count += len(observations)
+        all_observations.extend(turn_observations)
+        run_state.counters.tool_iterations += 1
 
-        approvals = approval_observations(observations)
-        if approvals:
-            completed_tool_messages = [
-                to_tool_result_message(observation)
-                for observation in observations
-                if observation.status != "approval_required"
-            ]
-            for message in completed_tool_messages:
-                messages.append(message)
-                new_messages.append(message)
-                _emit_message(recorder, message)
-            if task_runtime is not None:
-                approval_messages = [
-                    to_tool_result_message(
-                        observation,
-                        approval_id=(
-                            observation.interruption.approval_id
-                            if observation.interruption is not None
-                            else None
-                        ),
-                        approved=False,
-                    )
-                    for observation in approvals
-                ]
-                task_runtime.after_tool_results(
-                    [*completed_tool_messages, *approval_messages]
-                )
-                recorder.emit(
-                    {
-                        "type": "task_step_updated",
-                        "task": task_runtime.event_payload(),
-                    }
-                )
-            recorder.emit(
-                {
-                    "type": "turn_end",
-                    "message": assistant,
-                    "toolResults": completed_tool_messages,
-                }
-            )
-            recorder.emit({"type": "agent_end", "status": "waiting_approval"})
-            return AgentLoopOutcome(
-                run_id=input.run_id,
-                status="waiting_approval",
-                stop_reason="approval_required",
-                new_messages=list(new_messages),
-                final_message=assistant,
-                interruptions=[item.interruption for item in approvals if item.interruption],
-                counters=AgentRunCounters(
-                    model_attempts=model_attempts,
-                    tool_iterations=tool_iterations,
-                    tool_calls=tool_calls_count,
-                ),
-                usage=usage,
-                verification=verification(all_observations),
-                workspace_effects=workspace_effects(all_observations),
-                events=recorder.events,
-                task=_task_snapshot(task_runtime),
-            )
-
-        tool_messages = [to_tool_result_message(observation) for observation in observations]
-        for message in tool_messages:
+        tool_messages = _tool_messages_from_observations(turn_observations)
+        run_state.collect_tool_results(tool_messages)
+        visible_tool_messages = [
+            message
+            for message in tool_messages
+            if message.status != "approval_required"
+        ]
+        for message in visible_tool_messages:
             messages.append(message)
             new_messages.append(message)
             _emit_message(recorder, message)
+
+        task_decision = None
         if task_runtime is not None:
             task_decision = task_runtime.after_tool_results(tool_messages)
-            recorder.emit(
-                {
-                    "type": "task_step_updated",
-                    "task": task_runtime.event_payload(),
-                }
-            )
+            recorder.emit({"type": "task_step_updated", "task": task_runtime.event_payload()})
             recorder.emit(
                 {
                     "type": "task_decision",
@@ -926,111 +451,446 @@ async def _run_loop_body(
                     "task": task_runtime.event_payload(),
                 }
             )
-            post_decision = post_tool_decision(tool_messages, task_decision)
-            if post_decision.force_completion_check:
-                task, check = _complete_task_if_needed(
-                    task_runtime,
-                    observations=all_observations,
-                )
-                recorder.emit(
-                    {
-                        "type": "completion_checked",
-                        "task": task_runtime.event_payload(),
-                        "completion_satisfied": task.completion_satisfied if task else False,
-                        "completion_reason": task.completion_reason if task else "",
-                    }
-                )
-                if task is not None and check is not None and completion_decision(check).should_stop:
-                    final_decision = completion_decision(check)
-                    recorder.emit({"type": "turn_end", "message": assistant, "toolResults": tool_messages})
-                    recorder.emit({"type": "agent_end", "status": final_decision.status})
-                    return AgentLoopOutcome(
-                        run_id=input.run_id,
-                        status=final_decision.status or "waiting_user",
-                        stop_reason=final_decision.stop_reason or "task_incomplete",
-                        new_messages=list(new_messages),
-                        final_message=assistant,
-                        counters=AgentRunCounters(
-                            model_attempts=model_attempts,
-                            tool_iterations=tool_iterations,
-                            tool_calls=tool_calls_count,
-                        ),
-                        usage=usage,
-                        verification=verification(all_observations),
-                        workspace_effects=workspace_effects(all_observations),
-                        events=recorder.events,
-                        task=task,
-                    )
-                recorder.emit({"type": "turn_end", "message": assistant, "toolResults": tool_messages})
-                recorder.emit({"type": "agent_end", "status": "completed"})
-                return completed_outcome(
-                    input.run_id,
-                    list(new_messages),
-                    assistant,
-                    recorder.events,
-                    model_attempts=model_attempts,
-                    tool_iterations=tool_iterations,
-                    tool_calls=tool_calls_count,
-                    usage=usage,
-                    observations=all_observations,
-                    task=task,
-                )
-            if post_decision.should_stop:
-                recorder.emit({"type": "turn_end", "message": assistant, "toolResults": tool_messages})
-                recorder.emit({"type": "agent_end", "status": post_decision.status})
-                return AgentLoopOutcome(
-                    run_id=input.run_id,
-                    status=post_decision.status or "waiting_user",
-                    stop_reason=post_decision.stop_reason or "task_blocked",
-                    new_messages=list(new_messages),
-                    final_message=assistant,
-                    counters=AgentRunCounters(
-                        model_attempts=model_attempts,
-                        tool_iterations=tool_iterations,
-                        tool_calls=tool_calls_count,
-                    ),
-                    usage=usage,
-                    verification=verification(all_observations),
-                    workspace_effects=workspace_effects(all_observations),
-                    events=recorder.events,
-                    task=_task_snapshot(task_runtime),
-                    error=post_decision.error,
-                )
-        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": tool_messages})
+
+        approvals = approval_observations(turn_observations)
+        if approvals:
+            recorder.emit(
+                {
+                    "type": "turn_end",
+                    "message": assistant,
+                    "toolResults": visible_tool_messages,
+                }
+            )
+            recorder.emit({"type": "agent_end", "status": "waiting_approval"})
+            return _outcome(
+                input=input,
+                status="waiting_approval",
+                stop_reason="approval_required",
+                new_messages=new_messages,
+                final_message=assistant,
+                run_state=run_state,
+                observations=all_observations,
+                events=recorder.events,
+                task_runtime=task_runtime,
+                usage=usage,
+                interruptions=[item.interruption for item in approvals if item.interruption],
+            )
+
+        if any(message.status == "cancelled" for message in tool_messages):
+            recorder.emit({"type": "turn_end", "message": assistant, "toolResults": visible_tool_messages})
+            recorder.emit({"type": "agent_end", "status": "aborted"})
+            return _outcome(
+                input=input,
+                status="aborted",
+                stop_reason="aborted",
+                new_messages=new_messages,
+                final_message=assistant,
+                run_state=run_state,
+                observations=all_observations,
+                events=recorder.events,
+                task_runtime=task_runtime,
+                usage=usage,
+            )
+
+        if task_decision is not None and task_decision.action == "stop":
+            recorder.emit({"type": "turn_end", "message": assistant, "toolResults": visible_tool_messages})
+            recorder.emit({"type": "agent_end", "status": "waiting_user"})
+            return _outcome(
+                input=input,
+                status="waiting_user",
+                stop_reason="task_blocked",
+                new_messages=new_messages,
+                final_message=assistant,
+                run_state=run_state,
+                observations=all_observations,
+                events=recorder.events,
+                task_runtime=task_runtime,
+                usage=usage,
+            )
+
+        recorder.emit(
+            {
+                "type": "turn_end",
+                "message": assistant,
+                "toolResults": visible_tool_messages,
+            }
+        )
 
     recorder.emit({"type": "agent_end", "status": "failed"})
-    return AgentLoopOutcome(
-        run_id=input.run_id,
+    return _outcome(
+        input=input,
         status="failed",
         stop_reason="max_model_turns",
-        new_messages=list(new_messages),
+        new_messages=new_messages,
         final_message=last_assistant(new_messages),
+        run_state=run_state,
+        observations=all_observations,
+        events=recorder.events,
+        task_runtime=task_runtime,
+        usage=usage,
+    )
+
+
+async def _model_turn_with_retries(
+    *,
+    input: AgentLoopInput,
+    ports: AgentLoopPorts,
+    recorder: "_EventRecorder",
+    messages: list[Message],
+    run_state: RunState,
+    task_runtime: _TaskRuntime | None,
+) -> ModelTurnResult:
+    retries = 0
+    while True:
+        result = await run_model_turn(
+            _with_task_context(input, task_runtime),
+            ports,
+            messages,
+            emit=recorder.emit,
+        )
+        run_state.counters.model_attempts += 1
+        if result.error is None:
+            return result
+        delay = _next_retry_delay(input.retry_policy, retries)
+        if delay is None:
+            return result
+        retries += 1
+        recorder.emit(
+            {
+                "type": "model_retry_start",
+                "attempt": retries,
+                "maxAttempts": 1 + input.retry_policy.max_retries,
+                "delayMs": delay,
+                "error": result.error,
+            }
+        )
+        if delay > 0:
+            await asyncio.sleep(delay / 1000.0)
+
+
+def _finish_or_steer(
+    *,
+    input: AgentLoopInput,
+    recorder: "_EventRecorder",
+    messages: list[Message],
+    new_messages: list[Message],
+    assistant: AssistantMessage,
+    run_state: RunState,
+    task_runtime: _TaskRuntime | None,
+    observations: list[ToolObservation],
+    usage: Any,
+    turn_index: int,
+    max_model_turns: int,
+) -> AgentLoopOutcome | None:
+    if task_runtime is None:
+        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+        recorder.emit({"type": "agent_end", "status": "completed"})
+        return _outcome(
+            input=input,
+            status="completed",
+            stop_reason="final_answer",
+            new_messages=new_messages,
+            final_message=assistant,
+            run_state=run_state,
+            observations=observations,
+            events=recorder.events,
+            task_runtime=None,
+            usage=usage,
+        )
+
+    check = task_runtime.check_completion()
+    recorder.emit(
+        {
+            "type": "completion_checked",
+            "task": task_runtime.event_payload(),
+            "completion_satisfied": check.satisfied,
+            "completion_reason": check.reason,
+        }
+    )
+    if check.satisfied:
+        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+        recorder.emit({"type": "agent_end", "status": "completed"})
+        return _outcome(
+            input=input,
+            status="completed",
+            stop_reason="final_answer",
+            new_messages=new_messages,
+            final_message=assistant,
+            run_state=run_state,
+            observations=observations,
+            events=recorder.events,
+            task_runtime=task_runtime,
+            usage=usage,
+        )
+
+    if check.can_continue and turn_index + 1 < max_model_turns:
+        steering = task_runtime.completion_steering(check)
+        messages.append(steering)
+        new_messages.append(steering)
+        _emit_message(recorder, steering)
+        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+        return None
+
+    recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+    recorder.emit({"type": "agent_end", "status": "waiting_user"})
+    stop_reason = "task_blocked" if check.reason == "blocked_steps" else "task_incomplete"
+    return _outcome(
+        input=input,
+        status="waiting_user",
+        stop_reason=stop_reason,
+        new_messages=new_messages,
+        final_message=assistant,
+        run_state=run_state,
+        observations=observations,
+        events=recorder.events,
+        task_runtime=task_runtime,
+        usage=usage,
+    )
+
+
+def _tool_limit_outcome(
+    *,
+    input: AgentLoopInput,
+    recorder: "_EventRecorder",
+    assistant: AssistantMessage,
+    tool_calls: list[ToolCall],
+    new_messages: list[Message],
+    run_state: RunState,
+    observations: list[ToolObservation],
+    task_runtime: _TaskRuntime | None,
+    usage: Any,
+) -> AgentLoopOutcome | None:
+    if (
+        input.limits.max_tool_calls_per_turn is not None
+        and len(tool_calls) > input.limits.max_tool_calls_per_turn
+    ):
+        error = {
+            "code": "run.max_tool_calls_per_turn",
+            "message": (
+                "Stopped after model requested "
+                f"{len(tool_calls)} tool calls in one turn "
+                f"(max={input.limits.max_tool_calls_per_turn})"
+            ),
+        }
+        recorder.emit({"type": "error", "error": error})
+        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+        recorder.emit({"type": "agent_end", "status": "failed"})
+        return _outcome(
+            input=input,
+            status="failed",
+            stop_reason="tool_call_limit",
+            new_messages=new_messages,
+            final_message=assistant,
+            run_state=run_state,
+            observations=observations,
+            events=recorder.events,
+            task_runtime=task_runtime,
+            usage=usage,
+            error=error,
+        )
+
+    if (
+        input.limits.max_tool_calls is not None
+        and run_state.counters.tool_calls + len(tool_calls) > input.limits.max_tool_calls
+    ):
+        error = {"code": "run.max_tool_calls", "message": "Tool call limit reached"}
+        recorder.emit({"type": "error", "error": error})
+        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+        recorder.emit({"type": "agent_end", "status": "failed"})
+        return _outcome(
+            input=input,
+            status="failed",
+            stop_reason="tool_call_limit",
+            new_messages=new_messages,
+            final_message=assistant,
+            run_state=run_state,
+            observations=observations,
+            events=recorder.events,
+            task_runtime=task_runtime,
+            usage=usage,
+            error=error,
+        )
+
+    if (
+        input.limits.max_tool_iterations >= 0
+        and run_state.counters.tool_iterations >= input.limits.max_tool_iterations
+    ):
+        pause = max_iterations_pause_message(input.limits.max_tool_iterations)
+        if new_messages and new_messages[-1] is assistant:
+            new_messages.pop()
+        new_messages.append(pause)
+        _emit_message(recorder, pause)
+        recorder.emit({"type": "turn_end", "message": pause, "toolResults": []})
+        recorder.emit({"type": "agent_end", "status": "waiting_user"})
+        return _outcome(
+            input=input,
+            status="waiting_user",
+            stop_reason="max_iterations",
+            new_messages=new_messages,
+            final_message=pause,
+            run_state=run_state,
+            observations=observations,
+            events=recorder.events,
+            task_runtime=task_runtime,
+            usage=usage,
+        )
+
+    if run_state.has_repeated_call(
+        tool_calls,
+        limit=input.limits.repeated_tool_call_limit,
+    ):
+        error = {"code": "run.repeated_tool_call", "message": "Repeated identical tool calls"}
+        recorder.emit({"type": "error", "error": error})
+        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+        recorder.emit({"type": "agent_end", "status": "failed"})
+        return _outcome(
+            input=input,
+            status="failed",
+            stop_reason="repeated_tool_call",
+            new_messages=new_messages,
+            final_message=assistant,
+            run_state=run_state,
+            observations=observations,
+            events=recorder.events,
+            task_runtime=task_runtime,
+            usage=usage,
+            error=error,
+        )
+
+    return None
+
+
+def _outcome(
+    *,
+    input: AgentLoopInput,
+    status: AgentRunStatus,
+    stop_reason: AgentRunStopReason | str,
+    new_messages: list[Message],
+    final_message: AssistantMessage | None,
+    run_state: RunState,
+    observations: list[ToolObservation],
+    events: list[AgentEvent],
+    task_runtime: _TaskRuntime | None,
+    usage: Any = None,
+    error: Any = None,
+    interruptions: list[Any] | None = None,
+) -> AgentLoopOutcome:
+    effects = workspace_effects(observations)
+    if run_state.affected_paths:
+        effects = WorkspaceEffects(
+            affected_paths=tuple(sorted(run_state.affected_paths | set(effects.affected_paths))),
+            changed=run_state.workspace_changed or effects.changed,
+        )
+    return AgentLoopOutcome(
+        run_id=input.run_id,
+        status=status,  # type: ignore[arg-type]
+        stop_reason=str(stop_reason),
+        new_messages=list(new_messages),
+        final_message=final_message,
+        interruptions=list(interruptions or []),
         counters=AgentRunCounters(
-            model_attempts=model_attempts,
-            tool_iterations=tool_iterations,
-            tool_calls=tool_calls_count,
+            model_attempts=run_state.counters.model_attempts,
+            tool_iterations=run_state.counters.tool_iterations,
+            tool_calls=run_state.counters.tool_calls,
         ),
         usage=usage,
-        verification=verification(all_observations),
-        workspace_effects=workspace_effects(all_observations),
-        events=recorder.events,
-        task=_task_summary(
-            task_runtime,
-            observations=all_observations,
+        verification=verification(observations) or list(run_state.verification),
+        workspace_effects=effects,
+        events=list(events),
+        task=task_runtime.summary() if task_runtime is not None else None,
+        error=error,
+    )
+
+
+def _tool_messages_from_observations(
+    observations: list[ToolObservation],
+) -> list[ToolResultMessage]:
+    messages: list[ToolResultMessage] = []
+    for observation in observations:
+        if observation.status == "approval_required":
+            approval_id = (
+                observation.interruption.approval_id
+                if observation.interruption is not None
+                else None
+            )
+            messages.append(
+                to_tool_result_message(
+                    observation,
+                    approval_id=approval_id,
+                    approved=False,
+                )
+            )
+            continue
+        messages.append(to_tool_result_message(observation))
+    return messages
+
+
+def _with_task_context(
+    input: AgentLoopInput,
+    task_runtime: _TaskRuntime | None,
+) -> AgentLoopInput:
+    if task_runtime is None:
+        return input
+    return replace(
+        input,
+        context=PreparedContext(
+            {
+                **dict(input.context),
+                "task_state": task_runtime.event_payload(),
+                "task_signal": task_runtime.control_signal(),
+            }
         ),
     )
 
 
-class _LoopEventRecorder:
+def _task_signal(
+    input: AgentLoopInput,
+    task_runtime: _TaskRuntime | None,
+) -> dict[str, Any]:
+    if task_runtime is not None:
+        return task_runtime.control_signal()
+    signal = input.context.get("task_signal")
+    return dict(signal) if isinstance(signal, dict) else {}
+
+
+def _next_retry_delay(policy: RetryPolicy, retries_so_far: int) -> int | None:
+    if not policy.enabled or retries_so_far >= policy.max_retries:
+        return None
+    return int(policy.base_delay_ms * (2 ** retries_so_far))
+
+
+def max_iterations_pause_message(max_tool_iterations: int) -> AssistantMessage:
+    return AssistantMessage(
+        content=[
+            TextContent(
+                text=(
+                    "已暂停：连续工具调用达到本轮上限"
+                    f"（max_tool_iterations={max_tool_iterations}）。"
+                    "请回复“继续”或指定下一步。"
+                )
+            )
+        ],
+        stop_reason="max_iterations",
+    )
+
+
+def last_assistant(messages: list[Message]) -> AssistantMessage | None:
+    for message in reversed(messages):
+        if isinstance(message, AssistantMessage):
+            return message
+    return None
+
+
+class _EventRecorder:
     def __init__(self, input: AgentLoopInput, ports: AgentLoopPorts) -> None:
         self._input = input
         self._ports = ports
         self.events: list[AgentEvent] = []
-        self._event_seq = 0
         self._turn_id = 0
+        self._event_seq = 0
 
     def emit(self, event: dict[str, Any]) -> None:
-        event_type = str(event.get("type", "")).strip()
+        event_type = str(event.get("type") or "")
         if event_type == "turn_start":
             self._turn_id += 1
         self._event_seq += 1
@@ -1048,80 +908,9 @@ class _LoopEventRecorder:
             self._ports.events(enriched)
 
 
-def _emit_message(recorder: _LoopEventRecorder, message: Any) -> None:
+def _emit_message(recorder: _EventRecorder, message: Message) -> None:
     recorder.emit({"type": "message_start", "message": message})
     recorder.emit({"type": "message_end", "message": message})
-
-
-def _with_current_task(
-    input: AgentLoopInput,
-    task_runtime: AgentTaskRuntime | None,
-) -> AgentLoopInput:
-    if task_runtime is None:
-        return input
-    return replace(input, context=with_task_context(input.context, task_runtime))
-
-
-def _complete_task_if_needed(
-    task_runtime: AgentTaskRuntime | None,
-    *,
-    observations: list[ToolObservation],
-) -> tuple[Any | None, Any | None]:
-    if task_runtime is None:
-        return None, None
-    effects = workspace_effects(observations)
-    task_runtime.merge_observation_summary(
-        affected_paths=effects.affected_paths,
-        workspace_changed=effects.changed,
-        verification=verification(observations),
-    )
-    return task_runtime.complete()
-
-
-def _task_summary(
-    task_runtime: AgentTaskRuntime | None,
-    *,
-    observations: list[ToolObservation],
-):
-    task, _check = _complete_task_if_needed(
-        task_runtime,
-        observations=observations,
-    )
-    return task
-
-
-def _task_snapshot(task_runtime: AgentTaskRuntime | None):
-    if task_runtime is None:
-        return None
-    return task_runtime.snapshot()
-
-
-def _next_model_retry(policy: RetryPolicy, retries_so_far: int) -> int | None:
-    if not policy.enabled:
-        return None
-    if retries_so_far >= policy.max_retries:
-        return None
-    return int(policy.base_delay_ms * (2 ** retries_so_far))
-
-
-def _max_model_attempts(policy: RetryPolicy) -> int:
-    return 1 + policy.max_retries
-
-
-def _without_continuation_budget(check: Any) -> Any:
-    return replace(check, can_continue=False)
-
-
-def _task_signal(
-    input: AgentLoopInput,
-    task_runtime: AgentTaskRuntime | None,
-) -> dict[str, Any]:
-    if task_runtime is not None:
-        return dict(task_runtime.event_payload())
-    signal = input.context.get("task_signal")
-    if isinstance(signal, dict):
-        return dict(signal)
-    return {}
 
 
 def _resume_tool_end_event(
@@ -1147,3 +936,25 @@ def _resume_tool_end_event(
             "metadata": metadata,
         },
     }
+
+
+def _required_text(value: object, field_name: str) -> str:
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        raise ValueError(f"{field_name} cannot be empty")
+    return text
+
+
+def _optional_text(value: object) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+__all__ = [
+    "AgentEventEmitter",
+    "last_assistant",
+    "max_iterations_pause_message",
+    "maybe_await",
+    "resume_agent_loop",
+    "run_agent_loop",
+]

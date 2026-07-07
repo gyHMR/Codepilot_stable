@@ -1,40 +1,47 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from codepilot.sessions.controller import SessionController
 
+from .config import RuntimePermissionMode
 
 @dataclass
-class RuntimeSessionEntry:
+class RuntimeStatusInfo:
+    """Small status payload kept with an opened runtime session."""
+
+    session_id: str
+    model_id: str
+    workspace: str
+    permission_mode: RuntimePermissionMode
+    credential_source: str = "unknown"
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass
+class RuntimeSession:
+    """The live runtime objects needed to dispatch actions for one session."""
+
     controller: SessionController
-    assembly: Any | None = None
     model_port: Any | None = None
     tool_port: Any | None = None
+    status: RuntimeStatusInfo | None = None
+    commands: dict[str, Any] | None = None
+
+    @property
+    def session_id(self) -> str:
+        return self.controller.session_id
 
 
-class RuntimeSessionRegistry:
+class RuntimeSessionStore:
     def __init__(self) -> None:
-        self._items: dict[str, RuntimeSessionEntry] = {}
+        self._items: dict[str, RuntimeSession] = {}
 
-    def add(
-        self,
-        session_id: str,
-        controller: SessionController,
-        *,
-        assembly: Any | None = None,
-        model_port: Any | None = None,
-        tool_port: Any | None = None,
-    ) -> None:
-        self._items[session_id] = RuntimeSessionEntry(
-            controller=controller,
-            assembly=assembly,
-            model_port=model_port,
-            tool_port=tool_port,
-        )
+    def add(self, session: RuntimeSession) -> None:
+        self._items[session.session_id] = session
 
-    def require(self, session_id: str) -> RuntimeSessionEntry:
+    def require(self, session_id: str) -> RuntimeSession:
         try:
             return self._items[session_id]
         except KeyError as exc:
@@ -48,6 +55,29 @@ class RuntimeSessionRegistry:
     def close_all(self) -> None:
         for session_id in list(self._items):
             self.close(session_id)
+
+    def derive(
+        self,
+        *,
+        source_session_id: str,
+        controller: SessionController,
+    ) -> RuntimeSession | None:
+        source = self.require(source_session_id)
+        status = source.status
+        if status is not None:
+            status = replace(
+                status,
+                session_id=controller.session_id,
+            )
+        session = RuntimeSession(
+            controller=controller,
+            model_port=source.model_port,
+            tool_port=source.tool_port,
+            status=status,
+            commands=dict(source.commands or {}),
+        )
+        self.add(session)
+        return session
 
 
 class ActiveRunRegistry:
@@ -71,6 +101,7 @@ class ActiveRunRegistry:
 
 __all__ = [
     "ActiveRunRegistry",
-    "RuntimeSessionEntry",
-    "RuntimeSessionRegistry",
+    "RuntimeSession",
+    "RuntimeSessionStore",
+    "RuntimeStatusInfo",
 ]

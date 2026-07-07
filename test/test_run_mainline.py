@@ -188,119 +188,14 @@ async def _run_retry_case() -> None:
     assert any(event["type"] == "model_retry_start" for event in outcome.events)
 
 
-def test_v2_post_tool_decision_explains_pause_and_stop_cases() -> None:
-    from codepilot.core.loop import post_tool_decision
-    from codepilot.core import ExecutionDecision
-    from codepilot.protocols import ToolResultMessage
-
-    approval = post_tool_decision(
-        [
-            ToolResultMessage(
-                tool_call_id="tool_1",
-                tool_name="write",
-                status="approval_required",
-            )
-        ],
-        task_decision=ExecutionDecision("wait_approval", "approval_required"),
-    )
-    cancelled = post_tool_decision(
-        [
-            ToolResultMessage(
-                tool_call_id="tool_2",
-                tool_name="bash",
-                status="cancelled",
-            )
-        ],
-        task_decision=ExecutionDecision("stop", "cancelled"),
-    )
-    revert = post_tool_decision(
-        [],
-        task_decision=ExecutionDecision("propose_revert", "repeated_failure_after_change"),
-    )
-    replan_limit = post_tool_decision(
-        [],
-        task_decision=ExecutionDecision("stop", "replan_limit_exceeded"),
-    )
-    task_blocked = post_tool_decision(
-        [],
-        task_decision=ExecutionDecision("stop", "tool_unavailable"),
-    )
-    finished = post_tool_decision(
-        [],
-        task_decision=ExecutionDecision("finish", "all_steps_completed"),
-    )
-    keep_going = post_tool_decision(
-        [],
-        task_decision=ExecutionDecision("continue", "next_step"),
-    )
-
-    assert approval.should_stop is True
-    assert approval.status == "waiting_approval"
-    assert approval.stop_reason == "approval_required"
-    assert cancelled.status == "aborted"
-    assert cancelled.stop_reason == "aborted"
-    assert revert.status == "waiting_user"
-    assert revert.stop_reason == "task_blocked"
-    assert replan_limit.status == "failed"
-    assert replan_limit.error is not None
-    assert replan_limit.error.code == "run.replan_limit"
-    assert replan_limit.stop_reason == "replan_limit"
-    assert task_blocked.status == "waiting_user"
-    assert task_blocked.stop_reason == "task_blocked"
-    assert finished.should_stop is False
-    assert finished.force_completion_check is True
-    assert finished.reason == "finish"
-    assert keep_going.should_stop is False
-    assert keep_going.reason == "next_step"
+def test_passed_verification_returns_to_model_before_completion_check() -> None:
+    asyncio.run(_passed_verification_returns_to_model_case())
 
 
-def test_v2_completion_decision_explains_continue_wait_and_done_cases() -> None:
-    from codepilot.core.loop import completion_decision
-    from codepilot.core import CompletionCheck
-
-    needs_more_work = completion_decision(
-        CompletionCheck(
-            satisfied=False,
-            reason="modified_without_fresh_verification",
-            missing=["fresh_verification"],
-            can_continue=True,
-        )
-    )
-    blocked = completion_decision(
-        CompletionCheck(
-            satisfied=False,
-            reason="blocked_steps",
-            missing=["unblocked_steps"],
-        )
-    )
-    incomplete = completion_decision(
-        CompletionCheck(
-            satisfied=False,
-            reason="incomplete_steps",
-            missing=["运行测试"],
-        )
-    )
-    done = completion_decision(CompletionCheck(satisfied=True, reason="all_steps_completed"))
-
-    assert needs_more_work.should_continue is True
-    assert needs_more_work.should_stop is False
-    assert blocked.should_stop is True
-    assert blocked.status == "waiting_user"
-    assert blocked.stop_reason == "task_blocked"
-    assert incomplete.should_stop is True
-    assert incomplete.stop_reason == "task_incomplete"
-    assert done.should_stop is False
-    assert done.should_continue is False
-
-
-def test_task_finish_decision_exits_tool_loop_for_completion_check() -> None:
-    asyncio.run(_task_finish_exits_tool_loop_case())
-
-
-async def _task_finish_exits_tool_loop_case() -> None:
+async def _passed_verification_returns_to_model_case() -> None:
     from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts, TaskStrategy
     from codepilot.core.loop import run_agent_loop
-    from codepilot.protocols import AssistantMessage, RunVerification, ToolCall
+    from codepilot.protocols import AssistantMessage, RunVerification, TextContent, ToolCall
     from codepilot.tools.ports import ToolObservation
 
     model = _ScriptedModel(
@@ -308,6 +203,8 @@ async def _task_finish_exits_tool_loop_case() -> None:
             content=[ToolCall(id=f"test_{calls}", name="run_tests", arguments={})],
             stop_reason="toolUse",
         )
+        if calls == 1
+        else AssistantMessage(content=[TextContent(text="verified done")])
     )
     tools = _StaticToolPort(
         ToolObservation(
@@ -339,7 +236,8 @@ async def _task_finish_exits_tool_loop_case() -> None:
 
     assert outcome.status == "completed"
     assert outcome.stop_reason == "final_answer"
-    assert model.calls == 1
+    assert model.calls == 2
+    assert outcome.final_text == "verified done"
     assert any(event.get("type") == "completion_checked" for event in outcome.events)
 
 
@@ -350,7 +248,7 @@ def test_builtin_file_and_shell_results_are_structured(tmp_path: Path, monkeypat
 async def _run_builtin_result_case(tmp_path: Path, monkeypatch) -> None:
     from codepilot.tools.builtins import create_builtin_tools, get_builtin_tool_metadata
     from codepilot.tools.authoring import ToolRuntimeRequest
-    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.engine import ToolRuntime
     from codepilot.tools.policy import PermissionPolicy
 

@@ -186,17 +186,15 @@ async def _run_agent_loop_max_tool_iterations_case() -> None:
         AgentLoopPorts(model=model, tools=tools),
     )
 
-    assert any(
-        event["type"] == "error" and event["error"]["code"] == "run.max_iterations"
-        for event in outcome.events
-    )
+    assert not any(event["type"] == "error" for event in outcome.events)
     assert outcome.events[-1]["type"] == "agent_end"
-    assert outcome.status == "failed"
+    assert outcome.status == "waiting_user"
     assert outcome.stop_reason == "max_iterations"
     records = [record for event in outcome.events if (record := event_to_record(event))]
     assert all(validate_run_event(record) == [] for record in records)
     assert isinstance(outcome.final_message, AssistantMessage)
     assert outcome.final_message.stop_reason == "max_iterations"
+    assert "工具调用" in outcome.final_message.content[0].text
     assert len([event for event in outcome.events if event["type"] == "tool_execution_start"]) == 1
 
 

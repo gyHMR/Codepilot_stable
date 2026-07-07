@@ -3,10 +3,9 @@ from __future__ import annotations
 # 新手导读：包门面文件：集中导出本层最常用的类型和入口，降低学习时的导入成本。
 # 关注点：sessions 层是会话事实源，负责消息、run、记忆、上下文投影和任务恢复。
 
-"""结构化会话记忆和项目记忆。"""
+"""Durable project memory for sessions."""
 
-from .experience import ExperienceExtractor, MemoryConsolidator
-from .files import load_global_memory, sanitize_memory_text, save_global_memory
+from .files import sanitize_memory_text
 from .records import (
     MEMORY_SCHEMA_VERSION,
     MemoryQuery,
@@ -16,19 +15,25 @@ from .records import (
     MemorySource,
     MemoryStatus,
     RetrievedMemory,
-    normalize_memory_record_payload,
+    validate_memory_record_payload,
 )
 from .rendering import render_memory
 from .retriever import MemoryRetriever
 from .store import MemoryStore
-from .writer import MemoryAdmissionDecision, MemoryWriter, decide_prompt_memory_admission
+from .writer import (
+    MemoryAdmissionDecision,
+    MemoryAdmissionPolicy,
+    MemoryConflictResolver,
+    MemoryWriteContext,
+    MemoryWriter,
+)
 
 
 __all__ = [
     "MEMORY_SCHEMA_VERSION",
-    "ExperienceExtractor",
     "MemoryAdmissionDecision",
-    "MemoryConsolidator",
+    "MemoryAdmissionPolicy",
+    "MemoryConflictResolver",
     "MemoryQuery",
     "MemoryRecall",
     "MemoryRecord",
@@ -37,12 +42,10 @@ __all__ = [
     "MemorySource",
     "MemoryStatus",
     "MemoryStore",
+    "MemoryWriteContext",
     "MemoryWriter",
-    "decide_prompt_memory_admission",
-    "normalize_memory_record_payload",
     "RetrievedMemory",
-    "load_global_memory",
     "render_memory",
     "sanitize_memory_text",
-    "save_global_memory",
+    "validate_memory_record_payload",
 ]

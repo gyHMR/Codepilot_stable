@@ -52,7 +52,7 @@ def test_session_controller_prepares_and_commits_run_without_exposing_live_sessi
         from codepilot.sessions.contracts import SessionOptions
         from codepilot.sessions.contracts import SessionRunIntent
         from codepilot.sessions.controller import _bind_session_runtime
-        from codepilot.sessions.prepare import SessionRuntime
+        from codepilot.sessions.runtime import SessionRuntime
 
         session = SessionRuntime(
             SessionOptions(
@@ -109,7 +109,7 @@ def test_session_controller_applies_command_as_session_intent(tmp_path) -> None:
         from codepilot.sessions.contracts import SessionOptions
         from codepilot.sessions.contracts import SessionCommandIntent
         from codepilot.sessions.controller import _bind_session_runtime
-        from codepilot.sessions.prepare import SessionRuntime
+        from codepilot.sessions.runtime import SessionRuntime
 
         session = SessionRuntime(
             SessionOptions(
@@ -154,7 +154,7 @@ def test_session_controller_drives_real_session_lifecycle(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.llm.stream import AssistantMessageEventStream
         from codepilot.protocols import AssistantMessage, Model, TextContent
-        from codepilot.sessions.prepare import SessionRuntime
+        from codepilot.sessions.runtime import SessionRuntime
         from codepilot.sessions.contracts import SessionOptions
 
         hook_calls: list[tuple[str, str, bool]] = []
@@ -215,21 +215,21 @@ def test_session_controller_drives_real_session_lifecycle(tmp_path) -> None:
             ]
             stored_runs = session.store.load_run_results(limit=1)
             assert stored_runs[-1]["run_id"] == "run_v2_controller"
-            projection = session.task_recovery.load_projection()
-            assert projection is not None
-            assert projection["goal"] == "hello"
-            assert projection["source_run_id"] == "run_v2_controller"
+            task_state = session.task_state.current()
+            assert task_state is not None
+            assert task_state["goal"]["value"] == "hello"
+            assert task_state["source_run_id"] == "run_v2_controller"
         finally:
             session._close()
 
     asyncio.run(run_case())
 
 
-def test_session_controller_carries_task_control_through_core_and_recovery(tmp_path) -> None:
+def test_session_controller_carries_task_control_through_core_and_task_state(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.llm.stream import AssistantMessageEventStream
         from codepilot.protocols import AssistantMessage, Model, TextContent
-        from codepilot.sessions.prepare import SessionRuntime
+        from codepilot.sessions.runtime import SessionRuntime
         from codepilot.sessions.contracts import SessionOptions
 
         seen_system_prompts: list[str | None] = []
@@ -268,7 +268,7 @@ def test_session_controller_carries_task_control_through_core_and_recovery(tmp_p
                 "finish the v2 task spine",
                 run_id="run_v2_task",
             )
-            projection = session.task_recovery.load_projection()
+            task_state = session.task_state.current()
 
             assert result.task is not None
             assert result.task.goal == "finish the v2 task spine"
@@ -277,15 +277,234 @@ def test_session_controller_carries_task_control_through_core_and_recovery(tmp_p
             assert seen_system_prompts
             assert seen_system_prompts[0] is not None
             assert "rules" in seen_system_prompts[0]
-            assert "## Current Task" in seen_system_prompts[0]
-            assert projection is not None
-            assert projection["goal"] == "finish the v2 task spine"
-            assert "task_progress" not in projection
-            assert all(step["status"] == "completed" for step in projection["steps"])
+            assert "## Current Task" not in seen_system_prompts[0]
+            assert task_state is not None
+            assert task_state["goal"]["value"] == "finish the v2 task spine"
+            assert all(step["status"] == "completed" for step in task_state["steps"])
         finally:
             session._close()
 
     asyncio.run(run_case())
+
+
+def test_session_continue_recovers_polluted_continue_task_goal(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.protocols import Model, UserMessage
+        from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
+        from codepilot.sessions.controller import _bind_session_runtime
+        from codepilot.sessions.runtime import SessionRuntime
+
+        session = SessionRuntime(
+            SessionOptions(
+                model=Model(
+                    id="session-v2-task",
+                    name="Session V2 Task",
+                    api="unit-test",
+                    provider="unit-test",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=4000,
+                    max_tokens=500,
+                ),
+                workspace_dir=tmp_path,
+                session_id="s1",
+                messages=[UserMessage(content="帮我完善修复登录注册功能")],
+                memory_enabled=False,
+                task_control_enabled=True,
+            )
+        )
+        try:
+            session.task_state.save(
+                {
+                    "schema_version": 2,
+                    "task_id": "task_polluted",
+                    "raw_user_request": "继续",
+                    "current_mode": "build",
+                    "approval_state": "none",
+                    "goal": {
+                        "value": "继续",
+                        "source": "builder",
+                        "confidence": "inferred",
+                    },
+                    "user_constraints": [],
+                    "proposed_plan": None,
+                    "approved_plan": None,
+                    "current_step_id": None,
+                    "steps": [
+                        {
+                            "id": "step_1",
+                            "title": "完成当前请求",
+                            "kind": "other",
+                            "status": "completed",
+                            "acceptance": None,
+                            "verification_hint": None,
+                            "summary": "已完成只读分析",
+                            "evidence_refs": [],
+                            "failure_count": 0,
+                        }
+                    ],
+                    "verification_status": "passed",
+                    "evidence_refs": [],
+                    "blocked_reason": None,
+                    "recovery_summary": "",
+                    "source_run_id": "run_bad",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                }
+            )
+
+            controller = _bind_session_runtime(session)
+            prepared = await controller.prepare_run(
+                SessionRunIntent(text="继续", run_id="run_continue")
+            )
+
+            state = prepared.loop_input.task_strategy.task_state
+            assert state is not None
+            assert state["raw_user_request"] == "帮我完善修复登录注册功能"
+            assert state["goal"]["value"] == "帮我完善修复登录注册功能"
+            assert state["steps"] == []
+        finally:
+            session._close()
+
+    asyncio.run(run_case())
+
+
+def test_session_continue_reopens_completed_task_state(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.protocols import Model, UserMessage
+        from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
+        from codepilot.sessions.controller import _bind_session_runtime
+        from codepilot.sessions.runtime import SessionRuntime
+
+        session = SessionRuntime(
+            SessionOptions(
+                model=Model(
+                    id="session-v2-task",
+                    name="Session V2 Task",
+                    api="unit-test",
+                    provider="unit-test",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=4000,
+                    max_tokens=500,
+                ),
+                workspace_dir=tmp_path,
+                session_id="s1",
+                messages=[UserMessage(content="帮我完善修复登录注册功能")],
+                memory_enabled=False,
+                task_control_enabled=True,
+            )
+        )
+        try:
+            session.task_state.save(
+                {
+                    "schema_version": 2,
+                    "task_id": "task_closed",
+                    "raw_user_request": "帮我完善修复登录注册功能",
+                    "current_mode": "build",
+                    "approval_state": "none",
+                    "goal": {
+                        "value": "帮我完善修复登录注册功能",
+                        "source": "builder",
+                        "confidence": "inferred",
+                    },
+                    "user_constraints": [],
+                    "proposed_plan": None,
+                    "approved_plan": None,
+                    "current_step_id": None,
+                    "steps": [
+                        {
+                            "id": "step_1",
+                            "title": "完成当前请求",
+                            "kind": "other",
+                            "status": "completed",
+                            "acceptance": None,
+                            "verification_hint": None,
+                            "summary": "已完成只读分析",
+                            "evidence_refs": [],
+                            "failure_count": 0,
+                        }
+                    ],
+                    "verification_status": "passed",
+                    "evidence_refs": [],
+                    "blocked_reason": None,
+                    "recovery_summary": "",
+                    "source_run_id": "run_bad",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                }
+            )
+
+            controller = _bind_session_runtime(session)
+            prepared = await controller.prepare_run(
+                SessionRunIntent(text="继续", run_id="run_continue")
+            )
+
+            state = prepared.loop_input.task_strategy.task_state
+            assert state is not None
+            assert state["raw_user_request"] == "帮我完善修复登录注册功能"
+            assert state["goal"]["value"] == "帮我完善修复登录注册功能"
+            assert state["steps"] == []
+            assert state["verification_status"] == "unknown"
+        finally:
+            session._close()
+
+    asyncio.run(run_case())
+
+
+def test_session_commit_does_not_mark_failed_run_task_as_completed(tmp_path) -> None:
+    from codepilot.protocols import AgentRunResult, TaskSummary
+    from codepilot.protocols import Model
+    from codepilot.sessions.contracts import SessionOptions
+    from codepilot.sessions.runtime import SessionRuntime
+
+    session = SessionRuntime(
+        SessionOptions(
+            model=Model(
+                id="session-v2-task",
+                name="Session V2 Task",
+                api="unit-test",
+                provider="unit-test",
+                base_url="",
+                reasoning=False,
+                input=["text"],
+                context_window=4000,
+                max_tokens=500,
+            ),
+            workspace_dir=tmp_path,
+            session_id="s1",
+            memory_enabled=False,
+            task_control_enabled=True,
+        )
+    )
+    try:
+        before = session.task_state.begin("modify register module", run_id="run_start")
+        result = AgentRunResult(
+            run_id="run_failed",
+            session_id="s1",
+            status="failed",
+            stop_reason="max_iterations",
+            task=TaskSummary(
+                task_id="task_failed",
+                goal="modify register module",
+                completed_steps=["完成当前请求"],
+                completion_satisfied=True,
+                completion_reason="all_steps_completed",
+            ),
+        )
+
+        session._finalize_task_state(result)
+
+        after = session.task_state.current()
+        assert after is not None
+        assert after["task_id"] == before["task_id"]
+        assert after["steps"] == before["steps"]
+        assert after["verification_status"] == "unknown"
+        assert after["source_run_id"] == "run_start"
+    finally:
+        session._close()
 
 
 def test_session_controller_commits_v2_outcome_into_real_session_lifecycle(tmp_path) -> None:
@@ -295,7 +514,7 @@ def test_session_controller_commits_v2_outcome_into_real_session_lifecycle(tmp_p
         from codepilot.protocols import AssistantMessage, Model, TextContent, ToolResultMessage
         from codepilot.sessions.contracts import SessionRunIntent
         from codepilot.sessions.controller import _bind_session_runtime
-        from codepilot.sessions.prepare import SessionRuntime
+        from codepilot.sessions.runtime import SessionRuntime
         from codepilot.sessions.contracts import SessionOptions
 
         async def fake_stream(_model, _context, _options):
@@ -376,7 +595,7 @@ def test_session_runtime_subscribers_receive_v2_run_events(tmp_path) -> None:
         from codepilot.protocols import AssistantMessage, Model, TextContent
         from codepilot.sessions.contracts import SessionRunIntent
         from codepilot.sessions.controller import _bind_session_runtime
-        from codepilot.sessions.prepare import SessionRuntime
+        from codepilot.sessions.runtime import SessionRuntime
         from codepilot.sessions.contracts import SessionOptions
 
         async def fake_stream(_model, _context, _options):

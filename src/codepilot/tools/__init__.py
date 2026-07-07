@@ -8,27 +8,18 @@ Codepilot 工具层。
 而非在各入口点分散嵌入文件系统和 shell 检查逻辑。
 """
 
-from .authoring import (
-    AgentTool,
-    AgentToolResult,
-    AgentToolUpdateCallback,
-    MUTATING_TOOL_NAMES,
-    READ_ONLY_TOOL_NAMES,
-    ToolMetadata,
-    ToolRegistry,
-    ToolResultStatus,
-)
-from .builtins import create_builtin_tools
-from .policy import (
+from codepilot.protocols.tools import ToolMetadata, ToolResultStatus
+
+from .approval import (
     ApprovalDecision,
     ApprovalProvider,
     ApprovalRequest,
     DeferredApprovalProvider,
-    PermissionPolicy,
-    ToolDecision,
-    ToolPermissionMode,
-    ToolRequest,
 )
+from .authoring import AgentTool, AgentToolResult, AgentToolUpdateCallback
+from .builtins import create_builtin_tools
+from .policy import PermissionPolicy, ToolDecision, ToolPermissionMode, ToolRequest
+from .registry import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES, ToolRegistry
 
 __all__ = [
     "AgentTool",

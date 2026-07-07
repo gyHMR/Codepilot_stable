@@ -6,8 +6,9 @@ import asyncio
 def test_tool_runtime_port_defers_and_resumes_approval_through_runtime() -> None:
     async def run_case() -> None:
         from codepilot.protocols import TextContent
-        from codepilot.tools.policy import DeferredApprovalProvider
-        from codepilot.tools.authoring import AgentTool, AgentToolResult, ToolMetadata
+        from codepilot.tools.approval import DeferredApprovalProvider
+        from codepilot.protocols import ToolMetadata
+        from codepilot.tools.authoring import AgentTool, AgentToolResult
         from codepilot.tools.engine import ToolRuntime
         from codepilot.tools.policy import PermissionPolicy
         from codepilot.tools.adapter import ToolRuntimePort
@@ -15,7 +16,7 @@ def test_tool_runtime_port_defers_and_resumes_approval_through_runtime() -> None
             ToolInvocation,
             ToolResumeDecision,
         )
-        from codepilot.tools.authoring import ToolRegistry
+        from codepilot.tools.registry import ToolRegistry
 
         executed: list[dict] = []
 
@@ -95,8 +96,9 @@ def test_tool_runtime_port_defers_and_resumes_approval_through_runtime() -> None
 def test_tool_runtime_port_denied_resume_does_not_execute_pending_tool() -> None:
     async def run_case() -> None:
         from codepilot.protocols import TextContent
-        from codepilot.tools.policy import DeferredApprovalProvider
-        from codepilot.tools.authoring import AgentTool, AgentToolResult, ToolMetadata
+        from codepilot.tools.approval import DeferredApprovalProvider
+        from codepilot.protocols import ToolMetadata
+        from codepilot.tools.authoring import AgentTool, AgentToolResult
         from codepilot.tools.engine import ToolRuntime
         from codepilot.tools.policy import PermissionPolicy
         from codepilot.tools.adapter import ToolRuntimePort
@@ -104,7 +106,7 @@ def test_tool_runtime_port_denied_resume_does_not_execute_pending_tool() -> None
             ToolInvocation,
             ToolResumeDecision,
         )
-        from codepilot.tools.authoring import ToolRegistry
+        from codepilot.tools.registry import ToolRegistry
 
         executed = False
 
@@ -258,11 +260,12 @@ def test_tool_runtime_port_runs_before_and_after_hooks_with_protocol_snapshot() 
             BeforeToolCallContext,
             ToolHookContextSnapshot,
         )
-        from codepilot.tools.authoring import AgentTool, AgentToolResult, ToolMetadata
+        from codepilot.protocols import ToolMetadata
+        from codepilot.tools.authoring import AgentTool, AgentToolResult
         from codepilot.tools.engine import ToolRuntime
         from codepilot.tools.adapter import ToolRuntimePort
         from codepilot.tools.ports import ToolInvocation
-        from codepilot.tools.authoring import ToolRegistry
+        from codepilot.tools.registry import ToolRegistry
 
         seen: list[tuple[str, str, str]] = []
         executed: list[dict] = []

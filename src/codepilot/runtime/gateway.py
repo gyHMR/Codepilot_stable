@@ -1,22 +1,25 @@
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncIterator
-from dataclasses import replace
-from typing import Any, Callable
+"""Runtime gateway: receive interface actions and stream runtime frames."""
 
-from codepilot.core.contracts import AgentLoopPorts, ContextPort
+import asyncio
+from collections.abc import AsyncIterator, Awaitable
+from typing import Any, Callable
+from typing import TYPE_CHECKING
+
+from codepilot.core.contracts import AgentLoopOutcome, AgentLoopPorts, ContextPort
 from codepilot.core.loop import resume_agent_loop, run_agent_loop
 from codepilot.sessions.contracts import (
+    PreparedAgentRun,
     SessionCommandIntent,
     SessionResumeIntent,
     SessionRunIntent,
+    SessionRunRecord,
     SessionView,
 )
 from codepilot.sessions.controller import SessionController
 from codepilot.tools.ports import ToolCatalogView
 
-from .approvals import ApprovalRegistry, ApprovalView
 from .actions import (
     ApprovalDecided,
     ApprovalRequiredFrame,
@@ -31,97 +34,73 @@ from .actions import (
     RuntimeFrame,
     UserAction,
 )
-from .opening import (
-    AppSessionView,
-    SessionOpenIntent as _SessionOpenIntent,
-    SessionRef,
-    _to_runtime_assembly_intent,
-)
-from .sessions import ActiveRunRegistry, RuntimeSessionRegistry
+from .approvals import ApprovalRegistry
+from .builder import build_runtime_session
+from .opening import AppSessionView, SessionRef
+from .sessions import ActiveRunRegistry, RuntimeSession, RuntimeSessionStore
+from .views import CommandDescriptor, SessionStatus, builtin_commands
+
+if TYPE_CHECKING:
+    from .opening import SessionOpenIntent
 
 
 __all__ = ["RuntimeGateway"]
 
 
 class RuntimeGateway:
+    """Application boundary used by CLI, DingTalk, evaluation, and tests."""
+
     def __init__(
         self,
         *,
         model_port: Any | None = None,
         tool_port: Any | None = None,
     ) -> None:
-        self._sessions = RuntimeSessionRegistry()
+        self._sessions = RuntimeSessionStore()
         self._model_port = model_port
         self._tool_port = tool_port
         self._approvals = ApprovalRegistry()
         self._active_runs = ActiveRunRegistry()
 
-    def open_session(self, intent: _SessionOpenIntent) -> SessionRef:
-        from .assemble import assemble_runtime
-
-        controller, assembly = assemble_runtime(_to_runtime_assembly_intent(intent))
-        session_id = controller.session_id
-
-        self._sessions.add(
-            session_id,
-            controller,
-            assembly=assembly,
-            model_port=self._model_port or assembly.model_port,
-            tool_port=self._tool_port or assembly.tool_port,
-        )
-        return SessionRef(session_id=session_id)
+    def open_session(self, intent: "SessionOpenIntent") -> SessionRef:
+        session = build_runtime_session(intent)
+        if self._model_port is not None:
+            session.model_port = self._model_port
+        if self._tool_port is not None:
+            session.tool_port = self._tool_port
+        self._sessions.add(session)
+        return SessionRef(session_id=session.session_id)
 
     async def dispatch(
         self,
         session_id: str,
         action: UserAction,
     ) -> AsyncIterator[RuntimeFrame]:
-        controller = self._require_session(session_id)
+        session = self._sessions.require(session_id)
         if isinstance(action, PromptSubmitted):
-            async for frame in self._dispatch_prompt(controller, action):
+            async for frame in self._run_prompt(session, action):
                 yield frame
             return
         if isinstance(action, CommandSubmitted):
-            record = await controller.apply_command(
-                SessionCommandIntent(
-                    text=action.text,
-                    tool_catalog=tuple(self._tool_catalog_for(session_id)),
-                )
-            )
-            if record.switched_session_id:
-                self._register_derived_controller(
-                    source_session_id=session_id,
-                    new_session_id=record.switched_session_id,
-                    controller=controller,
-                )
-            yield CommandFinishedFrame(record=record)
+            yield await self._run_command(session, action)
             return
         if isinstance(action, ApprovalDecided):
-            async for frame in self._dispatch_approval(controller, action):
+            async for frame in self._resume_after_approval(session, action):
                 yield frame
             return
         if isinstance(action, RunCancelled):
-            active = self._active_runs.finish(session_id)
-            yield CancelledFrame(
-                session_id=session_id,
-                cancelled=active is not None,
-                reason=action.reason,
-            )
+            yield self._cancel_run(session_id, action)
             return
         yield FailedFrame(error={"code": "runtime.unknown_action", "action": type(action).__name__})
 
     def describe(self, session_id: str) -> AppSessionView:
-        entry = self._sessions.require(session_id)
-        session = entry.controller.describe()
+        session = self._sessions.require(session_id)
+        view = session.controller.describe()
         return AppSessionView(
-            session=session,
-            status=_session_status(
-                entry,
-                session,
-                running=self._active_runs.is_running(session_id),
-            ),
-            state=dict(session.context),
-            commands=tuple(_builtin_commands()),
+            session=view,
+            status=self._status_for(session, view),
+            state=dict(view.context),
+            commands=tuple(self._commands_for(session)),
             pending_approvals=tuple(self._approvals.list(session_id)),
         )
 
@@ -138,60 +117,47 @@ class RuntimeGateway:
     def _require_session(self, session_id: str) -> SessionController:
         return self._sessions.require(session_id).controller
 
-    async def _dispatch_prompt(
+    async def _run_prompt(
         self,
-        controller: SessionController,
+        session: RuntimeSession,
         action: PromptSubmitted,
     ) -> AsyncIterator[RuntimeFrame]:
-        prepared = await controller.prepare_run(
+        prepared = await session.controller.prepare_run(
             SessionRunIntent(
                 text=action.text,
                 images=action.images,
                 mode_hint=action.mode_hint,
             )
         )
-        self._active_runs.start(controller.session_id, prepared.run_id)
-        event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-
-        def event_sink(event: dict[str, Any]) -> None:
-            event_queue.put_nowait(dict(event))
-
-        try:
-            task = asyncio.create_task(
-                run_agent_loop(
-                    prepared.loop_input,
-                    ports=self._ports_for(
-                        controller.session_id,
-                        context_port=prepared.context_port,
-                        event_sink=event_sink,
-                    ),
-                ),
-            )
-            while not task.done() or not event_queue.empty():
-                try:
-                    event = await asyncio.wait_for(event_queue.get(), timeout=0.05)
-                except asyncio.TimeoutError:
-                    continue
-                yield ProgressFrame(event=event)
-            outcome = await task
-            record = await controller.commit_run(prepared, outcome)
-        except Exception as exc:
-            yield FailedFrame(error=_runtime_error_payload(exc))
-            return
-        finally:
-            self._active_runs.finish(controller.session_id)
-
-        async for frame in self._frames_from_outcome(
-            controller,
-            outcome,
-            record,
-            include_events=False,
+        async for frame in self._run_agent_loop(
+            session,
+            prepared,
+            lambda ports: run_agent_loop(prepared.loop_input, ports),
         ):
             yield frame
 
-    async def _dispatch_approval(
+    async def _run_command(
         self,
-        controller: SessionController,
+        session: RuntimeSession,
+        action: CommandSubmitted,
+    ) -> CommandFinishedFrame:
+        record = await session.controller.apply_command(
+            SessionCommandIntent(
+                text=action.text,
+                tool_catalog=tuple(self._tool_catalog_for(session.session_id)),
+            )
+        )
+        if record.switched_session_id:
+            self._register_derived_controller(
+                source_session_id=session.session_id,
+                new_session_id=record.switched_session_id,
+                controller=session.controller,
+            )
+        return CommandFinishedFrame(record=record)
+
+    async def _resume_after_approval(
+        self,
+        session: RuntimeSession,
         action: ApprovalDecided,
     ) -> AsyncIterator[RuntimeFrame]:
         transaction = self._approvals.get(action.approval_id)
@@ -203,47 +169,67 @@ class RuntimeGateway:
                 }
             )
             return
-        if transaction.session_id != controller.session_id:
+        if transaction.session_id != session.session_id:
             yield FailedFrame(
                 error={
                     "code": "runtime.approval_session_mismatch",
                     "approval_id": action.approval_id,
-                    "session_id": controller.session_id,
+                    "session_id": session.session_id,
                 }
             )
             return
+
+        prepared = await session.controller.prepare_resume(
+            SessionResumeIntent(
+                approval_id=action.approval_id,
+                decision=action.decision,
+                reason=action.reason,
+            )
+        )
+        if prepared.resume_input is None:
+            yield FailedFrame(
+                error={
+                    "code": "runtime.missing_resume_input",
+                    "approval_id": action.approval_id,
+                }
+            )
+            return
+
+        async for frame in self._run_agent_loop(
+            session,
+            prepared,
+            lambda ports: resume_agent_loop(prepared.resume_input, ports),
+        ):
+            yield frame
+        self._approvals.pop(action.approval_id)
+
+    def _cancel_run(self, session_id: str, action: RunCancelled) -> CancelledFrame:
+        active = self._active_runs.finish(session_id)
+        return CancelledFrame(
+            session_id=session_id,
+            cancelled=active is not None,
+            reason=action.reason,
+        )
+
+    async def _run_agent_loop(
+        self,
+        session: RuntimeSession,
+        prepared: PreparedAgentRun,
+        run_loop: Callable[[AgentLoopPorts], Awaitable[AgentLoopOutcome]],
+    ) -> AsyncIterator[RuntimeFrame]:
+        self._active_runs.start(session.session_id, prepared.run_id)
+        event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        def event_sink(event: dict[str, Any]) -> None:
+            event_queue.put_nowait(dict(event))
+
         try:
-            prepared = await controller.prepare_resume(
-                SessionResumeIntent(
-                    approval_id=action.approval_id,
-                    decision=action.decision,
-                    reason=action.reason,
-                )
+            ports = self._ports_for(
+                session.session_id,
+                context_port=prepared.context_port,
+                event_sink=event_sink,
             )
-            if prepared.resume_input is None:
-                yield FailedFrame(
-                    error={
-                        "code": "runtime.missing_resume_input",
-                        "approval_id": action.approval_id,
-                    }
-                )
-                return
-            self._active_runs.start(controller.session_id, prepared.run_id)
-            event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-
-            def event_sink(event: dict[str, Any]) -> None:
-                event_queue.put_nowait(dict(event))
-
-            task = asyncio.create_task(
-                resume_agent_loop(
-                    prepared.resume_input,
-                    self._ports_for(
-                        controller.session_id,
-                        context_port=prepared.context_port,
-                        event_sink=event_sink,
-                    ),
-                )
-            )
+            task = asyncio.create_task(run_loop(ports))
             while not task.done() or not event_queue.empty():
                 try:
                     event = await asyncio.wait_for(event_queue.get(), timeout=0.05)
@@ -251,32 +237,22 @@ class RuntimeGateway:
                     continue
                 yield ProgressFrame(event=event)
             outcome = await task
-            record = await controller.commit_run(prepared, outcome)
+            record = await session.controller.commit_run(prepared, outcome)
         except Exception as exc:
             yield FailedFrame(error=_runtime_error_payload(exc))
             return
         finally:
-            self._active_runs.finish(controller.session_id)
-        self._approvals.pop(action.approval_id)
-        async for frame in self._frames_from_outcome(
-            controller,
-            outcome,
-            record,
-            include_events=False,
-        ):
+            self._active_runs.finish(session.session_id)
+
+        async for frame in self._frames_from_outcome(session.controller, outcome, record):
             yield frame
 
     async def _frames_from_outcome(
         self,
         controller: SessionController,
-        outcome: Any,
-        record: Any,
-        *,
-        include_events: bool = True,
+        outcome: AgentLoopOutcome,
+        record: SessionRunRecord,
     ) -> AsyncIterator[RuntimeFrame]:
-        if include_events:
-            for event in outcome.events:
-                yield ProgressFrame(event=dict(event))
         if outcome.status == "waiting_approval":
             for interruption in outcome.interruptions:
                 self._approvals.add(controller.session_id, interruption)
@@ -294,17 +270,17 @@ class RuntimeGateway:
         context_port: ContextPort | None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> AgentLoopPorts:
-        entry = self._sessions.require(session_id)
-        return _ports(
-            entry.model_port or self._model_port,
-            entry.tool_port or self._tool_port,
-            context_port,
-            event_sink,
+        session = self._sessions.require(session_id)
+        return AgentLoopPorts(
+            model=session.model_port or self._model_port,
+            tools=session.tool_port or self._tool_port,
+            context=context_port,
+            events=event_sink,
         )
 
     def _tool_catalog_for(self, session_id: str) -> list[Any]:
-        entry = self._sessions.require(session_id)
-        tool_port = entry.tool_port or self._tool_port
+        session = self._sessions.require(session_id)
+        tool_port = session.tool_port or self._tool_port
         if tool_port is None:
             return []
         catalog = tool_port.catalog()
@@ -327,54 +303,69 @@ class RuntimeGateway:
         derived = controller.claim_derived_controller(new_session_id)
         if derived is None:
             return
-        source = self._sessions.require(source_session_id)
-        assembly = source.assembly
-        if assembly is not None:
-            session_options = replace(
-                assembly.session_options,
-                session_id=new_session_id,
-                messages=[],
-                task_mode=derived.task_mode,  # type: ignore[arg-type]
-            )
-            assembly = replace(
-                assembly,
-                session_options=session_options,
-                profile=replace(
-                    assembly.profile,
-                    task_mode=derived.task_mode,  # type: ignore[arg-type]
-                ),
-            )
-        self._sessions.add(
-            new_session_id,
-            derived,
-            assembly=assembly,
-            model_port=source.model_port,
-            tool_port=source.tool_port,
+        self._sessions.derive(
+            source_session_id=source_session_id,
+            controller=derived,
         )
 
+    def _status_for(self, session: RuntimeSession, view: SessionView) -> SessionStatus:
+        info = session.status
+        leaf_id = str((view.context or {}).get("leaf_id") or "N/A")
+        if info is None:
+            model = session.controller.model
+            model_id = f"{model.provider}/{model.model_id}"
+            return SessionStatus(
+                session_id=view.session_id,
+                model_id=model_id,
+                workspace=".",
+                permission_mode="workspace-write",
+                message_count=view.message_count,
+                leaf_id=leaf_id,
+                task_mode=view.task_mode,  # type: ignore[arg-type]
+                is_running=self._active_runs.is_running(session.session_id),
+                credential_source="unknown",
+            )
+        return SessionStatus(
+            session_id=view.session_id,
+            model_id=info.model_id,
+            workspace=info.workspace,
+            permission_mode=info.permission_mode,
+            message_count=view.message_count,
+            leaf_id=leaf_id,
+            task_mode=view.task_mode,  # type: ignore[arg-type]
+            is_running=self._active_runs.is_running(session.session_id),
+            credential_source=info.credential_source,
+            warnings=info.warnings,
+        )
 
-def _ports(
-    model_port: Any,
-    tool_port: Any | None = None,
-    context_port: ContextPort | None = None,
-    event_sink: Callable[[dict[str, Any]], None] | None = None,
-) -> AgentLoopPorts:
-    return AgentLoopPorts(
-        model=model_port,
-        tools=tool_port,
-        context=context_port,
-        events=event_sink,
-    )
-
-
-def _builtin_commands():
-    from .views import builtin_commands
-
-    return builtin_commands()
+    def _commands_for(self, session: RuntimeSession) -> list[CommandDescriptor]:
+        commands = list(builtin_commands())
+        for command in (session.commands or {}).values():
+            name = getattr(command, "name", "")
+            description = getattr(command, "description", None) or ""
+            source = getattr(command, "source", "extension")
+            if not name or not description:
+                continue
+            commands.append(
+                CommandDescriptor(
+                    name=str(name),
+                    description=str(description),
+                    source=source,  # type: ignore[arg-type]
+                )
+            )
+        return commands
 
 
 def _runtime_error_payload(error: Any) -> dict[str, Any]:
-    code = "runtime.dispatch_failed"
+    if isinstance(error, dict):
+        code = error.get("code")
+        message = error.get("message")
+        details = error.get("details")
+        return {
+            "code": code if isinstance(code, str) and code else "runtime.dispatch_failed",
+            "message": message if isinstance(message, str) and message else "Runtime dispatch failed",
+            "details": details if isinstance(details, dict) else {},
+        }
     message = str(error)
     details: dict[str, Any] = {}
     error_info = getattr(error, "error", None)
@@ -386,44 +377,7 @@ def _runtime_error_payload(error: Any) -> dict[str, Any]:
     if hasattr(error, "status"):
         details["status"] = getattr(error, "status")
     return {
-        "code": code,
+        "code": "runtime.dispatch_failed",
         "message": message,
         "details": details,
     }
-
-
-def _session_status(entry: Any, session: SessionView, *, running: bool):
-    from .views import SessionStatus
-
-    assembly = entry.assembly
-    if assembly is not None:
-        model = assembly.profile.model
-        model_id = f"{model.provider}/{model.id}" if model.provider else model.id
-        warnings = tuple(
-            diagnostic.message
-            for diagnostic in assembly.diagnostics
-            if diagnostic.severity == "warning"
-        )
-        workspace = str(assembly.session_options.workspace_dir)
-        permission_mode = assembly.profile.permission_mode
-        credential_source = assembly.profile.credential_source
-        leaf_id = str((session.context or {}).get("leaf_id") or "N/A")
-    else:
-        model_id = f"{entry.controller.model.provider}/{entry.controller.model.model_id}"
-        workspace = "."
-        permission_mode = "workspace-write"
-        credential_source = "test"
-        warnings = ()
-        leaf_id = "N/A"
-    return SessionStatus(
-        session_id=session.session_id,
-        model_id=model_id,
-        workspace=workspace,
-        permission_mode=permission_mode,
-        message_count=session.message_count,
-        leaf_id=leaf_id,
-        task_mode=session.task_mode,  # type: ignore[arg-type]
-        is_running=running,
-        credential_source=credential_source,
-        warnings=warnings,
-    )

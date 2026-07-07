@@ -1,268 +1,409 @@
 from __future__ import annotations
 
-# 新手导读：MemoryWriter 根据运行结果和证据生成 durable memory。
-# 关注点：它需要保守写入，避免把模型猜测直接写成事实。
-
-"""Admission and consolidation rules for durable memory."""
-
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from codepilot.protocols import AgentRunResult
+from codepilot.protocols import AgentRunResult, ToolResultMessage
 
-from .experience import ExperienceExtractor, MemoryConsolidator, memory_key_for_text
 from .files import sanitize_memory_text
-from .records import MemoryRecord
+from .records import MemoryRecord, utc_now_iso
 from .store import MemoryStore
 
 
-PROJECT_CONSTRAINT_KNOWLEDGE = (
-    "Codepilot 是学生学习与求职展示项目；后续设计应优先保持清晰、"
-    "可解释、可演示，避免生产级复杂平台化。"
-)
+@dataclass(frozen=True)
+class MemoryWriteContext:
+    session_id: str | None = None
+    run_id: str | None = None
+    source_message_id: str | None = None
+    source_event_id: str | None = None
+    evidence_refs: list[str] = field(default_factory=list)
+
+    def refs(self) -> list[str]:
+        refs = list(self.evidence_refs)
+        if self.run_id:
+            refs.append(f"run:{self.run_id}")
+        if self.session_id:
+            refs.append(f"session:{self.session_id}")
+        return _dedupe(refs)
+
+    def has_source(self) -> bool:
+        return bool(
+            self.session_id
+            or self.run_id
+            or self.source_message_id
+            or self.source_event_id
+            or self.evidence_refs
+        )
 
 
 @dataclass(frozen=True)
 class MemoryAdmissionDecision:
     should_store: bool
     reason: str
-    type: str | None = None
-    subject: str | None = None
-    content: str | None = None
-    keywords: list[str] | None = None
-    status: str = "active"
-    source: str = "task_summary"
+    type: str = "constraint"
+    content: str = ""
+    status: str = "candidate"
+    source: str = "user_correction"
     confidence: str = "inferred"
+    priority: int = 1
+    keywords: list[str] = field(default_factory=list)
+    paths: list[str] = field(default_factory=list)
 
 
-def decide_prompt_memory_admission(text: str) -> MemoryAdmissionDecision:
-    """Decide whether prompt text contains durable long-term knowledge."""
+class MemoryAdmissionPolicy:
+    """Small deterministic policy for explicit memory boundaries."""
 
-    safe_text = sanitize_memory_text(text, limit=1200)
-    if not safe_text:
-        return MemoryAdmissionDecision(False, "empty_after_sanitization")
-    if _is_correction(safe_text):
-        clean = _strip_memory_marker(safe_text)
-        durable = _has_long_term_marker(safe_text)
-        return MemoryAdmissionDecision(
-            should_store=True,
-            reason="user_correction",
-            type="correction",
-            subject=memory_key_for_text("constraint", clean),
-            content=clean,
-            keywords=_triggers_for_text(clean),
-            status="active" if durable else "candidate",
-            source="user_correction",
-            confidence="explicit",
-        )
-    if _is_explicit_memory(safe_text):
-        clean = _strip_memory_marker(safe_text)
-        return MemoryAdmissionDecision(
-            should_store=True,
-            reason="explicit_memory_request",
-            type="constraint",
-            subject=memory_key_for_text("constraint", clean),
-            content=clean,
-            keywords=["always", *_triggers_for_text(clean)],
-            status="active",
-            source="user_explicit",
-            confidence="explicit",
-        )
-    if _is_project_boundary_constraint(safe_text):
-        return MemoryAdmissionDecision(
-            should_store=True,
-            reason="durable_project_constraint",
-            type="constraint",
-            subject="constraint:project_boundary",
-            content=PROJECT_CONSTRAINT_KNOWLEDGE,
-            keywords=["always", "topic:architecture"],
-            status="active",
-            source="user_explicit",
-            confidence="explicit",
-        )
-    return MemoryAdmissionDecision(False, "ordinary_task_prompt")
+    def detect_user_prompt(self, text: str) -> MemoryAdmissionDecision:
+        content = _safe_memory_text(text, limit=1200, allow_empty=True)
+        if not content:
+            return MemoryAdmissionDecision(False, "empty")
+        stripped = _strip_marker(content)
+        lowered = content.lower()
+        if _has_memory_marker(lowered, content):
+            return MemoryAdmissionDecision(
+                True,
+                "user_memory_requested",
+                type="constraint",
+                content=stripped,
+                status="active",
+                source="user_explicit",
+                confidence="explicit",
+                priority=5,
+                keywords=["always", *_keywords(stripped)],
+            )
+        if _has_correction_marker(lowered, content):
+            durable = _has_memory_marker(lowered, content)
+            return MemoryAdmissionDecision(
+                True,
+                "user_correction_observed",
+                type="correction",
+                content=stripped,
+                status="active" if durable else "candidate",
+                source="user_correction",
+                confidence="explicit",
+                priority=4 if durable else 2,
+                keywords=_keywords(stripped),
+            )
+        return MemoryAdmissionDecision(False, "ordinary_task_prompt")
+
+
+class MemoryConflictResolver:
+    """Keep one active memory per subject/predicate pair."""
+
+    def __init__(self, store: MemoryStore) -> None:
+        self.store = store
+
+    def write(self, record: MemoryRecord) -> MemoryRecord:
+        if record.status != "active":
+            return self.store.append(record)
+        for old in self.store.active_records():
+            if old.id == record.id:
+                continue
+            if (old.scope, old.subject, old.predicate) != (
+                record.scope,
+                record.subject,
+                record.predicate,
+            ):
+                continue
+            if old.value == record.value:
+                old.occurrences += 1
+                old.keywords = _dedupe([*old.keywords, *record.keywords])
+                old.paths = _dedupe([*old.paths, *record.paths])
+                old.evidence_refs = _dedupe([*old.evidence_refs, *record.evidence_refs])
+                return self.store.update(old)
+            old.status = "superseded"
+            old.superseded_by = record.id
+            record.supersedes = _dedupe([*record.supersedes, old.id])
+            self.store.update(old)
+        return self.store.append(record)
 
 
 class MemoryWriter:
-    """Durable memory writer.
-
-    The writer only admits long-term knowledge.  Task progress, file freshness,
-    tool logs, and transient failures belong to task/context/run stores.
-    """
+    """The only write API for durable project memory."""
 
     def __init__(self, *, store: MemoryStore, workspace_dir: str | Path) -> None:
         self.store = store
         self.workspace_dir = Path(workspace_dir)
+        self.policy = MemoryAdmissionPolicy()
+        self.conflicts = MemoryConflictResolver(store)
 
     def admit_prompt_memory(
         self,
         text: str,
         *,
-        run_id: str | None = None,
-    ) -> MemoryRecord | None:
-        decision = decide_prompt_memory_admission(text)
-        if not decision.should_store or not decision.type or not decision.subject or not decision.content:
+        context: MemoryWriteContext,
+    ) -> tuple[MemoryRecord, MemoryAdmissionDecision] | None:
+        decision = self.policy.detect_user_prompt(text)
+        if not decision.should_store:
             return None
-        evidence_refs = [f"run:{run_id}"] if run_id else []
-        record = MemoryRecord(
-            id=_new_memory_id(),
-            scope="project",
+        record = self._record_from_decision(decision, context)
+        return self.conflicts.write(record), decision
+
+    def finalize_run(
+        self,
+        result: AgentRunResult,
+        *,
+        context: MemoryWriteContext,
+    ) -> list[MemoryRecord]:
+        candidates = _experience_candidates(result)
+        records = [self._record_from_decision(candidate, context) for candidate in candidates]
+        return [self.conflicts.write(record) for record in records]
+
+    def add_explicit(self, text: str, *, context: MemoryWriteContext) -> MemoryRecord:
+        content = _safe_memory_text(text)
+        memory_type = "decision" if _looks_like_decision(content) else "constraint"
+        content = _strip_decision_marker(content)
+        return self.conflicts.write(
+            self._new_record(
+                type=memory_type,
+                content=content,
+                status="active",
+                source="user_explicit",
+                confidence="explicit",
+                priority=5,
+                keywords=["always", *_keywords(content)],
+                context=context,
+            )
+        )
+
+    def approve(self, memory_id: str, *, context: MemoryWriteContext) -> MemoryRecord:
+        record = self._copy(memory_id)
+        record.status = "active"
+        record.source = "user_approved"
+        record.confidence = "explicit"
+        _apply_context(record, context)
+        return self.conflicts.write(record)
+
+    def promote(self, memory_id: str, *, context: MemoryWriteContext) -> MemoryRecord:
+        record = self._copy(memory_id)
+        if record.status != "candidate":
+            raise ValueError("Only candidate memory can be promoted")
+        record.status = "active"
+        record.source = "user_approved"
+        record.confidence = "explicit"
+        _apply_context(record, context)
+        return self.conflicts.write(record)
+
+    def edit_as_supersede(
+        self,
+        memory_id: str,
+        content: str,
+        *,
+        context: MemoryWriteContext,
+    ) -> MemoryRecord:
+        old = self._copy(memory_id)
+        new_content = _safe_memory_text(content)
+        new_record = self._new_record(
+            type=old.type,
+            content=new_content,
+            status="active",
+            source="manual_edit",
+            confidence="explicit",
+            priority=old.priority,
+            keywords=list(old.keywords),
+            paths=list(old.paths),
+            subject=old.subject,
+            predicate=old.predicate,
+            context=context,
+            supersedes=[old.id],
+        )
+        return self.store.supersede(old.id, new_record)
+
+    def supersede(self, memory_id: str, content: str, *, context: MemoryWriteContext) -> MemoryRecord:
+        return self.edit_as_supersede(memory_id, content, context=context)
+
+    def disable(self, memory_id: str, *, context: MemoryWriteContext) -> MemoryRecord:
+        return self._mark(memory_id, "disabled", context)
+
+    def delete(self, memory_id: str, *, context: MemoryWriteContext) -> MemoryRecord:
+        return self._mark(memory_id, "deleted", context)
+
+    def _mark(self, memory_id: str, status: str, context: MemoryWriteContext) -> MemoryRecord:
+        record = self._copy(memory_id)
+        record.status = status
+        _apply_context(record, context)
+        return self.store.update(record)
+
+    def _record_from_decision(
+        self,
+        decision: MemoryAdmissionDecision,
+        context: MemoryWriteContext,
+    ) -> MemoryRecord:
+        return self._new_record(
             type=decision.type,
-            subject=decision.subject,
-            predicate="is",
-            value=decision.content,
             content=decision.content,
-            keywords=decision.keywords or [],
             status=decision.status,
-            evidence_refs=evidence_refs,
             source=decision.source,
             confidence=decision.confidence,
-            created_by_session_id=self.store.session_id,
-            created_by_run_id=run_id,
+            priority=decision.priority,
+            keywords=list(decision.keywords),
+            paths=list(decision.paths),
+            context=context,
         )
-        return MemoryConsolidator(self.store).upsert_project_record(record)
 
-    def finalize_run(self, result: AgentRunResult) -> list[MemoryRecord]:
-        extractor = ExperienceExtractor()
-        consolidator = MemoryConsolidator(self.store)
-        records: list[MemoryRecord] = []
-        for candidate in extractor.extract(result):
-            records.append(
-                consolidator.upsert_experience(
-                    candidate,
-                    run_id=result.run_id,
-                )
-            )
-        return records
-
-    def add_project(self, text: str) -> MemoryRecord:
-        content = sanitize_memory_text(text, limit=1600)
-        if not content:
-            raise ValueError("Memory content is empty after sensitive-data filtering")
-        kind = "decision" if _looks_like_decision(content) else "constraint"
-        memory_content = _strip_decision_marker(content)
-        record = MemoryRecord(
+    def _new_record(
+        self,
+        *,
+        type: str,
+        content: str,
+        status: str,
+        source: str,
+        confidence: str,
+        priority: int,
+        keywords: list[str],
+        context: MemoryWriteContext,
+        paths: list[str] | None = None,
+        subject: str | None = None,
+        predicate: str = "is",
+        supersedes: list[str] | None = None,
+    ) -> MemoryRecord:
+        _ensure_context(context, status=status)
+        content = _safe_memory_text(content)
+        subject = subject or _subject(type, content)
+        return MemoryRecord(
             id=_new_memory_id(),
+            type=type,
             scope="project",
-            type=kind,
-            subject=memory_key_for_text(kind, content),
-            predicate="is",
-            value=memory_content,
-            content=memory_content,
-            keywords=["always", *_triggers_for_text(content)] if kind == "constraint" else _triggers_for_text(content),
-            source="user_explicit",
-            confidence="explicit",
-            created_by_session_id=self.store.session_id,
+            subject=subject,
+            predicate=predicate,
+            value=content,
+            content=content,
+            keywords=_dedupe(keywords),
+            paths=_dedupe(paths or []),
+            status=status,
+            source=source,
+            confidence=confidence,
+            priority=priority,
+            created_by_session_id=context.session_id,
+            created_by_run_id=context.run_id,
+            source_message_id=context.source_message_id,
+            source_event_id=context.source_event_id,
+            evidence_refs=context.refs(),
+            supersedes=_dedupe(supersedes or []),
         )
-        return MemoryConsolidator(self.store).upsert_project_record(record)
 
-    def promote(self, memory_id: str) -> MemoryRecord:
-        source = self.store.get(memory_id)
-        if source is None:
+    def _copy(self, memory_id: str) -> MemoryRecord:
+        record = self.store.get(memory_id)
+        if record is None:
             raise ValueError(f"Memory not found: {memory_id}")
-        if source.status != "active":
-            raise ValueError("Only active memory can be promoted")
-        if source.scope != "session" or source.type != "experience":
-            raise ValueError("Only session experience memory can be promoted")
-        promoted = MemoryRecord(
-            id=_new_memory_id(),
-            scope="project",
-            type="experience",
-            subject=source.subject,
-            predicate=source.predicate,
-            value=source.value,
-            content=source.content,
-            keywords=list(source.keywords),
-            paths=list(source.paths),
-            evidence_refs=list(source.evidence_refs),
-            source="promoted",
-            confidence="observed",
-            created_by_session_id=self.store.session_id,
-            supersedes=[source.id],
-            occurrences=source.occurrences,
-        )
-        return MemoryConsolidator(self.store).upsert_project_record(promoted)
+        return MemoryRecord.from_dict(record.to_dict())
 
 
-def _is_explicit_memory(text: str) -> bool:
-    return _has_long_term_marker(text)
+def _experience_candidates(result: AgentRunResult) -> list[MemoryAdmissionDecision]:
+    if result.status != "completed":
+        return []
+    tool_messages = [message for message in result.messages if isinstance(message, ToolResultMessage)]
+    if not any(_verification_status(message) == "passed" for message in tool_messages):
+        return []
+    if any(message.is_error for message in tool_messages):
+        return [
+            MemoryAdmissionDecision(
+                True,
+                "task_experience_candidate",
+                type="experience",
+                content=(
+                    "When a tool or verification fails, inspect the failure, make "
+                    "the smallest repair, and rerun the same verification before "
+                    "claiming completion."
+                ),
+                status="candidate",
+                source="task_experience",
+                confidence="observed",
+                priority=2,
+                keywords=["intent:debug_failure", "verification:passed"],
+                paths=_dedupe(
+                    [
+                        path
+                        for message in tool_messages
+                        for path in message.affected_paths
+                    ]
+                ),
+            )
+        ]
+    return []
 
 
-def _has_long_term_marker(text: str) -> bool:
+def _apply_context(record: MemoryRecord, context: MemoryWriteContext) -> None:
+    _ensure_context(context, status=record.status)
+    record.created_by_session_id = record.created_by_session_id or context.session_id
+    record.created_by_run_id = record.created_by_run_id or context.run_id
+    record.source_message_id = record.source_message_id or context.source_message_id
+    record.source_event_id = record.source_event_id or context.source_event_id
+    record.evidence_refs = _dedupe([*record.evidence_refs, *context.refs()])
+    record.updated_at = utc_now_iso()
+
+
+def _ensure_context(context: MemoryWriteContext, *, status: str) -> None:
+    if not context.has_source():
+        raise ValueError("memory write requires source context")
+    if status == "active" and not context.refs() and not context.source_event_id:
+        raise ValueError("active memory requires evidence")
+
+
+def _safe_memory_text(text: str, *, limit: int = 1600, allow_empty: bool = False) -> str:
+    content = sanitize_memory_text(text, limit=limit)
+    if not content and not allow_empty:
+        raise ValueError("Memory content is empty after sensitive-data filtering")
+    if "[REDACTED]" in content:
+        raise ValueError("Memory content contains sensitive data")
+    return content
+
+
+def _verification_status(message: ToolResultMessage) -> str | None:
+    verification = message.verification
+    if isinstance(verification, dict):
+        status = verification.get("status")
+        return status if isinstance(status, str) else None
+    return None
+
+
+def _subject(memory_type: str, text: str) -> str:
     lowered = text.lower()
+    if "context" in lowered or "上下文" in text:
+        topic = "context"
+    elif "memory" in lowered or "记忆" in text:
+        topic = "memory"
+    elif "task" in lowered or "任务" in text:
+        topic = "task"
+    elif "pytest" in lowered or "测试" in text:
+        topic = "test"
+    else:
+        import hashlib
+
+        topic = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    return f"{memory_type}:{topic}"
+
+
+def _keywords(text: str) -> list[str]:
+    lowered = text.lower()
+    keywords: list[str] = []
+    if "context" in lowered or "上下文" in text:
+        keywords.append("topic:context")
+    if "memory" in lowered or "记忆" in text:
+        keywords.append("topic:memory")
+    if "task" in lowered or "任务" in text:
+        keywords.append("topic:task")
+    if "pytest" in lowered or "测试" in text or "验证" in text:
+        keywords.append("intent:verify")
+    return keywords
+
+
+def _has_memory_marker(lowered: str, original: str) -> bool:
     return any(
-        marker in lowered
-        for marker in (
-            "请记住",
-            "记住：",
-            "记住:",
-            "remember:",
-            "remember that",
-            "以后",
-            "默认",
-            "总是",
-            "always",
-        )
+        marker in lowered or marker in original
+        for marker in ("请记住", "记住：", "记住:", "remember:", "remember that", "以后", "默认", "总是", "always")
     )
 
 
-def _is_correction(text: str) -> bool:
-    lowered = text.lower()
+def _has_correction_marker(lowered: str, original: str) -> bool:
     return any(
-        marker in lowered
-        for marker in (
-            "纠正",
-            "更正",
-            "不是",
-            "而是",
-            "不要再",
-            "以后不要",
-            "actually",
-            "correction",
-        )
+        marker in lowered or marker in original
+        for marker in ("纠正", "更正", "不是", "而是", "不要再", "以后不要", "actually", "correction")
     )
 
 
-def _is_project_boundary_constraint(text: str) -> bool:
-    markers = ("学生", "求职", "学习", "生产级", "过度设计", "复杂设计")
-    if not any(marker in text for marker in markers):
-        return False
-    if (
-        "生产级" not in text
-        and "过度设计" not in text
-        and "复杂设计" not in text
-    ):
-        return False
-    return any(
-        marker in text
-        for marker in (
-            "不要",
-            "不做",
-            "不是生产级",
-            "非生产级",
-            "避免",
-            "别",
-            "无需",
-            "不需要",
-            "不按生产级",
-        )
-    )
-
-
-def _looks_like_decision(text: str) -> bool:
-    lowered = text.lower()
-    return lowered.startswith("decision:") or text.startswith("决策：") or text.startswith("决策:")
-
-
-def _strip_decision_marker(text: str) -> str:
-    for marker in ("decision:", "Decision:", "决策：", "决策:"):
-        if text.startswith(marker):
-            return text[len(marker):].strip()
-    return text
-
-
-def _strip_memory_marker(text: str) -> str:
+def _strip_marker(text: str) -> str:
     cleaned = text.strip()
     for marker in (
         "请记住：",
@@ -283,28 +424,34 @@ def _strip_memory_marker(text: str) -> str:
     return cleaned
 
 
-def _triggers_for_text(text: str) -> list[str]:
-    triggers: list[str] = []
+def _looks_like_decision(text: str) -> bool:
     lowered = text.lower()
-    if "context" in lowered or "上下文" in text:
-        triggers.append("topic:context")
-    if "memory" in lowered or "记忆" in text:
-        triggers.append("topic:memory")
-    if "architecture" in lowered or "架构" in text or "设计" in text:
-        triggers.append("topic:architecture")
-    if "edit" in lowered:
-        triggers.append("intent:edit_file")
-    if "pytest" in lowered or "验证" in text or "测试" in text:
-        triggers.append("intent:verify")
-    return triggers
+    return lowered.startswith("decision:") or text.startswith("决策：") or text.startswith("决策:")
+
+
+def _strip_decision_marker(text: str) -> str:
+    for marker in ("decision:", "Decision:", "决策：", "决策:"):
+        if text.startswith(marker):
+            return text[len(marker):].strip()
+    return text
 
 
 def _new_memory_id() -> str:
     return f"mem_{uuid.uuid4().hex[:12]}"
 
 
+def _dedupe(items: list[str]) -> list[str]:
+    out: list[str] = []
+    for item in items:
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
 __all__ = [
     "MemoryAdmissionDecision",
+    "MemoryAdmissionPolicy",
+    "MemoryConflictResolver",
+    "MemoryWriteContext",
     "MemoryWriter",
-    "decide_prompt_memory_admission",
 ]

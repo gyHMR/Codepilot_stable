@@ -301,7 +301,8 @@ def create_file_tools(
         if char_truncated:
             rendered = rendered[:max_chars] + "\n...<truncated>..."
             truncated = True
-        state = file_state_for_path(workspace, path_text)
+        relative_path = target.relative_to(workspace).as_posix()
+        state = file_state_for_path(workspace, relative_path)
         quality = _output_quality(
             truncated=truncated,
             original_chars=len(raw),
@@ -312,6 +313,7 @@ def create_file_tools(
             details={"file_state": state},
             metadata={
                 "file_state": state,
+                "read_paths": [relative_path],
                 "start_line": offset if selected else None,
                 "end_line": end_index if selected else None,
                 "total_lines": len(lines),

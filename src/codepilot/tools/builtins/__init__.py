@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from codepilot.tools.authoring import AgentTool
-from codepilot.tools.authoring import (
+from codepilot.tools.registry import (
     MUTATING_TOOL_NAMES,
     READ_ONLY_TOOL_NAMES,
     get_builtin_tool_metadata,

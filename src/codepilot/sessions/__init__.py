@@ -8,9 +8,10 @@ from __future__ import annotations
 The sessions layer owns four small domains:
 
 - persistence: session/run facts and filesystem layout
-- context: per-turn ContextGovernor prompt projection
+- runtime: open a session, prepare a run, commit a run, close the session
+- context: per-turn prompt projection and context report
 - memory: durable project/session memory
-- history: task recovery, branching, and lightweight git rollback
+- history: transcript branching and lightweight git rollback
 """
 
 from .controller import SessionController

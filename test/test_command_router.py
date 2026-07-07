@@ -111,14 +111,14 @@ def test_cli_command_router_handles_session_command(tmp_path: Path) -> None:
 
 
 async def _run_session_command_case(tmp_path: Path) -> None:
-    from codepilot.interfaces.cli.commands import handle_cli_command
+    from codepilot.interfaces.cli.interactive import dispatch_command
 
     runtime, session_id = _create_runtime_session(tmp_path)
     session = _persistent_session(runtime, session_id)
     from codepilot.sessions.commands import get_leaf_id
 
     try:
-        result = await handle_cli_command(runtime, session_id, "/session")
+        result = await dispatch_command(runtime, session_id, "/session")
         assert result.handled
         assert result.switched_session_id is None
         assert result.output_lines == (
@@ -157,19 +157,19 @@ def test_cli_command_router_reports_blocked_rollback(tmp_path: Path) -> None:
 
 
 async def _run_memory_command_case(tmp_path: Path) -> None:
-    from codepilot.interfaces.cli.commands import handle_cli_command
+    from codepilot.interfaces.cli.interactive import dispatch_command
 
     runtime, session_id = _create_runtime_session(tmp_path)
     try:
-        added = await handle_cli_command(
+        added = await dispatch_command(
             runtime,
             session_id,
             "/memory add tests use python -m pytest test -q",
         )
         memory_id = added.output_lines[0].split(": ", 1)[1]
-        listed = await handle_cli_command(runtime, session_id, "/memory list project")
-        forgotten = await handle_cli_command(runtime, session_id, f"/memory forget {memory_id}")
-        deleted = await handle_cli_command(runtime, session_id, "/memory list deleted")
+        listed = await dispatch_command(runtime, session_id, "/memory list project")
+        forgotten = await dispatch_command(runtime, session_id, f"/memory forget {memory_id}")
+        deleted = await dispatch_command(runtime, session_id, "/memory list deleted")
 
         assert added.handled
         assert any(memory_id in line for line in listed.output_lines)
@@ -180,7 +180,7 @@ async def _run_memory_command_case(tmp_path: Path) -> None:
 
 
 async def _run_context_command_case(tmp_path: Path) -> None:
-    from codepilot.interfaces.cli.commands import handle_cli_command
+    from codepilot.interfaces.cli.interactive import dispatch_command
 
     runtime, session_id = _create_runtime_session(tmp_path)
     session = _persistent_session(runtime, session_id)
@@ -195,7 +195,7 @@ async def _run_context_command_case(tmp_path: Path) -> None:
         "sections": [],
     }
     try:
-        result = await handle_cli_command(runtime, session_id, "/context")
+        result = await dispatch_command(runtime, session_id, "/context")
         assert result.handled
         assert any("ctx_1" in line for line in result.output_lines)
         assert any("Dropped items" in line for line in result.output_lines)
@@ -204,7 +204,7 @@ async def _run_context_command_case(tmp_path: Path) -> None:
 
 
 async def _run_rollback_command_case(tmp_path: Path) -> None:
-    from codepilot.interfaces.cli.commands import handle_cli_command
+    from codepilot.interfaces.cli.interactive import dispatch_command
     from codepilot.sessions.commands import capture_run_rollback_baseline
 
     _init_repo(tmp_path)
@@ -225,8 +225,8 @@ async def _run_rollback_command_case(tmp_path: Path) -> None:
             affected_paths=["app.py"],
         )
 
-        preview = await handle_cli_command(runtime, session_id, "/rollback run_cli_rollback")
-        applied = await handle_cli_command(runtime, session_id, "/rollback apply run_cli_rollback")
+        preview = await dispatch_command(runtime, session_id, "/rollback run_cli_rollback")
+        applied = await dispatch_command(runtime, session_id, "/rollback apply run_cli_rollback")
 
         assert preview.handled
         assert any("Rollback preview" in line for line in preview.output_lines)
@@ -240,11 +240,11 @@ async def _run_rollback_command_case(tmp_path: Path) -> None:
 
 
 async def _run_rollback_no_run_case(tmp_path: Path) -> None:
-    from codepilot.interfaces.cli.commands import handle_cli_command
+    from codepilot.interfaces.cli.interactive import dispatch_command
 
     runtime, session_id = _create_runtime_session(tmp_path)
     try:
-        result = await handle_cli_command(runtime, session_id, "/rollback")
+        result = await dispatch_command(runtime, session_id, "/rollback")
 
         assert result.handled
         assert any("status=not_eligible" in line for line in result.output_lines)
@@ -254,7 +254,7 @@ async def _run_rollback_no_run_case(tmp_path: Path) -> None:
 
 
 async def _run_rollback_blocked_case(tmp_path: Path) -> None:
-    from codepilot.interfaces.cli.commands import handle_cli_command
+    from codepilot.interfaces.cli.interactive import dispatch_command
     from codepilot.sessions.commands import capture_run_rollback_baseline
 
     _init_repo(tmp_path)
@@ -276,7 +276,7 @@ async def _run_rollback_blocked_case(tmp_path: Path) -> None:
         )
         _git(tmp_path, "add", "app.py")
 
-        result = await handle_cli_command(runtime, session_id, "/rollback apply")
+        result = await dispatch_command(runtime, session_id, "/rollback apply")
 
         assert result.handled
         assert any("status=conflict" in line for line in result.output_lines)
@@ -287,7 +287,7 @@ async def _run_rollback_blocked_case(tmp_path: Path) -> None:
 
 
 async def _run_removed_compact_command_case(tmp_path: Path) -> None:
-    from codepilot.interfaces.cli.commands import handle_cli_command
+    from codepilot.interfaces.cli.interactive import dispatch_command
     from codepilot.runtime.views import builtin_commands
 
     runtime, session_id = _create_runtime_session(tmp_path)
@@ -297,7 +297,7 @@ async def _run_removed_compact_command_case(tmp_path: Path) -> None:
             command.name for command in runtime.describe(session_id).commands
         }
 
-        result = await handle_cli_command(runtime, session_id, "/compact")
+        result = await dispatch_command(runtime, session_id, "/compact")
 
         assert result.handled is False
         assert result.output_lines == ()
@@ -306,11 +306,11 @@ async def _run_removed_compact_command_case(tmp_path: Path) -> None:
 
 
 async def _run_clear_command_case(tmp_path: Path) -> None:
-    from codepilot.interfaces.cli.commands import handle_cli_command
+    from codepilot.interfaces.cli.interactive import dispatch_command
 
     runtime, session_id = _create_runtime_session(tmp_path)
     try:
-        result = await handle_cli_command(runtime, session_id, "/clear")
+        result = await dispatch_command(runtime, session_id, "/clear")
         assert result.handled
         assert result.switched_session_id is not None
         assert result.switched_session_id != session_id

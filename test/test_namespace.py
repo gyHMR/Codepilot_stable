@@ -255,7 +255,6 @@ def test_removed_runtime_compat_modules_are_gone() -> None:
         "approval_flow",
         "agent_session",
         "command_registry",
-        "config",
         "context",
         "builtin_tools",
         "cli",
@@ -264,7 +263,6 @@ def test_removed_runtime_compat_modules_are_gone() -> None:
         "factory",
         "hook_pipeline",
         "model_resolver",
-        "prompt",
         "repository_tracker",
         "resources",
         "runner",
@@ -284,41 +282,32 @@ def test_removed_runtime_compat_modules_are_gone() -> None:
 
 def test_runtime_public_contracts_and_views_are_separate() -> None:
     import codepilot.runtime as runtime
-    import codepilot.runtime.assemble as assembly
+    import codepilot.runtime.builder as builder
+    import codepilot.runtime.config as config
     import codepilot.runtime.gateway as gateway_module
+    import codepilot.runtime.model as model
     import codepilot.runtime.opening as session_opening
+    import codepilot.runtime.prompt as prompt
     import codepilot.runtime.sessions as runtime_sessions
+    import codepilot.runtime.tools as tools
     import codepilot.runtime.views as views
     from importlib.util import find_spec
 
     assert hasattr(runtime, "SessionOpenIntent")
-    assert hasattr(assembly, "RuntimeAssemblyIntent")
-    assert hasattr(assembly, "RuntimePermissionMode")
-    assert hasattr(assembly, "RuntimeAssembly")
-    assert hasattr(assembly, "RuntimeDiagnostic")
-    assert hasattr(assembly, "CapabilityCatalog")
+    assert find_spec("codepilot.runtime.assemble") is None
+    assert hasattr(builder, "build_runtime_session")
+    assert hasattr(config, "RuntimeConfig")
+    assert hasattr(config, "RuntimePermissionMode")
+    assert hasattr(model, "resolve_runtime_model")
+    assert hasattr(prompt, "build_system_prompt")
+    assert hasattr(tools, "build_runtime_tools")
     assert hasattr(views, "CommandDescriptor")
     assert hasattr(views, "SessionStatus")
-    assert not hasattr(assembly, "SessionOpenRequest")
-    assert not hasattr(assembly, "UserTurn")
-    assert not hasattr(assembly, "RuntimeOutput")
-    assert not hasattr(assembly, "ApprovalDecision")
-    assert not hasattr(assembly, "ApprovalSnapshot")
-    assert not hasattr(assembly, "CancellationResult")
-    assert not hasattr(assembly, "CommandRequest")
-    assert not hasattr(assembly, "SessionRef")
-    assert not hasattr(assembly, "CommandDescriptor")
-    assert not hasattr(assembly, "CommandResult")
-    assert not hasattr(assembly, "SessionSnapshot")
-    assert not hasattr(assembly, "SessionStatus")
-    assert not hasattr(assembly, "ModelSelection")
-    assert not hasattr(assembly, "AgentSessionOptions")
     assert not hasattr(runtime, "WorkspaceResourceLoader")
     assert not hasattr(runtime, "build_default_system_prompt")
     assert not hasattr(runtime, "format_commands_for_help")
     assert not hasattr(runtime, "list_runtime_commands")
     assert not hasattr(runtime.RuntimeGateway, "aclose_all")
-    assert not hasattr(assembly, "create_session_controller")
     assert gateway_module.__all__ == ["RuntimeGateway"]
     assert not hasattr(gateway_module, "SessionOpenIntent")
     assert not hasattr(views, "SessionSnapshot")
@@ -330,8 +319,9 @@ def test_runtime_public_contracts_and_views_are_separate() -> None:
     ]
     assert runtime_sessions.__all__ == [
         "ActiveRunRegistry",
-        "RuntimeSessionEntry",
-        "RuntimeSessionRegistry",
+        "RuntimeSession",
+        "RuntimeSessionStore",
+        "RuntimeStatusInfo",
     ]
     assert not hasattr(runtime, "to_runtime_assembly_intent")
     assert find_spec("codepilot.runtime.service") is None
@@ -351,8 +341,10 @@ def test_removed_sessions_compat_modules_are_gone() -> None:
         "branching",
         "checkpoint",
         "compaction",
+        "commit",
         "context_compiler",
         "context_state",
+        "prepare",
         "repository_context",
         "repository_tracker",
         "run_store",
@@ -388,7 +380,7 @@ def test_removed_protocol_and_llm_aliases_are_gone() -> None:
 
 def test_removed_builtin_file_tool_aliases_are_gone(tmp_path: Path) -> None:
     from codepilot.tools.builtins import create_builtin_tools, get_builtin_tool_metadata
-    from codepilot.tools.authoring import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES
+    from codepilot.tools.registry import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES
 
     removed_aliases = {"list_dir", "read_file", "write_file"}
     tool_names = {tool.name for tool in create_builtin_tools(tmp_path)}
@@ -412,13 +404,13 @@ def test_tools_refactor_exposes_new_lifecycle_modules() -> None:
 
     expected_modules = (
         "codepilot.tools.authoring",
-        "codepilot.tools.authoring",
-        "codepilot.tools.authoring",
+        "codepilot.tools.registry",
         "codepilot.tools.policy",
+        "codepilot.tools.approval",
+        "codepilot.tools.validation",
+        "codepilot.tools.guard",
         "codepilot.tools.engine",
-        "codepilot.tools.engine",
-        "codepilot.tools.engine",
-        "codepilot.tools.workspace",
+        "codepilot.tools.adapter",
         "codepilot.tools.workspace",
         "codepilot.tools.builtins",
         "codepilot.tools.builtins.files",
@@ -509,8 +501,7 @@ def test_removed_task_control_helper_modules_are_gone() -> None:
 def test_removed_run_result_compat_entries_are_gone() -> None:
     import codepilot.core as core
     from codepilot.core import __all__ as core_exports
-    import codepilot.sessions.prepare as session_module
-    from codepilot.sessions.conversation import SessionConversationState
+    import codepilot.sessions.runtime as session_module
     from codepilot.sessions.contracts import SessionOptions
 
     assert not hasattr(core, "Agent")
@@ -522,56 +513,20 @@ def test_removed_run_result_compat_entries_are_gone() -> None:
     assert find_spec("codepilot.core.agent") is None
     assert find_spec("codepilot.core.agent_loop") is None
     assert not hasattr(session_module, "AgentSession")
+    assert hasattr(session_module, "SessionRuntime")
+    assert hasattr(session_module, "RuntimeSessionContextPort")
     assert not hasattr(session_module.SessionRuntime, "prompt")
     assert not hasattr(session_module.SessionRuntime, "prompt_message")
     assert not hasattr(session_module.SessionRuntime, "run")
     assert not hasattr(session_module.SessionRuntime, "continue_run")
-    assert not hasattr(session_module.SessionRuntime, "_start_run_lifecycle")
-    assert not hasattr(session_module.SessionRuntime, "_complete_run_lifecycle")
-    assert not hasattr(session_module.SessionRuntime, "_admit_prompt_memory")
-    assert not hasattr(session_module.SessionRuntime, "_begin_task_recovery")
-    assert not hasattr(session_module.SessionRuntime, "_observe_tool_memory")
-    assert not hasattr(session_module.SessionRuntime, "_finalize_memory")
-    assert not hasattr(session_module.SessionRuntime, "_finalize_task_recovery")
-    assert not hasattr(session_module.SessionRuntime, "_check_context_freshness")
-    assert not hasattr(session_module.SessionRuntime, "_run_lifecycle_hooks")
-    assert not hasattr(session_module.SessionRuntime, "_write_rollback_metadata")
     assert not hasattr(session_module.SessionRuntime, "messages")
     assert not hasattr(session_module.SessionRuntime, "last_run_result")
     assert not hasattr(session_module.SessionRuntime, "last_session_run_record")
     assert "tools" not in SessionOptions.__dataclass_fields__
-    assert "tools" not in SessionConversationState.__dataclass_fields__
     assert not hasattr(session_module.SessionRuntime, "last_usage")
     assert not hasattr(session_module.SessionRuntime, "cumulative_usage")
     assert not hasattr(session_module.SessionRuntime, "_last_usage")
     assert not hasattr(session_module.SessionRuntime, "_cumulative_usage")
-    assert not hasattr(session_module.SessionRuntime, "_set_task_mode")
-    assert not hasattr(session_module.SessionRuntime, "_list_entry_ids")
-    assert not hasattr(session_module.SessionRuntime, "_list_entries")
-    assert not hasattr(session_module.SessionRuntime, "_get_leaf_id")
-    assert not hasattr(session_module.SessionRuntime, "_get_entry_path")
-    assert not hasattr(session_module.SessionRuntime, "_get_session_tree")
-    assert not hasattr(session_module.SessionRuntime, "_fork_session")
-    assert not hasattr(session_module.SessionRuntime, "_create_fresh_session")
-    assert not hasattr(session_module.SessionRuntime, "_fork_from_entry")
-    assert not hasattr(session_module.SessionRuntime, "_switch_to_entry")
-    assert not hasattr(session_module.SessionRuntime, "_switch_session")
-    assert not hasattr(session_module.SessionRuntime, "_record_checkpoint")
-    assert not hasattr(session_module.SessionRuntime, "_memory_summary")
-    assert not hasattr(session_module.SessionRuntime, "_list_memory_records")
-    assert not hasattr(session_module.SessionRuntime, "_add_project_memory")
-    assert not hasattr(session_module.SessionRuntime, "_promote_memory")
-    assert not hasattr(session_module.SessionRuntime, "_forget_memory")
-    assert not hasattr(session_module.SessionRuntime, "_memory_status")
-    assert not hasattr(session_module.SessionRuntime, "_context_command_view")
-    assert not hasattr(session_module.SessionRuntime, "_capture_run_rollback_baseline")
-    assert not hasattr(session_module.SessionRuntime, "_rollback_preview_view")
-    assert not hasattr(session_module.SessionRuntime, "_rollback_apply_view")
-    assert not hasattr(session_module.SessionRuntime, "_revert_last_run")
-    assert not hasattr(session_module.SessionRuntime, "_preview_last_run_rollback")
-    assert not hasattr(session_module.SessionRuntime, "_preview_run_rollback")
-    assert not hasattr(session_module.SessionRuntime, "_revert_run")
-    assert not hasattr(session_module.SessionRuntime, "set_task_mode")
     assert not hasattr(session_module.SessionRuntime, "list_entry_ids")
     assert not hasattr(session_module.SessionRuntime, "list_entries")
     assert not hasattr(session_module.SessionRuntime, "get_leaf_id")
@@ -700,36 +655,26 @@ def test_cli_startup_contract_is_separate_from_renderer_exports() -> None:
     assert "build_startup_state" in renderer_exports
 
 
-def test_cli_runner_exports_compact_run_and_rpc_entrypoints() -> None:
-    from codepilot.interfaces.cli.runner import __all__ as runner_exports
+def test_cli_legacy_runner_and_adapter_modules_are_removed() -> None:
+    removed_modules = (
+        "codepilot.interfaces.cli.runner",
+        "codepilot.interfaces.cli.input",
+        "codepilot.interfaces.cli.frames",
+        "codepilot.interfaces.cli.commands",
+    )
 
-    assert set(runner_exports) == {
-        "InputFn",
-        "OutputFn",
-        "RPC_PROTOCOL_VERSION",
-        "RpcEmit",
-        "RpcError",
-        "RunMode",
-        "RunOptions",
-        "emit_rpc_error",
-        "emit_rpc_ok",
-        "emit_rpc_ready",
-        "rpc_error_from_exception",
-        "rpc_json_default",
-        "run",
-        "run_interactive",
-        "run_print",
-        "run_rpc",
-    }
+    existing = [module for module in removed_modules if find_spec(module) is not None]
+
+    assert existing == []
 
 
 def test_cli_run_mode_types_stay_out_of_runtime_contracts() -> None:
-    import codepilot.runtime.assemble as runtime_types
-    import codepilot.interfaces.cli.runner as runner
+    import codepilot.runtime as runtime_types
+    import codepilot.interfaces.cli.interactive as interactive
 
-    assert hasattr(runner, "RunMode")
-    assert hasattr(runner, "OutputFn")
-    assert hasattr(runner, "InputFn")
+    assert hasattr(interactive, "InputFn")
+    assert hasattr(interactive, "run_repl")
+    assert hasattr(interactive, "run_once")
 
     assert not hasattr(runtime_types, "RunMode")
     assert not hasattr(runtime_types, "OutputFn")
@@ -743,9 +688,15 @@ def test_cli_namespace_exports_public_adapter_contracts() -> None:
     assert hasattr(cli, "SimpleRenderer")
     assert hasattr(cli, "TerminalRenderer")
     assert hasattr(cli, "CliStartupState")
+    assert hasattr(cli, "run_repl")
+    assert hasattr(cli, "run_once")
+    assert hasattr(cli, "run_rpc")
     assert "SimpleRenderer" in cli_exports
     assert "TerminalRenderer" in cli_exports
     assert "CliStartupState" in cli_exports
+    assert "run_repl" in cli_exports
+    assert "run_once" in cli_exports
+    assert "run_rpc" in cli_exports
 
 
 def test_cli_main_module_owns_parser_and_entrypoint() -> None:

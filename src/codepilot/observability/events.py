@@ -22,10 +22,23 @@ RUN_EVENT_TYPES = {
     "context_built",
     "memory_retrieved",
     "memory_written",
+    "user_memory_requested",
+    "user_correction_observed",
+    "task_completed_with_reusable_experience",
+    "memory_record_created",
+    "memory_candidate_created",
+    "memory_record_approved",
+    "memory_record_edited",
+    "memory_record_disabled",
+    "memory_record_deleted",
+    "memory_record_superseded",
+    "memory_record_promoted",
     "tool_call_started",
     "tool_call_finished",
     "task_plan_created",
     "task_step_updated",
+    "task_state_updated",
+    "task_state_warning",
     "task_decision_made",
     "completion_checked",
     "file_changed",
@@ -38,8 +51,6 @@ _LOW_VALUE_EVENTS = {
     "message_update",
     "tool_execution_update",
     "tool_execution_grace",
-    "task_recovery_updated",
-    "task_recovery_warning",
     "planning_discovery_started",
     "planning_discovery_step",
     "planning_discovery_completed",
@@ -97,9 +108,6 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
         return _memory_retrieved(raw)
     if event_type in {
         "memory_written",
-        "memory_updated",
-        "memory_created",
-        "memory_promoted",
     }:
         return _memory_written(raw, event_type)
     if event_type in {"tool_call_started", "tool_execution_start"}:
@@ -341,13 +349,19 @@ def _memory_retrieved(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _memory_written(raw: dict[str, Any], action: str) -> dict[str, Any]:
+    memory_ids = [
+        str(item)
+        for item in _list(raw.get("memory_ids") or raw.get("memoryIds"))
+    ]
+    single = raw.get("memoryId") or raw.get("memory_id")
+    if single and str(single) not in memory_ids:
+        memory_ids.append(str(single))
     return {
         **_base(raw, "memory_written"),
-        "memory_ids": [
-            str(item)
-            for item in _list(raw.get("memory_ids") or raw.get("memoryIds"))
-        ],
+        "memory_ids": memory_ids,
         "action": str(raw.get("action") or action),
+        "memory_type": str(raw.get("memoryType") or raw.get("memory_type") or ""),
+        "status": str(raw.get("status") or ""),
     }
 
 

@@ -119,6 +119,29 @@ def test_core_contracts_describe_loop_stage_without_session_objects() -> None:
     assert AgentLoopPorts(model=None, tools=None).events is None
 
 
+def test_agent_loop_default_tool_iteration_budget_supports_coding_tasks() -> None:
+    from types import SimpleNamespace
+
+    from codepilot.core.contracts import AgentLoopLimits
+    from codepilot.sessions.runtime import runtime_loop_limits
+
+    assert AgentLoopLimits().max_tool_iterations >= 32
+    assert (
+        runtime_loop_limits(
+            SimpleNamespace(task_mode="build", max_tool_calls_per_turn=8)
+        ).max_tool_iterations
+        >= 48
+    )
+    assert (
+        runtime_loop_limits(
+            SimpleNamespace(task_mode="read", max_tool_calls_per_turn=8)
+        ).max_tool_iterations
+        < runtime_loop_limits(
+            SimpleNamespace(task_mode="build", max_tool_calls_per_turn=8)
+        ).max_tool_iterations
+    )
+
+
 def test_agent_loop_retry_policy_is_explicit_contract() -> None:
     from typing import get_type_hints
 
@@ -145,7 +168,7 @@ def test_agent_loop_task_strategy_is_explicit_contract() -> None:
         goal="  ship it  ",
         steps=[{"title": "Inspect"}],
         max_replans_per_run=-1,
-        recovery_projection={"goal": "ship it"},
+        task_state={"goal": {"value": "ship it"}},
     )
 
     assert input_hints["task_strategy"] is TaskStrategy
@@ -153,7 +176,7 @@ def test_agent_loop_task_strategy_is_explicit_contract() -> None:
     assert strategy.goal == "ship it"
     assert strategy.steps == ({"title": "Inspect"},)
     assert strategy.max_replans_per_run is None
-    assert strategy.recovery_projection == {"goal": "ship it"}
+    assert strategy.task_state == {"goal": {"value": "ship it"}}
 
 
 def test_agent_loop_context_is_named_prepared_context_contract() -> None:
@@ -301,7 +324,7 @@ def test_v2_contract_modules_do_not_import_higher_layers() -> None:
     forbidden = {
         "codepilot.core.contracts": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
         "codepilot.sessions.contracts": ("codepilot.runtime", "codepilot.interfaces"),
-        "codepilot.runtime.actions": ("codepilot.core.agent", "codepilot.sessions.prepare", "codepilot.tools.engine"),
+        "codepilot.runtime.actions": ("codepilot.core.agent", "codepilot.sessions.runtime", "codepilot.tools.engine"),
         "codepilot.llm.ports": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
         "codepilot.tools.ports": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
     }

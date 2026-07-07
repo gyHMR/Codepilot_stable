@@ -156,7 +156,7 @@ class PreparedAgentRun:
     rollback_baseline: RollbackBaselineRef | None = None
     context_refs: dict[str, Any] = field(default_factory=dict)
     memory_refs: dict[str, Any] = field(default_factory=dict)
-    recovery_refs: dict[str, Any] = field(default_factory=dict)
+    task_refs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

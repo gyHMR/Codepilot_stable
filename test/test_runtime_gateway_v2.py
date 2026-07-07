@@ -170,7 +170,7 @@ def test_runtime_gateway_real_command_flow_updates_session_mode(tmp_path) -> Non
 
         assert isinstance(frames[-1], CommandFinishedFrame)
         assert frames[-1].record.handled is True
-        assert frames[-1].record.data["task_mode"] == "plan"
+        assert frames[-1].record.data["current_mode"] == "plan"
         assert gateway.describe(ref.session_id).session.task_mode == "plan"
 
     asyncio.run(run_case())
@@ -310,6 +310,22 @@ def test_runtime_gateway_prompt_failure_returns_failed_frame(tmp_path) -> None:
         assert isinstance(cancel_frames[-1], FailedFrame)
 
     asyncio.run(run_case())
+
+
+def test_runtime_error_payload_preserves_dict_code_and_message() -> None:
+    from codepilot.runtime.gateway import _runtime_error_payload
+
+    payload = _runtime_error_payload(
+        {
+            "code": "run.max_iterations",
+            "message": "Stopped after reaching max_tool_iterations=12",
+            "details": {"limit": 12},
+        }
+    )
+
+    assert payload["code"] == "run.max_iterations"
+    assert payload["message"] == "Stopped after reaching max_tool_iterations=12"
+    assert payload["details"]["limit"] == 12
 
 
 def test_runtime_gateway_real_prompt_flow_retries_model_failure(tmp_path) -> None:

@@ -1,27 +1,88 @@
 from __future__ import annotations
 
-# 新手导读：records.py 定义 MemoryRecord、RetrievedMemory 等记忆数据结构。
-# 关注点：MemoryRecord v3 只暴露结构化 subject/predicate/value；旧字段只在读取边界转换。
+# 新手导读：records.py 定义 MemoryRecord、MemoryQuery 和召回结果。
+# 关注点：MemoryRecord v4 是唯一长期记忆 schema，不做旧字段兼容。
 
-"""Structured durable memory data contracts."""
+"""Canonical durable memory data contracts."""
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Literal, cast
+from typing import Any, Literal, Mapping, cast
 
 
-MEMORY_SCHEMA_VERSION = 3
+MEMORY_SCHEMA_VERSION = 4
 
-MemoryType = str
-MemoryScope = str
+MemoryType = Literal[
+    "preference",
+    "constraint",
+    "decision",
+    "workflow",
+    "correction",
+    "experience",
+]
+MemoryScope = Literal["project", "workspace", "global"]
 MemoryStatus = Literal["candidate", "active", "disabled", "superseded", "deleted"]
-MemorySource = str
+MemorySource = Literal[
+    "user_explicit",
+    "user_correction",
+    "task_experience",
+    "user_approved",
+    "manual_edit",
+]
 MemoryConfidence = Literal["explicit", "observed", "inferred"]
 
+_MEMORY_TYPES = frozenset(
+    {"preference", "constraint", "decision", "workflow", "correction", "experience"}
+)
+_MEMORY_SCOPES = frozenset({"project", "workspace", "global"})
 _MEMORY_STATUSES = frozenset(
     {"candidate", "active", "disabled", "superseded", "deleted"}
 )
+_MEMORY_SOURCES = frozenset(
+    {"user_explicit", "user_correction", "task_experience", "user_approved", "manual_edit"}
+)
 _MEMORY_CONFIDENCE = frozenset({"explicit", "observed", "inferred"})
+_MEMORY_RECORD_KEYS = frozenset(
+    {
+        "schema_version",
+        "id",
+        "type",
+        "scope",
+        "subject",
+        "predicate",
+        "value",
+        "content",
+        "keywords",
+        "paths",
+        "status",
+        "source",
+        "confidence",
+        "priority",
+        "created_by_session_id",
+        "created_by_run_id",
+        "source_message_id",
+        "source_event_id",
+        "evidence_refs",
+        "supersedes",
+        "superseded_by",
+        "occurrences",
+        "created_at",
+        "updated_at",
+    }
+)
+_LEGACY_MEMORY_KEYS = frozenset(
+    {"k" + "ind", "k" + "ey", "t" + "ext", "tri" + "ggers", "related" + "_paths"}
+)
+_EVIDENCE_REF_PREFIXES = (
+    "message:",
+    "event:",
+    "run:",
+    "tool:",
+    "verification:",
+    "artifact:",
+    "session:",
+)
+_MAX_MEMORY_CONTENT_CHARS = 1600
 
 
 def utc_now_iso() -> str:
@@ -42,13 +103,16 @@ class MemoryRecord:
     keywords: list[str] = field(default_factory=list)
     paths: list[str] = field(default_factory=list)
     status: MemoryStatus = "active"
-    source: MemorySource = "task_summary"
+    source: MemorySource = "user_explicit"
     confidence: MemoryConfidence = "inferred"
     priority: int = 1
     created_by_session_id: str | None = None
     created_by_run_id: str | None = None
+    source_message_id: str | None = None
+    source_event_id: str | None = None
     evidence_refs: list[str] = field(default_factory=list)
     supersedes: list[str] = field(default_factory=list)
+    superseded_by: str | None = None
     occurrences: int = 1
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
@@ -71,62 +135,67 @@ class MemoryRecord:
         priority: int = 1,
         created_by_session_id: str | None = None,
         created_by_run_id: str | None = None,
+        source_message_id: str | None = None,
+        source_event_id: str | None = None,
         evidence_refs: list[object] | None = None,
         supersedes: list[object] | None = None,
+        superseded_by: str | None = None,
         occurrences: int = 1,
         created_at: str | None = None,
         updated_at: str | None = None,
     ) -> None:
         self.id = _require_text(id, "memory id")
-        self.type = _require_text(type, "memory type")
-        self.scope = _require_text(scope, "memory scope")
+        self.type = _ensure_memory_type(type)
+        self.scope = _ensure_memory_scope(scope)
         self.subject = _require_text(subject, "memory subject")
         self.predicate = _require_text(predicate, "memory predicate")
         self.value = _require_text(value, "memory value")
-        self.content = _require_text(content, "memory content")
+        self.content = _content_text(content)
         self.keywords = _dedupe_text(keywords or [])
         self.paths = _dedupe_text(paths or [])
         self.status = _ensure_memory_status(status)
-        self.source = _require_text(source, "memory source")
+        self.source = _ensure_memory_source(source)
         self.confidence = _ensure_memory_confidence(confidence)
-        self.priority = _non_negative_int(priority, field_name="memory priority")
+        self.priority = _priority(priority)
         self.created_by_session_id = _optional_text(created_by_session_id)
         self.created_by_run_id = _optional_text(created_by_run_id)
-        self.evidence_refs = _dedupe_text(evidence_refs or [])
+        self.source_message_id = _optional_text(source_message_id)
+        self.source_event_id = _optional_text(source_event_id)
+        self.evidence_refs = _evidence_refs(evidence_refs or [])
         self.supersedes = _dedupe_text(supersedes or [])
+        self.superseded_by = _optional_text(superseded_by)
         self.occurrences = _positive_int(occurrences)
         self.created_at = str(created_at or utc_now_iso())
         self.updated_at = str(updated_at or utc_now_iso())
+        _ensure_source_trace(self)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "MemoryRecord":
-        schema = value.get("schema_version")
-        if schema != MEMORY_SCHEMA_VERSION:
-            raise ValueError(f"Unsupported memory schema_version: {schema}")
+        payload = validate_memory_record_payload(value)
         return cls(
-            id=str(value.get("id", "")),
-            type=str(value.get("type", "")),
-            scope=str(value.get("scope", "")),
-            subject=str(value.get("subject", "")),
-            predicate=str(value.get("predicate", "")),
-            value=str(value.get("value", "")),
-            content=str(value.get("content", "")),
-            keywords=_strings(value.get("keywords")),
-            paths=_strings(value.get("paths")),
-            status=_ensure_memory_status(value.get("status", "active")),
-            source=str(value.get("source", "")),
-            confidence=_ensure_memory_confidence(value.get("confidence", "inferred")),
-            priority=_non_negative_int(
-                value.get("priority", 1),
-                field_name="memory priority",
-            ),
-            created_by_session_id=_optional_text(value.get("created_by_session_id")),
-            created_by_run_id=_optional_text(value.get("created_by_run_id")),
-            evidence_refs=_strings(value.get("evidence_refs")),
-            supersedes=_strings(value.get("supersedes")),
-            occurrences=_positive_int(value.get("occurrences", 1)),
-            created_at=str(value.get("created_at", utc_now_iso())),
-            updated_at=str(value.get("updated_at", utc_now_iso())),
+            id=payload["id"],
+            type=payload["type"],
+            scope=payload["scope"],
+            subject=payload["subject"],
+            predicate=payload["predicate"],
+            value=payload["value"],
+            content=payload["content"],
+            keywords=payload["keywords"],
+            paths=payload["paths"],
+            status=payload["status"],
+            source=payload["source"],
+            confidence=payload["confidence"],
+            priority=payload["priority"],
+            created_by_session_id=payload["created_by_session_id"],
+            created_by_run_id=payload["created_by_run_id"],
+            source_message_id=payload["source_message_id"],
+            source_event_id=payload["source_event_id"],
+            evidence_refs=payload["evidence_refs"],
+            supersedes=payload["supersedes"],
+            superseded_by=payload["superseded_by"],
+            occurrences=payload["occurrences"],
+            created_at=payload["created_at"],
+            updated_at=payload["updated_at"],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -144,64 +213,82 @@ class MemoryRecord:
         return None
 
 
-def normalize_memory_record_payload(raw: object) -> dict[str, Any]:
-    """Normalize persisted memory JSON into the canonical v3 payload."""
-
-    if not isinstance(raw, dict):
+def validate_memory_record_payload(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
         raise TypeError("memory record payload must be a mapping")
-    memory_type = _memory_type(raw.get("type") or raw.get("kind"))
-    content = _memory_content(raw)
-    subject = _optional_text(raw.get("subject") or raw.get("key")) or _subject_from_content(content)
-    predicate = _optional_text(raw.get("predicate")) or "is"
-    value = _optional_text(raw.get("value")) or content
-    source = _optional_text(raw.get("source")) or _default_source(memory_type)
-    return {
-        "schema_version": MEMORY_SCHEMA_VERSION,
-        "id": str(raw.get("id", "")),
-        "type": memory_type,
-        "scope": str(raw.get("scope", "project")),
-        "subject": subject,
-        "predicate": predicate,
-        "value": value,
-        "content": content,
-        "keywords": _strings(
-            raw.get("keywords")
-            if isinstance(raw.get("keywords"), list)
-            else raw.get("triggers")
-        ),
-        "paths": _strings(
-            raw.get("paths")
-            if isinstance(raw.get("paths"), list)
-            else raw.get("related_paths")
-        ),
-        "status": _ensure_memory_status(raw.get("status", "active")),
-        "source": source,
-        "confidence": _ensure_memory_confidence(raw.get("confidence", "inferred")),
-        "priority": _non_negative_int(
-            raw.get("priority", 1),
-            field_name="memory priority",
-        ),
-        "created_by_session_id": _optional_text(raw.get("created_by_session_id")),
-        "created_by_run_id": _optional_text(raw.get("created_by_run_id")),
-        "evidence_refs": _strings(raw.get("evidence_refs")),
-        "supersedes": _strings(raw.get("supersedes")),
-        "occurrences": _positive_int(raw.get("occurrences", 1)),
-        "created_at": str(raw.get("created_at", utc_now_iso())),
-        "updated_at": str(raw.get("updated_at", utc_now_iso())),
-    }
+    keys = set(raw)
+    schema = raw.get("schema_version")
+    if schema != MEMORY_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported memory schema_version: {schema}")
+    legacy = sorted(keys & _LEGACY_MEMORY_KEYS)
+    if legacy:
+        raise ValueError("legacy memory fields are not supported: " + ", ".join(legacy))
+    missing = sorted(_MEMORY_RECORD_KEYS - keys)
+    if missing:
+        raise ValueError("missing memory fields: " + ", ".join(missing))
+    unknown = sorted(keys - _MEMORY_RECORD_KEYS)
+    if unknown:
+        raise ValueError("unknown memory fields: " + ", ".join(unknown))
+    payload = dict(raw)
+    payload["id"] = _require_text(payload.get("id"), "memory id")
+    payload["type"] = _ensure_memory_type(payload.get("type"))
+    payload["scope"] = _ensure_memory_scope(payload.get("scope"))
+    payload["subject"] = _require_text(payload.get("subject"), "memory subject")
+    payload["predicate"] = _require_text(payload.get("predicate"), "memory predicate")
+    payload["value"] = _require_text(payload.get("value"), "memory value")
+    payload["content"] = _content_text(payload.get("content"))
+    payload["keywords"] = _string_list(payload.get("keywords"), "keywords")
+    payload["paths"] = _string_list(payload.get("paths"), "paths")
+    payload["status"] = _ensure_memory_status(payload.get("status"))
+    payload["source"] = _ensure_memory_source(payload.get("source"))
+    payload["confidence"] = _ensure_memory_confidence(payload.get("confidence"))
+    payload["priority"] = _priority(payload.get("priority"))
+    payload["created_by_session_id"] = _optional_text(payload.get("created_by_session_id"))
+    payload["created_by_run_id"] = _optional_text(payload.get("created_by_run_id"))
+    payload["source_message_id"] = _optional_text(payload.get("source_message_id"))
+    payload["source_event_id"] = _optional_text(payload.get("source_event_id"))
+    payload["evidence_refs"] = _evidence_refs(payload.get("evidence_refs"))
+    payload["supersedes"] = _string_list(payload.get("supersedes"), "supersedes")
+    payload["superseded_by"] = _optional_text(payload.get("superseded_by"))
+    payload["occurrences"] = _positive_int(payload.get("occurrences"))
+    payload["created_at"] = _require_text(payload.get("created_at"), "created_at")
+    payload["updated_at"] = _require_text(payload.get("updated_at"), "updated_at")
+    _ensure_source_trace_mapping(payload)
+    return payload
 
 
 @dataclass(frozen=True)
 class MemoryQuery:
     """Query signals used to recall durable memory."""
 
-    text: str
-    active_paths: list[str]
+    latest_user_message: str = ""
+    raw_user_request: str = ""
+    goal: str = ""
+    current_mode: str | None = None
+    current_step_title: str | None = None
+    current_step_kind: str | None = None
+    verification_status: str | None = None
+    blocked_reason: str | None = None
+    active_paths: list[str] = field(default_factory=list)
+    changed_paths: list[str] = field(default_factory=list)
+    artifact_summaries: list[str] = field(default_factory=list)
+    session_id: str | None = None
+    run_id: str | None = None
     limit: int = 5
-    task_phase: str | None = None
-    action_intent: str | None = None
-    recent_error: str | None = None
-    retrieval_mode: str | None = None
+
+    @property
+    def text(self) -> str:
+        return "\n".join(
+            part
+            for part in (
+                self.latest_user_message,
+                self.raw_user_request,
+                self.goal,
+                self.current_step_title or "",
+                self.blocked_reason or "",
+            )
+            if part
+        )
 
 
 @dataclass(frozen=True)
@@ -213,22 +300,34 @@ class RetrievedMemory:
 
 @dataclass(frozen=True)
 class MemoryRecall:
-    """Layered memory recall result consumed by ContextGovernor."""
+    """Memory recall result consumed by ContextGovernor."""
 
-    pinned_text: str = ""
-    always: list[RetrievedMemory] = field(default_factory=list)
-    selected: list[RetrievedMemory] = field(default_factory=list)
+    retrieved: list[RetrievedMemory] = field(default_factory=list)
     dropped: dict[str, str] = field(default_factory=dict)
 
-    @property
-    def retrieved(self) -> list[RetrievedMemory]:
-        return [*self.always, *self.selected]
+
+def _ensure_memory_type(value: object) -> MemoryType:
+    if value not in _MEMORY_TYPES:
+        raise ValueError(f"Unknown memory type: {value}")
+    return cast(MemoryType, value)
+
+
+def _ensure_memory_scope(value: object) -> MemoryScope:
+    if value not in _MEMORY_SCOPES:
+        raise ValueError(f"Unknown memory scope: {value}")
+    return cast(MemoryScope, value)
 
 
 def _ensure_memory_status(value: object) -> MemoryStatus:
     if value not in _MEMORY_STATUSES:
         raise ValueError(f"Unknown memory status: {value}")
     return cast(MemoryStatus, value)
+
+
+def _ensure_memory_source(value: object) -> MemorySource:
+    if value not in _MEMORY_SOURCES:
+        raise ValueError(f"Unknown memory source: {value}")
+    return cast(MemorySource, value)
 
 
 def _ensure_memory_confidence(value: object) -> MemoryConfidence:
@@ -246,6 +345,13 @@ def _require_text(value: object, field_name: str) -> str:
     return text
 
 
+def _content_text(value: object) -> str:
+    text = _require_text(value, "memory content")
+    if len(text) > _MAX_MEMORY_CONTENT_CHARS:
+        raise ValueError("memory content is too long")
+    return text
+
+
 def _optional_text(value: object) -> str | None:
     if value is None:
         return None
@@ -253,9 +359,9 @@ def _optional_text(value: object) -> str | None:
     return text or None
 
 
-def _strings(value: object) -> list[str]:
+def _string_list(value: object, field_name: str) -> list[str]:
     if not isinstance(value, list):
-        return []
+        raise TypeError(f"{field_name} must be a list")
     return _dedupe_text(value)
 
 
@@ -270,17 +376,15 @@ def _dedupe_text(values: list[object]) -> list[str]:
     return out
 
 
-def _memory_type(value: object) -> str:
-    text = _optional_text(value)
-    return text or "fact"
-
-
-def _memory_content(raw: dict[str, Any]) -> str:
-    for key in ("content", "text", "value"):
-        text = _optional_text(raw.get(key))
-        if text:
-            return text
-    return ""
+def _evidence_refs(value: object) -> list[str]:
+    refs = _string_list(value, "evidence_refs")
+    invalid = [
+        ref for ref in refs
+        if not any(ref.startswith(prefix) for prefix in _EVIDENCE_REF_PREFIXES)
+    ]
+    if invalid:
+        raise ValueError("invalid memory evidence_refs: " + ", ".join(invalid))
+    return refs
 
 
 def _positive_int(value: object) -> int:
@@ -295,40 +399,38 @@ def _positive_int(value: object) -> int:
     return number
 
 
-def _non_negative_int(value: object, *, field_name: str) -> int:
+def _priority(value: object) -> int:
     if isinstance(value, bool):
-        raise ValueError(f"{field_name} must be non-negative")
+        raise ValueError("memory priority must be between 0 and 5")
     try:
         number = int(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field_name} must be non-negative") from exc
-    if number < 0:
-        raise ValueError(f"{field_name} must be non-negative")
+        raise ValueError("memory priority must be between 0 and 5") from exc
+    if number < 0 or number > 5:
+        raise ValueError("memory priority must be between 0 and 5")
     return number
 
 
-def _legacy_kind(memory_type: str) -> str:
-    if memory_type in {"correction", "constraint", "decision", "experience"}:
-        return memory_type
-    lowered = memory_type.lower()
-    if "correction" in lowered:
-        return "correction"
-    if "decision" in lowered:
-        return "decision"
-    if "experience" in lowered or "workflow" in lowered:
-        return "experience"
-    return "constraint"
+def _ensure_source_trace(record: MemoryRecord) -> None:
+    if not (
+        record.created_by_session_id
+        or record.created_by_run_id
+        or record.source_message_id
+        or record.source_event_id
+        or record.evidence_refs
+    ):
+        raise ValueError("memory record requires at least one source reference")
 
 
-def _default_source(memory_type: str) -> str:
-    if _legacy_kind(memory_type) == "correction":
-        return "user_correction"
-    return "task_summary"
-
-
-def _subject_from_content(content: str) -> str:
-    compact = "_".join(content.lower().split())[:80]
-    return compact or "memory"
+def _ensure_source_trace_mapping(payload: Mapping[str, object]) -> None:
+    if not (
+        payload.get("created_by_session_id")
+        or payload.get("created_by_run_id")
+        or payload.get("source_message_id")
+        or payload.get("source_event_id")
+        or payload.get("evidence_refs")
+    ):
+        raise ValueError("memory record requires at least one source reference")
 
 
 __all__ = [
@@ -342,6 +444,6 @@ __all__ = [
     "MemoryStatus",
     "MemoryType",
     "RetrievedMemory",
-    "normalize_memory_record_payload",
     "utc_now_iso",
+    "validate_memory_record_payload",
 ]

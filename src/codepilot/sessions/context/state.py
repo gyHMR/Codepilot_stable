@@ -382,13 +382,23 @@ class SessionContextState:
         path = state.get("path") if isinstance(state, dict) else None
         source_hash = state.get("sha256") if isinstance(state, dict) else None
 
+        read_paths = _metadata_paths(message.metadata.get("read_paths"))
+
         # 收集所有受影响的路径
         paths = [str(item) for item in message.affected_paths]
+        if _is_successful_read_result(message):
+            for item in read_paths:
+                if item not in paths:
+                    paths.append(item)
         if isinstance(path, str) and path not in paths:
             paths.append(path)
 
-        # 确定文件角色：如果工作区被修改则为 target，否则为 reference
-        role = "target" if message.workspace_changed else "reference"
+        # 确定文件角色：修改或直接读取的文件都属于当前 working set 目标。
+        role = (
+            "target"
+            if message.workspace_changed or _is_successful_read_result(message)
+            else "reference"
+        )
 
         # 更新活跃文件
         for item in paths:
@@ -640,6 +650,22 @@ def _tool_result_text(message: ToolResultMessage, *, limit: int = 1200) -> str:
     # 拼接并截断
     text = "".join(part for part in parts if part).strip()
     return text[:limit]
+
+
+def _metadata_paths(value: object) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    paths: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text and text not in paths:
+            paths.append(text)
+    return paths
+
+
+def _is_successful_read_result(message: ToolResultMessage) -> bool:
+    status = str(getattr(message, "status", "") or "success")
+    return message.tool_name == "read" and status == "success"
 
 
 def _ensure_file_role(value: str) -> ContextFileRole:

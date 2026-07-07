@@ -188,6 +188,33 @@ def test_session_context_state_caps_verification_only_evidence(
     assert len(state.evidence) == 80
 
 
+def test_session_context_state_promotes_successful_read_paths_to_active_targets(
+    tmp_path: Path,
+) -> None:
+    from codepilot.protocols import TextContent, ToolResultMessage
+    from codepilot.sessions.context.state import SessionContextState
+
+    state = SessionContextState(workspace_dir=tmp_path)
+
+    state.observe_tool_result(
+        ToolResultMessage(
+            tool_call_id="read_1",
+            tool_name="read",
+            content=[TextContent(text="1\tprint('hello')")],
+            status="success",
+            metadata={
+                "read_paths": ["src/app.py"],
+                "file_state": {"path": "src/app.py", "sha256": "abc"},
+            },
+        )
+    )
+
+    active = state.active_files["src/app.py"]
+    assert active.role == "target"
+    assert active.source_hash == "abc"
+    assert active.freshness == "fresh"
+
+
 def test_session_context_state_caps_active_files_by_relevance(tmp_path: Path) -> None:
     from codepilot.sessions.context.state import SessionContextState
 

@@ -3,11 +3,10 @@ from __future__ import annotations
 # 新手导读：memory/files.py 负责记忆文件路径和 JSONL 读写细节。
 # 关注点：业务判断不放这里，避免文件 IO 和策略混在一起。
 
-"""固定 MEMORY.md 辅助工具和记忆文本脱敏。"""
+"""记忆文本脱敏。"""
 
 import logging
 import re
-from pathlib import Path
 
 
 logger = logging.getLogger("codepilot.sessions.memory")
@@ -29,37 +28,6 @@ def sanitize_memory_text(text: str, *, limit: int) -> str:
     return safe[:limit]
 
 
-def load_global_memory(workspace_dir: str | Path) -> str:
-    """加载用户维护的固定记忆文件 `.codepilot/MEMORY.md`。"""
-
-    path = Path(workspace_dir) / ".codepilot" / "MEMORY.md"
-    return _read_memory_file(path)
-
-
-def save_global_memory(workspace_dir: str | Path, content: str) -> None:
-    """保存固定 MEMORY.md（自动记忆机制不会调用此函数，仅用户手动操作）。"""
-
-    path = Path(workspace_dir) / ".codepilot" / "MEMORY.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8", newline="\n")
-    logger.info("global memory saved chars=%d", len(content))
-
-
-def _read_memory_file(path: Path) -> str:
-    if not path.exists():
-        return ""
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-        if text:
-            logger.debug("loaded memory file=%s chars=%d", path, len(text))
-        return text
-    except Exception as exc:
-        logger.warning("failed to read memory file=%s: %s", path, exc)
-        return ""
-
-
 __all__ = [
-    "load_global_memory",
     "sanitize_memory_text",
-    "save_global_memory",
 ]

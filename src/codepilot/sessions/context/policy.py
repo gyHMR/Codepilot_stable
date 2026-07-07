@@ -40,14 +40,18 @@ class ContextPressurePolicy:
             else 1.0
         )
         reasons: list[str] = []
-        if tool_output_tokens >= int(effective_budget * self.tool_output_ratio):
+        tool_output_pressure = tool_output_tokens >= int(
+            effective_budget * self.tool_output_ratio
+        )
+        history_pressure = history_tokens >= int(effective_budget * 0.50)
+        if tool_output_pressure:
             reasons.append("tool_output_pressure")
-        if history_tokens >= int(effective_budget * 0.50):
+        if history_pressure:
             reasons.append("history_pressure")
         if pressure_ratio >= self.critical_ratio:
             level = "critical"
             reasons.append("critical_budget_pressure")
-        elif pressure_ratio >= self.tight_ratio or reasons:
+        elif pressure_ratio >= self.tight_ratio or history_pressure:
             level = "tight"
             if pressure_ratio >= self.tight_ratio:
                 reasons.append("tight_budget_pressure")

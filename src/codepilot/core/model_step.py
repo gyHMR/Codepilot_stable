@@ -139,27 +139,13 @@ async def build_model_request(
     return LLMRequest(
         model=request_data.get("model", input.model),
         messages=tuple(request_data.get("messages", messages)),
-        system_prompt=_system_prompt_with_task_context(request_data),
+        system_prompt=str(request_data.get("system_prompt", "")),
         tools=tuple(request_data.get("tools", tools)),
         correlation=LLMCorrelation(
             run_id=input.run_id,
             session_id=input.correlation.session_id or "",
         ),
     )
-
-
-def _system_prompt_with_task_context(request_data: dict[str, Any]) -> str:
-    system_prompt = str(request_data.get("system_prompt", ""))
-    current_task = request_data.get("current_task")
-    if not isinstance(current_task, str) or not current_task.strip():
-        context = request_data.get("context")
-        if isinstance(context, dict):
-            current_task = context.get("current_task")
-    if not isinstance(current_task, str) or not current_task.strip():
-        return system_prompt
-    if not system_prompt:
-        return current_task
-    return f"{system_prompt}\n\n{current_task}"
 
 
 def tool_catalog_for_request(input: AgentLoopInput, ports: AgentLoopPorts) -> list[Tool]:

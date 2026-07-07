@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-# 新手导读：ToolArtifactLedger 把大工具输出记录为 artifact，并在 prompt 中只放摘要引用。
-# 关注点：这是防止长日志污染上下文的关键位置。
-
-"""工具输出 ledger：保存大输出并为 prompt 生成轻量引用。"""
-
 import hashlib
 import json
 from dataclasses import asdict, dataclass
@@ -12,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from codepilot.llm.estimation import estimate_context_tokens
-from codepilot.protocols import ContextArtifactRef, TextContent, ToolResultMessage
+from codepilot.protocols import ContextArtifactRef, ContextReport, TextContent, ToolResultMessage
 from codepilot.sessions.storage import SessionLayout
 
 
@@ -33,95 +28,66 @@ class ToolLedgerEntry:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ToolLedgerEntry":
-        artifact_data = data.get("artifact", {})
-        artifact = ContextArtifactRef(
-            kind=str(artifact_data.get("kind", "tool_output")),
-            path=str(artifact_data.get("path", "")),
-            source_hash=(
-                str(artifact_data.get("source_hash"))
-                if artifact_data.get("source_hash") is not None
-                else None
-            ),
-            summary=str(artifact_data.get("summary", "")),
-            original_tokens=int(artifact_data.get("original_tokens", 0)),
-            visible_tokens=int(artifact_data.get("visible_tokens", 0)),
-        )
-        verification = data.get("verification")
+    def from_dict(cls, payload: dict[str, Any]) -> "ToolLedgerEntry":
+        artifact = payload.get("artifact") if isinstance(payload.get("artifact"), dict) else {}
+        verification = payload.get("verification")
         return cls(
-            tool_call_id=str(data.get("tool_call_id", "")),
-            run_id=data.get("run_id") if isinstance(data.get("run_id"), str) else None,
-            tool_name=str(data.get("tool_name", "")),
-            status=str(data.get("status", "success")),
-            artifact=artifact,
+            tool_call_id=str(payload.get("tool_call_id") or ""),
+            run_id=payload.get("run_id") if isinstance(payload.get("run_id"), str) else None,
+            tool_name=str(payload.get("tool_name") or ""),
+            status=str(payload.get("status") or "success"),
+            artifact=ContextArtifactRef(
+                kind=str(artifact.get("kind") or "tool_output"),
+                path=str(artifact.get("path") or ""),
+                source_hash=artifact.get("source_hash") if isinstance(artifact.get("source_hash"), str) else None,
+                summary=str(artifact.get("summary") or ""),
+                original_tokens=_int(artifact.get("original_tokens")),
+                visible_tokens=_int(artifact.get("visible_tokens")),
+            ),
             affected_paths=[
-                str(item)
-                for item in data.get("affected_paths", [])
-                if isinstance(item, str)
+                str(path)
+                for path in payload.get("affected_paths", [])
+                if isinstance(path, str)
             ],
             verification=verification if isinstance(verification, dict) else None,
-            error_code=(
-                str(data.get("error_code"))
-                if data.get("error_code") is not None
-                else None
-            ),
-            )
+            error_code=payload.get("error_code") if isinstance(payload.get("error_code"), str) else None,
+        )
 
 
-def normalize_context_view_payload(raw: object) -> dict[str, list[str]]:
-    """Normalize historical context view aliases to the canonical five layers."""
+class ContextLedger:
+    """Append a compact audit record for every prepared context."""
 
-    data = raw if isinstance(raw, dict) else {}
-    return {
-        "stable_rules": _string_list(data.get("stable_rules")),
-        "task_state": _string_list(
-            data.get("task_state")
-            if "task_state" in data
-            else data.get("working_state")
-        ),
-        "working_set": _string_list(
-            data.get("working_set")
-            if "working_set" in data
-            else data.get("evidence")
-        ),
-        "recalled_memory": _string_list(data.get("recalled_memory")),
-        "conversation": _string_list(
-            data.get("conversation")
-            if "conversation" in data
-            else data.get("recent_messages")
-        ),
-        "tools": _string_list(data.get("tools")),
-    }
+    def __init__(self, *, workspace_dir: str | Path, session_id: str) -> None:
+        self.file = SessionLayout.for_workspace(workspace_dir, session_id).context_ledger_file
 
-
-def normalize_context_ledger_entry(raw: object) -> dict[str, Any] | None:
-    """Normalize one context_ledger.jsonl entry without exposing legacy fields."""
-
-    if not isinstance(raw, dict):
-        return None
-    entry = dict(raw)
-    context_view = entry.get("context_view")
-    if isinstance(context_view, dict):
-        entry["context_view"] = normalize_context_view_payload(context_view)
-    return entry
-
-
-def _string_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, str)]
+    def append_projection(self, report: ContextReport, *, run_id: str | None) -> None:
+        payload = {
+            "type": "context_projection",
+            "context_id": report.context_id,
+            "run_id": run_id,
+            "pressure": asdict(report.pressure) if report.pressure else None,
+            "tokens_by_layer": dict(report.tokens_by_layer),
+            "selected_items": list(report.selected_items),
+            "dropped_items": [asdict(item) for item in report.dropped_items],
+            "memory_ids": list(report.retrieved_memory_ids),
+            "artifact_refs": [asdict(item) for item in report.artifact_refs],
+            "prefix_hash": report.prefix_hash,
+            "dynamic_hash": report.dynamic_hash,
+        }
+        self.file.parent.mkdir(parents=True, exist_ok=True)
+        with self.file.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 class ToolArtifactLedger:
-    """Session 级工具输出索引与 artifact 存储。"""
+    """Archive large tool outputs and expose short references to context prep."""
 
     def __init__(self, *, workspace_dir: str | Path, session_id: str) -> None:
         self.workspace_dir = Path(workspace_dir)
         self.session_id = session_id
         self.layout = SessionLayout.for_workspace(self.workspace_dir, self.session_id)
-        self.root = self.layout.session_dir
-        self.artifact_dir = self.layout.tool_outputs_dir
         self.ledger_file = self.layout.context_ledger_file
+        self.artifact_dir = self.layout.tool_outputs_dir
 
     def record_tool_result(
         self,
@@ -134,43 +100,44 @@ class ToolArtifactLedger:
         existing = self._entry_for_call(message.tool_call_id)
         if existing is not None and existing.artifact.source_hash == digest:
             return existing
-        relative = (
+
+        artifact_path = (
             Path(".codepilot")
             / "sessions"
             / self.session_id
             / "artifacts"
             / "tool_outputs"
-            / f"{_artifact_stem(message.tool_call_id, digest)}.txt"
+            / f"{_safe_stem(message.tool_call_id)}_{digest[:12]}.txt"
         )
-        target = self.workspace_dir / relative
+        target = self.workspace_dir / artifact_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8", newline="\n")
+
         summary = _summary_for_tool_result(message, text)
-        visible = _projection_text(message, relative.as_posix(), summary)
-        artifact = ContextArtifactRef(
-            kind="tool_output",
-            path=relative.as_posix(),
-            source_hash=digest,
-            summary=summary,
-            original_tokens=estimate_context_tokens([message], ""),
-            visible_tokens=estimate_context_tokens(
-                [
-                    ToolResultMessage(
-                        tool_call_id=message.tool_call_id,
-                        tool_name=message.tool_name,
-                        content=[TextContent(text=visible)],
-                        status=message.status,
-                    )
-                ],
-                "",
-            ),
-        )
+        visible = _projection_text(message, artifact_path.as_posix(), summary)
         entry = ToolLedgerEntry(
             tool_call_id=message.tool_call_id,
             run_id=run_id,
             tool_name=message.tool_name,
             status=message.status,
-            artifact=artifact,
+            artifact=ContextArtifactRef(
+                kind="tool_output",
+                path=artifact_path.as_posix(),
+                source_hash=digest,
+                summary=summary,
+                original_tokens=estimate_context_tokens([message], ""),
+                visible_tokens=estimate_context_tokens(
+                    [
+                        ToolResultMessage(
+                            tool_call_id=message.tool_call_id,
+                            tool_name=message.tool_name,
+                            content=[TextContent(text=visible)],
+                            status=message.status,
+                        )
+                    ],
+                    "",
+                ),
+            ),
             affected_paths=list(message.affected_paths),
             verification=dict(message.verification) if message.verification else None,
             error_code=message.error_code,
@@ -224,66 +191,53 @@ class ToolArtifactLedger:
     def artifact_refs(self) -> list[ContextArtifactRef]:
         return [entry.artifact for entry in self.load_entries()]
 
-    def _append(self, entry: ToolLedgerEntry) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        with self.ledger_file.open("a", encoding="utf-8", newline="\n") as fp:
-            payload = {"type": "tool_artifact", **entry.to_dict()}
-            fp.write(json.dumps(payload, ensure_ascii=False) + "\n")
-
     def _entry_for_call(self, tool_call_id: str) -> ToolLedgerEntry | None:
         for entry in reversed(self.load_entries()):
             if entry.tool_call_id == tool_call_id:
                 return entry
         return None
 
+    def _append(self, entry: ToolLedgerEntry) -> None:
+        self.ledger_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.ledger_file.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps({"type": "tool_artifact", **entry.to_dict()}, ensure_ascii=False) + "\n")
+
 
 def _tool_text(message: ToolResultMessage) -> str:
     return "".join(getattr(block, "text", "") for block in message.content)
 
 
-def _artifact_stem(tool_call_id: str, digest: str) -> str:
-    raw = tool_call_id or "tool"
-    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw)
-    return f"{safe[:64]}_{digest[:12]}"
+def _safe_stem(value: str) -> str:
+    raw = value or "tool"
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw)[:64]
 
 
 def _summary_for_tool_result(message: ToolResultMessage, text: str) -> str:
     compact = " ".join(text.strip().split())
-    line_count = len(text.splitlines())
-    if len(compact) > 400:
-        compact = f"{line_count} lines, {len(text)} chars archived"
-    elif len(compact) > 240:
-        compact = compact[:240].rstrip() + "..."
+    if len(compact) > 280:
+        compact = f"{len(text.splitlines())} lines, {len(text)} chars archived"
     paths = ", ".join(message.affected_paths)
-    status = f"{message.tool_name} status={message.status}"
+    prefix = f"{message.tool_name} status={message.status}"
     if paths:
-        status = f"{status} paths={paths}"
-    return f"{status}: {compact}" if compact else status
+        prefix += f" paths={paths}"
+    return f"{prefix}: {compact}" if compact else prefix
 
 
-def _projection_text(
-    message: ToolResultMessage,
-    artifact_path: str,
-    summary: str,
-) -> str:
-    verification = (
-        f"\nverification={message.verification}"
-        if message.verification
-        else ""
-    )
-    return (
-        "[Tool output archived]\n"
-        f"tool={message.tool_name}\n"
-        f"status={message.status}\n"
-        f"artifact={artifact_path}\n"
-        f"summary={summary}"
-        f"{verification}"
-    )
+def _projection_text(message: ToolResultMessage, artifact_path: str, summary: str) -> str:
+    lines = [
+        "[Tool output archived]",
+        f"tool={message.tool_name}",
+        f"status={message.status}",
+        f"artifact={artifact_path}",
+        f"summary={summary}",
+    ]
+    if message.verification:
+        lines.append(f"verification={message.verification}")
+    return "\n".join(lines)
 
 
-__all__ = [
-    "ToolArtifactLedger",
-    "ToolLedgerEntry",
-    "normalize_context_ledger_entry",
-    "normalize_context_view_payload",
-]
+def _int(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+__all__ = ["ContextLedger", "ToolArtifactLedger", "ToolLedgerEntry"]

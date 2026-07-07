@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from codepilot.core.contracts import (
-    AgentLoopOutcome,
-)
+from codepilot.core.contracts import AgentLoopOutcome
 from codepilot.llm.ports import ModelDescriptor
 from codepilot.protocols import AgentRunResult, ErrorInfo
 
@@ -19,37 +17,21 @@ from .contracts import (
     SessionRunRecord,
     SessionView,
 )
-from .commit import commit_runtime_run
-from .prepare import (
-    close_runtime_session,
-    describe_runtime_session,
-    new_v2_run_id,
-    prepare_runtime_resume,
-    prepare_runtime_run,
-)
-
-
-if TYPE_CHECKING:
-    from .prepare import SessionRuntime
+from .runtime import SessionRuntime, new_run_id
 
 
 def create_session_controller(options: Any) -> "SessionController":
-    """Create a controller from session-owned runtime options."""
-
-    from .prepare import SessionRuntime
-
     return _bind_session_runtime(SessionRuntime(options))
 
 
-def _bind_session_runtime(session: "SessionRuntime") -> "SessionController":
-    model_value = getattr(getattr(session, "conversation", None), "model", None)
-    descriptor = ModelDescriptor(
-        provider=getattr(model_value, "provider", "unknown"),
-        model_id=getattr(model_value, "id", "unknown"),
-    )
+def _bind_session_runtime(session: SessionRuntime) -> "SessionController":
+    model = session.conversation.model
     return SessionController(
         session_id=session.session_id,
-        model=descriptor,
+        model=ModelDescriptor(
+            provider=getattr(model, "provider", "unknown"),
+            model_id=getattr(model, "id", "unknown"),
+        ),
         task_mode=session.task_mode,
         _session=session,
     )
@@ -58,9 +40,11 @@ def _bind_session_runtime(session: "SessionRuntime") -> "SessionController":
 @dataclass
 class SessionController:
     session_id: str
-    model: ModelDescriptor = field(default_factory=lambda: ModelDescriptor(provider="local", model_id="v2-test"))
+    model: ModelDescriptor = field(
+        default_factory=lambda: ModelDescriptor(provider="local", model_id="v2-test")
+    )
     task_mode: str = "build"
-    _session: Any | None = None
+    _session: SessionRuntime | None = None
     _last_run_id: str | None = None
     _derived_controllers: dict[str, "SessionController"] = field(default_factory=dict)
 
@@ -69,26 +53,19 @@ class SessionController:
             raise ValueError("SessionController requires SessionRuntime")
 
     def describe(self) -> SessionView:
-        return describe_runtime_session(
-            self._session,
-            last_run_id=self._last_run_id,
-        )
+        return self._session.describe(last_run_id=self._last_run_id)
 
     async def prepare_run(self, intent: SessionRunIntent) -> PreparedAgentRun:
-        run_id = intent.run_id or new_v2_run_id()
-        return await prepare_runtime_run(
-            self._session,
+        return await self._session.prepare_run(
             intent,
-            run_id=run_id,
+            run_id=intent.run_id or new_run_id(),
             model=self.model,
         )
 
     async def prepare_resume(self, intent: SessionResumeIntent) -> PreparedAgentRun:
-        run_id = intent.run_id or new_v2_run_id()
-        return await prepare_runtime_resume(
-            self._session,
+        return await self._session.prepare_resume(
             intent,
-            run_id=run_id,
+            run_id=intent.run_id or new_run_id(),
             model=self.model,
         )
 
@@ -98,9 +75,12 @@ class SessionController:
         outcome: AgentLoopOutcome,
     ) -> SessionRunRecord:
         structured_result = isinstance(outcome.error, AgentRunResult)
-        result = outcome.error if structured_result else self._agent_result_from_outcome(prepared, outcome)
-        record = await commit_runtime_run(
-            self._session,
+        result = (
+            outcome.error
+            if structured_result
+            else self._agent_result_from_outcome(prepared, outcome)
+        )
+        record = await self._session.commit_run(
             prepared,
             outcome,
             result,
@@ -120,18 +100,14 @@ class SessionController:
             self.task_mode = str(record.data["task_mode"])
         return record
 
-    def stage_derived_session(self, session: Any) -> None:
-        """Stage a session created by a session command until runtime registers it."""
-
+    def stage_derived_session(self, session: SessionRuntime) -> None:
         self._derived_controllers[session.session_id] = _bind_session_runtime(session)
 
     def claim_derived_controller(self, session_id: str) -> "SessionController" | None:
-        """Return the staged controller for a command-created session."""
-
         return self._derived_controllers.pop(session_id, None)
 
     def close(self) -> None:
-        close_runtime_session(self._session)
+        self._session.close()
 
     def _agent_result_from_outcome(
         self,
@@ -140,7 +116,7 @@ class SessionController:
     ) -> AgentRunResult:
         return AgentRunResult(
             run_id=outcome.run_id,
-            session_id=self.session_id,
+            session_id=self._session.session_id,
             status=_agent_status(outcome.status),
             stop_reason=_agent_stop_reason(outcome.stop_reason),
             counters=outcome.counters,
@@ -153,20 +129,18 @@ class SessionController:
             task=outcome.task,
         )
 
+
 def _agent_status(status: str) -> str:
-    if status == "cancelled":
-        return "aborted"
-    return status
+    return "aborted" if status == "cancelled" else status
 
 
 def _agent_stop_reason(reason: str) -> str:
-    mapping = {
+    return {
         "max_model_turns": "max_iterations",
         "tool_call_limit": "max_iterations",
         "missing_tool_port": "internal_error",
         "missing_approval_decision": "internal_error",
-    }
-    return mapping.get(reason, reason)
+    }.get(reason, reason)
 
 
 def _error_info(error: Any) -> ErrorInfo | None:
@@ -181,3 +155,6 @@ def _error_info(error: Any) -> ErrorInfo | None:
         source="runtime",
         details={"error_type": type(error).__name__},
     )
+
+
+__all__ = ["SessionController", "create_session_controller", "_bind_session_runtime"]

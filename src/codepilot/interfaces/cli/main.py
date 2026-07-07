@@ -1,179 +1,24 @@
 from __future__ import annotations
 
-# 新手导读：CLI main.py 负责解析命令行参数并创建 RuntimeGateway。
-# 关注点：它是用户从命令行进入项目的第一站。
-
-"""
-Codepilot CLI 命令行入口。
-
-设计原则：
-- 参数只用于启动和临时覆盖，长期策略进入配置文件
-- 高频操作简单，低频高级配置仍可访问
-- CLI 是适配层，不复制 Agent、Session 和 Tool 的核心逻辑
-
-示例：
-    codepilot                              # 交互式模式（默认）
-    codepilot -p "解释 main 函数"           # 单次输出模式
-    codepilot --cwd ./project              # 指定工作区
-    codepilot --resume SESSION_ID          # 恢复会话
-    codepilot --model deepseek/deepseek-chat  # 临时覆盖模型
-    codepilot rpc                          # 启动 RPC 模式
-    codepilot config init                  # 初始化配置
-    codepilot config show                  # 查看配置
-"""
+"""Codepilot command line entrypoint."""
 
 import argparse
 import asyncio
-import json
 import sys
 from pathlib import Path
 from typing import Sequence
 
 from codepilot.runtime import RuntimeGateway, SessionOpenIntent
-from codepilot.runtime.configuration import (
-    UnknownRuntimeConfigKeyError,
-    check_workspace_model_config,
-    describe_workspace_config,
-    explain_session_open_config,
+
+from .config import (
+    check_model_config as _check_model_config,
+    init_model_config as _init_model_config,
+    run_config_command,
+    show_config as _show_config,
 )
-
-from .runner import RunOptions, run
-from .render import (
-    create_console,
-    format_config_help_text,
-    format_error_text,
-    format_help_text,
-    render_key_value_panel,
-)
-
-
-_MODEL_CONFIG_TEMPLATE = {
-    "api": "openai-compatible",
-    "provider": "deepseek",
-    "model_id": "deepseek-chat",
-    "base_url": "https://api.deepseek.com/v1",
-    "api_key": "",
-    "api_key_env": "DEEPSEEK_API_KEY",
-    "context_window": 64000,
-    "max_tokens": 8192,
-    "reasoning": False,
-    "vision": False,
-}
-
-
-def _init_model_config(workspace: str | Path) -> None:
-    """初始化模型配置文件。"""
-    from rich import box
-    from rich.panel import Panel
-    from rich.text import Text
-
-    config_file = Path(workspace) / ".codepilot" / "model.local.json"
-    if config_file.exists():
-        raise ValueError(f"Model config already exists: {config_file}")
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    config_file.write_text(
-        json.dumps(_MODEL_CONFIG_TEMPLATE, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-    content = Text()
-    content.append("Created ", style="success")
-    content.append(str(config_file), style="path")
-    content.append("\nEdit api_key or configure api_key_env, then run `codepilot`.", style="value")
-    content.append("\nDo not commit this file to version control.", style="warning")
-    create_console().print(
-        Panel(
-            content,
-            title="[panel.title]CP // CONFIG INIT[/panel.title]",
-            border_style="success",
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
-    )
-
-
-def _check_model_config(workspace: str | Path) -> None:
-    """检查模型配置。"""
-    view = check_workspace_model_config(workspace)
-    render_key_value_panel(
-        "Config Check",
-        list(view.rows),
-        border_style=view.border_style,
-    )
-
-
-def _show_config(workspace: str | Path) -> None:
-    """显示当前配置（脱敏）。"""
-    from rich.table import Table
-    from rich.panel import Panel
-
-    console = create_console()
-    view = describe_workspace_config(workspace)
-
-    # 模型配置表格
-    model_table = Table(show_header=True, box=None, padding=(0, 2))
-    model_table.add_column("Key", style="label", width=12)
-    model_table.add_column("Value", style="value")
-
-    for key, value in view.model_rows:
-        model_table.add_row(str(key), str(value))
-
-    console.print(Panel(model_table, title="[panel.title]CP // MODEL CONFIG[/panel.title]", border_style="panel.border"))
-
-    # 设置表格（只显示非 None 的配置）
-    settings_table = Table(show_header=True, box=None, padding=(0, 2))
-    settings_table.add_column("Key", style="label", width=25)
-    settings_table.add_column("Value", style="value")
-
-    for key, value in view.settings_rows:
-        settings_table.add_row(str(key), str(value))
-
-    console.print(Panel(settings_table, title="[panel.title]CP // SETTINGS[/panel.title]", border_style="panel.border"))
-
-
-def _explain_config(options: SessionOpenIntent, key: str | None) -> None:
-    """解释配置项的来源。
-
-    使用 RuntimeConfigResolver 追踪每个配置项的最终值和来源。
-    """
-    from rich.table import Table
-
-    console = create_console()
-    if not key:
-        console.print("[error]Usage: codepilot config explain <key>[/error]")
-        console.print("[muted2]Available keys: model, provider, model_id, thinking_level, tool_execution, etc.[/muted2]")
-        return
-
-    try:
-        resolved = explain_session_open_config(options, key)
-    except UnknownRuntimeConfigKeyError:
-        console.print(f"[error]Unknown config key: {key}[/error]")
-    except KeyError as exc:
-        raise ValueError(str(exc).strip("'")) from exc
-    else:
-        table = Table(show_header=False, box=None, padding=(0, 2))
-        table.add_column("Field", style="label", width=12)
-        table.add_column("Value", style="value")
-        table.add_row("Key", key)
-        table.add_row("Value", str(resolved.value))
-        table.add_row("Source", _format_source(resolved.source))
-        from rich.panel import Panel
-
-        console.print(Panel(table, title=f"[panel.title]CP // CONFIG: {key}[/panel.title]", border_style="panel.border"))
-
-
-def _format_source(source: object) -> str:
-    """格式化配置来源显示。"""
-    kind = str(getattr(source, "kind", "unknown"))
-    location = getattr(source, "location", None)
-    source_map = {
-        "cli": "CLI argument",
-        "session": "restored session",
-        "project": "project",
-        "default": "built-in default",
-    }
-    label = source_map.get(kind, kind)
-    return f"{label}:{location}" if location else label
+from .interactive import run_once, run_repl
+from .render import format_config_help_text, format_error_text, format_help_text
+from .rpc import run_rpc
 
 
 class CodepilotArgumentParser(argparse.ArgumentParser):
@@ -195,43 +40,29 @@ class CodepilotArgumentParser(argparse.ArgumentParser):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """构建命令行参数解析器。
+    """Build the CLI parser."""
 
-    一级参数只保留高频、启动时需要的配置。
-    低频配置通过配置文件或未来的 --set 机制覆盖。
-    """
     parser = CodepilotArgumentParser(
         description="Codepilot - Local AI Coding Agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
-        epilog="""\
-Examples:
-  codepilot                              Interactive mode (default)
-  codepilot -p "explain this function"   Single prompt mode
-  codepilot --cwd ./project              Specify workspace
-  codepilot --resume SESSION_ID          Resume session
-  codepilot --model deepseek/deepseek-chat  Override model
-  codepilot rpc                          Start RPC mode
-  codepilot config init                  Initialize config
-  codepilot config show                  Show current config
-""",
     )
-
-    # ── 核心参数（推荐使用） ─────────────────────────────────────
-
     parser.add_argument(
-        "-p", "--prompt",
+        "-p",
+        "--prompt",
         default=None,
         help="Single prompt mode: run once and exit",
     )
     parser.add_argument(
-        "--cwd", "--workspace",
+        "--cwd",
+        "--workspace",
         default=".",
         dest="workspace",
         help="Workspace directory (default: current directory)",
     )
     parser.add_argument(
-        "--resume", "--session-id",
+        "--resume",
+        "--session-id",
         default=None,
         dest="session_id",
         help="Resume existing session by ID",
@@ -278,11 +109,7 @@ Examples:
         version="%(prog)s 0.3",
     )
 
-    # ── 子命令 ──────────────────────────────────────────────────
-
     subparsers = parser.add_subparsers(dest="command", parser_class=CodepilotArgumentParser)
-
-    # config 子命令
     config_parser = subparsers.add_parser(
         "config",
         help="Configuration management",
@@ -299,100 +126,17 @@ Examples:
         default=None,
         help="Config key to explain (for 'explain' action)",
     )
-
-    # rpc 子命令
     subparsers.add_parser("rpc", help="Start RPC mode (JSONL protocol)")
-
     return parser
 
 
-def _resolve_run_mode(args: argparse.Namespace) -> str:
-    """解析运行模式。
+def build_session_intent(args: argparse.Namespace) -> SessionOpenIntent:
+    """Translate parsed CLI args into the runtime session-open contract."""
 
-    优先级：-p 参数、rpc 子命令、默认交互模式。
-    """
-    if args.prompt:
-        return "print"
-    if args.command == "rpc":
-        return "rpc"
-    return "interactive"
-
-
-def _resolve_model_id(args: argparse.Namespace) -> tuple[str | None, str | None]:
-    """解析模型标识。
-
-    --model 必须使用 provider/model-id 格式。
-
-    返回:
-        (provider, model_id) 元组
-    """
-    if args.model:
-        parts = args.model.split("/", 1)
-        if len(parts) != 2 or not all(part.strip() for part in parts):
-            raise ValueError("--model must use provider/model-id format")
-        return parts[0], parts[1]
-    return None, None
-
-
-def _resolve_permission_mode(args: argparse.Namespace) -> str | None:
-    """解析权限模式。"""
-    return args.permission_mode
-
-
-async def _run_from_args(args: argparse.Namespace) -> int:
-    """根据解析后的命令行参数执行 Agent 会话。
-
-    主要流程：
-    1. 处理 config 子命令
-    2. 将 CLI 参数转换为 SessionOpenIntent
-    3. 通过 RuntimeGateway 创建 Agent 会话
-    4. 执行会话管理操作或正常运行
-    5. 确保会话在退出时正确关闭
-    """
-    workspace = Path(args.workspace)
-
-    # ── 处理 config 子命令 ──────────────────────────────────────
-
-    if args.command == "config":
-        if args.config_action == "init":
-            _init_model_config(workspace)
-            return 0
-        if args.config_action == "show":
-            _show_config(workspace)
-            return 0
-        if args.config_action == "check":
-            _check_model_config(workspace)
-            return 0
-        if args.config_action == "explain":
-            provider, model_id = _resolve_model_id(args)
-            _explain_config(
-                SessionOpenIntent(
-                    workspace_dir=workspace,
-                    provider=provider,
-                    model_id=model_id,
-                    session_id=args.session_id,
-                    read_only_mode=(
-                        args.permission_mode == "read-only"
-                        if args.permission_mode is not None
-                        else None
-                    ),
-                    tool_permission_mode=args.permission_mode,
-                    task_mode=args.task_mode,
-                    planning_budget_profile=args.planning_budget_profile,
-                ),
-                args.config_key,
-            )
-            return 0
-
-    # ── 解析运行模式和模型 ──────────────────────────────────────
-
-    run_mode = _resolve_run_mode(args)
-    provider, model_id = _resolve_model_id(args)
-    permission_mode = _resolve_permission_mode(args)
-    # ── 构建会话配置 ────────────────────────────────────────────
-
-    options = SessionOpenIntent(
-        workspace_dir=workspace,
+    provider, model_id = _resolve_model_id(args.model)
+    permission_mode = args.permission_mode
+    return SessionOpenIntent(
+        workspace_dir=Path(args.workspace),
         provider=provider,
         model_id=model_id,
         session_id=args.session_id,
@@ -406,38 +150,53 @@ async def _run_from_args(args: argparse.Namespace) -> int:
         planning_budget_profile=args.planning_budget_profile,
     )
 
-    # ── 创建会话并运行 ──────────────────────────────────────────
+
+async def _run_from_args(args: argparse.Namespace) -> int:
+    """Run the selected CLI mode from parsed args."""
+
+    intent = build_session_intent(args)
+    if args.command == "config":
+        run_config_command(
+            args.config_action,
+            workspace=Path(args.workspace),
+            key=args.config_key,
+            intent=intent,
+        )
+        return 0
 
     runtime = RuntimeGateway()
-    handle = runtime.open_session(options)
-
+    handle = runtime.open_session(intent)
     try:
-        await run(
-            RunOptions(
-                mode=run_mode,
-                session_id=handle.session_id,
-                runtime=runtime,
-                prompt=args.prompt,
+        if args.command == "rpc":
+            await run_rpc(runtime, handle.session_id)
+        elif args.prompt:
+            await run_once(runtime, handle.session_id, args.prompt)
+        else:
+            await run_repl(
+                runtime,
+                handle.session_id,
                 verbose=args.verbose,
                 no_color=args.no_color,
             )
-        )
     finally:
-        # 关闭所有会话（包括 fork 出来的新会话）
         await runtime.close_all()
-
     return 0
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """CLI 主入口函数。
+def _resolve_model_id(model: str | None) -> tuple[str | None, str | None]:
+    if model is None:
+        return None, None
+    parts = model.split("/", 1)
+    if len(parts) != 2 or not all(part.strip() for part in parts):
+        raise ValueError("--model must use provider/model-id format")
+    return parts[0].strip(), parts[1].strip()
 
-    解析命令行参数，启动异步事件循环执行 Agent 会话。
-    捕获 ValueError 并通过 parser.error() 输出友好的错误信息。
-    """
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Parse CLI args and run the selected mode."""
+
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
-
     try:
         return asyncio.run(_run_from_args(args))
     except KeyboardInterrupt:
@@ -448,6 +207,5 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
 
-# 脚本直接运行时的入口点
 if __name__ == "__main__":
     raise SystemExit(main())

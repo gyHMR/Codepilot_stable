@@ -88,7 +88,7 @@ def test_shell_ctrl_c_exits_prompt_and_keyboard_interrupt_is_not_swallowed(
 
 
 def test_interactive_runner_passes_dynamic_toolbar_and_prompt(monkeypatch) -> None:
-    from codepilot.interfaces.cli import runner
+    from codepilot.interfaces.cli import interactive
 
     calls: dict[str, object] = {}
 
@@ -109,6 +109,9 @@ def test_interactive_runner_passes_dynamic_toolbar_and_prompt(monkeypatch) -> No
             calls["toolbar_state"] = state
             return "<b>model</b> · permission"
 
+        def build_shell_prompt(self):
+            return "<prompt>╭─ YOU</prompt>\n<prompt>╰─› </prompt>"
+
         def render_status(self, message, *, kind="info"):
             calls["status"] = (message, kind)
 
@@ -125,21 +128,21 @@ def test_interactive_runner_passes_dynamic_toolbar_and_prompt(monkeypatch) -> No
                 )
             )
 
-    monkeypatch.setattr(runner, "TerminalRenderer", FakeRenderer)
+    monkeypatch.setattr(interactive, "TerminalRenderer", FakeRenderer)
     monkeypatch.setattr("codepilot.interfaces.cli.shell.create_shell", lambda **_kwargs: FakeShell())
 
-    asyncio.run(runner.run_interactive(FakeRuntime(), "session-123"))
+    asyncio.run(interactive.run_repl(FakeRuntime(), "session-123"))
 
     assert calls["renderer_init"]["output"] is print
     assert calls["prompt"] == {
-        "prompt_text": "› ",
+        "prompt_text": "<prompt>╭─ YOU</prompt>\n<prompt>╰─› </prompt>",
         "bottom_toolbar": "<b>model</b> · permission",
     }
     assert calls["status"] == ("Bye.", "info")
 
 
 def test_interactive_runner_exits_when_shell_raises_keyboard_interrupt(monkeypatch) -> None:
-    from codepilot.interfaces.cli import runner
+    from codepilot.interfaces.cli import interactive
 
     calls: dict[str, object] = {}
 
@@ -157,6 +160,9 @@ def test_interactive_runner_exits_when_shell_raises_keyboard_interrupt(monkeypat
         def build_toolbar(self, _state):
             return "toolbar"
 
+        def build_shell_prompt(self):
+            return "prompt"
+
         def render_status(self, message, *, kind="info"):
             calls["status"] = (message, kind)
 
@@ -173,9 +179,9 @@ def test_interactive_runner_exits_when_shell_raises_keyboard_interrupt(monkeypat
                 )
             )
 
-    monkeypatch.setattr(runner, "TerminalRenderer", FakeRenderer)
+    monkeypatch.setattr(interactive, "TerminalRenderer", FakeRenderer)
     monkeypatch.setattr("codepilot.interfaces.cli.shell.create_shell", lambda **_kwargs: FakeShell())
 
-    asyncio.run(runner.run_interactive(FakeRuntime(), "session-123"))
+    asyncio.run(interactive.run_repl(FakeRuntime(), "session-123"))
 
     assert calls["status"] == ("Bye.", "info")

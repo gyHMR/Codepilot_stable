@@ -1,27 +1,24 @@
 from __future__ import annotations
 
-# 新手导读：MemoryRetriever 根据当前任务和模式召回相关记忆进入上下文。
-# 关注点：它只负责找记忆，不负责决定是否写入新记忆。
+# 新手导读：MemoryRetriever 只读 memories.jsonl，给 ContextGovernor 返回可解释召回结果。
+# 关注点：candidate/disabled/superseded/deleted 都不会进入上下文。
 
-"""Layered durable memory recall."""
+"""Canonical Memory v4 retrieval."""
 
 import re
 from pathlib import Path
 
-from .files import load_global_memory, sanitize_memory_text
 from .records import MemoryQuery, MemoryRecall, MemoryRecord, RetrievedMemory
 from .rendering import render_memory
 from .store import MemoryStore
 
 
-PINNED_MEMORY_LIMIT = 2000
 MEMORY_RECALL_MIN = 3
 MEMORY_RECALL_MAX = 5
-EXPERIENCE_LIMIT = 3
 
 
 class MemoryRetriever:
-    """Recall durable memory for ContextGovernor."""
+    """Recall active durable memory for context projection."""
 
     def __init__(self, *, store: MemoryStore, workspace_dir: str | Path) -> None:
         self.store = store
@@ -29,216 +26,177 @@ class MemoryRetriever:
 
     def recall(self, query: MemoryQuery) -> MemoryRecall:
         dropped: dict[str, str] = {}
-        active: list[MemoryRecord] = []
+        scored: list[RetrievedMemory] = []
         for record in self.store.all_records():
-            reason = record.retrieval_exclusion_reason()
+            reason = _drop_reason(record, query)
             if reason is not None:
                 dropped[record.id] = reason
                 continue
-            if _conflicts_with_current_instruction(record, query):
-                dropped[record.id] = "conflict:latest_instruction"
+            item = score_memory_record(record, query)
+            if item is None:
+                dropped[record.id] = "low_score"
                 continue
-            active.append(record)
+            scored.append(item)
 
-        forced = [
-            item
-            for record in active
-            if record.type == "correction"
-            if (item := score_memory_record(record, query, force_reason="layer:correction"))
-            is not None
-        ]
-        always_constraints = [
-            item
-            for record in active
-            if record.type == "constraint" and "always" in record.keywords
-            if (item := score_memory_record(record, query, force_reason="layer:always_constraint"))
-            is not None
-        ]
-        selected_candidates = [
-            scored
-            for record in active
-            if record.type not in {"correction"}
-            and not (record.type == "constraint" and "always" in record.keywords)
-            if (scored := score_memory_record(record, query)) is not None
-        ]
-        selected_candidates.sort(
-            key=lambda item: (_kind_order(item.record.type), item.score, item.record.updated_at),
-            reverse=True,
-        )
         ranked = _dedupe_by_subject(
             sorted(
-                [*forced, *always_constraints, *selected_candidates],
-                key=lambda item: (item.score, item.record.priority, item.record.updated_at),
+                scored,
+                key=lambda item: (
+                    item.score,
+                    item.record.priority,
+                    item.record.updated_at,
+                ),
                 reverse=True,
-            )
+            ),
+            dropped,
         )
         limit = min(MEMORY_RECALL_MAX, max(MEMORY_RECALL_MIN, query.limit))
-        selected_total = ranked[:limit]
-        always = [
-            item for item in selected_total
-            if any(reason.startswith("layer:") for reason in item.reasons)
-        ]
-        selected = _apply_selected_limits(
-            [
-                item for item in selected_total
-                if not any(reason.startswith("layer:") for reason in item.reasons)
-            ],
-            limit - len(always),
-        )
+        selected = ranked[:limit]
+        selected_ids = {item.record.id for item in selected}
+        for item in ranked[limit:]:
+            if item.record.id not in dropped:
+                dropped[item.record.id] = "over_limit"
         return MemoryRecall(
-            pinned_text=self.pinned_memory(),
-            always=always,
-            selected=selected,
-            dropped=dropped,
+            retrieved=selected,
+            dropped={
+                memory_id: reason
+                for memory_id, reason in dropped.items()
+                if memory_id not in selected_ids
+            },
         )
 
-    def validate_freshness(self) -> list[MemoryRecord]:
-        return []
 
-    def pinned_memory(self) -> str:
-        text = load_global_memory(self.workspace_dir)
-        return sanitize_memory_text(text, limit=PINNED_MEMORY_LIMIT)
-
-
-def score_memory_record(
-    record: MemoryRecord,
-    query: MemoryQuery,
-    *,
-    force_reason: str | None = None,
-) -> RetrievedMemory | None:
-    if record.retrieval_exclusion_reason() is not None:
-        return None
-
+def score_memory_record(record: MemoryRecord, query: MemoryQuery) -> RetrievedMemory | None:
     score = 0
     reasons: list[str] = []
-    if force_reason:
-        score += 1000 if force_reason == "layer:correction" else 500
-        reasons.append(force_reason)
-
-    trigger_score, trigger_reasons = _trigger_score(record, query)
-    score += trigger_score
-    reasons.extend(trigger_reasons)
-
-    keyword_matches = sorted(_keyword_matches(_terms(query.text), _terms(render_memory(record))))
-    if keyword_matches:
-        score += min(40, len(keyword_matches) * 10)
-        reasons.append(f"keyword:{keyword_matches[0]}")
+    query_terms = _terms(query.text)
+    rendered_terms = _terms(render_memory(record))
 
     if record.scope == "project":
-        score += 10
+        score += 20
         reasons.append("scope:project")
+    elif record.scope == "workspace":
+        score += 12
+        reasons.append("scope:workspace")
+    elif record.scope == "global":
+        score += 6
+        reasons.append("scope:global")
 
-    mode = query.retrieval_mode or ""
-    if record.type == "decision" and mode in {"qa", "plan", "design"}:
-        score += 40
-        reasons.append(f"mode:{mode}_decision")
-    if record.type == "constraint" and (mode in {"qa", "plan", "design"} or keyword_matches):
-        score += 25
-        reasons.append("constraint_relevant")
-    if record.type == "experience":
-        if mode in {"repair", "verify"}:
-            score += 35
-            reasons.append(f"mode:{mode}_experience")
-        if query.recent_error and f"error:{query.recent_error}" in record.keywords:
-            score += 60
-            reasons.append(f"error:{query.recent_error}")
-        if query.action_intent and f"intent:{query.action_intent}" in record.keywords:
-            score += 40
-            reasons.append(f"intent:{query.action_intent}")
-        if record.occurrences > 1:
-            score += min(30, record.occurrences * 10)
-            reasons.append(f"occurrences:{record.occurrences}")
+    type_score = {
+        "constraint": 35,
+        "correction": 35,
+        "preference": 25,
+        "decision": 22,
+        "workflow": 20,
+        "experience": 18,
+    }.get(record.type, 0)
+    score += type_score
+    reasons.append(f"type:{record.type}")
+
+    subject_matches = _keyword_matches(query_terms, _terms(record.subject))
+    if subject_matches:
+        score += min(35, len(subject_matches) * 12)
+        reasons.append(f"subject:{sorted(subject_matches)[0]}")
+
+    keyword_matches = _keyword_matches(query_terms, set(_keywords(record)) | rendered_terms)
+    if keyword_matches:
+        score += min(45, len(keyword_matches) * 10)
+        reasons.append(f"keyword:{sorted(keyword_matches)[0]}")
+
+    path_matches = _path_matches(record, query)
+    if path_matches:
+        score += min(40, len(path_matches) * 15)
+        reasons.append(f"path:{path_matches[0]}")
+
+    task_score, task_reasons = _task_signal_score(record, query)
+    score += task_score
+    reasons.extend(task_reasons)
+
+    if record.priority:
+        score += record.priority * 8
+        reasons.append(f"priority:{record.priority}")
+    if record.occurrences > 1:
+        score += min(20, record.occurrences * 5)
+        reasons.append(f"occurrences:{record.occurrences}")
 
     if score <= 0:
         return None
     return RetrievedMemory(record=record, score=score, reasons=_dedupe(reasons))
 
 
-def _trigger_score(record: MemoryRecord, query: MemoryQuery) -> tuple[int, list[str]]:
+def _drop_reason(record: MemoryRecord, query: MemoryQuery) -> str | None:
+    if record.status != "active":
+        return f"status:{record.status}"
+    if record.scope not in {"project", "workspace", "global"}:
+        return f"scope:{record.scope}"
+    if _conflicts_with_current_instruction(record, query):
+        return "conflict:latest_instruction"
+    return None
+
+
+def _path_matches(record: MemoryRecord, query: MemoryQuery) -> list[str]:
+    active = {Path(path).as_posix() for path in [*query.active_paths, *query.changed_paths]}
+    matches: list[str] = []
+    for path in record.paths:
+        normalized = Path(path).as_posix()
+        if normalized in active:
+            matches.append(normalized)
+    for keyword in _keywords(record):
+        if keyword.startswith("path:"):
+            path = keyword.removeprefix("path:")
+            if path in active:
+                matches.append(path)
+    return _dedupe(matches)
+
+
+def _task_signal_score(record: MemoryRecord, query: MemoryQuery) -> tuple[int, list[str]]:
     score = 0
     reasons: list[str] = []
-    active_paths = {Path(path).as_posix() for path in query.active_paths}
-    for trigger in record.keywords:
-        if trigger == "always":
-            score += 100
-            reasons.append("trigger:always")
-        elif trigger.startswith("path:"):
-            path = trigger.removeprefix("path:")
-            if path in active_paths:
-                score += 50
-                reasons.append(f"path:{path}")
-        elif trigger.startswith("topic:"):
-            topic = trigger.removeprefix("topic:")
-            if topic and (topic in query.text.lower() or topic in _terms(query.text)):
-                score += 30
-                reasons.append(f"topic:{topic}")
-        elif trigger.startswith("phase:") and query.task_phase:
-            phase = trigger.removeprefix("phase:")
-            if phase == query.task_phase:
-                score += 25
-                reasons.append(f"phase:{phase}")
-        elif trigger.startswith("intent:") and query.action_intent:
-            intent = trigger.removeprefix("intent:")
-            if intent == query.action_intent:
-                score += 35
-                reasons.append(f"intent:{intent}")
-        elif trigger.startswith("error:") and query.recent_error:
-            error = trigger.removeprefix("error:")
-            if error == query.recent_error:
-                score += 50
-                reasons.append(f"error:{error}")
+    keywords = _keywords(record)
+    if query.current_mode and f"mode:{query.current_mode}" in keywords:
+        score += 25
+        reasons.append(f"mode:{query.current_mode}")
+    if query.current_step_kind and f"kind:{query.current_step_kind}" in keywords:
+        score += 25
+        reasons.append(f"kind:{query.current_step_kind}")
+    if query.verification_status and record.type == "experience":
+        score += 10
+        reasons.append(f"verification:{query.verification_status}")
+    if query.blocked_reason:
+        matches = _keyword_matches(_terms(query.blocked_reason), set(keywords) | _terms(record.content))
+        if matches:
+            score += 35
+            reasons.append(f"blocked:{sorted(matches)[0]}")
     return score, reasons
 
 
-def _apply_selected_limits(
-    candidates: list[RetrievedMemory],
-    total_limit: int,
+def _dedupe_by_subject(
+    items: list[RetrievedMemory],
+    dropped: dict[str, str],
 ) -> list[RetrievedMemory]:
-    if total_limit <= 0:
-        return []
-    limits = {
-        "constraint": 3,
-        "decision": 2,
-        "experience": EXPERIENCE_LIMIT,
-    }
-    counts: dict[str, int] = {}
-    selected: list[RetrievedMemory] = []
-    for item in candidates:
-        kind = item.record.type
-        if counts.get(kind, 0) >= limits.get(kind, total_limit):
-            continue
-        selected.append(item)
-        counts[kind] = counts.get(kind, 0) + 1
-        if len(selected) >= total_limit:
-            break
-    selected.sort(key=lambda item: _output_order(item.record.type))
-    return selected
-
-
-def _dedupe_by_subject(items: list[RetrievedMemory]) -> list[RetrievedMemory]:
     best: dict[str, RetrievedMemory] = {}
     order: list[str] = []
     for item in items:
         subject = item.record.subject.lower()
-        if subject not in best:
+        previous = best.get(subject)
+        if previous is None:
             best[subject] = item
             order.append(subject)
             continue
-        previous = best[subject]
         if (item.score, item.record.priority, item.record.updated_at) > (
             previous.score,
             previous.record.priority,
             previous.record.updated_at,
         ):
+            dropped[previous.record.id] = "duplicate_subject"
             best[subject] = item
+        else:
+            dropped[item.record.id] = "duplicate_subject"
     return [best[subject] for subject in order]
 
 
-def _conflicts_with_current_instruction(
-    record: MemoryRecord,
-    query: MemoryQuery,
-) -> bool:
-    text = query.text.lower()
+def _conflicts_with_current_instruction(record: MemoryRecord, query: MemoryQuery) -> bool:
+    text = query.latest_user_message.lower()
     if not text:
         return False
     if not any(
@@ -258,27 +216,9 @@ def _conflicts_with_current_instruction(
         )
     ):
         return False
-    query_terms = _terms(query.text)
-    subject_terms = _terms(record.subject)
-    value_terms = _terms(record.value)
-    keywords = {item.lower() for item in record.keywords}
-    return bool(query_terms.intersection(subject_terms | value_terms | keywords))
-
-
-def _output_order(kind: str) -> int:
-    return {
-        "constraint": 0,
-        "decision": 1,
-        "experience": 2,
-    }.get(kind, 9)
-
-
-def _kind_order(kind: str) -> int:
-    return {
-        "constraint": 1,
-        "decision": 2,
-        "experience": 3,
-    }.get(kind, 0)
+    query_terms = _terms(query.latest_user_message)
+    record_terms = _terms(record.subject) | _terms(record.value) | set(_keywords(record))
+    return bool(_keyword_matches(query_terms, record_terms))
 
 
 def _terms(text: str) -> set[str]:
@@ -289,22 +229,27 @@ def _terms(text: str) -> set[str]:
 
 
 def _keyword_matches(query_terms: set[str], record_terms: set[str]) -> set[str]:
-    matches = set(query_terms.intersection(record_terms))
+    matches = set(query_terms.intersection({term.lower() for term in record_terms}))
     for query_term in query_terms:
         for record_term in record_terms:
-            if query_term == record_term:
+            normalized = record_term.lower()
+            if query_term == normalized:
                 continue
-            if query_term in record_term or record_term in query_term:
-                matches.add(record_term)
+            if query_term in normalized or normalized in query_term:
+                matches.add(normalized)
     return matches
 
 
 def _dedupe(items: list[str]) -> list[str]:
     out: list[str] = []
     for item in items:
-        if item not in out:
+        if item and item not in out:
             out.append(item)
     return out
+
+
+def _keywords(record: MemoryRecord) -> list[str]:
+    return list(getattr(record, "keywords"))
 
 
 __all__ = ["MemoryRetriever", "score_memory_record"]

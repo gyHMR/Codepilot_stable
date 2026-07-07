@@ -44,7 +44,7 @@ def test_permission_policy_supports_future_approval_flow() -> None:
 
 def test_permission_policy_uses_tool_metadata_for_read_only() -> None:
     from codepilot.tools.policy import PermissionPolicy, ToolRequest
-    from codepilot.tools.authoring import ToolMetadata
+    from codepilot.protocols import ToolMetadata
 
     metadata = ToolMetadata(
         name="database.query",
@@ -66,7 +66,7 @@ def test_permission_policy_uses_tool_metadata_for_read_only() -> None:
 
 def test_permission_policy_requires_approval_for_high_risk_metadata() -> None:
     from codepilot.tools.policy import PermissionPolicy, ToolRequest
-    from codepilot.tools.authoring import ToolMetadata
+    from codepilot.protocols import ToolMetadata
 
     metadata = ToolMetadata(
         name="email.send",
@@ -105,7 +105,7 @@ def test_tool_runtime_preserves_denied_status() -> None:
 async def _run_tool_runtime_blocks_dangerous_bash_before_execution() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
-    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.engine import ToolRuntime
     from codepilot.tools.authoring import ToolRuntimeRequest
 
@@ -146,9 +146,10 @@ async def _run_tool_runtime_blocks_dangerous_bash_before_execution() -> None:
 async def _run_tool_runtime_requires_approval_for_high_risk_tool() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
-    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.engine import ToolRuntime
-    from codepilot.tools.authoring import ToolMetadata, ToolRuntimeRequest
+    from codepilot.protocols import ToolMetadata
+    from codepilot.tools.authoring import ToolRuntimeRequest
 
     executed = False
 
@@ -201,7 +202,7 @@ async def _run_tool_runtime_preserves_denied_status() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
     from codepilot.tools.authoring import ToolRuntimeRequest
-    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.engine import ToolRuntime
 
     executed = False
@@ -242,7 +243,7 @@ async def _run_tool_runtime_preserves_denied_status() -> None:
 def test_unknown_external_tool_metadata_is_conservative() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
-    from codepilot.tools.authoring import ToolRegistry
+    from codepilot.tools.registry import ToolRegistry
 
     async def execute(tool_call_id, params, signal=None, on_update=None):
         _ = tool_call_id, params, signal, on_update
@@ -271,9 +272,9 @@ def test_unknown_external_tool_metadata_is_conservative() -> None:
 def test_read_only_tool_assembly_filters_by_metadata(tmp_path: Path) -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools import AgentTool, AgentToolResult
-    from codepilot.runtime.assemble import RuntimeConfig
-    from codepilot.runtime.assemble import assemble_tools
-    from codepilot.runtime.assemble import RuntimeAssemblyIntent
+    from codepilot.runtime import SessionOpenIntent
+    from codepilot.runtime.config import load_runtime_config
+    from codepilot.runtime.tools import build_runtime_tools
 
     async def execute(tool_call_id, params, signal=None, on_update=None):
         _ = tool_call_id, params, signal, on_update
@@ -286,37 +287,17 @@ def test_read_only_tool_assembly_filters_by_metadata(tmp_path: Path) -> None:
         parameters={},
         execute=execute,
     )
-    config = RuntimeConfig(
-        system_prompt="",
-        thinking_level="off",
-        tool_execution="parallel",
-        task_mode="build",
-        planning_budget_profile="balanced",
-        retry_enabled=True,
-        max_retries=2,
-        retry_base_delay_ms=1200,
+    intent = SessionOpenIntent(
+        workspace_dir=tmp_path,
+        tools=[external_tool],
         read_only_mode=True,
-        block_dangerous_bash=True,
-        bash_allow_patterns=None,
-        bash_block_patterns=None,
-        edit_require_unique_match=True,
-        extension_paths=[],
-        skill_paths=[],
-        mcp_servers=[],
-        prompt_guidelines=None,
-        append_system_prompt=None,
-        prompt_debug_sources=False,
-        tool_snippets=None,
-        enabled_builtin_tools=None,
+        load_workspace_resources=False,
     )
-    assembled = assemble_tools(
-        tmp_path,
-        RuntimeAssemblyIntent(workspace_dir=tmp_path, tools=[external_tool]),
-        config,
-    )
+    config = load_runtime_config(intent)
+    assembled = build_runtime_tools(tmp_path, intent, config)
 
-    names = {tool.name for tool in assembled.tools}
-    registered_names = {tool.name for tool in assembled.registered_tools}
+    names = {tool.name for tool in assembled.specs}
+    registered_names = {tool.name for tool in assembled.runtime.registry.list()}
 
     assert "read" in names
     assert "grep" in names
@@ -325,9 +306,9 @@ def test_read_only_tool_assembly_filters_by_metadata(tmp_path: Path) -> None:
 
 
 def test_tool_assembly_exposes_skill_loader_tool(tmp_path: Path) -> None:
-    from codepilot.runtime.assemble import RuntimeConfig
-    from codepilot.runtime.assemble import assemble_tools
-    from codepilot.runtime.assemble import RuntimeAssemblyIntent
+    from codepilot.runtime import SessionOpenIntent
+    from codepilot.runtime.config import load_runtime_config
+    from codepilot.runtime.tools import build_runtime_tools
     from codepilot.tools.authoring import ToolRuntimeRequest
 
     skill_file = tmp_path / "triage.md"
@@ -345,43 +326,23 @@ def test_tool_assembly_exposes_skill_loader_tool(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    config = RuntimeConfig(
-        system_prompt="",
-        thinking_level="off",
-        tool_execution="parallel",
-        task_mode="build",
-        planning_budget_profile="balanced",
-        retry_enabled=True,
-        max_retries=2,
-        retry_base_delay_ms=1200,
+    intent = SessionOpenIntent(
+        workspace_dir=tmp_path,
         read_only_mode=True,
-        block_dangerous_bash=True,
-        bash_allow_patterns=None,
-        bash_block_patterns=None,
-        edit_require_unique_match=True,
-        extension_paths=[],
         skill_paths=[str(skill_file)],
-        mcp_servers=[],
-        prompt_guidelines=None,
-        append_system_prompt=None,
-        prompt_debug_sources=False,
-        tool_snippets=None,
-        enabled_builtin_tools=None,
+        load_workspace_resources=False,
     )
+    config = load_runtime_config(intent)
 
-    assembled = assemble_tools(
-        tmp_path,
-        RuntimeAssemblyIntent(workspace_dir=tmp_path),
-        config,
-    )
-    tools = {tool.name: tool for tool in assembled.tools}
-    registered = {tool.name: tool for tool in assembled.registered_tools}
+    assembled = build_runtime_tools(tmp_path, intent, config)
+    tools = {tool.name: tool for tool in assembled.specs}
+    registered = {tool.name: tool for tool in assembled.runtime.registry.list()}
 
     assert "load_skill" in tools
     assert "load_skill" in registered
     assert not hasattr(tools["load_skill"], "execute")
     runtime_result = asyncio.run(
-        assembled.tool_runtime.execute(
+        assembled.runtime.execute(
             ToolRuntimeRequest(
                 tool_call_id="call_skill",
                 name="load_skill",

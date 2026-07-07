@@ -43,18 +43,16 @@ class AgentContext:
     system_prompt: str
     messages: list[AgentMessage]
     tools: list[Tool] = field(default_factory=list)
-    current_task: str | None = None
-    task_recovery_projection: dict[str, object] | None = None
+    task_state: dict[str, object] | None = None
     task_signal: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         self.system_prompt = _clean_core_text(self.system_prompt)
         self.messages = _copy_messages(self.messages, field_name="messages")
         self.tools = _copy_tools(self.tools, field_name="tools")
-        self.current_task = _optional_core_text(self.current_task)
-        self.task_recovery_projection = _copy_optional_dict(
-            self.task_recovery_projection,
-            field_name="task_recovery_projection",
+        self.task_state = _copy_optional_dict(
+            self.task_state,
+            field_name="task_state",
         )
         self.task_signal = _copy_optional_dict(
             self.task_signal,
@@ -135,7 +133,7 @@ class RunCorrelation:
 @dataclass(frozen=True)
 class AgentLoopLimits:
     max_model_turns: int = 12
-    max_tool_iterations: int = 12
+    max_tool_iterations: int = 48
     max_tool_calls_per_turn: int | None = 8
     max_tool_calls: int | None = None
     repeated_tool_call_limit: int = 3
@@ -170,7 +168,7 @@ class TaskStrategy:
     planning: TaskPlanningState | None = None
     planning_budget_profile: PlanningBudgetProfile = "balanced"
     max_replans_per_run: int | None = None
-    recovery_projection: dict[str, object] | None = None
+    task_state: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "enabled", bool(self.enabled))
@@ -193,11 +191,11 @@ class TaskStrategy:
             "max_replans_per_run",
             _positive_int_or_none(self.max_replans_per_run),
         )
-        if self.recovery_projection is not None:
+        if self.task_state is not None:
             object.__setattr__(
                 self,
-                "recovery_projection",
-                dict(self.recovery_projection),
+                "task_state",
+                dict(self.task_state),
             )
 
 

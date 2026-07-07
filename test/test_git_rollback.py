@@ -46,7 +46,7 @@ def _model():
 
 def _session(root: Path):
     from codepilot.sessions.contracts import SessionOptions
-    from codepilot.sessions.prepare import SessionRuntime
+    from codepilot.sessions.runtime import SessionRuntime
 
     return SessionRuntime(
         SessionOptions(

@@ -71,7 +71,7 @@ class TestTerminalRenderer:
             },
         }
 
-        renderer.handle_event(event)
+        renderer.render_progress_event(event)
         assert renderer._stream_started is True
 
     def test_handle_tool_start(self):
@@ -85,7 +85,7 @@ class TestTerminalRenderer:
             "args": {"file_path": "/test/file.py"},
         }
 
-        renderer.handle_event(event)
+        renderer.render_progress_event(event)
         assert renderer._current_tool == "Read"
         assert renderer._tool_start_time > 0
 
@@ -93,13 +93,13 @@ class TestTerminalRenderer:
         output = MagicMock()
         renderer = TerminalRenderer(use_rich=False, output=output)
 
-        renderer.handle_event({
+        renderer.render_progress_event({
             "type": "tool_execution_start",
             "toolCallId": "read-1",
             "toolName": "read",
             "args": {"path": "src/codepilot/core/loop.py", "offset": 10, "limit": 20},
         })
-        renderer.handle_event({
+        renderer.render_progress_event({
             "type": "tool_execution_start",
             "toolCallId": "ls-1",
             "toolName": "ls",
@@ -107,15 +107,15 @@ class TestTerminalRenderer:
         })
 
         rendered = [call.args[0] for call in output.call_args_list]
-        assert "[tool] read  src/codepilot/core/loop.py:10-29" in rendered
-        assert "[tool] ls  src/codepilot" in rendered
+        assert "[tool] reading read  src/codepilot/core/loop.py:10-29" in rendered
+        assert "[tool] reading ls  src/codepilot" in rendered
 
     def test_tool_target_is_shortened_for_narrow_terminal_readability(self):
         output = MagicMock()
         renderer = TerminalRenderer(use_rich=False, output=output)
         long_path = "src/" + "/".join(["very_long_directory"] * 8) + "/module.py"
 
-        renderer.handle_event({
+        renderer.render_progress_event({
             "type": "tool_execution_start",
             "toolCallId": "read-long",
             "toolName": "read",
@@ -123,9 +123,9 @@ class TestTerminalRenderer:
         })
 
         rendered = output.call_args.args[0]
-        assert rendered.startswith("[tool] read  …")
+        assert rendered.startswith("[tool] reading read  …")
         assert rendered.endswith("/module.py")
-        assert len(rendered) <= 78
+        assert len(rendered) <= 86
 
     def test_parallel_tool_timings_are_tracked_by_call_id(self, monkeypatch):
         output = MagicMock()
@@ -136,25 +136,25 @@ class TestTerminalRenderer:
             lambda: next(timestamps),
         )
 
-        renderer.handle_event({
+        renderer.render_progress_event({
             "type": "tool_execution_start",
             "toolCallId": "read-1",
             "toolName": "read",
             "args": {"path": "a.py"},
         })
-        renderer.handle_event({
+        renderer.render_progress_event({
             "type": "tool_execution_start",
             "toolCallId": "ls-1",
             "toolName": "ls",
             "args": {"path": "src"},
         })
-        renderer.handle_event({
+        renderer.render_progress_event({
             "type": "tool_execution_end",
             "toolCallId": "read-1",
             "toolName": "read",
             "isError": False,
         })
-        renderer.handle_event({
+        renderer.render_progress_event({
             "type": "tool_execution_end",
             "toolCallId": "ls-1",
             "toolName": "ls",
@@ -237,7 +237,7 @@ class TestTerminalRenderer:
             "model": "deepseek-chat",
         }
 
-        renderer.handle_event(event)
+        renderer.render_progress_event(event)
         output.assert_called()
 
     def test_handle_error_shows_provider_response_body(self):
@@ -254,7 +254,7 @@ class TestTerminalRenderer:
             details={"response_text": '{"error":{"message":"Invalid request"}}'},
         )
 
-        renderer.handle_event({
+        renderer.render_progress_event({
             "type": "error",
             "error": info.code,
             "message": info.message,
@@ -265,6 +265,86 @@ class TestTerminalRenderer:
 
         rendered = [call.args[0] for call in output.call_args_list]
         assert '  Provider response: {"error":{"message":"Invalid request"}}' in rendered
+
+    def test_plain_activity_prevents_silent_wait(self):
+        output = MagicMock()
+        renderer = TerminalRenderer(use_rich=False, output=output)
+
+        renderer.render_activity("thinking")
+        renderer.render_activity("thinking")
+
+        rendered = [call.args[0] for call in output.call_args_list]
+        assert rendered == ["◇ thinking ..."]
+
+    def test_prompt_builders_frame_live_user_input(self):
+        renderer = TerminalRenderer(use_rich=False, output=MagicMock())
+
+        assert "╭─ YOU" in renderer.build_shell_prompt()
+        assert "╰─›" in renderer.build_shell_prompt()
+        assert "╭─ YOU" in renderer.build_plain_prompt()
+        assert "╰─›" in renderer.build_plain_prompt()
+
+    def test_plain_write_and_bash_tools_use_action_labels(self):
+        output = MagicMock()
+        renderer = TerminalRenderer(use_rich=False, output=output)
+
+        renderer.render_progress_event({
+            "type": "tool_execution_start",
+            "toolName": "write",
+            "args": {"path": "demo.txt"},
+        })
+        renderer.render_progress_event({
+            "type": "tool_execution_start",
+            "toolName": "bash",
+            "args": {"command": "python register.py --demo"},
+        })
+
+        rendered = [call.args[0] for call in output.call_args_list]
+        assert "[tool] writing write  demo.txt" in rendered
+        assert "[tool] running bash  python register.py --demo" in rendered
+
+    def test_approval_required_tool_end_is_not_rendered_as_error(self):
+        output = MagicMock()
+        renderer = TerminalRenderer(use_rich=False, output=output)
+
+        renderer.render_progress_event({
+            "type": "tool_execution_start",
+            "toolCallId": "bash-1",
+            "toolName": "bash",
+            "args": {"command": "head -5 agent-test/chatbot.py"},
+        })
+        renderer.render_progress_event({
+            "type": "tool_execution_end",
+            "toolCallId": "bash-1",
+            "toolName": "bash",
+            "status": "approval_required",
+            "isError": True,
+            "errorReason": "approval_required",
+        })
+
+        rendered = [call.args[0] for call in output.call_args_list]
+        assert rendered == ["[tool] running bash  head -5 agent-test/chatbot.py"]
+
+    def test_plain_approval_prompt_is_structured(self):
+        output = MagicMock()
+        renderer = TerminalRenderer(use_rich=False, output=output)
+
+        renderer.render_approval_required(
+            SimpleNamespace(
+                approval=SimpleNamespace(
+                    tool_name="bash",
+                    arguments={"command": "python register.py --demo"},
+                    risk=SimpleNamespace(level="medium"),
+                    approval_id="approval_1",
+                )
+            )
+        )
+
+        rendered = [call.args[0] for call in output.call_args_list]
+        assert "+-- APPROVAL REQUIRED " in rendered[1]
+        assert "| Tool  bash  python register.py --demo" in rendered
+        assert "| /approve approval_1" in rendered
+        assert "| /deny    approval_1" in rendered
 
 
 # ── SimpleRenderer 测试 ──────────────────────────────────────────
@@ -285,7 +365,7 @@ class TestSimpleRenderer:
             },
         }
 
-        renderer.handle_event(event)
+        renderer.render_progress_event(event)
         assert renderer._stream_started is True
 
     def test_render_final_with_text(self):
@@ -311,57 +391,42 @@ class TestSimpleRenderer:
         output.assert_called_with("Hello")
 
 
-def test_render_prompt_run_forwards_events_and_final_message():
-    from codepilot.interfaces.cli.runner import _render_prompt_run
+def test_run_once_dispatches_prompt_and_renders_final_message():
+    from codepilot.interfaces.cli.interactive import run_once
     from codepilot.runtime.actions import ProgressFrame, PromptSubmitted, RunFinishedFrame
+
+    final_message = AssistantMessage(content=[TextContent(text="done")])
 
     class FakeRuntime:
         def __init__(self):
             self.sent = None
-            self.final_message = AssistantMessage(content=[TextContent(text="done")])
 
         async def dispatch(self, session_id, action):
             assert isinstance(action, PromptSubmitted)
             self.sent = (session_id, action.text)
             yield ProgressFrame(event={"type": "message_update", "delta": "hello"})
             yield RunFinishedFrame(
-                record=type(
-                    "Record",
-                    (),
-                    {
-                        "outcome": type(
-                            "Outcome",
-                            (),
-                            {"final_message": self.final_message},
-                        )()
-                    },
-                )()
+                record=SimpleNamespace(
+                    outcome=SimpleNamespace(final_message=final_message)
+                )
             )
 
-    class FakeRenderer:
-        def __init__(self):
-            self.events = []
-            self.final = None
+    output: list[str] = []
 
-        def handle_event(self, event):
-            self.events.append(event)
-
-        def render_final(self, message):
-            self.final = message
+    def write(text: str = "", **_kwargs):
+        output.append(text)
 
     runtime = FakeRuntime()
-    renderer = FakeRenderer()
 
-    asyncio.run(_render_prompt_run(runtime, "session_1", "hello", renderer))
+    asyncio.run(run_once(runtime, "session_1", "hello", output=write))
 
     assert runtime.sent == ("session_1", "hello")
-    assert renderer.events == [{"type": "message_update", "delta": "hello"}]
-    assert renderer.final is runtime.final_message
+    assert output == ["hello", ""]
 
 
-def test_render_prompt_run_surfaces_approval_required_frame():
-    from codepilot.interfaces.cli.runner import _render_prompt_run
-    from codepilot.runtime.actions import ApprovalRequiredFrame, PromptSubmitted
+def test_render_dispatch_surfaces_approval_required_frame_directly():
+    from codepilot.interfaces.cli.interactive import render_dispatch
+    from codepilot.runtime.actions import ApprovalRequiredFrame
     from codepilot.tools.ports import ToolInterruption, ToolRiskView
 
     interruption = ToolInterruption(
@@ -374,111 +439,42 @@ def test_render_prompt_run_surfaces_approval_required_frame():
         risk=ToolRiskView(level="high", summary="write file"),
     )
 
-    class FakeRuntime:
-        async def dispatch(self, session_id, action):
-            assert session_id == "session_1"
-            assert isinstance(action, PromptSubmitted)
-            yield ApprovalRequiredFrame(approval=interruption)
+    async def frames():
+        yield ApprovalRequiredFrame(approval=interruption)
 
     class FakeRenderer:
         def __init__(self):
-            self.events = []
-            self.statuses = []
+            self.approvals = []
             self.final = "not-called"
 
-        def handle_event(self, event):
-            self.events.append(event)
+        def render_approval_required(self, frame):
+            self.approvals.append(frame.approval)
 
-        def render_status(self, message, *, kind="info"):
-            self.statuses.append((kind, message))
-
-        def render_final(self, message):
-            self.final = message
+        def render_final(self, record):
+            self.final = record
 
     renderer = FakeRenderer()
 
-    asyncio.run(_render_prompt_run(FakeRuntime(), "session_1", "write file", renderer))
+    asyncio.run(render_dispatch(frames(), renderer))
 
-    assert renderer.events == [
-        {
-            "type": "tool_approval_required",
-            "toolName": "write",
-            "toolCallId": "call_1",
-            "approvalId": "approval_1",
-            "runId": "run_1",
-            "args": {"path": "demo.txt"},
-            "riskLevel": "high",
-            "reason": "workspace_write",
-            "status": "approval_required",
-        }
-    ]
-    assert renderer.statuses == [
-        ("warning", "Approval pending: /approve approval_1 or /deny approval_1")
-    ]
+    assert renderer.approvals == [interruption]
     assert renderer.final is None
 
 
-def test_cli_approval_command_dispatches_decision_and_renders_result():
-    from codepilot.interfaces.cli.runner import _render_approval_decision_run
-    from codepilot.runtime.actions import ApprovalDecided, ProgressFrame, RunFinishedFrame
+def test_cli_approval_text_builds_runtime_decision():
+    from codepilot.interfaces.cli.interactive import approval_action_from_text
 
-    final_message = AssistantMessage(content=[TextContent(text="approved done")])
+    action = approval_action_from_text("/approve approval_1 ok")
 
-    class FakeRuntime:
-        def __init__(self):
-            self.sent = None
-
-        async def dispatch(self, session_id, action):
-            assert session_id == "session_1"
-            assert isinstance(action, ApprovalDecided)
-            self.sent = (action.approval_id, action.decision, action.reason)
-            yield ProgressFrame(event={"type": "message_update", "delta": "ok"})
-            yield RunFinishedFrame(
-                record=type(
-                    "Record",
-                    (),
-                    {
-                        "outcome": type(
-                            "Outcome",
-                            (),
-                            {"final_message": final_message},
-                        )()
-                    },
-                )()
-            )
-
-    class FakeRenderer:
-        def __init__(self):
-            self.events = []
-            self.final = None
-
-        def handle_event(self, event):
-            self.events.append(event)
-
-        def render_final(self, message):
-            self.final = message
-
-    runtime = FakeRuntime()
-    renderer = FakeRenderer()
-
-    asyncio.run(
-        _render_approval_decision_run(
-            runtime,
-            "session_1",
-            approval_id="approval_1",
-            decision="approve",
-            reason="ok",
-            renderer=renderer,
-        )
-    )
-
-    assert runtime.sent == ("approval_1", "approve", "ok")
-    assert renderer.events == [{"type": "message_update", "delta": "ok"}]
-    assert renderer.final is final_message
+    assert action is not None
+    assert action.approval_id == "approval_1"
+    assert action.decision == "approve"
+    assert action.reason == "ok"
+    assert approval_action_from_text("/memory status") is None
 
 
 def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monkeypatch):
-    from codepilot.interfaces.cli.runner import run_rpc
+    from codepilot.interfaces.cli.rpc import run_rpc
     from codepilot.runtime.actions import (
         CommandFinishedFrame,
         CommandSubmitted,
@@ -633,7 +629,7 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
 
 
 def test_run_rpc_surfaces_and_resumes_approval(monkeypatch):
-    from codepilot.interfaces.cli.runner import run_rpc
+    from codepilot.interfaces.cli.rpc import run_rpc
     from codepilot.runtime.actions import (
         ApprovalDecided,
         ApprovalRequiredFrame,
@@ -734,7 +730,7 @@ def test_run_rpc_surfaces_and_resumes_approval(monkeypatch):
 
 
 def test_rpc_ready_signal_uses_named_protocol_version() -> None:
-    from codepilot.interfaces.cli.runner import (
+    from codepilot.interfaces.cli.rpc import (
         RPC_PROTOCOL_VERSION,
         emit_rpc_ready,
     )
@@ -756,7 +752,7 @@ def test_rpc_ready_signal_uses_named_protocol_version() -> None:
 
 
 def test_rpc_ok_response_requires_command_name() -> None:
-    from codepilot.interfaces.cli.runner import emit_rpc_ok
+    from codepilot.interfaces.cli.rpc import emit_rpc_ok
 
     emitted: list[dict] = []
     emit_rpc_ok(emitted.append, req_id="request_1", command=" state ")
@@ -775,7 +771,7 @@ def test_rpc_ok_response_requires_command_name() -> None:
 
 
 def test_rpc_error_mapping_uses_coded_exception_payloads() -> None:
-    from codepilot.interfaces.cli.runner import rpc_error_from_exception
+    from codepilot.interfaces.cli.rpc import rpc_error_from_exception
 
     class SessionBusyError(Exception):
         code = "runtime.session_busy"
@@ -790,7 +786,7 @@ def test_rpc_error_mapping_uses_coded_exception_payloads() -> None:
 
 
 def test_rpc_error_requires_non_empty_code_and_message() -> None:
-    from codepilot.interfaces.cli.runner import RpcError, rpc_error_from_exception
+    from codepilot.interfaces.cli.rpc import RpcError, rpc_error_from_exception
 
     with pytest.raises(ValueError, match="code"):
         RpcError(code="  ", message="Something failed")
@@ -804,47 +800,16 @@ def test_rpc_error_requires_non_empty_code_and_message() -> None:
     assert mapped.message == "ValueError"
 
 
-def test_run_options_normalizes_cli_entry_contract() -> None:
-    from codepilot.interfaces.cli.runner import RunOptions
-
-    runtime = object()
-    output = lambda _text: None
-    input_fn = lambda _prompt: "hello"
-
-    options = RunOptions(
-        mode=" print ",  # type: ignore[arg-type]
-        session_id=" session_1 ",
-        runtime=runtime,  # type: ignore[arg-type]
-        output=output,
-        input_fn=input_fn,
-        exit_commands=[" /exit ", " ", "q"],  # type: ignore[arg-type]
+def test_repl_text_helpers_stay_local_to_interactive_flow() -> None:
+    from codepilot.interfaces.cli.interactive import (
+        approval_action_from_text,
+        is_exit_text,
     )
 
-    assert options.mode == "print"
-    assert options.session_id == "session_1"
-    assert options.exit_commands == ("exit", "q")
-
-    with pytest.raises(ValueError, match="mode"):
-        RunOptions(mode="daemon", session_id="session_1", runtime=runtime)  # type: ignore[arg-type]
-
-    with pytest.raises(ValueError, match="session_id"):
-        RunOptions(mode="print", session_id=" ", runtime=runtime)
-
-    with pytest.raises(TypeError, match="output"):
-        RunOptions(
-            mode="print",
-            session_id="session_1",
-            runtime=runtime,  # type: ignore[arg-type]
-            output="stdout",  # type: ignore[arg-type]
-        )
-
-    with pytest.raises(TypeError, match="input_fn"):
-        RunOptions(
-            mode="interactive",
-            session_id="session_1",
-            runtime=runtime,  # type: ignore[arg-type]
-            input_fn="stdin",  # type: ignore[arg-type]
-        )
+    assert is_exit_text("/exit")
+    assert is_exit_text("quit")
+    assert not is_exit_text("/memory status")
+    assert approval_action_from_text("hello") is None
 
 
 # ── CliStartupState 测试 ─────────────────────────────────────────

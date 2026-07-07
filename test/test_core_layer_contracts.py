@@ -64,18 +64,18 @@ def test_core_context_validates_session_context_boundaries() -> None:
     from codepilot.protocols import UserMessage
 
     messages = [UserMessage(content="hello")]
-    recovery_projection = {"task_id": "task_1", "nested": {"step": "s1"}}
+    task_state = {"task_id": "task_1", "nested": {"step": "s1"}}
     context = AgentContext(
         system_prompt="rules",
         messages=messages,
-        task_recovery_projection=recovery_projection,
+        task_state=task_state,
         task_signal={"action": "continue"},
     )
     messages.append(UserMessage(content="mutated"))
-    recovery_projection["nested"] = {"step": "mutated"}
+    task_state["nested"] = {"step": "mutated"}
 
     assert context.messages == [UserMessage(content="hello")]
-    assert context.task_recovery_projection == {"task_id": "task_1", "nested": {"step": "s1"}}
+    assert context.task_state == {"task_id": "task_1", "nested": {"step": "s1"}}
     assert context.task_signal == {"action": "continue"}
 
     with pytest.raises(TypeError, match="messages"):
@@ -92,11 +92,11 @@ def test_legacy_agent_state_is_not_a_core_contract() -> None:
     assert "AgentState" not in core_exports
 
 
-def test_model_turn_prepares_context_after_task_context_is_injected() -> None:
-    asyncio.run(_run_prepare_context_sees_current_task_case())
+def test_model_turn_prepares_context_after_task_state_is_injected() -> None:
+    asyncio.run(_run_prepare_context_sees_task_state_case())
 
 
-async def _run_prepare_context_sees_current_task_case() -> None:
+async def _run_prepare_context_sees_task_state_case() -> None:
     from codepilot.core.contracts import AgentLoopInput, AgentLoopPorts, RunCorrelation
     from codepilot.core.model_step import build_model_request
     from codepilot.llm.ports import ModelDescriptor
@@ -107,7 +107,7 @@ async def _run_prepare_context_sees_current_task_case() -> None:
     class ContextPort:
         def prepare(self, request):
             captured["system_prompt"] = request["system_prompt"]
-            captured["current_task"] = request["context"]["current_task"]
+            captured["task_state"] = request["context"]["task_state"]
             return {
                 "system_prompt": request["system_prompt"],
                 "messages": request["messages"],
@@ -119,16 +119,16 @@ async def _run_prepare_context_sees_current_task_case() -> None:
             run_id="run_prepare_context",
             correlation=RunCorrelation(session_id="s1"),
             messages=[UserMessage(content="continue")],
-            context={
-                "system_prompt": "Base rules",
-                "current_task": "## Current Task\nImplement the next verified step.",
-            },
-            model=ModelDescriptor(provider="unit-test", model_id="contract-model"),
+                context={
+                    "system_prompt": "Base rules",
+                    "task_state": {"task_id": "task_1", "current_mode": "build"},
+                },
+                model=ModelDescriptor(provider="unit-test", model_id="contract-model"),
         ),
         AgentLoopPorts(model=None, tools=None, context=ContextPort()),
         [UserMessage(content="continue")],
     )
 
-    assert "## Current Task" in captured["current_task"]
+    assert captured["task_state"] == {"task_id": "task_1", "current_mode": "build"}
     assert "Base rules" in request.system_prompt
-    assert "## Current Task" in request.system_prompt
+    assert "task_1" not in request.system_prompt

@@ -80,14 +80,14 @@ def test_old_openai_standard_alias_is_removed() -> None:
 
 def test_runtime_assembly_explicitly_registers_builtin_providers(tmp_path) -> None:
     from codepilot.llm.registry import clear_api_providers, get_api_provider
-    from codepilot.runtime.assemble import assemble_runtime
-    from codepilot.runtime.assemble import RuntimeAssemblyIntent
+    from codepilot.runtime import SessionOpenIntent
+    from codepilot.runtime.builder import build_runtime_session
 
     clear_api_providers()
     assert get_api_provider("openai-compatible") is None
 
-    assemble_runtime(
-        RuntimeAssemblyIntent(
+    session = build_runtime_session(
+        SessionOpenIntent(
             workspace_dir=tmp_path,
             provider="deepseek",
             model_id="deepseek-v4-pro",
@@ -96,5 +96,6 @@ def test_runtime_assembly_explicitly_registers_builtin_providers(tmp_path) -> No
             task_control_enabled=False,
         )
     )
+    session.controller.close()
 
     assert get_api_provider("openai-compatible") is not None

@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 
 from codepilot.runtime import SessionOpenIntent
-from codepilot.runtime.configuration import resolve_workspace_session_intent
+from codepilot.runtime.config import resolve_workspace_session_intent
 
 from .artifacts import EvaluationArtifacts
 from .experiments import (

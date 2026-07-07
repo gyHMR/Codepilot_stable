@@ -5,6 +5,32 @@ import asyncio
 from codepilot.core.contracts import TaskStrategy
 
 
+class _TaskStatePromptPort:
+    def prepare(self, request):
+        context = request.get("context")
+        context = context if isinstance(context, dict) else {}
+        state = context.get("task_state")
+        lines = []
+        if isinstance(state, dict):
+            steps = state.get("steps")
+            if isinstance(steps, list):
+                for step in steps:
+                    if not isinstance(step, dict):
+                        continue
+                    status = step.get("status")
+                    title = step.get("title")
+                    if isinstance(status, str) and isinstance(title, str):
+                        lines.append(f"- [{status}] {title}")
+        system_prompt = request.get("system_prompt", "")
+        if lines:
+            system_prompt = f"{system_prompt}\n\nTask State:\n" + "\n".join(lines)
+        return {
+            "system_prompt": system_prompt,
+            "messages": request["messages"],
+            "tools": request["tools"],
+        }
+
+
 def test_core_loop_uses_model_port_and_returns_outcome() -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import (
@@ -461,7 +487,7 @@ def test_core_loop_stops_before_repeated_tool_call_execution() -> None:
     asyncio.run(run_case())
 
 
-def test_core_loop_stops_when_tool_iteration_limit_is_reached() -> None:
+def test_core_loop_pauses_for_user_when_tool_iteration_limit_is_reached() -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import (
             AgentLoopInput,
@@ -523,11 +549,14 @@ def test_core_loop_stops_when_tool_iteration_limit_is_reached() -> None:
             AgentLoopPorts(model=model, tools=tools),
         )
 
-        assert outcome.status == "failed"
+        assert outcome.status == "waiting_user"
         assert outcome.stop_reason == "max_iterations"
         assert model.calls == 2
         assert tools.executions == 1
-        assert outcome.error["code"] == "run.max_iterations"
+        assert outcome.error is None
+        assert outcome.final_text
+        assert "工具调用" in outcome.final_text
+        assert "继续" in outcome.final_text
 
     asyncio.run(run_case())
 
@@ -572,7 +601,7 @@ def test_core_loop_retries_retryable_model_turn_from_retry_policy() -> None:
                     base_delay_ms=0,
                 ),
             ),
-            AgentLoopPorts(model=model, tools=None),
+            AgentLoopPorts(model=model, tools=None, context=_TaskStatePromptPort()),
         )
 
         assert model.calls == 2
@@ -622,14 +651,14 @@ def test_core_loop_injects_task_context_and_returns_task_summary() -> None:
                 task_strategy=TaskStrategy(enabled=True, mode="build"),
                 limits=AgentLoopLimits(max_model_turns=1),
             ),
-            AgentLoopPorts(model=model, tools=None),
+            AgentLoopPorts(model=model, tools=None, context=_TaskStatePromptPort()),
         )
 
         assert outcome.status == "completed"
         assert outcome.task is not None
         assert outcome.task.goal == "ship the task-control migration"
         assert "base rules" in model.system_prompts[0]
-        assert "## Current Task" in model.system_prompts[0]
+        assert "Task State:" in model.system_prompts[0]
         event_types = [event["type"] for event in outcome.events]
         assert "task_plan_created" in event_types
         assert "completion_checked" in event_types
@@ -671,7 +700,7 @@ def test_core_loop_plan_mode_uses_planning_budget_and_proposed_steps() -> None:
                     steps=[
                         {
                             "title": "Inspect target files",
-                            "kind": "investigate",
+                            "kind": "read",
                             "acceptance": "Relevant files are known",
                         },
                         {
@@ -683,7 +712,7 @@ def test_core_loop_plan_mode_uses_planning_budget_and_proposed_steps() -> None:
                 ),
                 limits=AgentLoopLimits(max_model_turns=1),
             ),
-            AgentLoopPorts(model=FakeModel(), tools=None),
+                AgentLoopPorts(model=FakeModel(), tools=None, context=_TaskStatePromptPort()),
         )
 
         assert outcome.task is not None
@@ -712,7 +741,7 @@ def test_core_loop_preserves_task_summary_when_waiting_for_approval() -> None:
 
         class FakeModel:
             async def stream(self, request):
-                assert "## Current Task" in request.system_prompt
+                assert "Task State:" in request.system_prompt
                 yield LLMCompleted(
                     message=AssistantMessage(
                         content=[
@@ -755,7 +784,7 @@ def test_core_loop_preserves_task_summary_when_waiting_for_approval() -> None:
                 task_strategy=TaskStrategy(enabled=True, mode="build"),
                 limits=AgentLoopLimits(max_model_turns=1),
             ),
-            AgentLoopPorts(model=FakeModel(), tools=FakeTools()),
+                AgentLoopPorts(model=FakeModel(), tools=FakeTools(), context=_TaskStatePromptPort()),
         )
 
         assert outcome.status == "waiting_approval"
@@ -905,7 +934,7 @@ def test_core_loop_waits_for_user_when_final_answer_lacks_required_verification(
     asyncio.run(run_case())
 
 
-def test_core_loop_allows_one_final_verification_at_tool_iteration_limit() -> None:
+def test_core_loop_pauses_at_tool_iteration_limit_before_more_tools() -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import (
             AgentLoopInput,
@@ -993,11 +1022,12 @@ def test_core_loop_allows_one_final_verification_at_tool_iteration_limit() -> No
             AgentLoopPorts(model=FakeModel(), tools=tools),
         )
 
-        assert outcome.status == "completed"
-        assert tools.executed == ["edit_file", "bash"]
-        assert any(event["type"] == "tool_execution_grace" for event in outcome.events)
+        assert outcome.status == "waiting_user"
+        assert outcome.stop_reason == "max_iterations"
+        assert tools.executed == ["edit_file"]
+        assert not any(event["type"] == "tool_execution_grace" for event in outcome.events)
         assert outcome.task is not None
-        assert outcome.task.completion_satisfied is True
+        assert outcome.task.completion_satisfied is False
 
     asyncio.run(run_case())
 
