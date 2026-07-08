@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import hashlib
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,10 +57,22 @@ from .plan_state import PlanStateStore
 
 logger = logging.getLogger("codepilot.sessions.runtime")
 
-_TOOL_ITERATION_BUDGET_BY_MODE = {
-    "read": 24,
-    "plan": 32,
-    "build": 48,
+_TOOL_ITERATION_BUDGET_BY_PROFILE = {
+    "conservative": {
+        "read": 48,
+        "plan": 72,
+        "build": 120,
+    },
+    "balanced": {
+        "read": 96,
+        "plan": 160,
+        "build": 240,
+    },
+    "wide": {
+        "read": 160,
+        "plan": 260,
+        "build": 400,
+    },
 }
 _CONTINUE_REQUESTS = {
     "继续",
@@ -74,6 +87,15 @@ _CONTINUE_REQUESTS = {
     "continue",
     "go on",
     "resume",
+}
+_PLAN_STATE_EVENT_TYPES = {
+    "plan_proposed",
+    "plan_approval_required",
+    "plan_approved",
+    "plan_rejected",
+    "plan_updated",
+    "plan_completed",
+    "plan_abandoned",
 }
 
 
@@ -92,24 +114,34 @@ class SessionRuntime:
         self.workspace_dir = Path(options.workspace_dir)
         self.get_api_key = options.get_api_key
         self.session_id = options.session_id or new_session_id()
+        self.current_mode = ensure_run_mode(options.current_mode)
+        self._system_prompt_builder = options.system_prompt_builder
+        system_prompt = self._system_prompt_for(
+            self.current_mode,
+            fallback=options.system_prompt,
+        )
         self.store = SessionStore(self.workspace_dir, self.session_id)
         self.store.ensure_initialized(
             model_id=options.model.id,
             provider=options.model.provider,
-            system_prompt=options.system_prompt,
+            system_prompt=system_prompt,
         )
         self._repair_checkpoint_messages()
 
         persisted = self.store.load_session_messages()
         messages = [*persisted, *options.messages]
-        self.current_mode = ensure_run_mode(options.current_mode)
-        self.store.update_meta({"current_mode": self.current_mode})
+        self.store.update_meta(
+            {
+                "current_mode": self.current_mode,
+                "system_prompt_hash": _hash_text(system_prompt),
+            }
+        )
         self.planning_budget_profile = ensure_planning_budget_profile(
             options.planning_budget_profile
         )
         self.conversation = SessionConversationState(
             model=options.model,
-            system_prompt=options.system_prompt,
+            system_prompt=system_prompt,
             messages=messages,
             thinking_level=options.thinking_level,
             current_mode=self.current_mode,
@@ -157,6 +189,7 @@ class SessionRuntime:
         model: ModelDescriptor,
     ) -> PreparedAgentRun:
         is_continue = self._is_continue_run(intent.text)
+        pending_plan = self.pending_plan_approval()
         rollback = await self._begin_run(
             text=intent.text,
             run_id=run_id,
@@ -181,10 +214,34 @@ class SessionRuntime:
                     run_id=run_id,
                     source_message_id=user_message_id,
                 )
-        run_plan_state = self.active_plan_state() or self._run_local_plan_seed(
-            intent.text,
+        effective_mode = ensure_run_mode(intent.mode_hint or self.current_mode)
+        if pending_plan is not None:
+            effective_mode = "plan"
+        run_plan_state = self._plan_state_for_run(
+            text=intent.text,
             run_id=run_id,
+            mode=effective_mode,
+            pending_plan=pending_plan,
         )
+        if effective_mode == "plan" and pending_plan is not None:
+            self.conversation.add_steering_message(
+                UserMessage(
+                    content=(
+                        "The user is giving feedback on the proposed plan. "
+                        "Revise the plan with update_plan, keep every proposed item pending, "
+                        "then wait for /plan approve or /plan reject."
+                    )
+                )
+            )
+        if _needs_plan_approval_notice(effective_mode, run_plan_state):
+            self.conversation.add_steering_message(
+                UserMessage(
+                    content=(
+                        "There is a proposed plan that has not been approved. "
+                        "Ask the user to run /plan approve, /plan reject, or revise the plan before implementation."
+                    )
+                )
+            )
         messages = self._messages_for_loop()
         return PreparedAgentRun(
             run_id=run_id,
@@ -197,7 +254,7 @@ class SessionRuntime:
                 context=self._loop_context(),
                 model=model,
                 tools=[],
-                mode=ensure_run_mode(intent.mode_hint or self.current_mode),
+                mode=effective_mode,
                 plan_state=run_plan_state,
                 limits=self.loop_limits(),
                 retry_policy=self.retry_policy(),
@@ -218,8 +275,8 @@ class SessionRuntime:
         model: ModelDescriptor,
     ) -> PreparedAgentRun:
         pending_approval = self.pending_approval(intent.approval_id)
-        rollback = await self._begin_run(text="", run_id=run_id, is_continue=True)
         messages = self._messages_for_loop()
+        event_start_seq = len(self.store.run_store.load_events(run_id))
         resume_input = AgentResumeInput(
             run_id=run_id,
             correlation=RunCorrelation(session_id=self.session_id),
@@ -250,6 +307,7 @@ class SessionRuntime:
             plan_state=self.active_plan_state(),
             limits=self.loop_limits(),
             retry_policy=self.retry_policy(),
+            event_start_seq=event_start_seq,
         )
         return PreparedAgentRun(
             run_id=run_id,
@@ -265,10 +323,10 @@ class SessionRuntime:
                 plan_state=self.active_plan_state(),
                 limits=self.loop_limits(),
                 retry_policy=self.retry_policy(),
+                event_start_seq=event_start_seq,
             ),
             resume_input=resume_input,
             context_port=RuntimeSessionContextPort(self),
-            rollback_baseline=self._remember_rollback_baseline(run_id, rollback),
             plan_refs={"plan_state": self.active_plan_state()},
         )
 
@@ -282,8 +340,10 @@ class SessionRuntime:
     ) -> SessionRunRecord:
         if store_outcome:
             for event in outcome.events:
-                self._persist_event(dict(event))
-                await self.conversation.dispatch_event(event)
+                payload = dict(event)
+                self._apply_plan_event(payload)
+                self._persist_event(payload)
+                await self.conversation.dispatch_event(payload)
             committed_messages = list(outcome.new_messages)
             self.conversation.append_messages(committed_messages)
             for message in committed_messages:
@@ -293,16 +353,21 @@ class SessionRuntime:
             self.conversation.remember_result(result)
 
         self.store.append_run_result(result)
-        self._write_rollback_metadata(
-            result,
-            self._take_rollback_baseline(prepared.rollback_baseline),
-        )
+        if prepared.rollback_baseline is not None:
+            self._write_rollback_metadata(
+                result,
+                self._take_rollback_baseline(prepared.rollback_baseline),
+            )
         self._finalize_plan_state(outcome)
         self._calibrate_context_usage(result)
         if self.memory_enabled:
             self._finalize_memory(result)
         self.context_governor.finalize_run(result)
-        if outcome.status != "waiting_approval":
+        if outcome.status == "waiting_approval":
+            pass
+        elif outcome.stop_reason == "plan_approval_required":
+            self._save_plan_approval_checkpoint(outcome)
+        else:
             self.store.set_checkpoint(None)
         await self._run_lifecycle_hooks(
             text=_prompt_text(prepared),
@@ -348,6 +413,42 @@ class SessionRuntime:
             "leaf_id": self.store.get_leaf_id(),
             "current_mode": self.current_mode,
             "planning_budget_profile": self.planning_budget_profile,
+            "plan_summary": self.plan_summary(),
+            "pending_plan_approval": self.pending_plan_approval(),
+        }
+
+    def plan_summary(self) -> dict[str, object] | None:
+        state = self.current_plan_state()
+        if not isinstance(state, dict):
+            return None
+        if state.get("status") in {None, "none", "rejected", "abandoned"}:
+            return None
+        items = state.get("items")
+        items = items if isinstance(items, list) else []
+        total = len([item for item in items if isinstance(item, dict)])
+        done = len([
+            item
+            for item in items
+            if isinstance(item, dict) and item.get("status") in {"completed", "done"}
+        ])
+        active = next(
+            (
+                str(item.get("step") or "").strip()
+                for item in items
+                if isinstance(item, dict)
+                and item.get("status") in {"in_progress", "active", "pending"}
+                and str(item.get("step") or "").strip()
+            ),
+            "",
+        )
+        return {
+            "plan_id": state.get("plan_id"),
+            "status": state.get("status"),
+            "approval_state": state.get("approval_state"),
+            "objective_preview": _short_text(state.get("objective"), limit=72),
+            "total_items": total,
+            "done_items": done,
+            "active_item_preview": _short_text(active, limit=72),
         }
 
     def pending_approvals(self) -> list[dict[str, Any]]:
@@ -379,16 +480,53 @@ class SessionRuntime:
                 return approval
         return None
 
-    def active_plan_state(self) -> dict[str, object] | None:
+    def resume_run_id(self, approval_id: str) -> str:
+        approval = self.pending_approval(approval_id)
+        if approval is None:
+            raise ValueError(f"Approval not found: {approval_id}")
+        run_id = _optional_text(approval.get("run_id"))
+        if run_id is None:
+            raise ValueError(f"Approval has no run_id: {approval_id}")
+        return run_id
+
+    def pending_plan_approval(self) -> dict[str, Any] | None:
+        state = self.current_plan_state()
+        if (
+            isinstance(state, dict)
+            and state.get("status") == "proposed"
+            and state.get("approval_state") == "proposed"
+        ):
+            return dict(state)
+        return None
+
+    def current_plan_state(self) -> dict[str, Any] | None:
         state = self.plan_state.current()
-        if state is None:
+        if not isinstance(state, dict):
             return None
-        if state.get("status") in {"none", "rejected", "abandoned"}:
+        if state.get("status") in {None, "none"}:
+            return None
+        return dict(state)
+
+    def active_plan_state(self) -> dict[str, object] | None:
+        state = self.current_plan_state()
+        if not isinstance(state, dict):
+            return None
+        if state.get("status") not in {"active", "completed"}:
+            return None
+        if state.get("approval_state") != "approved":
             return None
         active_plan_id = (self.store.read_meta() or {}).get("active_plan_id")
         if active_plan_id != state.get("plan_id"):
             return None
         return dict(state)
+
+    def context_plan_state(self) -> dict[str, Any] | None:
+        pending = self.pending_plan_approval()
+        if pending is not None:
+            return pending
+        if self.current_mode == "plan":
+            return None
+        return self.current_plan_state()
 
     def retry_policy(self) -> RetryPolicy:
         return RetryPolicy(
@@ -399,15 +537,26 @@ class SessionRuntime:
 
     def loop_limits(self) -> AgentLoopLimits:
         return AgentLoopLimits(
+            max_model_turns=self._model_turn_budget(),
             max_tool_iterations=self._tool_iteration_budget(),
             max_tool_calls_per_turn=self.max_tool_calls_per_turn,
         )
 
     def set_current_mode(self, mode: str) -> str:
         normalized = ensure_run_mode(mode)
+        if normalized == "build" and self.pending_plan_approval() is not None:
+            raise ValueError(
+                "Build mode is blocked while a proposed plan is waiting for approval. "
+                "Use /plan approve or /plan reject."
+            )
+        system_prompt = self._system_prompt_for(
+            normalized,
+            fallback=self.conversation.system_prompt,
+        )
+        self.conversation.system_prompt = system_prompt
+        self.conversation.set_current_mode(normalized)
         if normalized != self.current_mode:
             self.current_mode = normalized
-            self.conversation.set_current_mode(normalized)
             self.store.append_event(
                 {
                     "type": "mode_changed",
@@ -415,39 +564,48 @@ class SessionRuntime:
                     "currentMode": normalized,
                 }
             )
-            self.store.update_meta({"current_mode": normalized})
+        self.store.update_meta(
+            {
+                "current_mode": normalized,
+                "system_prompt_hash": _hash_text(system_prompt),
+            }
+        )
         return normalized
 
     def approve_current_plan(self, *, switch_to_build: bool = True) -> dict[str, Any] | None:
-        before = self.plan_state.current()
+        before = self.current_plan_state()
         if not isinstance(before, dict) or before.get("status") != "proposed":
             return before
         state = self.plan_state.approve_current()
         if state is None:
             return None
         self._record_plan_event("plan_approved", state, run_id=None)
+        self.store.set_checkpoint(None)
         if switch_to_build:
             self.set_current_mode("build")
         return state
 
     def reject_current_plan(self) -> dict[str, Any] | None:
-        before = self.plan_state.current()
+        before = self.current_plan_state()
         if not isinstance(before, dict) or before.get("status") != "proposed":
             return before
         state = self.plan_state.reject_current()
         if state is None:
             return None
         self._record_plan_event("plan_rejected", state, run_id=None)
+        self.store.set_checkpoint(None)
+        self.set_current_mode("plan")
         return state
 
     def abandon_current_plan(self) -> dict[str, Any] | None:
-        before = self.plan_state.current()
+        before = self.current_plan_state()
         if not isinstance(before, dict):
             return before
         state = self.plan_state.abandon_current()
         if state is None:
             return None
         self._record_plan_event("plan_abandoned", state, run_id=None)
+        self.store.set_checkpoint(None)
         return state
 
     def close(self) -> None:
@@ -456,8 +614,10 @@ class SessionRuntime:
     def record_event(self, event: dict[str, Any]) -> None:
         """Persist a streamed runner event and update the recoverable checkpoint."""
 
-        self._persist_event(event)
-        self._checkpoint_from_event(event)
+        payload = dict(event)
+        self._apply_plan_event(payload)
+        self._persist_event(payload)
+        self._checkpoint_from_event(payload)
 
     def _is_continue_run(self, text: str) -> bool:
         return self.active_plan_state() is not None and _is_continue_text(text)
@@ -551,6 +711,24 @@ class SessionRuntime:
             run_id=run_id,
         ).to_dict()
 
+    def _plan_state_for_run(
+        self,
+        *,
+        text: str,
+        run_id: str | None,
+        mode: str,
+        pending_plan: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if pending_plan is not None:
+            return pending_plan
+        if mode == "plan":
+            return PlanState.new(
+                objective=text,
+                origin_mode="plan",
+                run_id=run_id,
+            ).to_dict()
+        return self.active_plan_state() or self._run_local_plan_seed(text, run_id=run_id)
+
     def _last_substantive_user_request(self) -> str | None:
         for message in reversed(self.conversation.messages):
             if not isinstance(message, UserMessage):
@@ -611,15 +789,18 @@ class SessionRuntime:
 
     def _finalize_plan_state(self, outcome: AgentLoopOutcome) -> None:
         try:
-            if outcome.plan is None:
+            payload = _plan_payload(outcome.plan)
+            if payload is None:
                 return
             if (
-                getattr(outcome.plan, "status", None) == "none"
-                and not getattr(outcome.plan, "items", [])
+                payload.get("status") == "none"
+                and not payload.get("items")
             ):
                 return
-            previous = self.plan_state.current()
-            state = self.plan_state.save(outcome.plan.__dict__)
+            previous = self.current_plan_state()
+            state = self.plan_state.save(payload)
+            if previous == state:
+                return
             self._record_plan_event(
                 _plan_event_type(previous, state),
                 state,
@@ -707,12 +888,37 @@ class SessionRuntime:
             self._persisted_event_ids.add(event_id)
         return True
 
+    def _apply_plan_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        if event.get("type") not in _PLAN_STATE_EVENT_TYPES:
+            return None
+        payload = _plan_payload(event.get("plan"))
+        if payload is None:
+            return None
+        try:
+            state = self.plan_state.save(payload)
+        except Exception as exc:
+            logger.warning("failed to apply plan event: %s", exc)
+            self.store.append_event(
+                {
+                    "type": "plan_state_warning",
+                    "sessionId": self.session_id,
+                    "operation": "plan_event_apply",
+                    "message": str(exc),
+                }
+            )
+            return None
+        event["plan"] = state
+        return state
+
     def _runtime_checkpoint(self) -> dict[str, Any] | None:
         meta = self.store.read_meta() or {}
         checkpoint = meta.get("runtime_checkpoint")
         return checkpoint if isinstance(checkpoint, dict) else None
 
     def _checkpoint_from_event(self, event: dict[str, Any]) -> None:
+        if event.get("type") == "plan_approval_required":
+            self._save_plan_approval_checkpoint_from_event(event)
+            return
         if (
             event.get("type") == "tool_interrupted"
             and event.get("status") == "approval_required"
@@ -840,6 +1046,33 @@ class SessionRuntime:
             }
         )
 
+    def _save_plan_approval_checkpoint_from_event(self, event: dict[str, Any]) -> None:
+        plan = self.pending_plan_approval()
+        if not isinstance(plan, dict):
+            return
+        self.store.set_checkpoint(
+            {
+                "phase": "awaiting_plan_approval",
+                "run_id": _event_run_id(event),
+                "turn_id": _int_or_none(event.get("turnId")),
+                "plan_id": plan.get("plan_id"),
+                "reason": _optional_text(event.get("reason")) or "plan_approval_required",
+            }
+        )
+
+    def _save_plan_approval_checkpoint(self, outcome: AgentLoopOutcome) -> None:
+        plan = self.pending_plan_approval()
+        if not isinstance(plan, dict):
+            return
+        self.store.set_checkpoint(
+            {
+                "phase": "awaiting_plan_approval",
+                "run_id": outcome.run_id,
+                "plan_id": plan.get("plan_id"),
+                "reason": outcome.stop_reason,
+            }
+        )
+
     def _persist_message_from_event(
         self,
         message: AssistantMessage | ToolResultMessage,
@@ -940,10 +1173,21 @@ class SessionRuntime:
         )
 
     def _tool_iteration_budget(self) -> int:
-        return _TOOL_ITERATION_BUDGET_BY_MODE[self.current_mode]
+        return _TOOL_ITERATION_BUDGET_BY_PROFILE[self.planning_budget_profile][
+            self.current_mode
+        ]
+
+    def _model_turn_budget(self) -> int:
+        tool_iterations = self._tool_iteration_budget()
+        return tool_iterations + max(16, tool_iterations // 10)
+
+    def _system_prompt_for(self, mode: str, *, fallback: str) -> str:
+        if self._system_prompt_builder is None:
+            return str(fallback or "")
+        return str(self._system_prompt_builder(ensure_run_mode(mode)) or "")
 
     def _approve_proposed_plan(self) -> None:
-        before = self.plan_state.current()
+        before = self.current_plan_state()
         if not isinstance(before, dict) or before.get("status") != "proposed":
             return
         state = self.plan_state.approve_current()
@@ -1005,7 +1249,7 @@ class RuntimeSessionContextPort:
         request_context = request.get("context")
         request_context = request_context if isinstance(request_context, dict) else {}
         run_signals = request_context.get("run_signals")
-        plan_state = session.active_plan_state()
+        plan_state = session.context_plan_state()
         prepared = await maybe_await(
             session.prepare_context(
                 AgentContext(
@@ -1130,6 +1374,31 @@ def _optional_text(value: object) -> str | None:
     return text or None
 
 
+def _plan_payload(value: object) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return dict(value)
+    raw = getattr(value, "__dict__", None)
+    if isinstance(raw, dict):
+        return dict(raw)
+    return None
+
+
+def _short_text(value: object, *, limit: int) -> str:
+    text = str(value).strip() if value is not None else ""
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _needs_plan_approval_notice(mode: str, plan_state: object) -> bool:
+    return (
+        mode == "build"
+        and isinstance(plan_state, dict)
+        and plan_state.get("status") == "proposed"
+        and plan_state.get("approval_state") != "approved"
+    )
+
+
 def _checkpoint_pending_calls(checkpoint: dict[str, Any]) -> list[dict[str, Any]]:
     calls = checkpoint.get("pending_tool_calls")
     if isinstance(calls, list):
@@ -1192,6 +1461,10 @@ def _set_session_message_id(message: Message, message_id: str) -> None:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def _plan_event_type(

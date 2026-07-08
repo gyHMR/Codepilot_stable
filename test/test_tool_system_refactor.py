@@ -6,7 +6,7 @@ import asyncio
 def test_registry_prepare_call_parses_coerces_and_filters_by_mode() -> None:
     from codepilot.protocols import TextContent
     from codepilot.tools.contracts import ToolDefinition, ToolMetadata, ToolResult
-    from codepilot.tools.registry import ToolRegistry
+    from codepilot.tools.registry import ToolRegistry, get_builtin_tool_metadata
 
     async def execute(request, signal=None, on_update=None):
         return ToolResult(content=[TextContent(text=str(request.arguments["limit"]))])
@@ -37,6 +37,23 @@ def test_registry_prepare_call_parses_coerces_and_filters_by_mode() -> None:
                 risk_level="low",
                 scopes=("read", "plan", "build"),
             ),
+            execute=execute,
+        )
+    )
+    write_metadata = get_builtin_tool_metadata("write")
+    assert write_metadata is not None
+    registry.register(
+        ToolDefinition(
+            name="write",
+            label="Write",
+            description="Write a file",
+            parameters={
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                "required": ["path", "content"],
+                "additionalProperties": False,
+            },
+            metadata=write_metadata,
             execute=execute,
         )
     )
@@ -77,6 +94,19 @@ def test_registry_prepare_call_parses_coerces_and_filters_by_mode() -> None:
     )
     assert not invalid.valid
     assert invalid.error_code == "invalid_tool_arguments"
+
+    unavailable_in_mode = registry.prepare_call(
+        run_id="run1",
+        tool_call_id="call4",
+        name="write",
+        arguments={"path": "src/app.py", "content": "x"},
+        current_mode="plan",
+    )
+    assert not unavailable_in_mode.valid
+    assert unavailable_in_mode.error_code == "tool_not_available_in_mode"
+    assert "switch mode" not in unavailable_in_mode.recovery_hint.lower()
+    assert "change mode" not in unavailable_in_mode.recovery_hint.lower()
+    assert "approve" in unavailable_in_mode.recovery_hint
 
 
 def test_permission_policy_rejects_model_authorization_and_read_mode_mutation() -> None:
@@ -251,6 +281,75 @@ def test_approval_resume_invocation_executes_after_user_approval() -> None:
     assert observation.status == "success"
     assert observation.content[0].text == "wrote after approval"
     assert calls == 1
+
+
+def test_builtin_read_returns_line_pagination_contract(tmp_path) -> None:
+    from codepilot.protocols import TextContent
+    from codepilot.tools.builtins import create_builtin_tools
+    from codepilot.tools.contracts import ToolCallRequest
+
+    target = tmp_path / "big.txt"
+    target.write_text("\n".join(f"line {index}" for index in range(1, 251)) + "\n", encoding="utf-8")
+    read_tool = next(tool for tool in create_builtin_tools(tmp_path) if tool.name == "read")
+
+    result = asyncio.run(
+        read_tool.execute(
+            ToolCallRequest(
+                run_id="run_read",
+                tool_call_id="call_read",
+                name="read",
+                arguments={"path": "big.txt"},
+                metadata=read_tool.metadata,
+                current_mode="build",
+            )
+        )
+    )
+
+    assert result.status == "success"
+    assert isinstance(result.content[0], TextContent)
+    text = result.content[0].text
+    assert text.startswith("lines 1-200 of 250")
+    assert "200\tline 200" in text
+    assert "201\tline 201" not in text
+    assert 'next: read(path="big.txt", offset=201, limit=200)' in text
+    assert result.metadata["actual_start_line"] == 1
+    assert result.metadata["actual_end_line"] == 200
+    assert result.metadata["returned_lines"] == 200
+    assert result.metadata["has_more"] is True
+    assert result.metadata["next_offset"] == 201
+    assert result.metadata["truncated_reason"] == "line_limit"
+
+
+def test_builtin_read_char_truncation_stops_on_line_boundary(tmp_path) -> None:
+    from codepilot.tools.builtins import create_builtin_tools
+    from codepilot.tools.contracts import ToolCallRequest
+
+    target = tmp_path / "wide.txt"
+    target.write_text("\n".join("x" * 80 for _ in range(10)) + "\n", encoding="utf-8")
+    read_tool = next(tool for tool in create_builtin_tools(tmp_path) if tool.name == "read")
+
+    result = asyncio.run(
+        read_tool.execute(
+            ToolCallRequest(
+                run_id="run_read",
+                tool_call_id="call_read",
+                name="read",
+                arguments={"path": "wide.txt", "offset": 1, "limit": 10, "max_chars": 180},
+                metadata=read_tool.metadata,
+                current_mode="build",
+            )
+        )
+    )
+
+    text = result.content[0].text
+    assert "1\t" in text
+    assert "2\t" in text
+    assert "3\t" not in text
+    assert result.metadata["actual_end_line"] == 2
+    assert result.metadata["returned_lines"] == 2
+    assert result.metadata["has_more"] is True
+    assert result.metadata["next_offset"] == 3
+    assert result.metadata["truncated_reason"] == "max_chars"
 
 
 def test_result_policy_sanitizes_and_marks_untrusted_output() -> None:

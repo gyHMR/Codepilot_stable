@@ -130,8 +130,17 @@ async def run_repl(
             renderer.render_status("Bye.", kind="info")
             return
 
-        # 审批命令优先于普通斜杠命令，因为 /approve 和 /deny 会恢复被暂停的 run。
-        approval_action = approval_action_from_text(text)
+        view = runtime.describe(current_session_id)
+
+        # 审批命令优先于普通斜杠命令，因为 /approve、yes/no 会恢复被暂停的 run。
+        try:
+            approval_action = approval_action_from_text(
+                text,
+                pending_approvals=getattr(view, "pending_approvals", ()),
+            )
+        except ValueError as exc:
+            renderer.render_status(str(exc), kind="error")
+            continue
         if approval_action is not None:
             await run_approval(runtime, current_session_id, approval_action, renderer, verbose=verbose)
             continue
@@ -280,12 +289,32 @@ async def run_command(
     """
 
     try:
-        result = await dispatch_command(runtime, session_id, text)
+        result = None
+        final_record = None
+        async for frame in runtime.dispatch(session_id, CommandSubmitted(text=text)):
+            if isinstance(frame, CommandFinishedFrame):
+                result = frame.record
+                renderer.render_command_output(getattr(result, "output_lines", ()) or ())
+                continue
+            if isinstance(frame, ProgressFrame):
+                renderer.render_progress_event(frame.event)
+                continue
+            if isinstance(frame, ApprovalRequiredFrame):
+                renderer.render_approval_required(frame)
+                continue
+            if isinstance(frame, RunFinishedFrame):
+                final_record = frame.record
+                continue
+            if isinstance(frame, FailedFrame):
+                raise runtime_error_from_frame(frame.error)
     except Exception as exc:
         renderer.render_status(f"Command error: {exc}", kind="error")
         return None
 
-    renderer.render_command_output(getattr(result, "output_lines", ()) or ())
+    if result is None:
+        renderer.render_status("Command error: runtime command finished without a result", kind="error")
+        return None
+    renderer.render_final(final_record)
     switched_session_id = getattr(result, "switched_session_id", None)
     if switched_session_id is not None:
         return str(switched_session_id)
@@ -343,6 +372,8 @@ async def render_dispatch(frames: Any, renderer: Any) -> None:
     async for frame in frames:
         if isinstance(frame, ProgressFrame):
             renderer.render_progress_event(frame.event)
+        elif isinstance(frame, CommandFinishedFrame):
+            renderer.render_command_output(getattr(frame.record, "output_lines", ()) or ())
         elif isinstance(frame, ApprovalRequiredFrame):
             renderer.render_approval_required(frame)
         elif isinstance(frame, RunFinishedFrame):
@@ -373,7 +404,11 @@ def is_exit_text(
     return bare in {command.strip().lstrip("/") for command in exit_commands if command.strip()}
 
 
-def approval_action_from_text(text: str) -> ApprovalDecided | None:
+def approval_action_from_text(
+    text: str,
+    *,
+    pending_approvals: tuple[Any, ...] | list[Any] = (),
+) -> ApprovalDecided | None:
     """把 ``/approve`` 和 ``/deny`` 文本解析成 runtime action。
 
     Args:
@@ -384,19 +419,59 @@ def approval_action_from_text(text: str) -> ApprovalDecided | None:
         可直接派发给 runtime 的 ``ApprovalDecided``；如果不是审批命令则返回 ``None``。
     """
 
-    parts = text.strip().lstrip("/").split(maxsplit=2)
+    raw = text.strip()
+    parts = raw.lstrip("/").split(maxsplit=2)
     if not parts:
         return None
-    decision = parts[0].lower()
-    if decision not in {"approve", "deny"}:
+    decision = _approval_decision_alias(parts[0])
+    if decision is None:
         return None
-    approval_id = parts[1].strip() if len(parts) >= 2 else ""
+    approval_token = parts[1].strip() if len(parts) >= 2 else ""
     reason = parts[2].strip() if len(parts) >= 3 else ""
+    approval_id = _resolve_approval_id(approval_token, tuple(pending_approvals))
+    if approval_id is None:
+        if raw.startswith("/"):
+            return None
+        return None
     return ApprovalDecided(
         approval_id=approval_id,
         decision=decision,  # type: ignore[arg-type]
         reason=reason,
     )
+
+
+def _approval_decision_alias(value: str) -> str | None:
+    text = value.strip().lower().lstrip("/")
+    if text in {"approve", "yes", "y", "ok", "同意", "批准", "可以", "确认"}:
+        return "approve"
+    if text in {"deny", "no", "n", "拒绝", "不同意", "不行"}:
+        return "deny"
+    return None
+
+
+def _resolve_approval_id(token: str, pending: tuple[Any, ...]) -> str | None:
+    approvals = [_approval_id(item) for item in pending]
+    approvals = [item for item in approvals if item]
+    if token:
+        if token.isdigit():
+            index = int(token)
+            if 1 <= index <= len(approvals):
+                return approvals[index - 1]
+        return token
+    if len(approvals) == 1:
+        return approvals[0]
+    if len(approvals) > 1:
+        raise ValueError("Multiple approvals are pending. Use /approve <number> or /deny <number>.")
+    return None
+
+
+def _approval_id(item: Any) -> str | None:
+    if isinstance(item, dict):
+        value = item.get("approval_id")
+    else:
+        value = getattr(item, "approval_id", None)
+    text = str(value).strip() if value is not None else ""
+    return text or None
 
 
 def frame_error_message(error: Any) -> str:

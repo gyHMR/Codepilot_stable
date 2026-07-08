@@ -753,7 +753,7 @@ def test_core_loop_plan_mode_keeps_soft_plan_proposed() -> None:
         plan = plan.apply_update(
             PlanUpdate(
                 items=(
-                    PlanUpdateItem(step="Inspect target files", status="in_progress"),
+                    PlanUpdateItem(step="Inspect target files", status="pending"),
                     PlanUpdateItem(step="Apply focused refactor", status="pending"),
                 )
             ),
@@ -763,7 +763,7 @@ def test_core_loop_plan_mode_keeps_soft_plan_proposed() -> None:
 
         class FakeModel:
             async def stream(self, request):
-                assert "- [in_progress] Inspect target files" in request.system_prompt
+                assert "- [pending] Inspect target files" in request.system_prompt
                 assert "- [pending] Apply focused refactor" in request.system_prompt
                 yield LLMCompleted(
                     message=AssistantMessage(content=[TextContent(text="done")])
@@ -784,7 +784,7 @@ def test_core_loop_plan_mode_keeps_soft_plan_proposed() -> None:
 
         assert outcome.plan is not None
         assert outcome.plan.status == "proposed"
-        assert outcome.plan.items[0]["status"] == "in_progress"
+        assert outcome.plan.items[0]["status"] == "pending"
 
     asyncio.run(run_case())
 
@@ -866,6 +866,92 @@ def test_core_loop_preserves_plan_summary_when_waiting_for_approval() -> None:
     asyncio.run(run_case())
 
 
+def test_core_loop_steers_repeated_truncated_reads_before_retrying() -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import (
+            AgentLoopInput,
+            AgentLoopLimits,
+            AgentLoopPorts,
+            RunCorrelation,
+        )
+        from codepilot.core.runner import run_agent_loop
+        from codepilot.llm.ports import LLMCompleted, ModelDescriptor
+        from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+        from codepilot.tools.contracts import ToolObservation
+
+        class FakeModel:
+            def __init__(self) -> None:
+                self.prompts: list[str] = []
+
+            async def stream(self, request):
+                self.prompts.append(
+                    getattr(request.messages[-1], "content", "")
+                    if request.messages
+                    else ""
+                )
+                if len(self.prompts) <= 2:
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[
+                                ToolCall(
+                                    id=f"read_{len(self.prompts)}",
+                                    name="read",
+                                    arguments={
+                                        "path": "big.py",
+                                        "offset": 1,
+                                        "limit": 200,
+                                        "max_chars": 4000 + len(self.prompts),
+                                    },
+                                )
+                            ]
+                        )
+                    )
+                    return
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text="used pagination guidance")])
+                )
+
+        class FakeTools:
+            def catalog(self, current_mode: str = "build"):
+                return {"tools": ["read"]}
+
+            async def execute(self, invocation):
+                return ToolObservation(
+                    tool_call_id=invocation.tool_call_id,
+                    name=invocation.name,
+                    status="success",
+                    content=(TextContent(text="lines 1-20 of 500\n...<truncated>..."),),
+                    metadata={
+                        "read_paths": ["big.py"],
+                        "actual_start_line": 1,
+                        "actual_end_line": 20,
+                        "next_offset": 21,
+                        "has_more": True,
+                        "truncated": True,
+                        "output_quality": {"truncated": True},
+                    },
+                )
+
+        model = FakeModel()
+        outcome = await run_agent_loop(
+            AgentLoopInput(
+                run_id="run_truncated_reads",
+                correlation=RunCorrelation(session_id="s1"),
+                user_prompt="read big file",
+                model=ModelDescriptor(provider="fake", model_id="unit"),
+                limits=AgentLoopLimits(max_model_turns=4, repeated_tool_call_limit=10),
+            ),
+            AgentLoopPorts(model=model, tools=FakeTools()),
+        )
+
+        assert outcome.status == "completed"
+        assert outcome.final_text == "used pagination guidance"
+        assert any("offset/limit" in str(prompt) for prompt in model.prompts)
+        assert any("next_offset=21" in str(prompt) for prompt in model.prompts)
+
+    asyncio.run(run_case())
+
+
 def test_resume_agent_loop_uses_tool_port_resume_before_continuing_model() -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import (
@@ -940,6 +1026,7 @@ def test_resume_agent_loop_uses_tool_port_resume_before_continuing_model() -> No
                 approval_id="approval1",
                 decision="approve",
                 reason="ok",
+                event_start_seq=10,
             ),
             AgentLoopPorts(model=FakeModel(), tools=tools),
         )
@@ -953,6 +1040,7 @@ def test_resume_agent_loop_uses_tool_port_resume_before_continuing_model() -> No
         assert event_types[:2] == ["agent_start", "turn_start"]
         assert "tool_started" in event_types
         assert "tool_completed" in event_types
+        assert outcome.events[0]["eventId"] == "run1:11"
         tool_end = next(event for event in outcome.events if event["type"] == "tool_completed")
         assert tool_end["approvalId"] == "approval1"
         assert tool_end["toolCallId"] == "call1"

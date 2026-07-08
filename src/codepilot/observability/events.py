@@ -35,6 +35,7 @@ RUN_EVENT_TYPES = {
     "tool_call_started",
     "tool_call_finished",
     "plan_proposed",
+    "plan_approval_required",
     "plan_approved",
     "plan_rejected",
     "plan_updated",
@@ -54,6 +55,7 @@ _LOW_VALUE_EVENTS = {
 
 _PLAN_EVENTS = {
     "plan_proposed",
+    "plan_approval_required",
     "plan_approved",
     "plan_rejected",
     "plan_updated",

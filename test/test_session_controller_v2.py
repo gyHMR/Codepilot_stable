@@ -102,6 +102,265 @@ def test_session_controller_prepares_and_commits_run_without_exposing_live_sessi
     asyncio.run(run_case())
 
 
+def test_session_commit_keeps_plan_approval_checkpoint(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import AgentLoopOutcome
+        from codepilot.protocols import Model, PlanSummary
+        from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
+        from codepilot.sessions.controller import _bind_session_runtime
+        from codepilot.sessions.runtime import SessionRuntime
+
+        session = SessionRuntime(
+            SessionOptions(
+                model=Model(
+                    id="session-v2",
+                    name="Session V2",
+                    api="unit-test",
+                    provider="unit-test",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=4000,
+                    max_tokens=500,
+                ),
+                workspace_dir=tmp_path,
+                session_id="s_plan_wait",
+                current_mode="plan",
+                memory_enabled=False,
+            )
+        )
+        controller = _bind_session_runtime(session)
+        prepared = await controller.prepare_run(SessionRunIntent(text="先给计划"))
+        plan = PlanSummary(
+            schema_version=1,
+            plan_id="plan_wait",
+            status="proposed",
+            approval_state="proposed",
+            origin_mode="plan",
+            objective="先给计划",
+            items=[{"id": "item_1", "step": "阅读实现", "status": "pending"}],
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+        await controller.commit_run(
+            prepared,
+            AgentLoopOutcome(
+                run_id=prepared.run_id,
+                status="waiting_user",
+                stop_reason="plan_approval_required",
+                plan=plan,
+                events=[
+                    {
+                        "type": "plan_approval_required",
+                        "runId": prepared.run_id,
+                        "sessionId": session.session_id,
+                        "plan": plan.__dict__,
+                    }
+                ],
+            ),
+        )
+
+        checkpoint = session.store.read_meta()["runtime_checkpoint"]
+        assert checkpoint["phase"] == "awaiting_plan_approval"
+        assert checkpoint["plan_id"] == "plan_wait"
+        assert "plan" not in checkpoint
+        assert session.pending_plan_approval()["plan_id"] == "plan_wait"
+        session.close()
+
+    asyncio.run(run_case())
+
+
+def test_streamed_plan_event_is_immediately_visible_to_plan_command(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.protocols import Model
+        from codepilot.sessions.contracts import SessionCommandIntent, SessionOptions
+        from codepilot.sessions.controller import _bind_session_runtime
+        from codepilot.sessions.runtime import SessionRuntime
+
+        session = SessionRuntime(
+            SessionOptions(
+                model=Model(
+                    id="session-v2",
+                    name="Session V2",
+                    api="unit-test",
+                    provider="unit-test",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=4000,
+                    max_tokens=500,
+                ),
+                workspace_dir=tmp_path,
+                session_id="s_streamed_plan",
+                current_mode="plan",
+                memory_enabled=False,
+            )
+        )
+        controller = _bind_session_runtime(session)
+        plan = {
+            "schema_version": 1,
+            "plan_id": "plan_streamed",
+            "status": "proposed",
+            "approval_state": "proposed",
+            "origin_mode": "plan",
+            "objective": "优化登录逻辑",
+            "items": [{"id": "item_1", "step": "阅读实现", "status": "pending"}],
+            "explanation": "等待用户确认",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "last_update_run_id": "run_streamed",
+        }
+
+        session.record_event(
+            {
+                "type": "plan_proposed",
+                "runId": "run_streamed",
+                "sessionId": session.session_id,
+                "plan": plan,
+            }
+        )
+        record = await controller.apply_command(SessionCommandIntent(text="/plan"))
+
+        assert session.plan_state.current()["plan_id"] == "plan_streamed"
+        assert record.handled
+        assert any("plan_streamed" in line for line in record.output_lines)
+        assert record.data["plan_status"] == "proposed"
+
+        session.record_event(
+            {
+                "type": "plan_approval_required",
+                "runId": "run_streamed",
+                "sessionId": session.session_id,
+                "turnId": 2,
+                "plan": plan,
+                "reason": "proposed_plan_waiting_for_user_approval",
+            }
+        )
+        checkpoint = session.store.read_meta()["runtime_checkpoint"]
+        assert checkpoint["phase"] == "awaiting_plan_approval"
+        assert checkpoint["plan_id"] == "plan_streamed"
+        assert "plan" not in checkpoint
+        session.close()
+
+    asyncio.run(run_case())
+
+
+def test_pending_plan_feedback_forces_plan_mode(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.protocols import Model
+        from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
+        from codepilot.sessions.controller import _bind_session_runtime
+        from codepilot.sessions.runtime import SessionRuntime
+
+        session = SessionRuntime(
+            SessionOptions(
+                model=Model(
+                    id="session-v2",
+                    name="Session V2",
+                    api="unit-test",
+                    provider="unit-test",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=4000,
+                    max_tokens=500,
+                ),
+                workspace_dir=tmp_path,
+                session_id="s_plan_feedback",
+                current_mode="build",
+                memory_enabled=False,
+            )
+        )
+        session.plan_state.save(
+            {
+                "schema_version": 1,
+                "plan_id": "plan_feedback",
+                "status": "proposed",
+                "approval_state": "proposed",
+                "origin_mode": "plan",
+                "objective": "优化登录",
+                "items": [{"id": "item_1", "step": "阅读实现", "status": "pending"}],
+                "explanation": "",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "last_update_run_id": "run_plan",
+            }
+        )
+        session.store.set_checkpoint(
+            {
+                "phase": "awaiting_plan_approval",
+                "run_id": "run_plan",
+                "plan_id": "plan_feedback",
+            }
+        )
+
+        controller = _bind_session_runtime(session)
+        prepared = await controller.prepare_run(SessionRunIntent(text="第二步换成先写测试"))
+
+        assert prepared.loop_input.mode == "plan"
+        assert prepared.loop_input.plan_state["plan_id"] == "plan_feedback"
+        session.close()
+
+    asyncio.run(run_case())
+
+
+def test_plan_mode_replanning_uses_fresh_seed_instead_of_active_plan(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.protocols import Model
+        from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
+        from codepilot.sessions.controller import _bind_session_runtime
+        from codepilot.sessions.runtime import SessionRuntime
+
+        session = SessionRuntime(
+            SessionOptions(
+                model=Model(
+                    id="session-v2",
+                    name="Session V2",
+                    api="unit-test",
+                    provider="unit-test",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=4000,
+                    max_tokens=500,
+                ),
+                workspace_dir=tmp_path,
+                session_id="s_plan_rework",
+                current_mode="build",
+                memory_enabled=False,
+            )
+        )
+        try:
+            session.plan_state.save(
+                {
+                    "schema_version": 1,
+                    "plan_id": "plan_active",
+                    "status": "active",
+                    "approval_state": "approved",
+                    "origin_mode": "build",
+                    "objective": "旧执行计划",
+                    "items": [{"id": "item_1", "step": "修改实现", "status": "in_progress"}],
+                    "explanation": "",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "last_update_run_id": "run_old",
+                }
+            )
+            session.set_current_mode("plan")
+            controller = _bind_session_runtime(session)
+            prepared = await controller.prepare_run(SessionRunIntent(text="重新设计方案"))
+
+            assert prepared.loop_input.mode == "plan"
+            assert prepared.loop_input.plan_state["status"] == "none"
+            assert prepared.loop_input.plan_state["plan_id"] != "plan_active"
+            assert session.context_plan_state() is None
+        finally:
+            session.close()
+
+    asyncio.run(run_case())
+
+
 def test_session_controller_applies_command_as_session_intent(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.protocols import Model
@@ -435,7 +694,7 @@ def test_mode_build_does_not_approve_proposed_plan_without_plan_command(tmp_path
                 "origin_mode": "plan",
                 "objective": "先制定方案",
                 "items": [
-                    {"id": "item_1", "step": "阅读实现", "status": "completed"},
+                    {"id": "item_1", "step": "阅读实现", "status": "pending"},
                     {"id": "item_2", "step": "执行修改", "status": "pending"},
                 ],
                 "explanation": "等待用户切换到 build 后执行",
@@ -445,7 +704,10 @@ def test_mode_build_does_not_approve_proposed_plan_without_plan_command(tmp_path
             }
         )
 
-        assert session.set_current_mode("build") == "build"
+        import pytest
+
+        with pytest.raises(ValueError, match="/plan approve"):
+            session.set_current_mode("build")
 
         state = session.plan_state.current()
         assert state is not None
@@ -454,6 +716,49 @@ def test_mode_build_does_not_approve_proposed_plan_without_plan_command(tmp_path
         assert not any(event["type"] == "plan_approved" for event in session.store.load_events())
     finally:
         session.close()
+
+
+def test_mode_switch_refreshes_model_system_prompt(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.protocols import Model
+        from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
+        from codepilot.sessions.controller import _bind_session_runtime
+        from codepilot.sessions.runtime import SessionRuntime
+
+        session = SessionRuntime(
+            SessionOptions(
+                model=Model(
+                    id="session-v2-mode",
+                    name="Session V2 Mode",
+                    api="unit-test",
+                    provider="unit-test",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=4000,
+                    max_tokens=500,
+                ),
+                workspace_dir=tmp_path,
+                session_id="s1",
+                memory_enabled=False,
+                current_mode="build",
+                system_prompt_builder=lambda mode: f"rules for {mode}",
+            )
+        )
+        try:
+            assert session.conversation.system_prompt == "rules for build"
+            assert session.set_current_mode("plan") == "plan"
+            assert session.conversation.system_prompt == "rules for plan"
+
+            controller = _bind_session_runtime(session)
+            prepared = await controller.prepare_run(SessionRunIntent(text="只制定计划"))
+
+            assert prepared.loop_input.mode == "plan"
+            assert prepared.loop_input.context.system_prompt == "rules for plan"
+        finally:
+            session.close()
+
+    asyncio.run(run_case())
 
 
 def test_plan_commands_approve_reject_and_clear_current_plan(tmp_path) -> None:
@@ -493,7 +798,7 @@ def test_plan_commands_approve_reject_and_clear_current_plan(tmp_path) -> None:
                 "origin_mode": "plan",
                 "objective": "先制定方案",
                 "items": [
-                    {"id": "item_1", "step": "阅读实现", "status": "completed"},
+                    {"id": "item_1", "step": "阅读实现", "status": "pending"},
                     {"id": "item_2", "step": "执行修改", "status": "pending"},
                 ],
                 "explanation": "等待用户确认",
@@ -513,6 +818,7 @@ def test_plan_commands_approve_reject_and_clear_current_plan(tmp_path) -> None:
             )
             approve_state = approve_session.plan_state.current()
             assert approve_record.handled
+            assert approve_record.data["followup_mode"] == "build"
             assert approve_session.current_mode == "build"
             assert approve_controller.current_mode == "build"
             assert approve_state is not None

@@ -65,7 +65,7 @@ class SessionController:
     async def prepare_resume(self, intent: SessionResumeIntent) -> PreparedAgentRun:
         return await self._session.prepare_resume(
             intent,
-            run_id=intent.run_id or new_run_id(),
+            run_id=intent.run_id or self._session.resume_run_id(intent.approval_id),
             model=self.model,
         )
 

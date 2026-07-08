@@ -29,6 +29,7 @@ _TOOL_RESULT_STATUSES = frozenset(
 
 # Soft plan update tool name shared by tools execution and core plan state.
 UPDATE_PLAN_TOOL = "update_plan"
+PLAN_ITEM_LIMIT = 20
 
 
 @dataclass

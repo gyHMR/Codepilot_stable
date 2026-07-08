@@ -155,6 +155,7 @@ async def resume_agent_loop(
         plan_state=input.plan_state,
         limits=input.limits,
         retry_policy=input.retry_policy,
+        event_start_seq=input.event_start_seq,
     )
     recorder = _EventRecorder(loop_input, ports)
     run_state = RunState(input.run_id, input.correlation.session_id)
@@ -414,6 +415,27 @@ async def _drive_loop(
             recorder=recorder,
             objective=_objective_for_plan(input, messages),
         )
+
+        plan_pause = _plan_approval_pause_outcome(
+            input=input,
+            recorder=recorder,
+            assistant=assistant,
+            visible_tool_messages=visible_tool_messages,
+            new_messages=new_messages,
+            run_state=run_state,
+            plan_state=plan_state,
+            observations=observations,
+            usage=usage,
+        )
+        if plan_pause is not None:
+            return plan_pause
+
+        recovery_instruction = run_state.truncated_read_recovery_instruction(visible_tool_messages)
+        if recovery_instruction:
+            steering = UserMessage(content=recovery_instruction)
+            messages.append(steering)
+            new_messages.append(steering)
+            _emit_message(recorder, steering)
 
         interruption = _interruption_after_tool_results(
             input=input,
@@ -797,6 +819,72 @@ def _interruption_after_tool_results(
     return None
 
 
+def _plan_approval_pause_outcome(
+    *,
+    input: AgentLoopInput,
+    recorder: "_EventRecorder",
+    assistant: AssistantMessage,
+    visible_tool_messages: list[ToolResultMessage],
+    new_messages: list[Message],
+    run_state: RunState,
+    plan_state: PlanState | None,
+    observations: list[ToolObservation],
+    usage: Any,
+) -> AgentLoopOutcome | None:
+    if not _should_pause_for_plan_approval(input, plan_state, visible_tool_messages):
+        return None
+    recorder.emit(
+        {
+            "type": "plan_approval_required",
+            "plan": plan_state.to_dict() if plan_state is not None else None,
+            "reason": "proposed_plan_waiting_for_user_approval",
+        }
+    )
+    recorder.emit(
+        {
+            "type": "turn_end",
+            "message": assistant,
+            "toolResults": visible_tool_messages,
+        }
+    )
+    recorder.emit(
+        {
+            "type": "agent_end",
+            "status": "waiting_user",
+            "stopReason": "plan_approval_required",
+        }
+    )
+    return _outcome(
+        input=input,
+        status="waiting_user",
+        stop_reason="plan_approval_required",
+        new_messages=new_messages,
+        final_message=assistant,
+        run_state=run_state,
+        plan_state=plan_state,
+        observations=observations,
+        events=recorder.events,
+        usage=usage,
+    )
+
+
+def _should_pause_for_plan_approval(
+    input: AgentLoopInput,
+    plan_state: PlanState | None,
+    visible_tool_messages: list[ToolResultMessage],
+) -> bool:
+    if input.mode != "plan" or plan_state is None:
+        return False
+    if plan_state.status != "proposed" or plan_state.approval_state != "proposed":
+        return False
+    return any(
+        message.tool_name == "update_plan"
+        and message.status == "success"
+        and isinstance(message.metadata.get("plan_update"), dict)
+        for message in visible_tool_messages
+    )
+
+
 def _outcome(
     *,
     input: AgentLoopInput,
@@ -872,7 +960,7 @@ def _apply_plan_updates(
         event_type = _plan_event_type(current, next_state)
         current = next_state
         if current is not None:
-            recorder.emit({"type": event_type, "plan": current.summary()})
+            recorder.emit({"type": event_type, "plan": current.to_dict()})
     return current
 
 
@@ -1031,7 +1119,7 @@ class _EventRecorder:
         self._ports = ports
         self.events: list[AgentEvent] = []
         self._turn_id = 0
-        self._event_seq = 0
+        self._event_seq = input.event_start_seq
 
     def emit(self, event: dict[str, Any]) -> None:
         event_type = ensure_runtime_event_type(event.get("type"))

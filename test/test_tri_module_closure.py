@@ -181,8 +181,11 @@ def test_runtime_context_port_passes_plan_and_run_signals_to_context_governor() 
         memory_enabled = False
         store = Store()
 
-        def active_plan_state(self):
+        def current_plan_state(self):
             return {"plan_id": "plan_1", "items": []}
+
+        def context_plan_state(self):
+            return self.current_plan_state()
 
         async def prepare_context(self, context, request):
             captured["run_signals"] = context.run_signals

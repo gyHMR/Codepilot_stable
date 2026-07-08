@@ -74,6 +74,32 @@ class TestTerminalRenderer:
         renderer.render_progress_event(event)
         assert renderer._stream_started is True
 
+    def test_plan_approval_event_renders_plan_and_actions(self):
+        output = MagicMock()
+        renderer = TerminalRenderer(use_rich=False, output=output)
+
+        renderer.render_progress_event(
+            {
+                "type": "plan_approval_required",
+                "plan": {
+                    "plan_id": "plan_1",
+                    "status": "proposed",
+                    "approval_state": "proposed",
+                    "origin_mode": "plan",
+                    "objective": "优化登录逻辑",
+                    "items": [
+                        {"id": "item_1", "step": "阅读实现", "status": "pending"},
+                    ],
+                },
+            }
+        )
+
+        rendered = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        assert "Plan Approval Required" in rendered
+        assert "优化登录逻辑" in rendered
+        assert "/plan approve" in rendered
+        assert "Type feedback" in rendered
+
     def test_handle_tool_start(self):
         """测试处理工具开始事件。"""
         output = MagicMock()
@@ -343,8 +369,9 @@ class TestTerminalRenderer:
         rendered = [call.args[0] for call in output.call_args_list]
         assert "+-- APPROVAL REQUIRED " in rendered[1]
         assert "| Tool  bash  python register.py --demo" in rendered
-        assert "| /approve approval_1" in rendered
-        assert "| /deny    approval_1" in rendered
+        assert "| /approve   yes" in rendered
+        assert "| /deny      no" in rendered
+        assert "approval_1" not in "\n".join(rendered)
 
 
 # ── SimpleRenderer 测试 ──────────────────────────────────────────
@@ -471,6 +498,84 @@ def test_cli_approval_text_builds_runtime_decision():
     assert action.decision == "approve"
     assert action.reason == "ok"
     assert approval_action_from_text("/memory status") is None
+
+
+def test_cli_approval_shortcuts_use_unique_pending_approval():
+    from types import SimpleNamespace
+
+    from codepilot.interfaces.cli.interactive import approval_action_from_text
+
+    pending = (SimpleNamespace(approval_id="approval_1"),)
+
+    approved = approval_action_from_text("/approve", pending_approvals=pending)
+    yes = approval_action_from_text("yes", pending_approvals=pending)
+    denied = approval_action_from_text("no", pending_approvals=pending)
+
+    assert approved is not None
+    assert approved.approval_id == "approval_1"
+    assert approved.decision == "approve"
+    assert yes is not None
+    assert yes.approval_id == "approval_1"
+    assert yes.decision == "approve"
+    assert denied is not None
+    assert denied.approval_id == "approval_1"
+    assert denied.decision == "deny"
+
+
+def test_cli_approval_shortcut_requires_selection_for_multiple_pending_items():
+    from types import SimpleNamespace
+
+    import pytest
+
+    from codepilot.interfaces.cli.interactive import approval_action_from_text
+
+    pending = (
+        SimpleNamespace(approval_id="approval_1"),
+        SimpleNamespace(approval_id="approval_2"),
+    )
+
+    with pytest.raises(ValueError, match="Multiple approvals"):
+        approval_action_from_text("/approve", pending_approvals=pending)
+
+    by_index = approval_action_from_text("/approve 2", pending_approvals=pending)
+
+    assert by_index is not None
+    assert by_index.approval_id == "approval_2"
+    assert by_index.decision == "approve"
+
+
+def test_render_dispatch_shows_command_frames_from_runtime_prompt_shortcuts():
+    from codepilot.interfaces.cli.interactive import render_dispatch
+    from codepilot.runtime.actions import CommandFinishedFrame
+    from codepilot.sessions.contracts import SessionCommandRecord
+
+    record = SessionCommandRecord(
+        session_id="session_1",
+        command="/plan approve",
+        handled=True,
+        output_lines=["Plan approved. current_mode=build"],
+    )
+
+    async def frames():
+        yield CommandFinishedFrame(record=record)
+
+    class FakeRenderer:
+        def __init__(self):
+            self.commands = []
+            self.final = "not-called"
+
+        def render_command_output(self, lines):
+            self.commands.append(tuple(lines))
+
+        def render_final(self, record):
+            self.final = record
+
+    renderer = FakeRenderer()
+
+    asyncio.run(render_dispatch(frames(), renderer))
+
+    assert renderer.commands == [("Plan approved. current_mode=build",)]
+    assert renderer.final is None
 
 
 def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monkeypatch):
@@ -826,6 +931,12 @@ class TestCliStartupState:
             permission_mode="read-only",
             message_count=10,
             leaf_id="leaf_123",
+            plan_summary={
+                "status": "proposed",
+                "done_items": 1,
+                "total_items": 3,
+                "objective_preview": "fix cli",
+            },
         )
 
         state = build_startup_state(status, warnings=["Test warning"])
@@ -836,6 +947,12 @@ class TestCliStartupState:
         assert state.session_id == "test_session_123"
         assert state.permission_mode == "read-only"
         assert state.current_mode == "build"
+        assert state.plan_summary == {
+            "status": "proposed",
+            "done_items": 1,
+            "total_items": 3,
+            "objective_preview": "fix cli",
+        }
         assert state.warnings == ("Test warning",)
 
     def test_build_startup_state_defaults(self):
@@ -940,6 +1057,7 @@ class TestSessionStatus:
             message_count=42,
             leaf_id="leaf_456",
             is_running=True,
+            plan_summary={"status": "active", "done_items": 2, "total_items": 4},
         )
 
         assert status.session_id == "session_123"
@@ -950,6 +1068,7 @@ class TestSessionStatus:
         assert status.message_count == 42
         assert status.leaf_id == "leaf_456"
         assert status.is_running is True
+        assert status.plan_summary == {"status": "active", "done_items": 2, "total_items": 4}
 
     def test_session_status_defaults(self):
         """测试默认值。"""

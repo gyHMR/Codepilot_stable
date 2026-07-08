@@ -107,6 +107,7 @@ from .llm import (
     Usage,
 )
 from .tools import (
+    PLAN_ITEM_LIMIT,
     Tool,
     ToolResult,
     ToolResultStatus,
@@ -160,6 +161,7 @@ __all__ = [
     "ToolResultStatus",
     "ToolRiskLevel",
     "UPDATE_PLAN_TOOL",
+    "PLAN_ITEM_LIMIT",
     "AfterToolCallContext",
     "AfterToolCallResult",
     "BeforeToolCallContext",

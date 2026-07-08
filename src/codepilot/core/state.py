@@ -43,6 +43,9 @@ class RunState:
     cancelled: bool = False
     last_tool_fingerprint: str | None = None
     repeated_tool_calls: int = 0
+    last_truncated_read_fingerprint: str | None = None
+    repeated_truncated_reads: int = 0
+    truncated_read_recovery_sent: bool = False
 
     def has_repeated_call(
         self,
@@ -67,6 +70,30 @@ class RunState:
             if self.repeated_tool_calls > limit:
                 return True
         return False
+
+    def truncated_read_recovery_instruction(
+        self,
+        results: list[ToolResultMessage],
+    ) -> str | None:
+        fingerprint, metadata = _truncated_read_fingerprint(results)
+        if fingerprint is None:
+            return None
+        if fingerprint == self.last_truncated_read_fingerprint:
+            self.repeated_truncated_reads += 1
+        else:
+            self.last_truncated_read_fingerprint = fingerprint
+            self.repeated_truncated_reads = 1
+            self.truncated_read_recovery_sent = False
+        if self.repeated_truncated_reads < 2 or self.truncated_read_recovery_sent:
+            return None
+        self.truncated_read_recovery_sent = True
+        path = metadata.get("path") or "the same file"
+        next_offset = metadata.get("next_offset")
+        return (
+            "The previous read result was truncated and the same file range was read again. "
+            "Do not repeat truncated reads. Use grep/find to locate relevant text, or continue "
+            f"with offset/limit pagination from next_offset={next_offset} for {path}."
+        )
 
     def collect_tool_results(self, results: list[ToolResultMessage]) -> None:
         self.counters.tool_calls += len(results)
@@ -124,6 +151,34 @@ def _tool_error(result: ToolResultMessage) -> dict[str, Any]:
     }
 
 
+def _truncated_read_fingerprint(
+    results: list[ToolResultMessage],
+) -> tuple[str | None, dict[str, Any]]:
+    for result in results:
+        if result.tool_name != "read":
+            continue
+        metadata = dict(result.metadata)
+        quality = metadata.get("output_quality")
+        truncated = bool(metadata.get("truncated"))
+        if isinstance(quality, dict):
+            truncated = truncated or bool(quality.get("truncated"))
+        if not truncated:
+            continue
+        paths = metadata.get("read_paths")
+        path = str(paths[0]) if isinstance(paths, list) and paths else None
+        path = path or _optional_text(metadata.get("path")) or _optional_text(metadata.get("read_path"))
+        if not path:
+            continue
+        start = metadata.get("actual_start_line", metadata.get("start_line"))
+        next_offset = metadata.get(
+            "next_offset",
+            metadata.get("actual_end_line", metadata.get("end_line")),
+        )
+        metadata.setdefault("path", path)
+        return f"{path}:{start}:{next_offset}", metadata
+    return None, {}
+
+
 def _verification_status(value: object) -> RunVerificationStatus:
     if value in {"passed", "failed", "cancelled", "unknown"}:
         return cast(RunVerificationStatus, value)
@@ -138,6 +193,11 @@ def _signal_verification_status(status: RunVerificationStatus) -> RunSignalsVeri
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _optional_text(value: object) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
 
 
 def _optional_int(value: object) -> int | None:

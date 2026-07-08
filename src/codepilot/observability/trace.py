@@ -179,6 +179,7 @@ def build_run_trace(
             tool_calls.append(tool_call)
         elif event_type in {
             "plan_proposed",
+            "plan_approval_required",
             "plan_approved",
             "plan_rejected",
             "plan_updated",

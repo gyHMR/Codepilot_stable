@@ -43,6 +43,7 @@ AgentRunStopReason = Literal[
     "aborted",               # 被用户中止
     "approval_required",     # 需要用户审批
     "approval_denied",       # 用户拒绝工具审批
+    "plan_approval_required",  # plan 模式提出计划后等待用户批准
     "repeated_tool_call",    # 检测到重复的工具调用（可能陷入循环）
     "tool_call_limit",       # 工具调用数量超出限制
     "tool_unavailable",      # 模型请求了不可用工具
@@ -73,6 +74,7 @@ _STOP_REASONS = frozenset(
         "aborted",
         "approval_required",
         "approval_denied",
+        "plan_approval_required",
         "repeated_tool_call",
         "tool_call_limit",
         "tool_unavailable",
@@ -542,6 +544,7 @@ RuntimeEventType = Literal[
     "memory_record_deleted",
     "memory_record_superseded",
     "plan_proposed",
+    "plan_approval_required",
     "plan_approved",
     "plan_rejected",
     "plan_updated",
@@ -584,6 +587,7 @@ _RUNTIME_EVENT_TYPES = frozenset(
         "memory_record_deleted",
         "memory_record_superseded",
         "plan_proposed",
+        "plan_approval_required",
         "plan_approved",
         "plan_rejected",
         "plan_updated",

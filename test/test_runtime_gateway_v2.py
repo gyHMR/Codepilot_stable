@@ -99,6 +99,107 @@ def test_runtime_gateway_dispatch_command_and_cancel_as_frames(tmp_path) -> None
     asyncio.run(run_case())
 
 
+def test_runtime_gateway_plan_approve_runs_build_followup(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.runtime.actions import CommandFinishedFrame, CommandSubmitted, RunFinishedFrame
+        from codepilot.runtime.gateway import RuntimeGateway
+
+        gateway = RuntimeGateway(model_port=_EchoModelPort())
+        ref = _open_test_session(gateway, tmp_path)
+        session = _persistent_session(gateway, ref.session_id)
+        session.set_current_mode("plan")
+        session.plan_state.save(
+            {
+                "schema_version": 1,
+                "plan_id": "plan_gateway",
+                "status": "proposed",
+                "approval_state": "proposed",
+                "origin_mode": "plan",
+                "objective": "优化登录逻辑",
+                "items": [
+                    {"id": "item_1", "step": "阅读实现", "status": "pending"},
+                    {"id": "item_2", "step": "修改登录逻辑", "status": "pending"},
+                ],
+                "explanation": "",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "last_update_run_id": "run_plan",
+            }
+        )
+
+        frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                CommandSubmitted(text="/plan approve"),
+            )
+        ]
+
+        command = next(frame for frame in frames if isinstance(frame, CommandFinishedFrame))
+        finished = [frame for frame in frames if isinstance(frame, RunFinishedFrame)]
+        current_plan = session.plan_state.current()
+
+        assert command.record.data["followup_mode"] == "build"
+        assert finished
+        assert finished[-1].record.status == "completed"
+        assert session.current_mode == "build"
+        assert current_plan["status"] == "active"
+        assert current_plan["approval_state"] == "approved"
+        assert session.store.read_meta()["runtime_checkpoint"] is None
+
+    asyncio.run(run_case())
+
+
+def test_runtime_gateway_plain_plan_approval_uses_same_command_chain(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.runtime.actions import CommandFinishedFrame, PromptSubmitted, RunFinishedFrame
+        from codepilot.runtime.gateway import RuntimeGateway
+
+        gateway = RuntimeGateway(model_port=_EchoModelPort())
+        ref = _open_test_session(gateway, tmp_path)
+        session = _persistent_session(gateway, ref.session_id)
+        session.set_current_mode("plan")
+        session.plan_state.save(
+            {
+                "schema_version": 1,
+                "plan_id": "plan_gateway_plain",
+                "status": "proposed",
+                "approval_state": "proposed",
+                "origin_mode": "plan",
+                "objective": "优化登录逻辑",
+                "items": [
+                    {"id": "item_1", "step": "阅读实现", "status": "pending"},
+                    {"id": "item_2", "step": "修改登录逻辑", "status": "pending"},
+                ],
+                "explanation": "",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "last_update_run_id": "run_plan",
+            }
+        )
+
+        frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                PromptSubmitted(text="同意"),
+            )
+        ]
+
+        command = next(frame for frame in frames if isinstance(frame, CommandFinishedFrame))
+        finished = [frame for frame in frames if isinstance(frame, RunFinishedFrame)]
+        current_plan = session.plan_state.current()
+
+        assert command.record.command == "/plan approve"
+        assert command.record.data["followup_mode"] == "build"
+        assert finished
+        assert session.current_mode == "build"
+        assert current_plan["status"] == "active"
+        assert current_plan["approval_state"] == "approved"
+
+    asyncio.run(run_case())
+
+
 def test_runtime_gateway_cancel_stops_active_task_and_records_aborted_run(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.llm.ports import LLMCompleted
@@ -636,6 +737,11 @@ def test_runtime_gateway_approval_decision_resumes_through_v2_tool_port(tmp_path
         ]
         assert approval_frames
         assert approval_frames[-1].approval.approval_id == "approval1"
+        original_run_id = approval_frames[-1].approval.run_id
+        session = _persistent_session(gateway, ref.session_id)
+        runs_after_pause = session.store.load_run_results()
+        assert [run["run_id"] for run in runs_after_pause] == [original_run_id]
+        assert runs_after_pause[-1]["status"] == "waiting_approval"
 
         resume_frames = [
             frame
@@ -648,7 +754,17 @@ def test_runtime_gateway_approval_decision_resumes_through_v2_tool_port(tmp_path
 
         assert tools.sources == ["agent", "approval_resume"]
         assert finished
+        assert finished[-1].record.run_id == original_run_id
         assert finished[-1].record.final_text == "approved done"
+        runs_after_resume = session.store.load_run_results()
+        assert [run["run_id"] for run in runs_after_resume] == [original_run_id]
+        assert runs_after_resume[-1]["status"] == "completed"
+        event_ids = [
+            event["eventId"]
+            for event in session.store.run_store.load_events(original_run_id)
+            if isinstance(event.get("eventId"), str)
+        ]
+        assert len(event_ids) == len(set(event_ids))
 
     asyncio.run(run_case())
 

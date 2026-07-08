@@ -333,6 +333,7 @@ class RunStore:
                 state["workspace_changed"] = True
         elif event_type in {
             "plan_proposed",
+            "plan_approval_required",
             "plan_approved",
             "plan_rejected",
             "plan_updated",

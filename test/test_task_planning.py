@@ -49,6 +49,10 @@ class _ToolPort:
         raise AssertionError("resume is not used in these tests")
 
 
+def _raise(message: str) -> Any:
+    raise AssertionError(message)
+
+
 def _loop_input(
     run_id: str,
     *,
@@ -90,11 +94,29 @@ def test_plan_update_validates_shape() -> None:
 def test_plan_mode_update_stays_proposed_and_build_mode_update_becomes_active() -> None:
     plan_mode = PlanState.new(objective="制定方案", origin_mode="plan", run_id="run_1")
     proposed = plan_mode.apply_update(
-        PlanUpdate(items=(PlanUpdateItem(step="给出方案", status="completed"),)),
+        PlanUpdate(
+            items=(
+                PlanUpdateItem(step="阅读实现", status="completed"),
+                PlanUpdateItem(step="给出方案", status="in_progress"),
+            )
+        ),
         mode="plan",
         run_id="run_1",
     )
     assert proposed.status == "proposed"
+    assert proposed.approval_state == "proposed"
+    assert [item.status for item in proposed.items] == ["pending", "pending"]
+
+    from_mapping = PlanUpdate.from_mapping(
+        {
+            "plan": [
+                {"step": "a", "status": "in_progress"},
+                {"step": "b", "status": "in_progress"},
+            ]
+        },
+        proposal=True,
+    )
+    assert [item.status for item in from_mapping.items] == ["pending", "pending"]
 
     build_mode = PlanState.new(objective="实现方案", origin_mode="build", run_id="run_2")
     active = build_mode.apply_update(
@@ -202,6 +224,67 @@ async def _update_plan_tool_result_updates_soft_plan_and_continues_to_model() ->
     assert outcome.plan.status == "active"
     assert outcome.plan.items[1]["status"] == "in_progress"
     assert any(event["type"] == "plan_updated" for event in outcome.events)
+
+
+def test_plan_mode_update_plan_pauses_for_user_approval() -> None:
+    asyncio.run(_plan_mode_update_plan_pauses_for_user_approval())
+
+
+async def _plan_mode_update_plan_pauses_for_user_approval() -> None:
+    model = _ScriptedModel(
+        lambda _request, calls: AssistantMessage(
+            content=[
+                ToolCall(
+                    id="plan_1",
+                    name="update_plan",
+                    arguments={
+                        "plan": [
+                            {"step": "阅读注册逻辑", "status": "completed"},
+                            {"step": "提出重构方案", "status": "in_progress"},
+                        ],
+                    },
+                )
+            ],
+            stop_reason="toolUse",
+        )
+        if calls == 1
+        else (_raise("model should wait for user approval after proposed plan"))
+    )
+    tools = _ToolPort(
+        {
+            "update_plan": ToolObservation(
+                tool_call_id="plan_1",
+                name="update_plan",
+                status="success",
+                content=(TextContent(text="Plan updated."),),
+                metadata={
+                    "plan_update": {
+                        "plan": [
+                            {"step": "阅读注册逻辑", "status": "completed"},
+                            {"step": "提出重构方案", "status": "in_progress"},
+                        ],
+                    }
+                },
+            )
+        }
+    )
+
+    outcome = await run_agent_loop(
+        _loop_input("run_plan_pause", prompt="先给我方案", mode="plan"),
+        AgentLoopPorts(model=model, tools=tools),
+    )
+
+    assert outcome.status == "waiting_user"
+    assert outcome.stop_reason == "plan_approval_required"
+    assert model.calls == 1
+    assert tools.executed == ["update_plan"]
+    assert outcome.plan is not None
+    assert outcome.plan.status == "proposed"
+    assert outcome.plan.approval_state == "proposed"
+    assert [item["status"] for item in outcome.plan.items] == ["pending", "pending"]
+    event_types = [event["type"] for event in outcome.events]
+    assert "plan_proposed" in event_types
+    assert "plan_approval_required" in event_types
 
 
 def test_plan_completed_does_not_complete_run_before_model_final_answer() -> None:

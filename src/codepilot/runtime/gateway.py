@@ -79,11 +79,21 @@ class RuntimeGateway:
     ) -> AsyncIterator[RuntimeFrame]:
         session = self._sessions.require(session_id)
         if isinstance(action, PromptSubmitted):
+            plan_command = self._plan_command_from_prompt(session, action)
+            if plan_command is not None:
+                record = await self._run_command(session, CommandSubmitted(plan_command))
+                yield CommandFinishedFrame(record=record)
+                async for frame in self._follow_up_from_command(session, record):
+                    yield frame
+                return
             async for frame in self._run_prompt(session, action):
                 yield frame
             return
         if isinstance(action, CommandSubmitted):
-            yield await self._run_command(session, action)
+            record = await self._run_command(session, action)
+            yield CommandFinishedFrame(record=record)
+            async for frame in self._follow_up_from_command(session, record):
+                yield frame
             return
         if isinstance(action, ApprovalDecided):
             async for frame in self._resume_after_approval(session, action):
@@ -141,7 +151,7 @@ class RuntimeGateway:
         self,
         session: RuntimeSession,
         action: CommandSubmitted,
-    ) -> CommandFinishedFrame:
+    ) -> SessionCommandRecord:
         record = await session.controller.apply_command(
             SessionCommandIntent(
                 text=action.text,
@@ -154,7 +164,40 @@ class RuntimeGateway:
                 new_session_id=record.switched_session_id,
                 controller=session.controller,
             )
-        return CommandFinishedFrame(record=record)
+        return record
+
+    def _plan_command_from_prompt(
+        self,
+        session: RuntimeSession,
+        action: PromptSubmitted,
+    ) -> str | None:
+        if session.controller.pending_approvals():
+            return None
+        view = session.controller.describe()
+        plan = (view.context or {}).get("plan_summary")
+        decision = _plan_decision_alias(action.text)
+        if decision is None or not isinstance(plan, dict):
+            return None
+        if plan.get("status") != "proposed":
+            return None
+        if plan.get("approval_state") != "proposed":
+            return None
+        return "/plan approve" if decision == "approve" else "/plan reject"
+
+    async def _follow_up_from_command(
+        self,
+        session: RuntimeSession,
+        record: SessionCommandRecord,
+    ) -> AsyncIterator[RuntimeFrame]:
+        prompt = _optional_text(record.data.get("followup_prompt"))
+        if prompt is None:
+            return
+        mode_hint = _optional_text(record.data.get("followup_mode"))
+        async for frame in self._run_prompt(
+            session,
+            PromptSubmitted(text=prompt, mode_hint=mode_hint),
+        ):
+            yield frame
 
     async def _resume_after_approval(
         self,
@@ -378,6 +421,7 @@ class RuntimeGateway:
                 current_mode=view.current_mode,  # type: ignore[arg-type]
                 is_running=self._active_runs.is_running(session.session_id),
                 credential_source="unknown",
+                plan_summary=_plan_summary_from_view(view),
             )
         return SessionStatus(
             session_id=view.session_id,
@@ -390,6 +434,7 @@ class RuntimeGateway:
             is_running=self._active_runs.is_running(session.session_id),
             credential_source=info.credential_source,
             warnings=info.warnings,
+            plan_summary=_plan_summary_from_view(view),
         )
 
     def _commands_for(self, session: RuntimeSession) -> list[CommandDescriptor]:
@@ -413,6 +458,20 @@ class RuntimeGateway:
 def _optional_text(value: object) -> str | None:
     text = str(value).strip() if value is not None else ""
     return text or None
+
+
+def _plan_decision_alias(value: object) -> str | None:
+    text = str(value).strip().lower().lstrip("/") if value is not None else ""
+    if text in {"approve", "yes", "y", "ok", "同意", "批准", "可以", "确认"}:
+        return "approve"
+    if text in {"reject", "deny", "no", "n", "拒绝", "不同意", "不行"}:
+        return "reject"
+    return None
+
+
+def _plan_summary_from_view(view: SessionView) -> dict[str, object] | None:
+    value = (view.context or {}).get("plan_summary")
+    return dict(value) if isinstance(value, dict) else None
 
 
 def _runtime_error_payload(error: Any) -> dict[str, Any]:

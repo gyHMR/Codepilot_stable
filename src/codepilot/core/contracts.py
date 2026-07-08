@@ -126,11 +126,11 @@ class RunCorrelation:
 
 @dataclass(frozen=True)
 class AgentLoopLimits:
-    max_model_turns: int = 12
-    max_tool_iterations: int = 48
-    max_tool_calls_per_turn: int | None = 8
+    max_model_turns: int = 256
+    max_tool_iterations: int = 240
+    max_tool_calls_per_turn: int | None = 16
     max_tool_calls: int | None = None
-    repeated_tool_call_limit: int = 3
+    repeated_tool_call_limit: int = 6
 
 
 @dataclass(frozen=True)
@@ -166,11 +166,17 @@ class AgentLoopInput:
     plan_state: dict[str, object] | None = None
     limits: AgentLoopLimits = field(default_factory=AgentLoopLimits)
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
+    event_start_seq: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "context", _prepared_context(self.context))
         object.__setattr__(self, "mode", ensure_run_mode(self.mode))
         object.__setattr__(self, "plan_state", plan_state_to_dict(self.plan_state))
+        object.__setattr__(
+            self,
+            "event_start_seq",
+            _non_negative_int(self.event_start_seq, default=0),
+        )
 
 
 @dataclass(frozen=True)
@@ -191,6 +197,7 @@ class AgentResumeInput:
     plan_state: dict[str, object] | None = None
     limits: AgentLoopLimits = field(default_factory=AgentLoopLimits)
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
+    event_start_seq: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "context", _prepared_context(self.context))
@@ -201,6 +208,11 @@ class AgentResumeInput:
         if not isinstance(self.arguments, dict):
             raise TypeError("AgentResumeInput arguments must be a dict")
         object.__setattr__(self, "arguments", deepcopy(self.arguments))
+        object.__setattr__(
+            self,
+            "event_start_seq",
+            _non_negative_int(self.event_start_seq, default=0),
+        )
 
 
 @dataclass(frozen=True)

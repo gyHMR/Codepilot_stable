@@ -29,6 +29,7 @@ from codepilot.protocols.commands import (
 
 
 ConvertToLlmFn = Callable[[list[AgentMessage]], list[Message] | Awaitable[list[Message]]]
+SystemPromptBuilder = Callable[[RunMode], str]
 
 
 @dataclass
@@ -38,11 +39,12 @@ class SessionOptions:
     model: Model
     workspace_dir: str | Path
     system_prompt: str = ""
+    system_prompt_builder: Optional[SystemPromptBuilder] = None
     session_id: Optional[str] = None
     messages: list[AgentMessage] = field(default_factory=list)
     thinking_level: str = "off"
     tool_execution: ToolExecutionMode = "parallel"
-    max_tool_calls_per_turn: int = 8
+    max_tool_calls_per_turn: int = 16
     memory_enabled: bool = True
     current_mode: RunMode = "build"
     planning_budget_profile: PlanningBudgetProfile = "balanced"
@@ -217,4 +219,5 @@ __all__ = [
     "SessionRunRecord",
     "SessionOptions",
     "SessionView",
+    "SystemPromptBuilder",
 ]

@@ -90,3 +90,58 @@ def test_runtime_prompt_includes_skill_index_without_skill_body(tmp_path: Path) 
     assert "/focused-review" in prompt
     assert "Use this when reviewing a focused code change." in prompt
     assert "SECRET_SKILL_BODY_MARKER" not in prompt
+
+
+def test_runtime_config_default_tool_call_batch_limit_supports_agent_batches(tmp_path: Path) -> None:
+    from codepilot.runtime import SessionOpenIntent
+    from codepilot.runtime.config import load_runtime_config
+
+    config = load_runtime_config(
+        SessionOpenIntent(workspace_dir=tmp_path, load_workspace_resources=False)
+    )
+
+    assert config.max_tool_calls_per_turn == 16
+
+
+def test_default_runtime_prompt_describes_coding_agent_workflow(tmp_path: Path) -> None:
+    from codepilot.runtime import SessionOpenIntent
+    from codepilot.runtime.config import load_runtime_config
+    from codepilot.runtime.prompt import build_system_prompt
+    from codepilot.runtime.tools import build_runtime_tools
+
+    intent = SessionOpenIntent(workspace_dir=tmp_path, load_workspace_resources=False)
+    config = load_runtime_config(intent)
+    tools = build_runtime_tools(tmp_path, intent, config)
+
+    prompt = build_system_prompt(workspace=tmp_path, config=config, tools=tools)
+
+    assert "面向学生学习与求职展示" in prompt
+    assert "Plan State" in prompt
+    assert "update_plan" in prompt
+    assert "验证" in prompt
+    assert "当前模式：build" in prompt
+
+
+def test_plan_mode_prompt_requires_user_approval_before_build(tmp_path: Path) -> None:
+    from codepilot.runtime import SessionOpenIntent
+    from codepilot.runtime.config import load_runtime_config
+    from codepilot.runtime.prompt import build_system_prompt
+    from codepilot.runtime.tools import build_runtime_tools
+
+    intent = SessionOpenIntent(
+        workspace_dir=tmp_path,
+        current_mode="plan",
+        load_workspace_resources=False,
+    )
+    config = load_runtime_config(intent)
+    tools = build_runtime_tools(tmp_path, intent, config)
+
+    prompt = build_system_prompt(workspace=tmp_path, config=config, tools=tools)
+
+    assert "当前模式：plan" in prompt
+    assert "/plan approve" in prompt
+    assert "不要执行写入" in prompt
+    assert "等待用户确认" in prompt
+    assert "- write:" not in prompt
+    assert "- edit:" not in prompt
+    assert "- apply_patch:" not in prompt

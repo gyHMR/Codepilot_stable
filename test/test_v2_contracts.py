@@ -125,7 +125,11 @@ def test_agent_loop_default_tool_iteration_budget_supports_coding_tasks(tmp_path
     from codepilot.sessions.contracts import SessionOptions
     from codepilot.sessions.runtime import SessionRuntime
 
-    assert AgentLoopLimits().max_tool_iterations >= 32
+    defaults = AgentLoopLimits()
+    assert defaults.max_model_turns >= 256
+    assert defaults.max_tool_iterations >= 200
+    assert defaults.max_model_turns > defaults.max_tool_iterations
+    assert defaults.max_tool_calls_per_turn == 16
     model = Model(
         id="unit",
         name="Unit",
@@ -140,12 +144,32 @@ def test_agent_loop_default_tool_iteration_budget_supports_coding_tasks(tmp_path
     read_session = SessionRuntime(
         SessionOptions(model=model, workspace_dir=tmp_path / "read", current_mode="read")
     )
+    plan_session = SessionRuntime(
+        SessionOptions(model=model, workspace_dir=tmp_path / "plan", current_mode="plan")
+    )
     build_session = SessionRuntime(
         SessionOptions(model=model, workspace_dir=tmp_path / "build", current_mode="build")
     )
+    wide_build_session = SessionRuntime(
+        SessionOptions(
+            model=model,
+            workspace_dir=tmp_path / "build-wide",
+            current_mode="build",
+            planning_budget_profile="wide",
+        )
+    )
 
-    assert build_session.loop_limits().max_tool_iterations >= 48
-    assert read_session.loop_limits().max_tool_iterations < build_session.loop_limits().max_tool_iterations
+    read_limits = read_session.loop_limits()
+    plan_limits = plan_session.loop_limits()
+    build_limits = build_session.loop_limits()
+    wide_limits = wide_build_session.loop_limits()
+
+    assert build_limits.max_tool_iterations >= 200
+    assert build_limits.max_model_turns > build_limits.max_tool_iterations
+    assert build_limits.max_tool_calls_per_turn == 16
+    assert read_limits.max_tool_iterations < plan_limits.max_tool_iterations
+    assert plan_limits.max_tool_iterations < build_limits.max_tool_iterations
+    assert wide_limits.max_tool_iterations > build_limits.max_tool_iterations
 
 
 def test_agent_loop_retry_policy_is_explicit_contract() -> None:

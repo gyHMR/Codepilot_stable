@@ -69,6 +69,8 @@ class CliStartupState:
     permission_mode: str = "workspace-write"
     # 运行模式：read / plan / build。
     current_mode: str = "build"
+    # 当前计划摘要；无计划时为 None，避免底部栏和启动面板产生噪音。
+    plan_summary: dict[str, object] | None = None
     # 启动时需要提示用户的警告，例如配置缺失或降级信息。
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
@@ -83,6 +85,7 @@ class CliStartupState:
         object.__setattr__(self, "session_id", _require_text(self.session_id, "session_id"))
         object.__setattr__(self, "permission_mode", _ensure_permission_mode(self.permission_mode))
         object.__setattr__(self, "current_mode", _ensure_run_mode(self.current_mode))
+        object.__setattr__(self, "plan_summary", _normalize_plan_summary(self.plan_summary))
         object.__setattr__(self, "warnings", _normalize_warnings(self.warnings))
 
 
@@ -104,6 +107,7 @@ def build_startup_state(status: Any, warnings: list[str] | None = None) -> CliSt
         session_id=status.session_id,
         permission_mode=status.permission_mode,
         current_mode=status.current_mode,
+        plan_summary=getattr(status, "plan_summary", None),
         warnings=tuple(warnings) if warnings is not None else tuple(status.warnings or ()),
     )
 
@@ -452,6 +456,9 @@ class TerminalRenderer:
         if event_type in {"tool_completed", "tool_failed", "tool_interrupted"}:
             self._render_tool_end(event)
             return
+        if event_type == "plan_approval_required":
+            self._render_plan_approval(event)
+            return
         if event_type == "error":
             self._render_error_event(event)
             return
@@ -574,8 +581,10 @@ class TerminalRenderer:
         permission = escape(state.permission_mode)
         current_mode = escape(state.current_mode)
         session = escape(self._short_session(state.session_id))
+        plan = _format_plan_summary(state.plan_summary)
+        plan_part = f"  |  {escape(plan)}" if plan else ""
         return (
-            f"<b>CP</b>  <b>{model}</b>  |  {permission}  |  {current_mode}  |  {session}"
+            f"<b>CP</b>  <b>{model}</b>  |  {permission}  |  {current_mode}{plan_part}  |  {session}"
             "  |  <b>/help</b> deck  |  <b>Ctrl+C</b> cancel  |  <b>Alt+Enter</b> newline"
         )
 
@@ -623,6 +632,9 @@ class TerminalRenderer:
             ),
         )
         status.add_row("Mode", Text(state.current_mode, style="tool"))
+        plan = _format_plan_summary(state.plan_summary)
+        if plan:
+            status.add_row("Plan", Text(plan, style="warning"))
         status.add_row("Session", Text(session_display, style="muted2"))
 
         quickstart = Table.grid(expand=True)
@@ -664,6 +676,9 @@ class TerminalRenderer:
         self._print(f"| Workspace  {self._shorten_tail(state.workspace, 54)}")
         self._print(f"| Permission {state.permission_mode}")
         self._print(f"| Mode       {state.current_mode}")
+        plan = _format_plan_summary(state.plan_summary)
+        if plan:
+            self._print(f"| Plan       {plan}")
         self._print(f"| Session    {self._short_session(state.session_id)}")
         self._print("|")
         self._print("| /help command deck   /status telemetry   Ctrl+C exit/cancel")
@@ -817,15 +832,12 @@ class TerminalRenderer:
             summary.append(risk_level, style=self._risk_style(risk_level))
 
             command = Text()
-            if approval_id:
-                command.append("Approval id\n", style="label")
-                command.append(approval_id, style="muted2")
-                command.append("\n\n")
-                command.append(f"/approve {approval_id}", style="success")
-                command.append("    ")
-                command.append(f"/deny {approval_id}", style="error")
-            else:
-                command.append("Approval id missing", style="error")
+            command.append("Approve\n", style="label")
+            command.append("/approve", style="success")
+            command.append("  or  yes", style="muted2")
+            command.append("\n\nDeny\n", style="label")
+            command.append("/deny", style="error")
+            command.append("     or  no", style="muted2")
 
             self._console.print(
                 Panel(
@@ -849,11 +861,9 @@ class TerminalRenderer:
         self._print("+-- APPROVAL REQUIRED " + "-" * 20)
         self._print(f"| Tool  {tool_name}" + (f"  {target}" if target else ""))
         self._print(f"| Risk  {risk_level}")
-        if approval_id:
-            self._print(f"| Id    {approval_id}")
-            self._print("|")
-            self._print(f"| /approve {approval_id}")
-            self._print(f"| /deny    {approval_id}")
+        self._print("|")
+        self._print("| /approve   yes")
+        self._print("| /deny      no")
         self._print("+" + "-" * 40)
 
     def _render_error_event(self, event: AgentEvent) -> None:
@@ -903,6 +913,24 @@ class TerminalRenderer:
             self._print(f"  Provider: {provider}")
         if model:
             self._print(f"  Model: {model}")
+
+    def _render_plan_approval(self, event: AgentEvent) -> None:
+        """Render a proposed plan and the user actions that can resolve it."""
+        self._activity_started = False
+        if self._stream_started:
+            self._print()
+            self._stream_started = False
+        self.render_command_output(
+            [
+                "=== Plan Approval Required ===",
+                *_format_plan_payload_lines(event.get("plan")),
+                "",
+                "Use /plan approve to execute this plan.",
+                "Use /plan reject to discard it.",
+                "Type feedback to revise the plan.",
+            ]
+        )
+        self._stream_started = True
 
     def _clear_current_tool(self, event: AgentEvent) -> None:
         """清理当前工具执行状态和计时缓存。"""
@@ -1010,6 +1038,15 @@ class SimpleRenderer:
         Args:
             event: runtime 过程事件；只有 ``message_update`` 会被输出。
         """
+        if event.get("type") == "plan_approval_required":
+            for line in [
+                "Plan approval required:",
+                *_format_plan_payload_lines(event.get("plan")),
+                "Use /plan approve, /plan reject, or type feedback to revise it.",
+            ]:
+                self.output(line)
+            self._stream_started = True
+            return
         if event.get("type") != "message_update":
             return
         assistant_event = event.get("assistantMessageEvent") or {}
@@ -1108,6 +1145,54 @@ def _ensure_run_mode(value: object) -> str:
     if text not in _CLI_RUN_MODES:
         raise ValueError(f"Unknown CLI current_mode: {value}")
     return text
+
+
+def _normalize_plan_summary(value: object) -> dict[str, object] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise TypeError("CliStartupState.plan_summary must be a dict")
+    return dict(value)
+
+
+def _format_plan_summary(value: dict[str, object] | None) -> str:
+    if not value:
+        return ""
+    status = str(value.get("status") or "").strip()
+    if not status:
+        return ""
+    done = value.get("done_items")
+    total = value.get("total_items")
+    progress = ""
+    if isinstance(done, int) and isinstance(total, int) and total > 0:
+        progress = f" {done}/{total}"
+    objective = str(value.get("objective_preview") or "").strip()
+    objective = f" {objective}" if objective else ""
+    return f"plan {status}{progress}{objective}".strip()
+
+
+def _format_plan_payload_lines(value: object) -> list[str]:
+    if not isinstance(value, dict):
+        return ["No plan."]
+    lines = [
+        "=== Plan ===",
+        f"  Plan ID    : {value.get('plan_id', '')}",
+        f"  Status     : {value.get('status', '')}",
+        f"  Approval   : {value.get('approval_state', '')}",
+        f"  Mode       : {value.get('origin_mode', '')}",
+        f"  Objective  : {value.get('objective', '')}",
+    ]
+    explanation = str(value.get("explanation") or "").strip()
+    if explanation:
+        lines.append(f"  Note       : {explanation}")
+    items = value.get("items")
+    if isinstance(items, list) and items:
+        lines.append("  Items:")
+        for index, item in enumerate(items, start=1):
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"    {index}. [{item.get('status', '')}] {item.get('step', '')}")
+    return lines
 
 
 def _normalize_warnings(value: object) -> tuple[str, ...]:

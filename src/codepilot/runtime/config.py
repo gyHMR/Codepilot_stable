@@ -399,9 +399,9 @@ def load_runtime_config(intent: "SessionOpenIntent") -> RuntimeConfig:
                 "max_tool_calls_per_turn",
                 (_cli_source(), intent.max_tool_calls_per_turn),
                 (_project_source("settings.json"), settings.max_tool_calls_per_turn),
-                default=8,
+                default=16,
             ),
-            default=8,
+            default=16,
         ),
         retry_enabled=bool(
             choose(

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
 
-from codepilot.protocols import PlanSummary
+from codepilot.protocols import PLAN_ITEM_LIMIT, PlanSummary
 
 
 RunMode = Literal["read", "plan", "build"]
@@ -46,7 +46,7 @@ _PLAN_KEYS = frozenset(
 _ITEM_KEYS = frozenset({"id", "step", "status"})
 
 PLAN_STATE_SCHEMA_VERSION = 1
-MAX_PLAN_ITEMS = 10
+MAX_PLAN_ITEMS = PLAN_ITEM_LIMIT
 
 
 class PlanValidationError(ValueError):
@@ -96,7 +96,7 @@ class PlanUpdate:
         object.__setattr__(self, "items", items)
 
     @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any]) -> "PlanUpdate":
+    def from_mapping(cls, raw: Mapping[str, Any], *, proposal: bool = False) -> "PlanUpdate":
         plan = raw.get("plan")
         if not isinstance(plan, list):
             raise PlanValidationError("plan must be a list")
@@ -104,15 +104,27 @@ class PlanUpdate:
         for index, item in enumerate(plan):
             if not isinstance(item, Mapping):
                 raise PlanValidationError(f"plan[{index}] must be an object")
+            status = ensure_plan_item_status(item.get("status"))
             items.append(
                 PlanUpdateItem(
                     step=_required_text(item.get("step"), f"plan[{index}].step"),
-                    status=ensure_plan_item_status(item.get("status")),
+                    status="pending" if proposal else status,
                 )
             )
         return cls(
             explanation=_optional_text(raw.get("explanation")) or "",
             items=tuple(items),
+        )
+
+    def as_proposal(self) -> "PlanUpdate":
+        if all(item.status == "pending" for item in self.items):
+            return self
+        return PlanUpdate(
+            explanation=self.explanation,
+            items=tuple(
+                PlanUpdateItem(step=item.step, status="pending")
+                for item in self.items
+            ),
         )
 
 
@@ -233,10 +245,15 @@ class PlanState:
     ) -> "PlanState":
         if self.status == "rejected":
             raise PlanValidationError("rejected plan cannot be changed by the model")
+        run_mode = ensure_run_mode(mode)
+        if run_mode == "plan" and self.status in {"active", "completed"}:
+            raise PlanValidationError("approved plan progress can only be updated in build mode")
+        if run_mode == "plan":
+            update = update.as_proposal()
         now = _utc_now_iso()
         next_status = self.status
         if next_status in {"none", "abandoned"}:
-            next_status = "proposed" if ensure_run_mode(mode) == "plan" else "active"
+            next_status = "proposed" if run_mode == "plan" else "active"
         if next_status == "active" and all(item.status == "completed" for item in update.items):
             next_status = "completed"
         approval_state = self.approval_state
@@ -248,7 +265,7 @@ class PlanState:
             plan_id=self.plan_id,
             status=next_status,
             approval_state=approval_state,
-            origin_mode=ensure_run_mode(mode),
+            origin_mode=run_mode,
             objective=self.objective,
             items=tuple(_items_from_update(self.items, update)),
             explanation=update.explanation,
@@ -309,8 +326,17 @@ def apply_plan_update_metadata(
     raw_update = metadata.get("plan_update")
     if not isinstance(raw_update, Mapping):
         return state
-    update = PlanUpdate.from_mapping(raw_update)
-    current = state or PlanState.new(objective=objective, origin_mode=mode, run_id=run_id)
+    run_mode = ensure_run_mode(mode)
+    update = PlanUpdate.from_mapping(raw_update, proposal=run_mode == "plan")
+    current = state
+    if current is not None and run_mode == "plan" and current.status in {
+        "active",
+        "completed",
+        "rejected",
+        "abandoned",
+    }:
+        current = None
+    current = current or PlanState.new(objective=objective, origin_mode=run_mode, run_id=run_id)
     if not current.objective and objective:
         current = PlanState(
             plan_id=current.plan_id,
@@ -324,7 +350,7 @@ def apply_plan_update_metadata(
             updated_at=current.updated_at,
             last_update_run_id=current.last_update_run_id,
         )
-    return current.apply_update(update, mode=mode, run_id=run_id)
+    return current.apply_update(update, mode=run_mode, run_id=run_id)
 
 
 def ensure_run_mode(value: object) -> RunMode:

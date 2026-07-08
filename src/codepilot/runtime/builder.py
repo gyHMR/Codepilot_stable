@@ -39,11 +39,15 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
             max_tokens=int(intent.model_max_output_tokens or runtime_model.max_tokens),
         )
     tools = build_runtime_tools(config.workspace, intent, config)
-    system_prompt = build_system_prompt(
-        workspace=config.workspace,
-        config=config,
-        tools=tools,
-    )
+
+    def system_prompt_for(mode: str) -> str:
+        return build_system_prompt(
+            workspace=config.workspace,
+            config=replace(config, current_mode=mode),
+            tools=tools,
+        )
+
+    system_prompt = system_prompt_for(config.current_mode)
 
     before_tool_call = compose_before_tool_call(
         intent.before_tool_call,
@@ -66,6 +70,7 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         model=runtime_model,
         workspace_dir=config.workspace,
         system_prompt=system_prompt,
+        system_prompt_builder=system_prompt_for,
         session_id=intent.session_id,
         messages=list(intent.messages),
         thinking_level=config.thinking_level,

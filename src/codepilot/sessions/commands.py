@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import inspect
+import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 from codepilot.core.plan import RunMode
@@ -314,32 +316,23 @@ async def apply_session_command(
         return _mode_record(session_id, text, session, arg)
     if command == "/plan":
         return _plan_record(session_id, text, session, arg)
-    if command == "/session":
-        return _record(
-            session_id,
-            text,
-            output_lines=[f"session_id={session.session_id} leaf_id={get_leaf_id(session)}"],
-            data={"session_id": session.session_id, "leaf_id": get_leaf_id(session)},
-        )
-    if command == "/tree":
-        return _tree_record(session_id, text, session)
-    if command == "/path":
-        if not arg:
-            return _record(session_id, text, output_lines=["usage: /path <entry_id>"])
-        path = get_entry_path(session, arg)
-        return _record(session_id, text, output_lines=[f"path={' -> '.join(path)}"], data={"entry_id": arg, "path": path})
-    if command == "/clear":
+    if command == "/resume":
+        record = _resume_record(session_id, text, session, arg)
+        if record.switched_session_id:
+            _stage_derived_controller(controller, _open_derived_runtime(session, record.switched_session_id))
+        return record
+    if command == "/new":
         fresh = create_fresh_session(session)
         _stage_derived_controller(controller, fresh)
         return _record(
             session_id,
             text,
-            output_lines=[f"context cleared -> new session_id={fresh.session_id}"],
+            output_lines=[f"new session -> session_id={fresh.session_id}"],
             switched_session_id=fresh.session_id,
             data={"new_session_id": fresh.session_id},
         )
-    if command in {"/new", "/fork"}:
-        source_entry = arg or get_leaf_id(session) or ""
+    if command == "/fork":
+        source_entry = get_leaf_id(session) or ""
         if not source_entry:
             return _record(session_id, text, output_lines=["cannot resolve source entry"])
         forked = fork_from_entry(session, source_entry)
@@ -347,19 +340,9 @@ async def apply_session_command(
         return _record(
             session_id,
             text,
-            output_lines=[f"forked to session_id={forked.session_id}"],
+            output_lines=[f"forked session -> session_id={forked.session_id}"],
             switched_session_id=forked.session_id,
             data={"from_session_id": session_id, "from_entry_id": source_entry, "new_session_id": forked.session_id},
-        )
-    if command == "/switch":
-        if not arg:
-            return _record(session_id, text, output_lines=["usage: /switch <entry_id>"])
-        switch_to_entry(session, arg)
-        return _record(
-            session_id,
-            text,
-            output_lines=[f"switched leaf -> {get_leaf_id(session)}"],
-            data={"session_id": session_id, "entry_id": arg, "path": get_entry_path(session, arg)},
         )
     if command == "/context":
         return _context_record(session_id, text, session, arg)
@@ -408,18 +391,26 @@ async def apply_session_command(
 def _status_record(session_id: str, text: str, session: Any) -> SessionCommandRecord:
     model = session.conversation.model
     model_id = f"{model.provider}/{model.id}" if model.provider else model.id
+    plan = session.plan_summary() if hasattr(session, "plan_summary") else None
+    output_lines = [
+        "=== Status ===",
+        f"  Model      : {model_id}",
+        f"  Workspace  : {session.workspace_dir}",
+        f"  Session    : {session.session_id}",
+        f"  Leaf       : {get_leaf_id(session)}",
+        f"  Messages   : {len(session.conversation.messages)}",
+        f"  Mode       : {session.current_mode}",
+    ]
+    if isinstance(plan, dict):
+        output_lines.append(
+            f"  Plan       : {plan.get('status')} "
+            f"{plan.get('done_items', 0)}/{plan.get('total_items', 0)} "
+            f"{plan.get('objective_preview', '')}".rstrip()
+        )
     return _record(
         session_id,
         text,
-        output_lines=[
-            "=== Status ===",
-            f"  Model      : {model_id}",
-            f"  Workspace  : {session.workspace_dir}",
-            f"  Session    : {session.session_id}",
-            f"  Leaf       : {get_leaf_id(session)}",
-            f"  Messages   : {len(session.conversation.messages)}",
-            f"  Mode       : {session.current_mode}",
-        ],
+        output_lines=output_lines,
     )
 
 
@@ -431,15 +422,39 @@ def _mode_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
             output_lines=[f"current_mode={session.current_mode}"],
             data={"current_mode": session.current_mode},
         )
+    requested_mode = arg.strip().lower()
+    plan = session.pending_plan_approval() if hasattr(session, "pending_plan_approval") else None
+    if (
+        requested_mode == "build"
+        and isinstance(plan, dict)
+    ):
+        return _record(
+            session_id,
+            text,
+            output_lines=[
+                f"current_mode={session.current_mode}",
+                "Build mode is blocked while a proposed plan is waiting for approval.",
+                "Use /plan to review it, /plan approve to execute, or /plan reject to discard it.",
+                *_format_plan_lines(plan),
+            ],
+            data={
+                "current_mode": session.current_mode,
+                "plan_status": "proposed",
+                "approval_state": plan.get("approval_state"),
+                "blocked": True,
+            },
+        )
     try:
         mode = _set_current_mode(session, arg)
     except ValueError as exc:
         return _record(session_id, text, output_lines=[str(exc), "usage: /mode read|plan|build"])
+    lines = [f"current_mode={mode}"]
+    data: dict[str, Any] = {"current_mode": mode}
     return _record(
         session_id,
         text,
-        output_lines=[f"current_mode={mode}"],
-        data={"current_mode": mode},
+        output_lines=lines,
+        data=data,
     )
 
 
@@ -458,26 +473,54 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
             ],
         )
     if action == "approve":
-        before = session.plan_state.current()
-        if not isinstance(before, dict) or before.get("status") != "proposed":
+        before = session.current_plan_state()
+        if not isinstance(before, dict):
             return _record(
                 session_id,
                 text,
                 output_lines=["No proposed plan to approve."],
-                data={"plan_status": before.get("status") if isinstance(before, dict) else None},
+                data={"plan_status": None},
+            )
+        if before.get("status") in {"active", "completed"} and before.get("approval_state") == "approved":
+            return _record(
+                session_id,
+                text,
+                output_lines=["Plan already approved.", *_format_plan_lines(before)],
+                data={
+                    "plan_status": before.get("status"),
+                    "approval_state": before.get("approval_state"),
+                    "current_mode": session.current_mode,
+                },
+            )
+        if before.get("status") != "proposed":
+            return _record(
+                session_id,
+                text,
+                output_lines=[
+                    f"Cannot approve plan with status={before.get('status')}.",
+                    *_format_plan_lines(before),
+                ],
+                data={"plan_status": before.get("status")},
             )
         state = session.approve_current_plan(switch_to_build=True)
         return _record(
             session_id,
             text,
-            output_lines=["Plan approved. current_mode=build", *_format_plan_lines(state)],
+            output_lines=[
+                "Plan approved. current_mode=build",
+                "Starting implementation from the approved plan.",
+                *_format_plan_lines(state),
+            ],
             data={
                 "plan_status": state.get("status") if isinstance(state, dict) else None,
+                "approval_state": state.get("approval_state") if isinstance(state, dict) else None,
                 "current_mode": session.current_mode,
+                "followup_prompt": _approved_plan_followup_prompt(state),
+                "followup_mode": "build",
             },
         )
     if action == "reject":
-        before = session.plan_state.current()
+        before = session.current_plan_state()
         if not isinstance(before, dict) or before.get("status") != "proposed":
             return _record(
                 session_id,
@@ -493,7 +536,7 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
             data={"plan_status": state.get("status") if isinstance(state, dict) else None},
         )
     if action in {"clear", "abandon"}:
-        before = session.plan_state.current()
+        before = session.current_plan_state()
         if not isinstance(before, dict):
             return _record(
                 session_id,
@@ -514,11 +557,20 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
             text,
             output_lines=["usage: /plan [approve|reject|clear]"],
         )
-    state = session.plan_state.current()
+    state = session.current_plan_state()
+    lines = _format_plan_lines(state)
+    if isinstance(state, dict) and state.get("status") == "proposed":
+        lines.extend(
+            [
+                "",
+                "Plan is waiting for approval.",
+                "Use /plan approve to execute, /plan reject to discard, or type feedback to revise it.",
+            ]
+        )
     return _record(
         session_id,
         text,
-        output_lines=_format_plan_lines(state),
+        output_lines=lines,
         data={"plan_status": state.get("status") if isinstance(state, dict) else None},
     )
 
@@ -533,6 +585,39 @@ def _tree_record(session_id: str, text: str, session: Any) -> SessionCommandReco
         leaf = " *" if item.get("is_leaf") else ""
         lines.append(f"{prefix}- {item.get('id')}{leaf}")
     return _record(session_id, text, output_lines=lines, data={"entries": entries, "tree": get_session_tree(session)})
+
+
+def _resume_record(session_id: str, text: str, session: Any, arg: str) -> SessionCommandRecord:
+    sessions = _recent_session_summaries(session)
+    recent = sessions[:10]
+    if not arg:
+        lines = ["=== Recent sessions ==="]
+        if not recent:
+            lines.append("  (none)")
+        for index, item in enumerate(recent, start=1):
+            marker = "*" if item["session_id"] == session.session_id else " "
+            lines.append(
+                f"  {index}. {marker} {item['session_id']}  {item.get('updated_at', '')}  "
+                f"mode={item.get('mode', 'build')}  plan={item.get('plan') or '-'}  "
+                f"{item.get('preview') or '(empty)'}"
+            )
+        return _record(session_id, text, output_lines=lines, data={"sessions": recent})
+
+    target = _resolve_resume_target(arg, recent)
+    if target is None:
+        return _record(
+            session_id,
+            text,
+            output_lines=["Session not found. Use /resume to list recent sessions."],
+            data={"target": arg},
+        )
+    return _record(
+        session_id,
+        text,
+        output_lines=[f"resumed session -> session_id={target}"],
+        switched_session_id=target,
+        data={"session_id": target},
+    )
 
 
 def _context_record(session_id: str, text: str, session: Any, arg: str) -> SessionCommandRecord:
@@ -750,28 +835,16 @@ def _rollback_result_to_view(result: GitRollbackResult) -> dict[str, Any]:
 
 
 def _format_help(session: Any) -> str:
-    names = [
-        "help",
-        "status",
-        "mode",
-        "plan",
-        "session",
-        "tree",
-        "path",
-        "fork",
-        "new",
-        "switch",
-        "clear",
-        "context",
-        "memory",
-        "rollback",
-        "tools",
-        "model",
-        "usage",
-        "exit",
-        *sorted(session.extension_commands),
-    ]
-    return "可用命令：\n" + "\n".join(f"- `/{name}`" for name in names)
+    from codepilot.runtime.views import builtin_commands
+
+    commands = [command for command in builtin_commands() if command.visible]
+    lines = ["可用命令："]
+    for command in commands:
+        usage = f" (usage: {command.usage})" if command.usage != f"/{command.name}" else ""
+        lines.append(f"- `/{command.name}` - {command.description}{usage}")
+    for name in sorted(session.extension_commands):
+        lines.append(f"- `/{name}` - extension command")
+    return "\n".join(lines)
 
 
 def _format_plan_lines(state: Any) -> list[str]:
@@ -801,6 +874,22 @@ def _format_plan_lines(state: Any) -> list[str]:
     return lines
 
 
+def _approved_plan_followup_prompt(state: Any) -> str:
+    objective = ""
+    if isinstance(state, dict):
+        objective = str(state.get("objective") or "").strip()
+    if objective:
+        return (
+            "用户已经批准当前计划，请按已批准计划开始执行。"
+            f"任务目标：{objective}。"
+            "执行时继续使用 update_plan 更新进度，完成后运行必要验证并汇报结果。"
+        )
+    return (
+        "用户已经批准当前计划，请按已批准计划开始执行。"
+        "执行时继续使用 update_plan 更新进度，完成后运行必要验证并汇报结果。"
+    )
+
+
 def _open_derived_runtime(session: Any, session_id: str) -> Any:
     from .runtime import SessionRuntime
 
@@ -809,12 +898,13 @@ def _open_derived_runtime(session: Any, session_id: str) -> Any:
             model=session.conversation.model,
             workspace_dir=session.workspace_dir,
             system_prompt=session.conversation.system_prompt,
+            system_prompt_builder=getattr(session, "_system_prompt_builder", None),
             session_id=session_id,
             thinking_level=session.conversation.thinking_level,
             tool_execution=session.tool_execution,
             max_tool_calls_per_turn=session.max_tool_calls_per_turn,
             memory_enabled=session.memory_enabled,
-            current_mode=session.current_mode,
+            current_mode=_stored_session_mode(session.workspace_dir, session_id) or session.current_mode,
             planning_budget_profile=session.planning_budget_profile,
             convert_to_llm=session.convert_to_llm,
             get_api_key=session.get_api_key,
@@ -830,6 +920,119 @@ def _open_derived_runtime(session: Any, session_id: str) -> Any:
             prepare_context=getattr(session, "_custom_prepare_context", None),
         )
     )
+
+
+def _recent_session_summaries(session: Any) -> list[dict[str, Any]]:
+    root = Path(session.workspace_dir) / ".codepilot" / "sessions"
+    if not root.exists():
+        return []
+    items: list[dict[str, Any]] = []
+    for session_dir in root.iterdir():
+        if not session_dir.is_dir():
+            continue
+        meta = _read_json_file(session_dir / "session.json")
+        if not isinstance(meta, dict):
+            continue
+        session_id = str(meta.get("session_id") or session_dir.name)
+        items.append(
+            {
+                "session_id": session_id,
+                "updated_at": str(meta.get("updated_at") or ""),
+                "mode": str(meta.get("current_mode") or "build"),
+                "plan": _plan_summary_text(_read_json_file(session_dir / "plan_state.json")),
+                "preview": _last_message_preview(session_dir / "messages.jsonl"),
+            }
+        )
+    items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    return items
+
+
+def _stored_session_mode(workspace_dir: Any, session_id: str) -> str | None:
+    meta = _read_json_file(Path(workspace_dir) / ".codepilot" / "sessions" / session_id / "session.json")
+    if not isinstance(meta, dict):
+        return None
+    mode = str(meta.get("current_mode") or "").strip()
+    return mode if mode in {"read", "plan", "build"} else None
+
+
+def _resolve_resume_target(arg: str, sessions: list[dict[str, Any]]) -> str | None:
+    value = arg.strip()
+    if value.isdigit():
+        index = int(value)
+        if 1 <= index <= len(sessions):
+            return str(sessions[index - 1]["session_id"])
+        return None
+    for item in sessions:
+        session_id = str(item.get("session_id") or "")
+        if value == session_id:
+            return session_id
+    return None
+
+
+def _plan_summary_text(state: Any) -> str:
+    if not isinstance(state, dict):
+        return "-"
+    status = str(state.get("status") or "").strip()
+    if status in {"", "none", "rejected", "abandoned"}:
+        return "-"
+    items = state.get("items")
+    items = items if isinstance(items, list) else []
+    total = len([item for item in items if isinstance(item, dict)])
+    done = len([
+        item
+        for item in items
+        if isinstance(item, dict) and item.get("status") in {"completed", "done"}
+    ])
+    return f"{status} {done}/{total}" if total else status
+
+
+def _last_message_preview(path: Path) -> str:
+    if not path.exists():
+        return ""
+    last: dict[str, Any] | None = None
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                last = value
+    if last is None:
+        return ""
+    return _short_preview(_message_preview_from_row(last), limit=64)
+
+
+def _message_preview_from_row(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return ""
+
+
+def _read_json_file(path: Path) -> Any:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _short_preview(value: object, *, limit: int) -> str:
+    text = str(value).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
 
 
 def _stage_derived_controller(controller: Any | None, session: Any) -> None:
