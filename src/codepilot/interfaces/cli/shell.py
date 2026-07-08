@@ -17,6 +17,7 @@ from __future__ import annotations
 - Shell 只负责输入收集，不处理业务逻辑
 - 通过回调函数与上层通信
 - 历史文件存储在 .codepilot/history
+- 命令补全数据来自 runtime.describe()，不在 CLI 输入层维护第二份命令表
 """
 
 from pathlib import Path
@@ -30,7 +31,8 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import HTML
 
 
-# 自定义样式
+# prompt_toolkit 样式表。这里只定义输入框、底部工具栏和补全菜单颜色，
+# 真正的业务文案仍由 render.py 构造。
 CODEPILOT_STYLE = Style.from_dict({
     "prompt": "bold #22d3ee",
     "continuation": "#64748b",
@@ -50,9 +52,21 @@ class CommandCompleter(Completer):
     """
 
     def __init__(self, commands: Iterable[Any]) -> None:
+        """创建命令补全器。
+
+        Args:
+            commands: runtime 暴露的命令视图序列。每个对象通常包含 ``name`` 和
+                ``description`` 字段；这里用 getattr 读取，便于测试传入轻量 fake。
+        """
         self.commands = tuple(commands)
 
     def set_commands(self, commands: Iterable[Any]) -> None:
+        """刷新补全命令列表。
+
+        Args:
+            commands: 最新命令视图序列。会在每次读取用户输入前由 ``interactive.py`` 更新，
+                这样 session 切换或扩展命令变化后补全也能同步。
+        """
         self.commands = tuple(commands)
 
     def get_completions(
@@ -60,6 +74,15 @@ class CommandCompleter(Completer):
         document: "Document",
         complete_event: "CompleteEvent",
     ) -> Iterable[Completion]:
+        """根据当前输入位置生成补全项。
+
+        Args:
+            document: prompt_toolkit 的当前输入文档，包含光标前文本。
+            complete_event: prompt_toolkit 补全事件；当前实现不需要读取它。
+
+        Yields:
+            ``Completion`` 对象。只在输入以 ``/`` 开头且还没输入参数时补全命令名。
+        """
         text = document.text_before_cursor.lstrip()
 
         # 只在输入以 / 开头时补全
@@ -101,22 +124,24 @@ class InteractiveShell:
         """初始化 Shell。
 
         Args:
-            history_dir: 历史文件存储目录（默认 .codepilot/）。
-            multiline: 是否启用多行输入模式。
+            history_dir: 历史文件存储目录；实际历史文件会写到该目录下的 ``history``。
+                未传时使用当前工作目录的 ``.codepilot``。
+            multiline: 是否启用 prompt_toolkit 多行模式。当前默认关闭，使用 Alt+Enter 插入换行。
+            commands: 初始命令补全列表，来自 runtime 当前 session view。
         """
         self.multiline = multiline
 
-        # 设置历史文件
+        # 设置历史文件。只存用户输入，不存模型输出或工具结果。
         if history_dir is None:
             history_dir = Path.cwd() / ".codepilot"
         history_path = Path(history_dir) / "history"
         history_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 创建补全器
+        # 创建补全器。补全器持有在运行中可刷新的命令列表。
         completer = CommandCompleter(commands)
         self.completer = completer
 
-        # 创建快捷键绑定
+        # 创建快捷键绑定。这里不决定 Ctrl+C 是退出还是取消 run，只把中断抛给上层。
         bindings = KeyBindings()
 
         @bindings.add("enter")
@@ -149,6 +174,11 @@ class InteractiveShell:
         )
 
     def set_commands(self, commands: Iterable[Any]) -> None:
+        """刷新 shell 的命令补全数据。
+
+        Args:
+            commands: runtime.describe(session_id).commands 返回的命令视图序列。
+        """
         self.completer.set_commands(commands)
 
     async def prompt(
@@ -160,8 +190,9 @@ class InteractiveShell:
         """显示提示符并获取用户输入（异步版本）。
 
         Args:
-            prompt_text: 提示符文本（支持 HTML 格式）。
-            bottom_toolbar: 底部工具栏文本。
+            prompt_text: 提示符文本，支持 prompt_toolkit HTML 格式；普通文本会自动包成
+                ``<prompt>...</prompt>``。
+            bottom_toolbar: 底部工具栏 HTML 文本，通常展示模型、权限模式、运行模式和快捷键。
 
         Returns:
             用户输入的文本（已去除首尾空白）。
@@ -197,6 +228,9 @@ class InteractiveShell:
 
         Returns:
             用户选择的结果。
+
+        当前主流程的工具审批已经走 ``/approve``/``/deny``，该方法保留给未来需要
+        简单确认的问题使用。
         """
         suffix = " [Y/n] " if default else " [y/N] "
         try:
@@ -226,6 +260,8 @@ class InteractiveShell:
 
         Returns:
             用户选择的选项索引。
+
+        该方法只负责收集选择，不执行选择对应的业务动作。
         """
         # 显示选项
         print(f"\n{question}")
@@ -263,9 +299,11 @@ def create_shell(
         history_dir: 历史文件存储目录。
         multiline: 是否启用多行输入模式。
         no_color: 是否禁用颜色（禁用时不使用 prompt_toolkit）。
+        commands: 初始命令补全列表。
 
     Returns:
-        InteractiveShell 实例或 None。
+        ``InteractiveShell`` 实例；如果禁用颜色或 prompt_toolkit 初始化失败则返回 ``None``，
+        上层会退回 Rich Console 或普通 ``input``。
     """
     if no_color:
         return None

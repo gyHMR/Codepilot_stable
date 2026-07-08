@@ -16,7 +16,7 @@ from codepilot.protocols.commands import (
     LifecycleHook,
     RegisteredCommand,
 )
-from codepilot.tools import AgentTool
+from codepilot.tools import ToolDefinition
 
 # 工具调用前钩子类型
 BeforeHook = Callable[[BeforeToolCallContext, Any | None], BeforeToolCallResult | None | Awaitable[BeforeToolCallResult | None]]
@@ -45,7 +45,7 @@ class LoadedExtensions:
     - 钩子 → 进入生命周期或工具调用管道
     """
 
-    tools: list[AgentTool] = field(default_factory=list)
+    tools: list[ToolDefinition] = field(default_factory=list)
     before_tool_hooks: list[BeforeHook] = field(default_factory=list)
     after_tool_hooks: list[AfterHook] = field(default_factory=list)
     prompt_guidelines: list[str] = field(default_factory=list)

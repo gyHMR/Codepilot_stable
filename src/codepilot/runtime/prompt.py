@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from codepilot.sessions.storage import build_repository_bootstrap, render_repository_context
+from codepilot.sessions.store import build_repository_bootstrap, render_repository_context
 
 from .config import RuntimeConfig
 from .tools import RuntimeTools

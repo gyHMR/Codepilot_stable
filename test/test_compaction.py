@@ -4,9 +4,9 @@ from pathlib import Path
 
 
 def test_context_compaction_module_is_removed() -> None:
-    from importlib.util import find_spec
+    import codepilot.sessions.context as context
 
-    assert find_spec("codepilot.sessions.context.compaction") is None
+    assert not hasattr(context, "__path__")
 
 
 def test_session_runtime_uses_governor_and_slim_layout(tmp_path: Path) -> None:
@@ -40,4 +40,4 @@ def test_session_runtime_uses_governor_and_slim_layout(tmp_path: Path) -> None:
         assert not (session_dir / "context.jsonl").exists()
         assert not (session_dir / "runs.jsonl").exists()
     finally:
-        session._close()
+        session.close()

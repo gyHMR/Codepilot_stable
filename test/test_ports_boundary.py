@@ -131,15 +131,15 @@ def test_registry_import_does_not_register_providers() -> None:
 
 
 def test_tools_ports_contains_only_tool_port_contracts() -> None:
-    ports = SRC / "tools" / "ports.py"
+    ports = SRC / "tools" / "contracts.py"
     forbidden = {
-        "codepilot.tools.authoring",
-        "codepilot.tools.engine",
+        "codepilot.tools.runtime",
+        "codepilot.tools.adapter",
     }
 
     assert _has_forbidden_import(ports, forbidden) == []
 
-    import codepilot.tools.ports as ports_module
+    import codepilot.tools.contracts as ports_module
 
     assert hasattr(ports_module, "ToolPort")
     assert hasattr(ports_module, "ToolCatalogView")
@@ -152,17 +152,26 @@ def test_tools_ports_contains_only_tool_port_contracts() -> None:
 def test_tools_top_level_is_not_the_core_port_surface() -> None:
     import codepilot.tools as tools
 
-    core_port_names = {
+    public_tool_surface = {
         "ToolCatalogView",
+        "ToolDefinition",
         "ToolInvocation",
         "ToolObservation",
         "ToolPort",
         "ToolResumeDecision",
+        "ToolRuntime",
+        "PermissionPolicy",
+    }
+    removed_names = {
+        "AgentTool",
+        "AgentToolResult",
         "ToolRuntimePort",
+        "ToolRuntimeRequest",
+        "ToolRuntimeResult",
     }
 
-    assert core_port_names.isdisjoint(set(tools.__all__))
-    assert not any(hasattr(tools, name) for name in core_port_names)
+    assert public_tool_surface <= set(tools.__all__)
+    assert not any(hasattr(tools, name) for name in removed_names)
 
 
 def test_core_does_not_import_concrete_llm_or_tool_adapters() -> None:

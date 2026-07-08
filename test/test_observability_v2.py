@@ -14,7 +14,7 @@ def test_event_recorder_writes_slim_canonical_events(tmp_path: Path) -> None:
 
     recorder.append(
         {
-            "type": "context_prepared",
+            "type": "context_projected",
             "runId": "run-1",
             "sessionId": "session-1",
             "turnId": 1,
@@ -26,6 +26,17 @@ def test_event_recorder_writes_slim_canonical_events(tmp_path: Path) -> None:
                 "total_budget_tokens": 1200,
                 "estimated_tokens_before": 2000,
                 "estimated_tokens_after": 900,
+                "sections": [
+                    {
+                        "name": "working_set",
+                        "budget_tokens": 600,
+                        "candidate_items": 3,
+                        "selected_items": 1,
+                        "estimated_tokens_before": 800,
+                        "estimated_tokens_after": 120,
+                        "reduction_policy": "priority_budget",
+                    }
+                ],
                 "selected_items": [
                     {
                         "id": "file:src/app.py",
@@ -56,7 +67,19 @@ def test_event_recorder_writes_slim_canonical_events(tmp_path: Path) -> None:
     assert record["run_id"] == "run-1"
     assert record["turn"] == 1
     assert record["mode"] == "repair"
+    assert record["tokens_before"] == 2000
     assert record["tokens_after"] == 900
+    assert record["sections"] == [
+        {
+            "name": "working_set",
+            "budget_tokens": 600,
+            "candidate_items": 3,
+            "selected_items": 1,
+            "estimated_tokens_before": 800,
+            "estimated_tokens_after": 120,
+            "reduction_policy": "priority_budget",
+        }
+    ]
     assert record["selected_items"] == [
         {
             "id": "file:src/app.py",
@@ -178,6 +201,55 @@ def test_run_trace_and_summary_are_built_from_canonical_events() -> None:
     assert summary.total_cost == 0.01
 
 
+def test_context_token_counts_flow_into_eval_evidence() -> None:
+    trace = build_run_trace(
+        [
+            {
+                "schema_version": 1,
+                "event_id": "ctx-evt",
+                "run_id": "run-ctx",
+                "session_id": "session-ctx",
+                "turn": 1,
+                "type": "context_built",
+                "timestamp_ms": 100,
+                "context_id": "ctx-1",
+                "mode": "tight",
+                "budget_tokens": 6000,
+                "tokens_before": 10000,
+                "tokens_after": 4000,
+                "sections": [
+                    {
+                        "name": "conversation",
+                        "estimated_tokens_before": 6000,
+                        "estimated_tokens_after": 2500,
+                    }
+                ],
+                "selected_items": [
+                    {
+                        "id": "file:src/app.py",
+                        "path": "src/app.py",
+                        "tokens": 300,
+                    }
+                ],
+                "stale_items": [],
+                "tokens_by_layer": {"working_set": 300},
+            }
+        ]
+    )
+
+    evidence = evidence_from_traces(
+        case_id="context-case",
+        module="context",
+        traces=[trace],
+        expected={"key_context": ["src/app.py"]},
+        task_passed=True,
+    )
+
+    assert evidence.contexts[0].tokens_before == 10000
+    assert evidence.contexts[0].tokens_after == 4000
+    assert evidence.contexts[0].sections[0]["name"] == "conversation"
+
+
 def test_trace_normalizes_raw_event_shapes_even_when_event_names_are_canonical() -> None:
     events = [
         {
@@ -191,25 +263,24 @@ def test_trace_normalizes_raw_event_shapes_even_when_event_names_are_canonical()
             "reasons": {"mem_api_contract_v2": ["path_match"]},
         },
         {
-            "type": "task_plan_created",
+            "type": "plan_updated",
             "runId": "run-1",
             "sessionId": "session-1",
             "turnId": 1,
-            "eventId": "task-evt",
+            "eventId": "plan-evt",
             "timestamp": 110,
-            "task": {
-                "task_id": "task-1",
-                "mode": "repair",
-                "phase": "acting",
-                "steps": [
+            "plan": {
+                "plan_id": "plan-1",
+                "origin_mode": "build",
+                "status": "active",
+                "items": [
                     {
-                        "id": "step-1",
-                        "title": "Repair failing pytest",
+                        "id": "item-1",
+                        "step": "Repair failing pytest",
                         "status": "completed",
                     }
                 ],
             },
-            "evidence_refs": ["pytest.log"],
         },
     ]
 
@@ -223,9 +294,9 @@ def test_trace_normalizes_raw_event_shapes_even_when_event_names_are_canonical()
     )
 
     assert evidence.memory_ids == ["mem_api_contract_v2"]
-    assert evidence.steps[0].step_id == "step-1"
+    assert evidence.steps[0].step_id == "item-1"
     assert evidence.steps[0].status == "completed"
-    assert evidence.steps[0].evidence_refs == ["pytest.log"]
+    assert evidence.steps[0].evidence_refs == []
 
 
 def test_trace_joins_tool_start_args_into_finished_tool_evidence() -> None:
@@ -281,11 +352,11 @@ def test_v2_core_tool_events_normalize_to_observability_records() -> None:
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.observability import event_to_record, summarize_events
         from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
-        from codepilot.tools.ports import ToolObservation
+        from codepilot.tools.contracts import ToolObservation
 
         class FakeModel:
             def __init__(self) -> None:
@@ -312,7 +383,7 @@ def test_v2_core_tool_events_normalize_to_observability_records() -> None:
                 )
 
         class FakeTools:
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return {"tools": ["read"]}
 
             async def execute(self, invocation):

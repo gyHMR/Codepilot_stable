@@ -80,7 +80,7 @@ class TestTerminalRenderer:
         renderer = TerminalRenderer(use_rich=False, output=output)
 
         event = {
-            "type": "tool_execution_start",
+            "type": "tool_started",
             "toolName": "Read",
             "args": {"file_path": "/test/file.py"},
         }
@@ -94,13 +94,13 @@ class TestTerminalRenderer:
         renderer = TerminalRenderer(use_rich=False, output=output)
 
         renderer.render_progress_event({
-            "type": "tool_execution_start",
+            "type": "tool_started",
             "toolCallId": "read-1",
             "toolName": "read",
             "args": {"path": "src/codepilot/core/loop.py", "offset": 10, "limit": 20},
         })
         renderer.render_progress_event({
-            "type": "tool_execution_start",
+            "type": "tool_started",
             "toolCallId": "ls-1",
             "toolName": "ls",
             "args": {"path": "src/codepilot"},
@@ -116,7 +116,7 @@ class TestTerminalRenderer:
         long_path = "src/" + "/".join(["very_long_directory"] * 8) + "/module.py"
 
         renderer.render_progress_event({
-            "type": "tool_execution_start",
+            "type": "tool_started",
             "toolCallId": "read-long",
             "toolName": "read",
             "args": {"path": long_path},
@@ -137,25 +137,25 @@ class TestTerminalRenderer:
         )
 
         renderer.render_progress_event({
-            "type": "tool_execution_start",
+            "type": "tool_started",
             "toolCallId": "read-1",
             "toolName": "read",
             "args": {"path": "a.py"},
         })
         renderer.render_progress_event({
-            "type": "tool_execution_start",
+            "type": "tool_started",
             "toolCallId": "ls-1",
             "toolName": "ls",
             "args": {"path": "src"},
         })
         renderer.render_progress_event({
-            "type": "tool_execution_end",
+            "type": "tool_completed",
             "toolCallId": "read-1",
             "toolName": "read",
             "isError": False,
         })
         renderer.render_progress_event({
-            "type": "tool_execution_end",
+            "type": "tool_completed",
             "toolCallId": "ls-1",
             "toolName": "ls",
             "isError": False,
@@ -289,12 +289,12 @@ class TestTerminalRenderer:
         renderer = TerminalRenderer(use_rich=False, output=output)
 
         renderer.render_progress_event({
-            "type": "tool_execution_start",
+            "type": "tool_started",
             "toolName": "write",
             "args": {"path": "demo.txt"},
         })
         renderer.render_progress_event({
-            "type": "tool_execution_start",
+            "type": "tool_started",
             "toolName": "bash",
             "args": {"command": "python register.py --demo"},
         })
@@ -308,13 +308,13 @@ class TestTerminalRenderer:
         renderer = TerminalRenderer(use_rich=False, output=output)
 
         renderer.render_progress_event({
-            "type": "tool_execution_start",
+            "type": "tool_started",
             "toolCallId": "bash-1",
             "toolName": "bash",
             "args": {"command": "head -5 agent-test/chatbot.py"},
         })
         renderer.render_progress_event({
-            "type": "tool_execution_end",
+            "type": "tool_interrupted",
             "toolCallId": "bash-1",
             "toolName": "bash",
             "status": "approval_required",
@@ -427,7 +427,7 @@ def test_run_once_dispatches_prompt_and_renders_final_message():
 def test_render_dispatch_surfaces_approval_required_frame_directly():
     from codepilot.interfaces.cli.interactive import render_dispatch
     from codepilot.runtime.actions import ApprovalRequiredFrame
-    from codepilot.tools.ports import ToolInterruption, ToolRiskView
+    from codepilot.tools.contracts import ToolInterruption, ToolRiskView
 
     interruption = ToolInterruption(
         approval_id="approval_1",
@@ -487,7 +487,7 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
     class FakeRuntime:
         def __init__(self):
             self.prompt_calls = 0
-            self.task_mode = "build"
+            self.current_mode = "build"
 
         async def dispatch(self, session_id, action):
             assert session_id == "session_1"
@@ -521,14 +521,14 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
                 return
             if isinstance(action, CommandSubmitted):
                 assert action.text == "/mode read"
-                self.task_mode = "read"
+                self.current_mode = "read"
                 yield CommandFinishedFrame(
                     record=SessionCommandRecord(
                         session_id="session_1",
                         command="/mode read",
                         handled=True,
-                        output_lines=["task_mode=read"],
-                        data={"task_mode": "read"},
+                        output_lines=["current_mode=read"],
+                        data={"current_mode": "read"},
                     )
                 )
                 return
@@ -544,7 +544,7 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
                     permission_mode="workspace-write",
                     message_count=2,
                     leaf_id="entry_1",
-                    task_mode=self.task_mode,
+                    current_mode=self.current_mode,
                 ),
                 state={
                     "session_id": session_id,
@@ -553,7 +553,7 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
                     "entries": [{"id": "entry_1"}],
                     "tree": [{"id": "entry_1"}],
                     "leaf_id": "entry_1",
-                    "task_mode": self.task_mode,
+                    "current_mode": self.current_mode,
                 },
             )
 
@@ -561,8 +561,8 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
         "\n".join(
             [
                 json.dumps({"type": "state", "id": "state_1"}),
-                json.dumps({"type": "set_task_mode", "id": "mode_1", "task_mode": "read"}),
-                json.dumps({"type": "prompt", "id": "prompt_1", "text": "hello", "task_mode": "plan"}),
+                json.dumps({"type": "set_mode", "id": "mode_1", "mode": "read"}),
+                json.dumps({"type": "prompt", "id": "prompt_1", "text": "hello", "mode": "plan"}),
                 json.dumps({"type": "prompt", "id": "prompt_2", "text": "busy"}),
                 "{not-json",
                 json.dumps({"type": "shutdown", "id": "shutdown_1"}),
@@ -579,7 +579,7 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
     assert messages[0] == {
         "type": "rpc_ready",
         "session_id": "session_1",
-        "protocol_version": "1.2",
+        "protocol_version": "2.0",
     }
     assert messages[1] == {
         "type": "response",
@@ -593,17 +593,17 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
                 "entries": [{"id": "entry_1"}],
                 "tree": [{"id": "entry_1"}],
                 "leaf_id": "entry_1",
-                "task_mode": "build",
+                "current_mode": "build",
             },
         }
     assert messages[2] == {
         "type": "response",
         "id": "mode_1",
-        "command": "set_task_mode",
+        "command": "set_mode",
         "status": "ok",
         "data": {
             "session_id": "session_1",
-            "task_mode": "read",
+            "mode": "read",
         },
     }
     assert messages[3] == {
@@ -636,7 +636,7 @@ def test_run_rpc_surfaces_and_resumes_approval(monkeypatch):
         PromptSubmitted,
         RunFinishedFrame,
     )
-    from codepilot.tools.ports import ToolInterruption, ToolRiskView
+    from codepilot.tools.contracts import ToolInterruption, ToolRiskView
 
     final_message = AssistantMessage(content=[TextContent(text="approved done")])
     interruption = ToolInterruption(
@@ -738,12 +738,12 @@ def test_rpc_ready_signal_uses_named_protocol_version() -> None:
     emitted: list[dict] = []
     emit_rpc_ready(emitted.append, session_id=" session_1 ")
 
-    assert RPC_PROTOCOL_VERSION == "1.2"
+    assert RPC_PROTOCOL_VERSION == "2.0"
     assert emitted == [
         {
             "type": "rpc_ready",
             "session_id": "session_1",
-            "protocol_version": "1.2",
+            "protocol_version": "2.0",
         }
     ]
 
@@ -835,7 +835,7 @@ class TestCliStartupState:
         assert state.workspace == "/path/to/workspace"
         assert state.session_id == "test_session_123"
         assert state.permission_mode == "read-only"
-        assert state.task_mode == "build"
+        assert state.current_mode == "build"
         assert state.warnings == ("Test warning",)
 
     def test_build_startup_state_defaults(self):
@@ -886,7 +886,7 @@ class TestCliStartupState:
         assert state.workspace == "/workspace"
         assert state.session_id == "session_1"
         assert state.permission_mode == "read-only"
-        assert state.task_mode == "build"
+        assert state.current_mode == "build"
         assert state.warnings == ("Runtime warning",)
 
         with pytest.raises(ValueError, match="model_id"):
@@ -906,13 +906,13 @@ class TestCliStartupState:
                 permission_mode="admin",
             )
 
-        with pytest.raises(ValueError, match="task_mode"):
+        with pytest.raises(ValueError, match="current_mode"):
             CliStartupState(
                 version="0.3",
                 model_id="model",
                 workspace="/workspace",
                 session_id="session_1",
-                task_mode="auto",
+                current_mode="auto",
             )
 
         with pytest.raises(TypeError, match="warnings"):
@@ -946,7 +946,7 @@ class TestSessionStatus:
         assert status.model_id == "deepseek/deepseek-chat"
         assert status.workspace == "/workspace"
         assert status.permission_mode == "read-only"
-        assert status.task_mode == "build"
+        assert status.current_mode == "build"
         assert status.message_count == 42
         assert status.leaf_id == "leaf_456"
         assert status.is_running is True
@@ -963,7 +963,7 @@ class TestSessionStatus:
         )
 
         assert status.is_running is False
-        assert status.task_mode == "build"
+        assert status.current_mode == "build"
 
 
 # ── 配置脱敏测试 ─────────────────────────────────────────────────

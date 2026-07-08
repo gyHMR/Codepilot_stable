@@ -46,6 +46,7 @@ class EvalCase:
     checks: list[EvalCheck] = field(default_factory=list)
     metrics: list[str] = field(default_factory=list)
     expected: dict[str, Any] = field(default_factory=dict)
+    context_profile: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
     timeout_seconds: int = 120
 

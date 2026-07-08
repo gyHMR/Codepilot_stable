@@ -22,11 +22,11 @@ def test_agent_loop_stops_at_max_tool_iterations() -> None:
 
 async def _run_agent_loop_observability_case() -> None:
     from codepilot.core.contracts import AgentLoopInput, AgentLoopLimits, AgentLoopPorts, RunCorrelation
-    from codepilot.core.loop import run_agent_loop
+    from codepilot.core.runner import run_agent_loop
     from codepilot.llm.ports import LLMCompleted, ModelDescriptor
     from codepilot.observability import event_to_record, summarize_events, validate_run_event
     from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
-    from codepilot.tools.ports import ToolObservation
+    from codepilot.tools.contracts import ToolObservation
 
     model = _ScriptedModel(
         lambda request, calls: AssistantMessage(
@@ -52,8 +52,8 @@ async def _run_agent_loop_observability_case() -> None:
     )
 
     event_types = [event["type"] for event in outcome.events]
-    assert "tool_execution_start" in event_types
-    assert "tool_execution_end" in event_types
+    assert "tool_started" in event_types
+    assert "tool_completed" in event_types
     assert event_types[-1] == "agent_end"
     assert any(isinstance(message, ToolResultMessage) for message in outcome.new_messages)
     records = [record for event in outcome.events if (record := event_to_record(event))]
@@ -66,10 +66,10 @@ async def _run_agent_loop_observability_case() -> None:
 
 async def _run_agent_loop_tool_status_case() -> None:
     from codepilot.core.contracts import AgentLoopPorts
-    from codepilot.core.loop import run_agent_loop
+    from codepilot.core.runner import run_agent_loop
     from codepilot.observability import event_to_record, summarize_events, validate_run_event
     from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
-    from codepilot.tools.ports import ToolObservation
+    from codepilot.tools.contracts import ToolObservation
 
     model = _ScriptedModel(
         lambda request, calls: AssistantMessage(
@@ -85,7 +85,7 @@ async def _run_agent_loop_tool_status_case() -> None:
             name="write",
             status="denied",
             content=(TextContent(text="Tool blocked"),),
-            metadata={"error_code": "read_only_mode", "approved": False},
+            metadata={"error_code": "read_only_permission_mode", "approved": False},
         )
     )
 
@@ -94,12 +94,12 @@ async def _run_agent_loop_tool_status_case() -> None:
         AgentLoopPorts(model=model, tools=tools),
     )
 
-    tool_end = next(event for event in outcome.events if event["type"] == "tool_execution_end")
+    tool_end = next(event for event in outcome.events if event["type"] == "tool_interrupted")
     assert tool_end["isError"] is True
     assert tool_end["status"] == "denied"
     assert tool_end["approved"] is False
     assert tool_end["approvalId"] is None
-    assert tool_end["errorReason"] == "read_only_mode"
+    assert tool_end["errorReason"] == "read_only_permission_mode"
     assert any(
         isinstance(message, ToolResultMessage)
         and message.is_error
@@ -115,10 +115,10 @@ async def _run_agent_loop_tool_status_case() -> None:
 
 async def _run_agent_loop_tool_adapter_error_case() -> None:
     from codepilot.core.contracts import AgentLoopPorts
-    from codepilot.core.loop import run_agent_loop
+    from codepilot.core.runner import run_agent_loop
     from codepilot.observability import event_to_record, validate_run_event
     from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
-    from codepilot.tools.ports import ToolObservation
+    from codepilot.tools.contracts import ToolObservation
 
     model = _ScriptedModel(
         lambda request, calls: AssistantMessage(
@@ -143,7 +143,7 @@ async def _run_agent_loop_tool_adapter_error_case() -> None:
         AgentLoopPorts(model=model, tools=tools),
     )
 
-    tool_end = next(event for event in outcome.events if event["type"] == "tool_execution_end")
+    tool_end = next(event for event in outcome.events if event["type"] == "tool_failed")
     assert tool_end["isError"] is True
     assert tool_end["status"] == "error"
     assert tool_end["errorReason"] == "after_tool_hook_error"
@@ -157,10 +157,10 @@ async def _run_agent_loop_tool_adapter_error_case() -> None:
 
 async def _run_agent_loop_max_tool_iterations_case() -> None:
     from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts
-    from codepilot.core.loop import run_agent_loop
+    from codepilot.core.runner import run_agent_loop
     from codepilot.observability import event_to_record, validate_run_event
     from codepilot.protocols import AssistantMessage, TextContent, ToolCall
-    from codepilot.tools.ports import ToolObservation
+    from codepilot.tools.contracts import ToolObservation
 
     model = _ScriptedModel(
         lambda _request, _calls: AssistantMessage(
@@ -195,7 +195,7 @@ async def _run_agent_loop_max_tool_iterations_case() -> None:
     assert isinstance(outcome.final_message, AssistantMessage)
     assert outcome.final_message.stop_reason == "max_iterations"
     assert "工具调用" in outcome.final_message.content[0].text
-    assert len([event for event in outcome.events if event["type"] == "tool_execution_start"]) == 1
+    assert len([event for event in outcome.events if event["type"] == "tool_started"]) == 1
 
 
 def _loop_input(
@@ -232,7 +232,7 @@ class _StaticToolPort:
     def __init__(self, observation):
         self._observation = observation
 
-    def catalog(self):
+    def catalog(self, current_mode: str = "build"):
         return {"tools": [self._observation.name]}
 
     async def execute(self, invocation):

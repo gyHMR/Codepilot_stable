@@ -5,13 +5,11 @@ from __future__ import annotations
 
 """Session orchestration package.
 
-The sessions layer owns four small domains:
+The sessions layer owns three facts:
 
-- persistence: session/run facts and filesystem layout
-- runtime: open a session, prepare a run, commit a run, close the session
-- context: per-turn prompt projection and context report
-- memory: durable project/session memory
-- history: transcript branching and lightweight git rollback
+- Session: recoverable transcript, events, runs, and artifacts
+- Context: per-turn model input projection
+- Memory: durable cross-session project facts
 """
 
 from .controller import SessionController
@@ -28,7 +26,7 @@ from .contracts import (
     SessionOptions,
     SessionView,
 )
-from .storage import (
+from .store import (
     RepositoryBootstrap,
     SessionOpenMetadata,
     build_repository_bootstrap,

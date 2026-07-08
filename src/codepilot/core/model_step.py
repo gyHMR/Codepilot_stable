@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -16,23 +15,18 @@ from codepilot.llm.ports import (
 )
 from codepilot.protocols import (
     AssistantMessage,
-    ImageContent,
     Message,
     TextContent,
     ThinkingContent,
     Tool,
-    ToolCall,
     ToolResultMessage,
     Usage,
     UserMessage,
 )
-from codepilot.tools.ports import ToolCatalogView
+from codepilot.tools.contracts import ToolCatalogView
 
+from .context_preflight import TOOL_RESULT_MAX_CHARS, prepare_messages_for_model
 from .contracts import AgentLoopInput, AgentLoopPorts, AgentMessage
-
-
-TOOL_RESULT_MAX_CHARS = 30_000
-TOOL_RESULT_TRUNCATION_NOTICE = "\n...<content truncated>..."
 
 
 @dataclass(frozen=True)
@@ -136,6 +130,20 @@ async def build_model_request(
             prepared = await prepared
         if isinstance(prepared, dict):
             request_data.update(prepared)
+    preflight = prepare_messages_for_model(
+        list(request_data.get("messages", messages)),
+        tool_result_max_chars=TOOL_RESULT_MAX_CHARS,
+    )
+    request_data["messages"] = preflight.messages
+    report = request_data.get("context_report")
+    if isinstance(report, dict):
+        runner_preflight = preflight.report.to_dict()
+        report["runner_preflight"] = runner_preflight
+        recorder = getattr(ports.context, "record_preflight", None)
+        if callable(recorder):
+            value = recorder(runner_preflight, run_id=input.run_id)
+            if inspect.isawaitable(value):
+                await value
     return LLMRequest(
         model=request_data.get("model", input.model),
         messages=tuple(request_data.get("messages", messages)),
@@ -150,7 +158,7 @@ async def build_model_request(
 
 def tool_catalog_for_request(input: AgentLoopInput, ports: AgentLoopPorts) -> list[Tool]:
     if ports.tools is not None:
-        catalog = ports.tools.catalog()
+        catalog = ports.tools.catalog(input.mode)
         if catalog:
             return [_as_tool(item) for item in _catalog_items(catalog)]
     return [_as_tool(item) for item in input.tools]
@@ -209,11 +217,13 @@ def convert_to_llm(
             msg,
             strip_thinking=strip_thinking,
             thinking_to_text=thinking_to_text,
-            tool_result_max_chars=tool_result_max_chars,
         )
         if converted is not None:
             result.append(converted)
-    return _ensure_valid_sequence(result)
+    return prepare_messages_for_model(
+        result,
+        tool_result_max_chars=tool_result_max_chars,
+    ).messages
 
 
 def _convert_single(
@@ -221,7 +231,6 @@ def _convert_single(
     *,
     strip_thinking: bool,
     thinking_to_text: bool,
-    tool_result_max_chars: int,
 ) -> Message | None:
     if isinstance(msg, UserMessage):
         return msg
@@ -232,7 +241,7 @@ def _convert_single(
             thinking_to_text=thinking_to_text,
         )
     if isinstance(msg, ToolResultMessage):
-        return _process_tool_result(msg, max_chars=tool_result_max_chars)
+        return msg
     return None
 
 
@@ -267,127 +276,6 @@ def _process_assistant(
         model=msg.model,
         usage=msg.usage,
         stop_reason=msg.stop_reason,
-        response_id=msg.response_id,
-        error_message=msg.error_message,
-        error_info=msg.error_info,
-        timestamp=msg.timestamp,
-        metadata=dict(msg.metadata),
-    )
-
-
-def _process_tool_result(msg: ToolResultMessage, *, max_chars: int) -> ToolResultMessage:
-    total_chars = sum(len(b.text) for b in msg.content if isinstance(b, TextContent))
-    if total_chars <= max_chars:
-        return msg
-
-    new_content = []
-    remaining = max_chars
-    for block in msg.content:
-        if isinstance(block, TextContent):
-            if remaining <= 0:
-                continue
-            if len(block.text) > remaining:
-                new_content.append(
-                    TextContent(text=block.text[:remaining] + TOOL_RESULT_TRUNCATION_NOTICE)
-                )
-                remaining = 0
-            else:
-                new_content.append(block)
-                remaining -= len(block.text)
-        elif isinstance(block, ImageContent):
-            new_content.append(block)
-
-    return ToolResultMessage(
-        role=msg.role,
-        tool_call_id=msg.tool_call_id,
-        tool_name=msg.tool_name,
-        content=new_content,
-        status=msg.status,
-        is_error=msg.is_error,
-        approved=msg.approved,
-        approval_id=msg.approval_id,
-        error_code=msg.error_code,
-        exit_code=msg.exit_code,
-        affected_paths=list(msg.affected_paths),
-        workspace_changed=msg.workspace_changed,
-        diff_summary=msg.diff_summary,
-        verification=dict(msg.verification) if msg.verification else None,
-        details=msg.details,
-        timestamp=msg.timestamp,
-        metadata=dict(msg.metadata),
-    )
-
-
-def _ensure_valid_sequence(messages: list[Message]) -> list[Message]:
-    if not messages:
-        return messages
-    remaining_tool_results = Counter(
-        message.tool_call_id
-        for message in messages
-        if isinstance(message, ToolResultMessage) and message.tool_call_id
-    )
-    pending_tool_calls: set[str] = set()
-    result: list[Message] = []
-    for msg in messages:
-        if isinstance(msg, ToolResultMessage):
-            if msg.tool_call_id:
-                remaining_tool_results[msg.tool_call_id] -= 1
-            if msg.tool_call_id not in pending_tool_calls:
-                continue
-            pending_tool_calls.remove(msg.tool_call_id)
-            result.append(msg)
-            continue
-        if isinstance(msg, AssistantMessage):
-            msg = _assistant_with_provider_safe_tool_calls(
-                msg,
-                remaining_tool_results=remaining_tool_results,
-            )
-            tool_call_ids = [
-                block.id
-                for block in msg.content
-                if isinstance(block, ToolCall) and block.id
-            ]
-            if not msg.content:
-                continue
-            if (
-                result
-                and isinstance(result[-1], AssistantMessage)
-                and not tool_call_ids
-            ):
-                continue
-            pending_tool_calls.update(tool_call_ids)
-        result.append(msg)
-    return result
-
-
-def _assistant_with_provider_safe_tool_calls(
-    msg: AssistantMessage,
-    *,
-    remaining_tool_results: Counter[str],
-) -> AssistantMessage:
-    tool_calls = [block for block in msg.content if isinstance(block, ToolCall)]
-    if not tool_calls:
-        return msg
-
-    content = [
-        block
-        for block in msg.content
-        if not isinstance(block, ToolCall) or remaining_tool_results[block.id] > 0
-    ]
-    if len(content) == len(msg.content):
-        return msg
-    return AssistantMessage(
-        role=msg.role,
-        content=content,
-        api=msg.api,
-        provider=msg.provider,
-        model=msg.model,
-        usage=msg.usage,
-        stop_reason=(
-            msg.stop_reason
-            if any(isinstance(block, ToolCall) for block in content)
-            else "stop"
-        ),
         response_id=msg.response_id,
         error_message=msg.error_message,
         error_info=msg.error_info,

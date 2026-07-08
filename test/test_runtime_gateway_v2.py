@@ -37,9 +37,15 @@ def _open_test_session(gateway, workspace):
             workspace_dir=workspace,
             model=_unit_model(),
             memory_enabled=False,
-            task_control_enabled=False,
         )
     )
+
+
+def _persistent_session(gateway, session_id: str):
+    controller = gateway._require_session(session_id)  # noqa: SLF001
+    session = getattr(controller, "_session", None)
+    assert session is not None
+    return session
 
 
 def test_runtime_gateway_dispatch_prompt_streams_progress_and_finished_frames(tmp_path) -> None:
@@ -89,6 +95,77 @@ def test_runtime_gateway_dispatch_command_and_cancel_as_frames(tmp_path) -> None
         assert command_frames[-1].record.handled is True
         assert isinstance(cancel_frames[-1], CancelledFrame)
         assert cancel_frames[-1].cancelled is False
+
+    asyncio.run(run_case())
+
+
+def test_runtime_gateway_cancel_stops_active_task_and_records_aborted_run(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.llm.ports import LLMCompleted
+        from codepilot.protocols import AssistantMessage, TextContent
+        from codepilot.runtime.actions import (
+            CancelledFrame,
+            PromptSubmitted,
+            RunCancelled,
+            RunFinishedFrame,
+        )
+        from codepilot.runtime.gateway import RuntimeGateway
+
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        release = asyncio.Event()
+
+        class SlowModel:
+            async def stream(self, _request):
+                started.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text="too late")])
+                )
+
+        gateway = RuntimeGateway(model_port=SlowModel())
+        ref = _open_test_session(gateway, tmp_path)
+
+        async def collect_prompt_frames():
+            return [
+                frame
+                async for frame in gateway.dispatch(
+                    ref.session_id,
+                    PromptSubmitted(text="slow request"),
+                )
+            ]
+
+        prompt_task = asyncio.create_task(collect_prompt_frames())
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        cancel_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                RunCancelled(reason="user"),
+            )
+        ]
+
+        try:
+            await asyncio.wait_for(cancelled.wait(), timeout=1)
+        finally:
+            release.set()
+            prompt_frames = await asyncio.wait_for(prompt_task, timeout=1)
+
+        session = _persistent_session(gateway, ref.session_id)
+        runs = session.store.load_run_results(limit=1)
+
+        assert isinstance(cancel_frames[-1], CancelledFrame)
+        assert cancel_frames[-1].cancelled is True
+        assert any(isinstance(frame, RunFinishedFrame) for frame in prompt_frames)
+        assert runs
+        assert runs[-1]["status"] == "aborted"
+        assert runs[-1]["stop_reason"] == "aborted"
+        assert runs[-1]["signals"]["cancelled"] is True
 
     asyncio.run(run_case())
 
@@ -171,7 +248,7 @@ def test_runtime_gateway_real_command_flow_updates_session_mode(tmp_path) -> Non
         assert isinstance(frames[-1], CommandFinishedFrame)
         assert frames[-1].record.handled is True
         assert frames[-1].record.data["current_mode"] == "plan"
-        assert gateway.describe(ref.session_id).session.task_mode == "plan"
+        assert gateway.describe(ref.session_id).session.current_mode == "plan"
 
     asyncio.run(run_case())
 
@@ -210,6 +287,48 @@ def test_runtime_gateway_tools_command_renders_tool_port_catalog(tmp_path) -> No
         names = {item["name"] for item in frames[-1].record.data["tools"]}
         assert "read" in names
         assert "write" in names
+
+    asyncio.run(run_case())
+
+
+def test_runtime_gateway_tools_command_respects_current_mode(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.protocols import Model
+        from codepilot.runtime.actions import CommandFinishedFrame, CommandSubmitted
+        from codepilot.runtime import RuntimeGateway, SessionOpenIntent
+
+        gateway = RuntimeGateway()
+        ref = gateway.open_session(
+            SessionOpenIntent(
+                workspace_dir=tmp_path,
+                model=Model(
+                    id="runtime-v2",
+                    name="Runtime V2",
+                    api="unit-test",
+                    provider="unit-test",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=4000,
+                    max_tokens=500,
+                ),
+                memory_enabled=False,
+                current_mode="read",
+            )
+        )
+
+        frames = [
+            frame
+            async for frame in gateway.dispatch(ref.session_id, CommandSubmitted(text="/tools"))
+        ]
+
+        assert isinstance(frames[-1], CommandFinishedFrame)
+        names = {item["name"] for item in frames[-1].record.data["tools"]}
+        assert "read" in names
+        assert "workspace_status" in names
+        assert "write" not in names
+        assert "apply_patch" not in names
+        assert "bash" not in names
 
     asyncio.run(run_case())
 
@@ -312,6 +431,35 @@ def test_runtime_gateway_prompt_failure_returns_failed_frame(tmp_path) -> None:
     asyncio.run(run_case())
 
 
+def test_runtime_gateway_commits_uncaught_runtime_failure(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.runtime.actions import FailedFrame, PromptSubmitted
+        from codepilot.runtime.gateway import RuntimeGateway
+
+        class ExplodingModel:
+            async def stream(self, _request):
+                raise RuntimeError("provider crashed outside structured failure")
+                yield  # pragma: no cover
+
+        gateway = RuntimeGateway(model_port=ExplodingModel())
+        ref = _open_test_session(gateway, tmp_path)
+
+        frames = [
+            frame
+            async for frame in gateway.dispatch(ref.session_id, PromptSubmitted(text="hello"))
+        ]
+        session = _persistent_session(gateway, ref.session_id)
+        runs = session.store.load_run_results(limit=1)
+
+        assert isinstance(frames[-1], FailedFrame)
+        assert runs
+        assert runs[-1]["status"] == "failed"
+        assert runs[-1]["stop_reason"] == "internal_error"
+        assert session.store.read_meta()["runtime_checkpoint"] is None
+
+    asyncio.run(run_case())
+
+
 def test_runtime_error_payload_preserves_dict_code_and_message() -> None:
     from codepilot.runtime.gateway import _runtime_error_payload
 
@@ -390,7 +538,7 @@ def test_runtime_gateway_real_prompt_flow_retries_model_failure(tmp_path) -> Non
 def test_runtime_gateway_approval_decision_resumes_through_v2_tool_port(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.llm.ports import LLMCompleted
-        from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+        from codepilot.protocols import AssistantMessage, RunVerification, TextContent, ToolCall
         from codepilot.runtime.actions import (
             ApprovalDecided,
             ApprovalRequiredFrame,
@@ -398,7 +546,7 @@ def test_runtime_gateway_approval_decision_resumes_through_v2_tool_port(tmp_path
             RunFinishedFrame,
         )
         from codepilot.runtime.gateway import RuntimeGateway
-        from codepilot.tools.ports import (
+        from codepilot.tools.contracts import (
             ToolInterruption,
             ToolObservation,
             ToolRiskView,
@@ -429,12 +577,33 @@ def test_runtime_gateway_approval_decision_resumes_through_v2_tool_port(tmp_path
 
         class FakeTools:
             def __init__(self) -> None:
-                self.resume_decisions = []
+                self.sources = []
 
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return {"tools": ["shell"]}
 
             async def execute(self, invocation):
+                self.sources.append(invocation.source)
+                if invocation.source == "approval_resume":
+                    return ToolObservation(
+                        tool_call_id=invocation.tool_call_id,
+                        name=invocation.name,
+                        status="success",
+                        content=(TextContent(text="created"),),
+                        affected_paths=("created.txt",),
+                        workspace_changed=True,
+                        verification=(
+                            RunVerification(
+                                tool_call_id=invocation.tool_call_id,
+                                tool_name=invocation.name,
+                                status="passed",
+                                command="approved shell write",
+                                exit_code=0,
+                                summary="approved write verified",
+                            ),
+                        ),
+                        metadata={"approval_id": "approval1"},
+                    )
                 return ToolObservation(
                     tool_call_id=invocation.tool_call_id,
                     name=invocation.name,
@@ -451,17 +620,7 @@ def test_runtime_gateway_approval_decision_resumes_through_v2_tool_port(tmp_path
                 )
 
             async def resume(self, decision):
-                assert gateway.describe(ref.session_id).status.is_running is True
-                self.resume_decisions.append(decision)
-                return ToolObservation(
-                    tool_call_id="call1",
-                    name="shell",
-                    status="success",
-                    content=(TextContent(text="created"),),
-                    affected_paths=("created.txt",),
-                    workspace_changed=True,
-                    metadata={"approval_id": decision.approval_id},
-                )
+                raise AssertionError("gateway approval resume should use session checkpoint")
 
         model = FakeModel()
         tools = FakeTools()
@@ -487,7 +646,7 @@ def test_runtime_gateway_approval_decision_resumes_through_v2_tool_port(tmp_path
         ]
         finished = [frame for frame in resume_frames if isinstance(frame, RunFinishedFrame)]
 
-        assert [decision.approval_id for decision in tools.resume_decisions] == ["approval1"]
+        assert tools.sources == ["agent", "approval_resume"]
         assert finished
         assert finished[-1].record.final_text == "approved done"
 
@@ -506,7 +665,7 @@ def test_runtime_gateway_approval_resume_failure_returns_failed_frame(tmp_path) 
             RunFinishedFrame,
         )
         from codepilot.runtime.gateway import RuntimeGateway
-        from codepilot.tools.ports import ToolInterruption, ToolObservation
+        from codepilot.tools.contracts import ToolInterruption, ToolObservation
 
         class FakeModel:
             def __init__(self) -> None:
@@ -524,10 +683,18 @@ def test_runtime_gateway_approval_resume_failure_returns_failed_frame(tmp_path) 
                 yield LLMFailed(error={"code": "llm.failed_after_approval"})
 
         class FakeTools:
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return []
 
             async def execute(self, invocation):
+                if invocation.source == "approval_resume":
+                    return ToolObservation(
+                        tool_call_id=invocation.tool_call_id,
+                        name=invocation.name,
+                        status="success",
+                        content=(TextContent(text="decision=approve"),),
+                        metadata={"approval_id": "approval1"},
+                    )
                 return ToolObservation(
                     tool_call_id=invocation.tool_call_id,
                     name=invocation.name,
@@ -541,13 +708,7 @@ def test_runtime_gateway_approval_resume_failure_returns_failed_frame(tmp_path) 
                 )
 
             async def resume(self, decision):
-                return ToolObservation(
-                    tool_call_id="call1",
-                    name="shell",
-                    status="success",
-                    content=(TextContent(text=f"decision={decision.decision}"),),
-                    metadata={"approval_id": decision.approval_id},
-                )
+                raise AssertionError("gateway approval resume should use session checkpoint")
 
         gateway = RuntimeGateway(model_port=FakeModel(), tool_port=FakeTools())
         ref = _open_test_session(gateway, tmp_path)
@@ -572,6 +733,135 @@ def test_runtime_gateway_approval_resume_failure_returns_failed_frame(tmp_path) 
     asyncio.run(run_case())
 
 
+def test_runtime_gateway_approval_resume_uses_session_checkpoint_when_registry_is_lost(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.llm.ports import LLMCompleted
+        from codepilot.protocols import AssistantMessage, RunVerification, TextContent, ToolCall, ToolResultMessage
+        from codepilot.runtime.actions import (
+            ApprovalDecided,
+            ApprovalRequiredFrame,
+            PromptSubmitted,
+            RunFinishedFrame,
+        )
+        from codepilot.runtime.gateway import RuntimeGateway
+        from codepilot.tools.contracts import (
+            ToolInterruption,
+            ToolObservation,
+            ToolRiskView,
+        )
+
+        class FakeModel:
+            def __init__(self) -> None:
+                self.requests = []
+
+            async def stream(self, request):
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[
+                                ToolCall(
+                                    id="call_write",
+                                    name="write",
+                                    arguments={
+                                        "path": "created.txt",
+                                        "content": "hello",
+                                    },
+                                )
+                            ]
+                        )
+                    )
+                    return
+                last = request.messages[-1]
+                assert isinstance(last, ToolResultMessage)
+                assert last.tool_call_id == "call_write"
+                assert last.approval_id == "approval_lost"
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text="approved after restore")])
+                )
+
+        class FakeTools:
+            def __init__(self) -> None:
+                self.sources = []
+
+            def catalog(self, current_mode: str = "build"):
+                return {"tools": ["write"]}
+
+            async def execute(self, invocation):
+                self.sources.append(invocation.source)
+                if invocation.source == "approval_resume":
+                    return ToolObservation(
+                        tool_call_id=invocation.tool_call_id,
+                        name=invocation.name,
+                        status="success",
+                        content=(TextContent(text="wrote created.txt"),),
+                        affected_paths=("created.txt",),
+                        workspace_changed=True,
+                        verification=(
+                            RunVerification(
+                                tool_call_id=invocation.tool_call_id,
+                                tool_name=invocation.name,
+                                status="passed",
+                                command="workspace write approved",
+                                exit_code=0,
+                                summary="approved write verified",
+                            ),
+                        ),
+                        metadata={"approval_id": "approval_lost"},
+                    )
+                return ToolObservation(
+                    tool_call_id=invocation.tool_call_id,
+                    name=invocation.name,
+                    status="approval_required",
+                    interruption=ToolInterruption(
+                        approval_id="approval_lost",
+                        run_id=invocation.run_id,
+                        tool_call_id=invocation.tool_call_id,
+                        tool_name=invocation.name,
+                        arguments=invocation.arguments,
+                        reason="ask mode",
+                        risk=ToolRiskView(level="medium"),
+                    ),
+                    metadata={"approval_id": "approval_lost"},
+                )
+
+            async def resume(self, _decision):
+                raise AssertionError("checkpoint resume should not require in-memory pending calls")
+
+        tools = FakeTools()
+        gateway = RuntimeGateway(model_port=FakeModel(), tool_port=tools)
+        ref = _open_test_session(gateway, tmp_path)
+
+        prompt_frames = [
+            frame
+            async for frame in gateway.dispatch(ref.session_id, PromptSubmitted(text="write file"))
+        ]
+        assert any(isinstance(frame, ApprovalRequiredFrame) for frame in prompt_frames)
+        assert [
+            approval.approval_id
+            for approval in gateway.describe(ref.session_id).pending_approvals
+        ] == ["approval_lost"]
+
+        gateway._approvals.clear()  # noqa: SLF001 - simulate process-local registry loss
+        assert [
+            approval.approval_id
+            for approval in gateway.describe(ref.session_id).pending_approvals
+        ] == ["approval_lost"]
+
+        resume_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                ApprovalDecided(approval_id="approval_lost", decision="approve", reason="ok"),
+            )
+        ]
+
+        assert tools.sources == ["agent", "approval_resume"]
+        assert any(isinstance(frame, RunFinishedFrame) for frame in resume_frames)
+
+    asyncio.run(run_case())
+
+
 def test_runtime_gateway_approval_resume_exception_returns_failed_frame(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.llm.ports import LLMCompleted
@@ -583,7 +873,7 @@ def test_runtime_gateway_approval_resume_exception_returns_failed_frame(tmp_path
             PromptSubmitted,
         )
         from codepilot.runtime.gateway import RuntimeGateway
-        from codepilot.tools.ports import ToolInterruption, ToolObservation
+        from codepilot.tools.contracts import ToolInterruption, ToolObservation
 
         class FakeModel:
             async def stream(self, _request):
@@ -594,10 +884,12 @@ def test_runtime_gateway_approval_resume_exception_returns_failed_frame(tmp_path
                 )
 
         class FakeTools:
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return []
 
             async def execute(self, invocation):
+                if invocation.source == "approval_resume":
+                    raise RuntimeError("approval resume adapter failed")
                 return ToolObservation(
                     tool_call_id=invocation.tool_call_id,
                     name=invocation.name,
@@ -611,7 +903,7 @@ def test_runtime_gateway_approval_resume_exception_returns_failed_frame(tmp_path
                 )
 
             async def resume(self, _decision):
-                raise RuntimeError("approval resume adapter failed")
+                raise AssertionError("gateway approval resume should use session checkpoint")
 
         gateway = RuntimeGateway(model_port=FakeModel(), tool_port=FakeTools())
         ref = _open_test_session(gateway, tmp_path)
@@ -647,7 +939,7 @@ def test_runtime_gateway_approval_decision_is_bound_to_origin_session(tmp_path) 
             PromptSubmitted,
         )
         from codepilot.runtime.gateway import RuntimeGateway
-        from codepilot.tools.ports import ToolInterruption, ToolObservation
+        from codepilot.tools.contracts import ToolInterruption, ToolObservation
 
         class FakeModel:
             async def stream(self, _request):
@@ -658,7 +950,7 @@ def test_runtime_gateway_approval_decision_is_bound_to_origin_session(tmp_path) 
                 )
 
         class FakeTools:
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return []
 
             async def execute(self, invocation):
@@ -750,7 +1042,6 @@ def test_runtime_gateway_real_prompt_flow_uses_v2_core_and_tool_ports(tmp_path) 
                     max_tokens=500,
                 ),
                 memory_enabled=False,
-                task_control_enabled=False,
                 tool_permission_mode="ask",
                 stream_fn=fake_stream,
             )
@@ -776,7 +1067,7 @@ def test_runtime_gateway_close_all_closes_sessions_and_pending_approvals(tmp_pat
         from codepilot.protocols import AssistantMessage, ToolCall
         from codepilot.runtime.actions import ApprovalRequiredFrame, PromptSubmitted
         from codepilot.runtime.gateway import RuntimeGateway
-        from codepilot.tools.ports import ToolInterruption, ToolObservation
+        from codepilot.tools.contracts import ToolInterruption, ToolObservation
 
         class FakeModel:
             async def stream(self, _request):
@@ -787,7 +1078,7 @@ def test_runtime_gateway_close_all_closes_sessions_and_pending_approvals(tmp_pat
                 )
 
         class FakeTools:
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return []
 
             async def execute(self, invocation):

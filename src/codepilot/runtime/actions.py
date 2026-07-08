@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from codepilot.sessions.contracts import SessionCommandRecord, SessionRunRecord
-from codepilot.tools.ports import ToolInterruption
+from codepilot.tools.contracts import ToolInterruption
 
 
 ApprovalDecisionValue = Literal["approve", "deny"]

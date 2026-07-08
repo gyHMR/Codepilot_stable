@@ -528,7 +528,7 @@ class DingTalkBridge:
         command: str,
     ) -> None:
         event_type = event.get("type")
-        if event_type == "tool_execution_end":
+        if event_type == "tool_interrupted":
             result = event.get("result")
             status = event.get("status") or _field(result, "status")
             approval_id = (
@@ -766,7 +766,7 @@ def _approval_frame_to_event(frame: ApprovalRequiredFrame) -> dict[str, Any]:
         or "approval_required"
     )
     return {
-        "type": "tool_execution_end",
+        "type": "tool_interrupted",
         "toolName": tool_name,
         "status": "approval_required",
         "riskLevel": str(risk_level),

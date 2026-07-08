@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from codepilot.tools.ports import ToolInterruption
+from codepilot.tools.contracts import ToolInterruption
 
 
 @dataclass(frozen=True)

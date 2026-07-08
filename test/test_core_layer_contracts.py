@@ -37,7 +37,7 @@ def test_event_emitter_normalizes_envelope_and_rejects_unknown_event_type() -> N
 
 
 async def _run_event_emitter_contract_case() -> None:
-    from codepilot.core.loop import AgentEventEmitter
+    from codepilot.core.runner import AgentEventEmitter
 
     events: list[dict[str, Any]] = []
     emitter = AgentEventEmitter(events.append, run_id=" run_events ", session_id=" session_1 ")
@@ -64,19 +64,19 @@ def test_core_context_validates_session_context_boundaries() -> None:
     from codepilot.protocols import UserMessage
 
     messages = [UserMessage(content="hello")]
-    task_state = {"task_id": "task_1", "nested": {"step": "s1"}}
+    plan_state = {"plan_id": "plan_1", "nested": {"step": "s1"}}
     context = AgentContext(
         system_prompt="rules",
         messages=messages,
-        task_state=task_state,
-        task_signal={"action": "continue"},
+        plan_state=plan_state,
+        run_signals={"verification_status": "unknown"},
     )
     messages.append(UserMessage(content="mutated"))
-    task_state["nested"] = {"step": "mutated"}
+    plan_state["nested"] = {"step": "mutated"}
 
     assert context.messages == [UserMessage(content="hello")]
-    assert context.task_state == {"task_id": "task_1", "nested": {"step": "s1"}}
-    assert context.task_signal == {"action": "continue"}
+    assert context.plan_state == {"plan_id": "plan_1", "nested": {"step": "s1"}}
+    assert context.run_signals == {"verification_status": "unknown"}
 
     with pytest.raises(TypeError, match="messages"):
         AgentContext(system_prompt="rules", messages="not a list")  # type: ignore[arg-type]
@@ -92,11 +92,11 @@ def test_legacy_agent_state_is_not_a_core_contract() -> None:
     assert "AgentState" not in core_exports
 
 
-def test_model_turn_prepares_context_after_task_state_is_injected() -> None:
-    asyncio.run(_run_prepare_context_sees_task_state_case())
+def test_model_turn_prepares_context_after_plan_state_is_injected() -> None:
+    asyncio.run(_run_prepare_context_sees_plan_state_case())
 
 
-async def _run_prepare_context_sees_task_state_case() -> None:
+async def _run_prepare_context_sees_plan_state_case() -> None:
     from codepilot.core.contracts import AgentLoopInput, AgentLoopPorts, RunCorrelation
     from codepilot.core.model_step import build_model_request
     from codepilot.llm.ports import ModelDescriptor
@@ -107,7 +107,7 @@ async def _run_prepare_context_sees_task_state_case() -> None:
     class ContextPort:
         def prepare(self, request):
             captured["system_prompt"] = request["system_prompt"]
-            captured["task_state"] = request["context"]["task_state"]
+            captured["plan_state"] = request["context"]["plan_state"]
             return {
                 "system_prompt": request["system_prompt"],
                 "messages": request["messages"],
@@ -121,7 +121,7 @@ async def _run_prepare_context_sees_task_state_case() -> None:
             messages=[UserMessage(content="continue")],
                 context={
                     "system_prompt": "Base rules",
-                    "task_state": {"task_id": "task_1", "current_mode": "build"},
+                    "plan_state": {"plan_id": "plan_1", "origin_mode": "build"},
                 },
                 model=ModelDescriptor(provider="unit-test", model_id="contract-model"),
         ),
@@ -129,6 +129,6 @@ async def _run_prepare_context_sees_task_state_case() -> None:
         [UserMessage(content="continue")],
     )
 
-    assert captured["task_state"] == {"task_id": "task_1", "current_mode": "build"}
+    assert captured["plan_state"] == {"plan_id": "plan_1", "origin_mode": "build"}
     assert "Base rules" in request.system_prompt
-    assert "task_1" not in request.system_prompt
+    assert "plan_1" not in request.system_prompt

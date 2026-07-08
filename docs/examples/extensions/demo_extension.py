@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from codepilot.extensions import AfterToolCallResult
 from codepilot.protocols import TextContent
-from codepilot.tools import AgentTool, AgentToolResult
+from codepilot.tools import ToolCallRequest, ToolDefinition, ToolMetadata, ToolResult
 
 
 def register(api):
@@ -19,7 +19,7 @@ def register(api):
         description="Show that a Python extension command is available.",
     )
     api.register_tool(
-        AgentTool(
+        ToolDefinition(
             name="demo_echo",
             label="Demo Echo",
             description="Return the provided text. This demonstrates extension tools.",
@@ -28,6 +28,17 @@ def register(api):
                 "properties": {"text": {"type": "string"}},
                 "required": ["text"],
             },
+            metadata=ToolMetadata(
+                name="demo_echo",
+                category="extension",
+                read_only=True,
+                concurrency_safe=True,
+                exclusive=False,
+                requires_approval=False,
+                risk_level="low",
+                scopes=("read", "plan", "build"),
+                extra={"capabilities": ["demo.echo"]},
+            ),
             execute=_demo_echo,
         )
     )
@@ -39,10 +50,10 @@ def _demo_command(ctx):
     return "Demo extension is loaded."
 
 
-async def _demo_echo(tool_call_id, params, signal=None, on_update=None):
-    _ = tool_call_id, signal, on_update
-    text = str(params.get("text", ""))
-    return AgentToolResult(
+async def _demo_echo(request: ToolCallRequest, signal=None, on_update=None):
+    _ = signal, on_update
+    text = str(request.arguments.get("text", ""))
+    return ToolResult(
         content=[TextContent(text=text)],
         details={"demo_extension": True},
     )

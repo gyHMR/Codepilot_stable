@@ -93,7 +93,7 @@ def _append_run(session, run_id: str, affected_paths: list[str]) -> None:
 
 
 def _append_run_with_rollback(session, run_id: str, *, baseline, affected_paths: list[str]) -> None:
-    from codepilot.sessions.history.git_rollback import build_rollback_metadata
+    from codepilot.sessions.rollback import build_rollback_metadata
 
     _append_run(session, run_id, affected_paths)
     session.store.write_rollback_metadata(
@@ -168,12 +168,12 @@ async def _run_memory_command_case(tmp_path: Path) -> None:
         )
         memory_id = added.output_lines[0].split(": ", 1)[1]
         listed = await dispatch_command(runtime, session_id, "/memory list project")
-        forgotten = await dispatch_command(runtime, session_id, f"/memory forget {memory_id}")
+        deleted_once = await dispatch_command(runtime, session_id, f"/memory delete {memory_id}")
         deleted = await dispatch_command(runtime, session_id, "/memory list deleted")
 
         assert added.handled
         assert any(memory_id in line for line in listed.output_lines)
-        assert forgotten.output_lines == (f"memory forgotten: {memory_id}",)
+        assert deleted_once.output_lines == (f"memory deleted: {memory_id}",)
         assert any(memory_id in line for line in deleted.output_lines)
     finally:
         await runtime.close_all()

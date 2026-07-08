@@ -23,7 +23,7 @@ class SessionLifecycleView:
     session_id: str
     workspace_dir: str
     message_count: int
-    task_mode: str
+    current_mode: str
 
 
 @dataclass(frozen=True)
@@ -46,7 +46,7 @@ class SessionCommandView:
     session_id: str
     workspace_dir: str
     message_count: int
-    task_mode: str
+    current_mode: str
     leaf_id: str | None = None
 
 
@@ -114,7 +114,7 @@ class ToolHookContextSnapshot:
     system_prompt: str = ""
     messages: tuple[Message, ...] = ()
     tools: tuple[Tool, ...] = ()
-    task_signal: dict[str, Any] = field(default_factory=dict)
+    run_signals: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

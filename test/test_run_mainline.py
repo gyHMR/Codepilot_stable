@@ -18,9 +18,9 @@ def test_run_result_collects_counters_changes_and_verification() -> None:
 
 async def _run_result_case() -> None:
     from codepilot.core.contracts import AgentLoopPorts
-    from codepilot.core.loop import run_agent_loop
+    from codepilot.core.runner import run_agent_loop
     from codepilot.protocols import AssistantMessage, RunVerification, TextContent, ToolCall, ToolResultMessage
-    from codepilot.tools.ports import ToolObservation
+    from codepilot.tools.contracts import ToolObservation
 
     model = _ScriptedModel(
         lambda request, calls: AssistantMessage(
@@ -73,9 +73,9 @@ def test_run_stops_on_waiting_approval_and_repeated_calls() -> None:
 
 async def _run_stop_cases() -> None:
     from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts
-    from codepilot.core.loop import run_agent_loop
+    from codepilot.core.runner import run_agent_loop
     from codepilot.protocols import AssistantMessage, TextContent, ToolCall
-    from codepilot.tools.ports import ToolInterruption, ToolObservation, ToolRiskView
+    from codepilot.tools.contracts import ToolInterruption, ToolObservation, ToolRiskView
 
     approval_model = _ScriptedModel(
         lambda _request, _calls: AssistantMessage(
@@ -145,7 +145,7 @@ def test_retryable_model_error_remains_inside_one_run() -> None:
 
 async def _run_retry_case() -> None:
     from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts, RetryPolicy
-    from codepilot.core.loop import run_agent_loop
+    from codepilot.core.runner import run_agent_loop
     from codepilot.llm.ports import LLMCompleted, LLMFailed
     from codepilot.protocols import AssistantMessage, ErrorInfo, TextContent
 
@@ -193,10 +193,10 @@ def test_passed_verification_returns_to_model_before_completion_check() -> None:
 
 
 async def _passed_verification_returns_to_model_case() -> None:
-    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts, TaskStrategy
-    from codepilot.core.loop import run_agent_loop
+    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts
+    from codepilot.core.runner import run_agent_loop
     from codepilot.protocols import AssistantMessage, RunVerification, TextContent, ToolCall
-    from codepilot.tools.ports import ToolObservation
+    from codepilot.tools.contracts import ToolObservation
 
     model = _ScriptedModel(
         lambda _request, calls: AssistantMessage(
@@ -229,7 +229,6 @@ async def _passed_verification_returns_to_model_case() -> None:
             "run_finish",
             prompt="运行验证",
             limits=AgentLoopLimits(max_tool_iterations=1, repeated_tool_call_limit=20),
-            task_strategy=TaskStrategy(enabled=True, mode="build"),
         ),
         AgentLoopPorts(model=model, tools=tools),
     )
@@ -238,7 +237,7 @@ async def _passed_verification_returns_to_model_case() -> None:
     assert outcome.stop_reason == "final_answer"
     assert model.calls == 2
     assert outcome.final_text == "verified done"
-    assert any(event.get("type") == "completion_checked" for event in outcome.events)
+    assert any(event.get("type") == "run_guard_checked" for event in outcome.events)
 
 
 def test_builtin_file_and_shell_results_are_structured(tmp_path: Path, monkeypatch) -> None:
@@ -246,11 +245,11 @@ def test_builtin_file_and_shell_results_are_structured(tmp_path: Path, monkeypat
 
 
 async def _run_builtin_result_case(tmp_path: Path, monkeypatch) -> None:
-    from codepilot.tools.builtins import create_builtin_tools, get_builtin_tool_metadata
-    from codepilot.tools.authoring import ToolRuntimeRequest
+    from codepilot.tools.builtins import create_builtin_tools
+    from codepilot.tools.contracts import ToolInvocation
+    from codepilot.tools.permissions import PermissionPolicy
     from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.engine import ToolRuntime
-    from codepilot.tools.policy import PermissionPolicy
+    from codepilot.tools.runtime import ToolRuntime
 
     return_codes = iter([3, 0])
 
@@ -270,8 +269,7 @@ async def _run_builtin_result_case(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(asyncio, "create_subprocess_shell", fake_subprocess)
 
     registry = ToolRegistry()
-    for tool in create_builtin_tools(tmp_path):
-        registry.register(tool, metadata=get_builtin_tool_metadata(tool.name))
+    registry.extend(create_builtin_tools(tmp_path))
     runtime = ToolRuntime(
         registry,
         permission_policy=PermissionPolicy(
@@ -279,69 +277,63 @@ async def _run_builtin_result_case(tmp_path: Path, monkeypatch) -> None:
         ),
     )
 
-    write = (
-        await runtime.execute(
-            ToolRuntimeRequest(
-                tool_call_id="write_1",
-                name="write",
-                params={"path": "hello.txt", "content": "hello"},
-            )
+    write = await runtime.execute(
+        ToolInvocation(
+            run_id="run_builtin",
+            tool_call_id="write_1",
+            name="write",
+            arguments={"path": "hello.txt", "content": "hello"},
         )
-    ).result
+    )
     assert write.workspace_changed is True
-    assert write.affected_paths == ["hello.txt"]
-    assert write.diff_summary
+    assert write.affected_paths == ("hello.txt",)
     assert write.metadata["file_state"]["path"] == "hello.txt"
     assert isinstance(write.metadata["file_state"]["sha256"], str)
 
-    unchanged = (
-        await runtime.execute(
-            ToolRuntimeRequest(
-                tool_call_id="write_2",
-                name="write",
-                params={"path": "hello.txt", "content": "hello"},
-            )
+    unchanged = await runtime.execute(
+        ToolInvocation(
+            run_id="run_builtin",
+            tool_call_id="write_2",
+            name="write",
+            arguments={"path": "hello.txt", "content": "hello"},
         )
-    ).result
+    )
     assert unchanged.workspace_changed is False
     assert unchanged.metadata["file_state"]["path"] == "hello.txt"
 
-    read = (
-        await runtime.execute(
-            ToolRuntimeRequest(
-                tool_call_id="read_1",
-                name="read",
-                params={"path": "hello.txt"},
-            )
+    read = await runtime.execute(
+        ToolInvocation(
+            run_id="run_builtin",
+            tool_call_id="read_1",
+            name="read",
+            arguments={"path": "hello.txt"},
         )
-    ).result
+    )
     assert read.metadata["file_state"]["path"] == "hello.txt"
 
-    shell = (
-        await runtime.execute(
-            ToolRuntimeRequest(
-                tool_call_id="bash_1",
-                name="bash",
-                params={"command": 'python -c "import sys; sys.exit(3)"'},
-            )
+    shell = await runtime.execute(
+        ToolInvocation(
+            run_id="run_builtin",
+            tool_call_id="bash_1",
+            name="bash",
+            arguments={"command": 'python -c "import sys; sys.exit(3)"'},
         )
-    ).result
+    )
     assert shell.status == "error"
-    assert shell.error_code == "shell_exit_nonzero"
-    assert shell.exit_code == 3
+    assert shell.metadata["error_code"] == "shell_exit_nonzero"
+    assert shell.metadata["details"]["exit_code"] == 3
 
-    verification = (
-        await runtime.execute(
-            ToolRuntimeRequest(
-                tool_call_id="bash_2",
-                name="bash",
-                params={"command": "python -m pytest -q"},
-            )
+    verification = await runtime.execute(
+        ToolInvocation(
+            run_id="run_builtin",
+            tool_call_id="bash_2",
+            name="bash",
+            arguments={"command": "python -m pytest -q"},
         )
-    ).result
+    )
     assert verification.status == "success"
-    assert verification.verification is not None
-    assert verification.verification["status"] == "passed"
+    assert verification.verification
+    assert verification.verification[0].status == "passed"
 
 
 def _loop_input(
@@ -350,14 +342,12 @@ def _loop_input(
     prompt: str,
     limits: Any | None = None,
     retry_policy: "RetryPolicy | None" = None,
-    task_strategy: "TaskStrategy | None" = None,
 ):
     from codepilot.core.contracts import (
         AgentLoopInput,
         AgentLoopLimits,
         RetryPolicy,
         RunCorrelation,
-        TaskStrategy,
     )
     from codepilot.llm.ports import ModelDescriptor
 
@@ -368,7 +358,6 @@ def _loop_input(
         model=ModelDescriptor(provider="unit-test", model_id="run-test"),
         limits=limits or AgentLoopLimits(max_model_turns=4),
         retry_policy=retry_policy or RetryPolicy(),
-        task_strategy=task_strategy or TaskStrategy(),
     )
 
 
@@ -388,7 +377,7 @@ class _StaticToolPort:
     def __init__(self, observation):
         self._observation = observation
 
-    def catalog(self):
+    def catalog(self, current_mode: str = "build"):
         return {"tools": [self._observation.name]}
 
     async def execute(self, invocation):

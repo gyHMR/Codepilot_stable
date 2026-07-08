@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -80,17 +81,37 @@ class RuntimeSessionStore:
         return session
 
 
+@dataclass
+class ActiveRun:
+    run_id: str
+    task: asyncio.Task[Any] | None = None
+
+
 class ActiveRunRegistry:
-    """Track active run ids without exposing task objects."""
+    """Track active run ids and the asyncio task that drives them."""
 
     def __init__(self) -> None:
-        self._items: dict[str, str] = {}
+        self._items: dict[str, ActiveRun] = {}
 
     def start(self, session_id: str, run_id: str) -> None:
-        self._items[session_id] = run_id
+        self._items[session_id] = ActiveRun(run_id=run_id)
+
+    def attach_task(self, session_id: str, task: asyncio.Task[Any]) -> None:
+        active = self._items.get(session_id)
+        if active is not None:
+            active.task = task
 
     def finish(self, session_id: str) -> str | None:
-        return self._items.pop(session_id, None)
+        active = self._items.pop(session_id, None)
+        return active.run_id if active is not None else None
+
+    def cancel(self, session_id: str) -> str | None:
+        active = self._items.get(session_id)
+        if active is None:
+            return None
+        if active.task is not None and not active.task.done():
+            active.task.cancel()
+        return active.run_id
 
     def is_running(self, session_id: str) -> bool:
         return session_id in self._items

@@ -9,7 +9,7 @@ Protocols 子包公共索引。
 
 子模块分工：
 - conversation.py: 内容块、消息、上下文和模型工具调用意图
-- tools.py: 工具定义、工具结果和工具元数据
+- tools.py: 模型可见工具定义和工具结果
 - llm.py: 模型配置、能力和用量统计
 - runtime.py: 运行结果、运行状态和运行时事件
 - errors.py: 错误信息结构
@@ -49,6 +49,7 @@ from .context import (
     DroppedContextReason,
     RepositoryDelta,
     RepositorySnapshot,
+    RunnerPreflightReport,
 )
 from .commands import (
     AfterToolCallContext,
@@ -83,14 +84,15 @@ from .runtime import (
     MessageStartEvent,
     MessageUpdateEvent,
     ModelRetryStartEvent,
+    PlanSummary,
     RuntimeEvent,
     RuntimeEventType,
+    RunSignalsSummary,
+    RunSignalsVerificationStatus,
     RunVerification,
     RunVerificationStatus,
-    TaskSummary,
-    ToolExecutionEndEvent,
-    ToolExecutionStartEvent,
-    ToolExecutionUpdateEvent,
+    ToolFinishedEvent,
+    ToolStartedEvent,
     TurnEndEvent,
     TurnStartEvent,
 )
@@ -105,13 +107,11 @@ from .llm import (
     Usage,
 )
 from .tools import (
-    TASK_CONTROL_COMPLETE_TOOL,
-    TASK_CONTROL_UPDATE_TOOL,
     Tool,
-    ToolMetadata,
     ToolResult,
     ToolResultStatus,
     ToolRiskLevel,
+    UPDATE_PLAN_TOOL,
 )
 
 
@@ -143,6 +143,7 @@ __all__ = [
     "DroppedContextReason",
     "RepositoryDelta",
     "RepositorySnapshot",
+    "RunnerPreflightReport",
     # ── 命令与生命周期能力 ──
     "CommandHandler",
     "CommandSource",
@@ -155,12 +156,10 @@ __all__ = [
     # ── 工具 ──
     "Tool",
     "ToolCall",
-    "ToolMetadata",
     "ToolResult",
     "ToolResultStatus",
     "ToolRiskLevel",
-    "TASK_CONTROL_COMPLETE_TOOL",
-    "TASK_CONTROL_UPDATE_TOOL",
+    "UPDATE_PLAN_TOOL",
     "AfterToolCallContext",
     "AfterToolCallResult",
     "BeforeToolCallContext",
@@ -180,9 +179,11 @@ __all__ = [
     "AgentRunResult",
     "AgentRunStatus",
     "AgentRunStopReason",
+    "PlanSummary",
+    "RunSignalsSummary",
+    "RunSignalsVerificationStatus",
     "RunVerification",
     "RunVerificationStatus",
-    "TaskSummary",
     # ── 通用事件入口 ──
     "AgentEvent",
     "AgentEventSink",

@@ -14,7 +14,7 @@ from codepilot.core.contracts import (
     PrepareContextFn,
     ToolExecutionMode,
 )
-from codepilot.core.task import PlanningBudgetProfile, TaskMode
+from codepilot.core.plan import PlanningBudgetProfile, RunMode
 from codepilot.llm.provider_types import ProviderSimpleStreamFn
 from codepilot.protocols import AgentEvent, Message
 from codepilot.protocols import Model
@@ -44,10 +44,8 @@ class SessionOptions:
     tool_execution: ToolExecutionMode = "parallel"
     max_tool_calls_per_turn: int = 8
     memory_enabled: bool = True
-    task_control_enabled: bool = True
-    task_mode: TaskMode = "build"
+    current_mode: RunMode = "build"
     planning_budget_profile: PlanningBudgetProfile = "balanced"
-    max_task_replans_per_run: int = 2
     convert_to_llm: Optional[ConvertToLlmFn] = None
     get_api_key: Optional[Callable[[str], str | None | Awaitable[str | None]]] = None
     retry_enabled: bool = True
@@ -127,7 +125,7 @@ class SessionView:
     session_id: str
     message_count: int = 0
     last_run_id: str | None = None
-    task_mode: str = "build"
+    current_mode: str = "build"
     context: dict[str, Any] = field(default_factory=dict)
 
 
@@ -156,7 +154,7 @@ class PreparedAgentRun:
     rollback_baseline: RollbackBaselineRef | None = None
     context_refs: dict[str, Any] = field(default_factory=dict)
     memory_refs: dict[str, Any] = field(default_factory=dict)
-    task_refs: dict[str, Any] = field(default_factory=dict)
+    plan_refs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

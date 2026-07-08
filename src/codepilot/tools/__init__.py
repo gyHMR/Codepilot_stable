@@ -1,42 +1,60 @@
-# 新手导读：包门面文件：集中导出本层最常用的类型和入口，降低学习时的导入成本。
-# 关注点：tools 层是工具执行安全边界，统一处理契约、权限、校验、审批和结果防护。
+from __future__ import annotations
 
-"""
-Codepilot 工具层。
+"""Codepilot tools layer: definitions, safety, execution, and result policy."""
 
-工具位于本包之下，使 runtime 和 interfaces 共享统一的安全模型，
-而非在各入口点分散嵌入文件系统和 shell 检查逻辑。
-"""
-
-from codepilot.protocols.tools import ToolMetadata, ToolResultStatus
-
-from .approval import (
+from .approvals import (
     ApprovalDecision,
     ApprovalProvider,
     ApprovalRequest,
     DeferredApprovalProvider,
 )
-from .authoring import AgentTool, AgentToolResult, AgentToolUpdateCallback
 from .builtins import create_builtin_tools
-from .policy import PermissionPolicy, ToolDecision, ToolPermissionMode, ToolRequest
-from .registry import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES, ToolRegistry
+from .contracts import (
+    PreparedToolCall,
+    PreparedToolCallResult,
+    ToolCallRequest,
+    ToolCatalogItem,
+    ToolCatalogView,
+    ToolDefinition,
+    ToolInterruption,
+    ToolInvocation,
+    ToolMetadata,
+    ToolObservation,
+    ToolPolicyContext,
+    ToolPort,
+    ToolResult,
+    ToolResumeDecision,
+    ToolRiskView,
+)
+from .permissions import PermissionPolicy, ToolDecision, ToolPermissionMode
+from .registry import ToolRegistry, get_builtin_tool_metadata
+from .runtime import ToolRuntime
 
 __all__ = [
-    "AgentTool",
-    "AgentToolResult",
-    "AgentToolUpdateCallback",
     "ApprovalDecision",
     "ApprovalProvider",
     "ApprovalRequest",
     "DeferredApprovalProvider",
-    "MUTATING_TOOL_NAMES",
     "PermissionPolicy",
-    "READ_ONLY_TOOL_NAMES",
+    "PreparedToolCall",
+    "PreparedToolCallResult",
+    "ToolCallRequest",
+    "ToolCatalogItem",
+    "ToolCatalogView",
     "ToolDecision",
-    "ToolPermissionMode",
+    "ToolDefinition",
+    "ToolInterruption",
+    "ToolInvocation",
     "ToolMetadata",
+    "ToolObservation",
+    "ToolPermissionMode",
+    "ToolPolicyContext",
+    "ToolPort",
     "ToolRegistry",
-    "ToolRequest",
-    "ToolResultStatus",
+    "ToolResult",
+    "ToolResumeDecision",
+    "ToolRiskView",
+    "ToolRuntime",
     "create_builtin_tools",
+    "get_builtin_tool_metadata",
 ]

@@ -7,7 +7,7 @@ import pytest
 
 
 def _session_store(tmp_path: Path, session_id: str = "session_memory_v4"):
-    from codepilot.sessions.storage import SessionStore
+    from codepilot.sessions.store import SessionStore
 
     store = SessionStore(tmp_path, session_id)
     store.ensure_initialized(model_id="test", provider="test", system_prompt="")

@@ -9,7 +9,7 @@ from codepilot.llm.adapter import ProviderModelPort
 from codepilot.llm.registry import register_builtin_api_providers
 from codepilot.sessions.contracts import SessionOptions
 from codepilot.sessions.controller import create_session_controller
-from codepilot.tools.adapter import ToolRuntimePort
+from codepilot.tools import DeferredApprovalProvider, PermissionPolicy, ToolRuntime
 
 from .config import load_runtime_config
 from .hooks import (
@@ -31,6 +31,13 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
 
     config = load_runtime_config(intent)
     model = resolve_runtime_model(intent, config)
+    runtime_model = model.model
+    if intent.model_context_window is not None or intent.model_max_output_tokens is not None:
+        runtime_model = replace(
+            runtime_model,
+            context_window=int(intent.model_context_window or runtime_model.context_window),
+            max_tokens=int(intent.model_max_output_tokens or runtime_model.max_tokens),
+        )
     tools = build_runtime_tools(config.workspace, intent, config)
     system_prompt = build_system_prompt(
         workspace=config.workspace,
@@ -56,7 +63,7 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
     )
 
     session_options = SessionOptions(
-        model=model.model,
+        model=runtime_model,
         workspace_dir=config.workspace,
         system_prompt=system_prompt,
         session_id=intent.session_id,
@@ -65,10 +72,8 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         tool_execution=config.tool_execution,
         max_tool_calls_per_turn=config.max_tool_calls_per_turn,
         memory_enabled=intent.memory_enabled,
-        task_control_enabled=intent.task_control_enabled,
-        task_mode=config.task_mode,
+        current_mode=config.current_mode,
         planning_budget_profile=config.planning_budget_profile,
-        max_task_replans_per_run=intent.max_task_replans_per_run or 2,
         convert_to_llm=convert_to_llm,
         get_api_key=model.get_api_key,
         retry_enabled=config.retry_enabled,
@@ -83,7 +88,7 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         before_tool_call=before_tool_call,
         after_tool_call=after_tool_call,
         stream_fn=intent.stream_fn,
-        prepare_context=None,
+        prepare_context=intent.prepare_context,
     )
 
     controller = create_session_controller(session_options)
@@ -94,8 +99,15 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         convert_messages=effective_options.convert_to_llm,
         get_api_key=effective_options.get_api_key,
     )
-    tool_port = ToolRuntimePort(
-        tools.runtime,
+    tool_port = ToolRuntime(
+        registry=tools.registry,
+        permission_policy=PermissionPolicy(
+            permission_mode=config.tool_permission_mode,
+            block_dangerous_bash=config.block_dangerous_bash,
+            bash_allow_patterns=config.bash_allow_patterns,
+            bash_block_patterns=config.bash_block_patterns,
+        ),
+        approval_provider=intent.approval_provider or DeferredApprovalProvider(),
         before_tool_call=effective_options.before_tool_call,
         after_tool_call=effective_options.after_tool_call,
     )

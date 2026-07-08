@@ -87,7 +87,6 @@ def test_core_contracts_describe_loop_stage_without_session_objects() -> None:
         AgentLoopOutcome,
         AgentLoopPorts,
         RunCorrelation,
-        TaskStrategy,
     )
     from codepilot.llm.ports import ModelDescriptor
     from codepilot.protocols import AgentRunCounters, AssistantMessage, TextContent
@@ -111,7 +110,8 @@ def test_core_contracts_describe_loop_stage_without_session_objects() -> None:
         context={"system_prompt": "sys"},
         model=ModelDescriptor(provider="fake", model_id="unit"),
         tools=[],
-        task_strategy=TaskStrategy(mode="build"),
+        mode="build",
+        plan_state=None,
         limits=AgentLoopLimits(max_model_turns=3),
     )
     assert loop_input.correlation.session_id == "s1"
@@ -119,27 +119,33 @@ def test_core_contracts_describe_loop_stage_without_session_objects() -> None:
     assert AgentLoopPorts(model=None, tools=None).events is None
 
 
-def test_agent_loop_default_tool_iteration_budget_supports_coding_tasks() -> None:
-    from types import SimpleNamespace
-
+def test_agent_loop_default_tool_iteration_budget_supports_coding_tasks(tmp_path) -> None:
     from codepilot.core.contracts import AgentLoopLimits
-    from codepilot.sessions.runtime import runtime_loop_limits
+    from codepilot.protocols import Model
+    from codepilot.sessions.contracts import SessionOptions
+    from codepilot.sessions.runtime import SessionRuntime
 
     assert AgentLoopLimits().max_tool_iterations >= 32
-    assert (
-        runtime_loop_limits(
-            SimpleNamespace(task_mode="build", max_tool_calls_per_turn=8)
-        ).max_tool_iterations
-        >= 48
+    model = Model(
+        id="unit",
+        name="Unit",
+        api="unit-test",
+        provider="unit-test",
+        base_url="",
+        reasoning=False,
+        input=["text"],
+        context_window=4000,
+        max_tokens=500,
     )
-    assert (
-        runtime_loop_limits(
-            SimpleNamespace(task_mode="read", max_tool_calls_per_turn=8)
-        ).max_tool_iterations
-        < runtime_loop_limits(
-            SimpleNamespace(task_mode="build", max_tool_calls_per_turn=8)
-        ).max_tool_iterations
+    read_session = SessionRuntime(
+        SessionOptions(model=model, workspace_dir=tmp_path / "read", current_mode="read")
     )
+    build_session = SessionRuntime(
+        SessionOptions(model=model, workspace_dir=tmp_path / "build", current_mode="build")
+    )
+
+    assert build_session.loop_limits().max_tool_iterations >= 48
+    assert read_session.loop_limits().max_tool_iterations < build_session.loop_limits().max_tool_iterations
 
 
 def test_agent_loop_retry_policy_is_explicit_contract() -> None:
@@ -155,28 +161,29 @@ def test_agent_loop_retry_policy_is_explicit_contract() -> None:
     assert RetryPolicy(enabled=True, max_retries=-1, base_delay_ms=-5).max_retries == 0
 
 
-def test_agent_loop_task_strategy_is_explicit_contract() -> None:
+def test_agent_loop_mode_and_plan_state_are_explicit_contracts() -> None:
     from typing import get_type_hints
 
-    from codepilot.core.contracts import AgentLoopInput, AgentResumeInput, TaskStrategy
+    from codepilot.core.contracts import AgentLoopInput, AgentResumeInput, RunCorrelation
 
     input_hints = get_type_hints(AgentLoopInput)
     resume_hints = get_type_hints(AgentResumeInput)
-    strategy = TaskStrategy(
-        enabled=True,
-        mode="plan",
-        goal="  ship it  ",
-        steps=[{"title": "Inspect"}],
-        max_replans_per_run=-1,
-        task_state={"goal": {"value": "ship it"}},
-    )
+    plan_state = {"plan_id": "plan_1", "objective": "ship it"}
 
-    assert input_hints["task_strategy"] is TaskStrategy
-    assert resume_hints["task_strategy"] is TaskStrategy
-    assert strategy.goal == "ship it"
-    assert strategy.steps == ({"title": "Inspect"},)
-    assert strategy.max_replans_per_run is None
-    assert strategy.task_state == {"goal": {"value": "ship it"}}
+    assert input_hints["mode"].__args__ == ("read", "plan", "build")
+    assert resume_hints["mode"].__args__ == ("read", "plan", "build")
+    assert input_hints["plan_state"] == dict[str, object] | None
+    assert resume_hints["plan_state"] == dict[str, object] | None
+
+    loop_input = AgentLoopInput(
+        run_id="run_plan_contract",
+        correlation=RunCorrelation(),
+        mode="plan",
+        plan_state=plan_state,
+    )
+    plan_state["objective"] = "mutated"
+    assert loop_input.mode == "plan"
+    assert loop_input.plan_state == {"plan_id": "plan_1", "objective": "ship it"}
 
 
 def test_agent_loop_context_is_named_prepared_context_contract() -> None:
@@ -287,7 +294,7 @@ def test_session_intents_normalize_resume_and_cancel_values() -> None:
 
 
 def test_tool_port_approval_contract_is_explicit_interruption() -> None:
-    from codepilot.tools.ports import (
+    from codepilot.tools.contracts import (
         ToolInterruption,
         ToolInvocation,
         ToolObservation,
@@ -324,9 +331,9 @@ def test_v2_contract_modules_do_not_import_higher_layers() -> None:
     forbidden = {
         "codepilot.core.contracts": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
         "codepilot.sessions.contracts": ("codepilot.runtime", "codepilot.interfaces"),
-        "codepilot.runtime.actions": ("codepilot.core.agent", "codepilot.sessions.runtime", "codepilot.tools.engine"),
+        "codepilot.runtime.actions": ("codepilot.core.agent", "codepilot.sessions.runtime", "codepilot.tools.runtime"),
         "codepilot.llm.ports": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
-        "codepilot.tools.ports": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
+        "codepilot.tools.contracts": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
     }
     for module_name, forbidden_imports in forbidden.items():
         module = importlib.import_module(module_name)
@@ -349,7 +356,7 @@ def test_v2_contract_modules_export_only_named_contract_surface() -> None:
     import codepilot.llm.ports as llm_ports
     import codepilot.runtime.actions as runtime_actions
     import codepilot.sessions.contracts as session_contracts
-    import codepilot.tools.ports as tool_ports
+    import codepilot.tools.contracts as tool_ports
 
     modules = (
         runtime_actions,

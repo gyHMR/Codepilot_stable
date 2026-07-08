@@ -6,65 +6,55 @@ from pathlib import Path
 import pytest
 
 
-def test_task_modes_use_build_instead_of_edit() -> None:
-    from codepilot.core.task import ensure_task_mode, policy_for_mode
+def test_run_modes_use_build_instead_of_edit() -> None:
+    from codepilot.core.plan import ensure_run_mode
 
-    assert ensure_task_mode("build") == "build"
-    assert policy_for_mode("build").mode == "build"
+    assert ensure_run_mode("build") == "build"
+    assert ensure_run_mode("plan") == "plan"
 
-    with pytest.raises(ValueError, match="Unknown task mode"):
-        ensure_task_mode("edit")
+    with pytest.raises(ValueError, match="Unknown run mode"):
+        ensure_run_mode("edit")
 
 
-def test_session_store_persists_task_state_in_dedicated_file(tmp_path: Path) -> None:
-    from codepilot.sessions.storage import SessionStore
+def test_session_store_persists_plan_state_in_dedicated_file(tmp_path: Path) -> None:
+    from codepilot.sessions.store import SessionStore
 
-    store = SessionStore(tmp_path, "session_task")
+    store = SessionStore(tmp_path, "session_plan")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
 
-    task_state = {
-        "schema_version": 2,
-        "task_id": "task_1",
-        "raw_user_request": "先规划再执行",
-        "current_mode": "plan",
+    plan_state = {
+        "schema_version": 1,
+        "plan_id": "plan_1",
+        "status": "proposed",
         "approval_state": "proposed",
-        "goal": {"value": "重构任务规划", "source": "planner", "confidence": "inferred"},
-        "user_constraints": [],
-        "proposed_plan": {"steps": []},
-        "approved_plan": None,
-        "current_step_id": None,
-        "steps": [],
-        "verification_status": "unknown",
-        "evidence_refs": [],
-        "blocked_reason": None,
-        "recovery_summary": "",
-        "source_run_id": "run_1",
+        "origin_mode": "plan",
+        "objective": "先规划再执行",
+        "items": [
+            {"id": "item_1", "step": "阅读实现", "status": "in_progress"},
+            {"id": "item_2", "step": "给出方案", "status": "pending"},
+        ],
+        "explanation": "准备方案",
         "created_at": "2026-01-01T00:00:00+00:00",
         "updated_at": "2026-01-01T00:00:00+00:00",
+        "last_update_run_id": "run_1",
     }
 
-    store.save_task_state(task_state)
+    store.save_plan_state(plan_state)
 
-    session_dir = tmp_path / ".codepilot" / "sessions" / "session_task"
-    assert (session_dir / "task_state.json").exists()
-    assert store.load_task_state() == task_state
+    session_dir = tmp_path / ".codepilot" / "sessions" / "session_plan"
+    assert (session_dir / "plan_state.json").exists()
+    assert not (session_dir / "task_state.json").exists()
+    assert store.load_plan_state() == plan_state
 
     forked = store.fork_to("session_fork")
-    assert forked.load_task_state() == task_state
+    assert forked.load_plan_state() == plan_state
 
 
 def test_repeated_build_verification_failure_keeps_model_in_control() -> None:
-    from codepilot.core import TaskController
+    from codepilot.core.run_guard import RunGuard
     from codepilot.core.state import RunState
-    from codepilot.protocols import ToolResultMessage, UserMessage
+    from codepilot.protocols import AssistantMessage, TextContent, ToolResultMessage
 
-    controller = TaskController()
-    task = controller.initialize(
-        [UserMessage(content="修复失败测试")],
-        mode="build",
-        proposed_steps=["修改实现", "运行验证"],
-        max_replans_per_run=3,
-    )
     run = RunState(run_id="run_1", session_id="session_1")
     failed = ToolResultMessage(
         tool_call_id="test_1",
@@ -80,66 +70,55 @@ def test_repeated_build_verification_failure_keeps_model_in_control() -> None:
     )
 
     run.collect_tool_results([failed])
-    first = controller.after_tool_results(task, run, [failed])
-    run.collect_tool_results([failed])
-    second = controller.after_tool_results(task, run, [failed])
-
-    assert first.action == "continue"
-    assert first.reason == "verification_failed"
-    assert second.action == "continue"
-    assert second.reason == "verification_failed"
-    assert task.current_step() is not None
-    assert task.current_step().status == "in_progress"
-    assert task.current_step().failure_count == 2
-
-
-def test_task_update_requires_current_step_and_real_evidence() -> None:
-    from codepilot.core import TaskController
-    from codepilot.core.state import RunState
-    from codepilot.protocols import ToolResultMessage, UserMessage
-
-    controller = TaskController()
-    task = controller.initialize(
-        [UserMessage(content="按步骤执行")],
+    first = RunGuard().check(
+        assistant=AssistantMessage(content=[TextContent(text="已完成")]),
+        signals=run.summary(),
         mode="build",
-        proposed_steps=["阅读代码", "修改实现"],
     )
-    run = RunState(run_id="run_1", session_id="session_1")
-    rejected = ToolResultMessage(
-        tool_call_id="task_update_1",
-        tool_name="task_update",
-        status="success",
-        metadata={
-            "task_control": {
-                "action": "update_step",
-                "step_id": "step_1",
-                "proposed_status": "completed",
-                "summary": "已阅读代码",
-                "evidence_refs": [],
+    run.collect_tool_results([failed])
+    second = RunGuard().check(
+        assistant=AssistantMessage(content=[TextContent(text="已完成")]),
+        signals=run.summary(),
+        mode="build",
+    )
+
+    assert first.action == "continue_with_instruction"
+    assert first.reason == "verification_failed"
+    assert second.action == "continue_with_instruction"
+    assert second.reason == "verification_failed"
+    assert run.summary().verification_status == "failed"
+
+
+def test_update_plan_is_soft_progress_without_evidence_requirements() -> None:
+    from codepilot.core.plan import PlanState, apply_plan_update_metadata
+
+    state = PlanState.new(objective="按步骤执行", origin_mode="build", run_id="run_1")
+    updated = apply_plan_update_metadata(
+        state,
+        {
+            "plan_update": {
+                "explanation": "阅读完成，继续修改",
+                "plan": [
+                    {"step": "阅读代码", "status": "completed"},
+                    {"step": "修改实现", "status": "in_progress"},
+                ],
             }
         },
-    )
-
-    decision = controller.after_tool_results(task, run, [rejected])
-
-    assert decision.action == "continue"
-    assert task.current_step_id == "step_1"
-    assert task.current_step() is not None
-    assert task.current_step().status == "in_progress"
-    assert task.current_step().note == "task_control rejected: missing_evidence"
-
-
-def test_passed_verification_records_tool_evidence_on_completed_step() -> None:
-    from codepilot.core import TaskController
-    from codepilot.core.state import RunState
-    from codepilot.protocols import ToolResultMessage, UserMessage
-
-    controller = TaskController()
-    task = controller.initialize(
-        [UserMessage(content="运行验证后完成")],
         mode="build",
-        proposed_steps=["运行验证"],
+        objective="按步骤执行",
+        run_id="run_1",
     )
+
+    assert updated is not None
+    assert updated.status == "active"
+    assert [item.status for item in updated.items] == ["completed", "in_progress"]
+    assert updated.explanation == "阅读完成，继续修改"
+
+
+def test_passed_verification_is_run_signal_not_plan_completion_proof() -> None:
+    from codepilot.core.state import RunState
+    from codepilot.protocols import ToolResultMessage
+
     run = RunState(run_id="run_1", session_id="session_1")
     passed = ToolResultMessage(
         tool_call_id="test_1",
@@ -151,118 +130,33 @@ def test_passed_verification_records_tool_evidence_on_completed_step() -> None:
         },
     )
 
-    decision = controller.after_tool_results(task, run, [passed])
+    run.collect_tool_results([passed])
 
-    assert decision.action == "continue"
-    assert task.steps[0].status == "completed"
-    assert "tool:test_1" in task.steps[0].evidence_refs
-    assert "verification:test_1" in task.steps[0].evidence_refs
+    assert run.summary().verification_status == "passed"
+    assert run.summary().affected_paths == []
 
 
-def test_legacy_complete_task_step_requires_real_evidence_like_task_update() -> None:
-    from codepilot.core import TaskController
-    from codepilot.core.state import RunState
-    from codepilot.protocols import ToolResultMessage, UserMessage
+def test_plan_state_store_begins_authoritative_plan_shape(tmp_path: Path) -> None:
+    from codepilot.sessions.store import SessionStore
+    from codepilot.sessions.plan_state import PlanStateStore
 
-    controller = TaskController()
-    task = controller.initialize(
-        [UserMessage(content="按步骤执行")],
-        mode="build",
-        proposed_steps=["阅读代码", "修改实现"],
-    )
-    run = RunState(run_id="run_1", session_id="session_1")
-    rejected = ToolResultMessage(
-        tool_call_id="complete_1",
-        tool_name="complete_task_step",
-        status="success",
-        metadata={
-            "task_control": {
-                "action": "complete_step",
-                "summary": "声称已经阅读代码",
-                "evidence_refs": [],
-            }
-        },
-    )
-
-    decision = controller.after_tool_results(task, run, [rejected])
-
-    assert decision.action == "continue"
-    assert task.current_step_id == "step_1"
-    assert task.current_step() is not None
-    assert task.current_step().status == "in_progress"
-    assert task.current_step().note == "task_control rejected: missing_evidence"
-
-
-def test_task_state_store_begins_authoritative_task_state_shape(tmp_path: Path) -> None:
-    from codepilot.sessions.storage import SessionStore
-    from codepilot.sessions.task_state import TaskStateStore
-
-    store = SessionStore(tmp_path, "session_task_state")
+    store = SessionStore(tmp_path, "session_plan_state")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
-    state = TaskStateStore(store).begin("修复任务控制链路", run_id="run_1")
-    stored = store.load_task_state()
+    state = PlanStateStore(store).begin("修复运行编排链路", run_id="run_1")
+    stored = store.load_plan_state()
 
     assert stored is not None
     assert state == stored
-    assert stored["schema_version"] == 2
-    assert stored["raw_user_request"] == "修复任务控制链路"
-    assert stored["current_mode"] == "build"
+    assert stored["schema_version"] == 1
+    assert stored["objective"] == "修复运行编排链路"
+    assert stored["origin_mode"] == "build"
+    assert stored["status"] == "none"
     assert stored["approval_state"] == "none"
-    assert stored["current_step_id"] is None
-    assert stored["steps"] == []
-    assert stored["verification_status"] == "unknown"
-    assert stored["source_run_id"] == "run_1"
+    assert stored["items"] == []
+    assert stored["last_update_run_id"] == "run_1"
 
 
-def test_task_state_payload_builds_loop_task_state() -> None:
-    from codepilot.core import build_task_state_from_payload
-    from codepilot.protocols import UserMessage
-
-    task = build_task_state_from_payload(
-        [UserMessage(content="继续任务")],
-        {
-            "schema_version": 2,
-            "task_id": "task_1",
-            "raw_user_request": "继续任务",
-            "current_mode": "build",
-            "approval_state": "approved",
-            "goal": {"value": "继续任务", "source": "planner", "confidence": "inferred"},
-            "user_constraints": [],
-            "proposed_plan": None,
-            "approved_plan": {"steps": ["step_1"]},
-            "current_step_id": "step_1",
-            "steps": [
-                {
-                    "id": "step_1",
-                    "title": "补测试",
-                    "kind": "verify",
-                    "status": "pending",
-                    "acceptance": "测试通过",
-                    "verification_hint": "python -m pytest -q",
-                    "summary": None,
-                    "evidence_refs": [],
-                    "failure_count": 0,
-                }
-            ],
-            "verification_status": "unknown",
-            "evidence_refs": [],
-            "blocked_reason": None,
-            "recovery_summary": "",
-            "source_run_id": "run_1",
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "updated_at": "2026-01-01T00:00:00+00:00",
-        },
-    )
-
-    assert task is not None
-    assert task.task_id == "task_1"
-    assert task.mode == "build"
-    assert task.current_step_id == "step_1"
-    assert task.current_step() is not None
-    assert task.current_step().status == "in_progress"
-
-
-def test_runtime_context_port_passes_task_signal_to_context_governor() -> None:
+def test_runtime_context_port_passes_plan_and_run_signals_to_context_governor() -> None:
     from codepilot.core.contracts import PreparedAgentContext
     from codepilot.protocols import ContextReport, ContextView
     from codepilot.sessions.runtime import RuntimeSessionContextPort
@@ -287,12 +181,12 @@ def test_runtime_context_port_passes_task_signal_to_context_governor() -> None:
         memory_enabled = False
         store = Store()
 
-        def _active_task_state(self):
-            return {"task_id": "task_1"}
+        def active_plan_state(self):
+            return {"plan_id": "plan_1", "items": []}
 
         async def prepare_context(self, context, request):
-            captured["task_signal"] = context.task_signal
-            captured["task_state"] = context.task_state
+            captured["run_signals"] = context.run_signals
+            captured["plan_state"] = context.plan_state
             return PreparedAgentContext(
                 system_prompt=context.system_prompt,
                 messages=context.messages,
@@ -305,7 +199,7 @@ def test_runtime_context_port_passes_task_signal_to_context_governor() -> None:
                     estimated_tokens_after=1,
                     context_view=ContextView(
                         system=[],
-                        task_state=[],
+                        task_plan=[],
                         working_set=[],
                         memory=[],
                         conversation=[],
@@ -320,18 +214,14 @@ def test_runtime_context_port_passes_task_signal_to_context_governor() -> None:
                 "messages": [],
                 "tools": [],
                 "context": {
-                    "task_signal": {
-                        "phase": "acting",
-                        "action_intent": "debug_failure",
-                        "recent_error_code": "verification_failed",
-                    },
+                    "run_signals": {"verification_status": "failed"},
                 },
             }
         )
     )
 
-    assert captured["task_state"] == {"task_id": "task_1"}
-    assert captured["task_signal"]["action_intent"] == "debug_failure"
+    assert captured["plan_state"] == {"plan_id": "plan_1", "items": []}
+    assert captured["run_signals"]["verification_status"] == "failed"
 
 
 def test_structured_memory_record_supports_candidate_and_conflict_fields() -> None:
@@ -366,7 +256,7 @@ def test_memory_writer_uses_single_log_and_candidates_for_ordinary_corrections(
     tmp_path: Path,
 ) -> None:
     from codepilot.sessions.memory import MemoryStore, MemoryWriteContext, MemoryWriter
-    from codepilot.sessions.storage import SessionStore
+    from codepilot.sessions.store import SessionStore
 
     session_store = SessionStore(tmp_path, "session_memory")
     session_store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
@@ -407,7 +297,7 @@ def test_memory_writer_uses_single_log_and_candidates_for_ordinary_corrections(
 
 def test_memory_recall_filters_conflicts_and_dedupes_subjects(tmp_path: Path) -> None:
     from codepilot.sessions.memory import MemoryQuery, MemoryRecord, MemoryRetriever, MemoryStore
-    from codepilot.sessions.storage import SessionStore
+    from codepilot.sessions.store import SessionStore
 
     session_store = SessionStore(tmp_path, "session_memory")
     session_store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
@@ -471,7 +361,7 @@ def test_memory_management_commands_update_status_and_supersede(tmp_path: Path) 
         supersede_memory,
     )
     from codepilot.sessions.memory import MemoryRecord, MemoryStore, MemoryWriter
-    from codepilot.sessions.storage import SessionStore
+    from codepilot.sessions.store import SessionStore
 
     class Session:
         session_id = "session_memory"

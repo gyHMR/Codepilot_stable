@@ -32,7 +32,7 @@ def _bind_session_runtime(session: SessionRuntime) -> "SessionController":
             provider=getattr(model, "provider", "unknown"),
             model_id=getattr(model, "id", "unknown"),
         ),
-        task_mode=session.task_mode,
+        current_mode=session.current_mode,
         _session=session,
     )
 
@@ -43,7 +43,7 @@ class SessionController:
     model: ModelDescriptor = field(
         default_factory=lambda: ModelDescriptor(provider="local", model_id="v2-test")
     )
-    task_mode: str = "build"
+    current_mode: str = "build"
     _session: SessionRuntime | None = None
     _last_run_id: str | None = None
     _derived_controllers: dict[str, "SessionController"] = field(default_factory=dict)
@@ -96,9 +96,18 @@ class SessionController:
             session=self._session,
             controller=self,
         )
-        if "task_mode" in record.data:
-            self.task_mode = str(record.data["task_mode"])
+        if "current_mode" in record.data:
+            self.current_mode = str(record.data["current_mode"])
         return record
+
+    def record_event(self, event: dict[str, Any]) -> None:
+        self._session.record_event(event)
+
+    def pending_approvals(self) -> list[dict[str, Any]]:
+        return self._session.pending_approvals()
+
+    def pending_approval(self, approval_id: str) -> dict[str, Any] | None:
+        return self._session.pending_approval(approval_id)
 
     def stage_derived_session(self, session: SessionRuntime) -> None:
         self._derived_controllers[session.session_id] = _bind_session_runtime(session)
@@ -126,7 +135,8 @@ class SessionController:
             affected_paths=list(outcome.workspace_effects.affected_paths),
             workspace_changed=outcome.workspace_effects.changed,
             verification=list(outcome.verification),
-            task=outcome.task,
+            plan=outcome.plan,
+            signals=outcome.signals,
         )
 
 

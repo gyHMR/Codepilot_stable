@@ -140,7 +140,7 @@ def test_runtime_gateway_public_surface_is_v2_spine_only() -> None:
         "get_run_events",
         "list_commands",
         "list_pending_approvals",
-        "set_task_mode",
+        "set_mode",
         "fork_session",
         "switch_entry",
     }.isdisjoint(public)

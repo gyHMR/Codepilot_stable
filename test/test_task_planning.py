@@ -5,59 +5,20 @@ from typing import Any
 
 import pytest
 
-from codepilot.core.contracts import AgentLoopInput, AgentLoopLimits, AgentLoopPorts, RunCorrelation, TaskStrategy
-from codepilot.core.loop import run_agent_loop
+from codepilot.core.contracts import AgentLoopInput, AgentLoopLimits, AgentLoopPorts, RunCorrelation
+from codepilot.core.plan import PlanState, PlanUpdate, PlanUpdateItem, PlanValidationError
+from codepilot.core.run_guard import RunGuard
+from codepilot.core.runner import run_agent_loop
 from codepilot.llm.ports import LLMCompleted, ModelDescriptor
-from codepilot.protocols import AssistantMessage, RunVerification, TextContent, ToolCall, ToolResultMessage, UserMessage
-from codepilot.tools.ports import ToolObservation
-
-
-def _canonical_task_state(**updates: object) -> dict[str, object]:
-    state: dict[str, object] = {
-        "schema_version": 2,
-        "task_id": "task_existing",
-        "raw_user_request": "继续任务",
-        "current_mode": "build",
-        "approval_state": "approved",
-        "goal": {"value": "继续任务", "source": "user", "confidence": "explicit"},
-        "user_constraints": [],
-        "proposed_plan": None,
-        "approved_plan": None,
-        "current_step_id": "step_2",
-        "steps": [
-            {
-                "id": "step_1",
-                "title": "读取上下文",
-                "kind": "read",
-                "status": "completed",
-                "acceptance": None,
-                "verification_hint": None,
-                "summary": "done",
-                "evidence_refs": ["tool:read_1"],
-                "failure_count": 0,
-            },
-            {
-                "id": "step_2",
-                "title": "运行验证",
-                "kind": "verify",
-                "status": "pending",
-                "acceptance": "验证通过",
-                "verification_hint": "pytest",
-                "summary": None,
-                "evidence_refs": [],
-                "failure_count": 0,
-            },
-        ],
-        "verification_status": "unknown",
-        "evidence_refs": [],
-        "blocked_reason": None,
-        "recovery_summary": "",
-        "source_run_id": "run_1",
-        "created_at": "2026-01-01T00:00:00+00:00",
-        "updated_at": "2026-01-01T00:00:00+00:00",
-    }
-    state.update(updates)
-    return state
+from codepilot.protocols import (
+    AssistantMessage,
+    RunSignalsSummary,
+    RunVerification,
+    TextContent,
+    ToolCall,
+    ToolResultMessage,
+)
+from codepilot.tools.contracts import ToolObservation
 
 
 class _ScriptedModel:
@@ -77,7 +38,7 @@ class _ToolPort:
         self.observations = observations
         self.executed: list[str] = []
 
-    def catalog(self):
+    def catalog(self, current_mode: str = "build"):
         return {"tools": list(self.observations)}
 
     async def execute(self, invocation):
@@ -93,7 +54,8 @@ def _loop_input(
     *,
     prompt: str = "do task",
     limits: AgentLoopLimits | None = None,
-    task_strategy: TaskStrategy | None = None,
+    mode: str = "build",
+    plan_state: dict[str, object] | None = None,
 ) -> AgentLoopInput:
     return AgentLoopInput(
         run_id=run_id,
@@ -101,265 +63,51 @@ def _loop_input(
         user_prompt=prompt,
         model=ModelDescriptor(provider="fake", model_id="unit"),
         limits=limits or AgentLoopLimits(),
-        task_strategy=task_strategy or TaskStrategy(enabled=True, mode="build"),
+        mode=mode,  # type: ignore[arg-type]
+        plan_state=plan_state,
     )
 
 
-def test_task_contracts_keep_modes_and_budget_small() -> None:
-    from codepilot.core.task import budget_for_profile, ensure_task_mode, policy_for_mode
-
-    assert ensure_task_mode("build") == "build"
-    assert policy_for_mode("read").read_only is True
-    assert policy_for_mode("plan").planner_required is True
-    assert budget_for_profile("wide").max_tool_calls > budget_for_profile("balanced").max_tool_calls
-    with pytest.raises(ValueError):
-        ensure_task_mode("auto")
-
-
-def test_task_state_tracks_current_step_and_status_lists() -> None:
-    from codepilot.core.task import TaskState, TaskStep
-
-    task = TaskState(
-        task_id="task_1",
-        goal="修复问题",
-        steps=[
-            TaskStep(id="step_1", title="读取代码", kind="read"),
-            TaskStep(id="step_2", title="运行验证", kind="verify"),
-        ],
-    )
-
-    first = task.advance()
-    assert first is not None
-    assert first.status == "in_progress"
-    first.complete(evidence_refs=["tool:read"])
-    task.advance()
-
-    assert task.completed_step_titles() == ["读取代码"]
-    assert task.pending_step_titles() == ["运行验证"]
-    assert task.current_step_id == "step_2"
-
-
-def test_task_planner_parses_json_and_falls_back() -> None:
-    from codepilot.core.task import TaskPlanner
-
-    planner = TaskPlanner()
-    draft = planner.parse_plan_message(
-        AssistantMessage(
-            content=[
-                TextContent(
-                    text='{"goal":"修复 bug","steps":[{"title":"读取文件","kind":"read"}]}'
-                )
-            ]
+def test_plan_update_validates_shape() -> None:
+    update = PlanUpdate(
+        explanation="推进实现",
+        items=(
+            PlanUpdateItem(step="阅读相关实现", status="completed"),
+            PlanUpdateItem(step="重构 runner", status="in_progress"),
         ),
-        fallback_goal="完成当前请求",
     )
+    assert update.items[1].status == "in_progress"
 
-    assert draft.source == "llm"
-    assert draft.goal == "修复 bug"
-    assert draft.steps[0].title == "读取文件"
-    assert planner.parse_plan_message(
-        AssistantMessage(content=[TextContent(text="not json")]),
-        fallback_goal="兜底",
-    ).source == "fallback"
-
-
-def test_task_controller_updates_steps_from_tool_results() -> None:
-    from codepilot.core.state import RunState
-    from codepilot.core.task import TaskController
-
-    controller = TaskController()
-    task = controller.initialize(
-        [UserMessage(content="修复并测试")],
-        proposed_steps=[
-            {"title": "读取代码", "kind": "read"},
-            {"title": "运行验证", "kind": "verify"},
-        ],
-    )
-    run = RunState("run_1", "s1")
-
-    read_result = ToolResultMessage(tool_call_id="read_1", tool_name="read_file")
-    run.collect_tool_results([read_result])
-    decision = controller.after_tool_results(task, run, [read_result])
-    assert decision.action == "continue"
-    assert task.completed_step_titles() == ["读取代码"]
-    assert task.current_step_id == "step_2"
-
-    failed = ToolResultMessage(
-        tool_call_id="test_1",
-        tool_name="pytest",
-        status="error",
-        verification={"status": "failed", "command": "pytest", "summary": "failed"},
-    )
-    run.collect_tool_results([failed])
-    decision = controller.after_tool_results(task, run, [failed])
-    assert decision.reason == "verification_failed"
-    assert task.current_step().failure_count == 1  # type: ignore[union-attr]
-
-    passed = ToolResultMessage(
-        tool_call_id="test_2",
-        tool_name="pytest",
-        verification={"status": "passed", "command": "pytest", "summary": "passed"},
-    )
-    run.collect_tool_results([passed])
-    decision = controller.after_tool_results(task, run, [passed])
-    assert decision.action == "continue"
-    assert controller.check_completion(task, run).satisfied is True
-
-
-def test_build_task_does_not_finish_after_generic_read_only_tool_result() -> None:
-    from codepilot.core.state import RunState
-    from codepilot.core.task import TaskController
-
-    controller = TaskController()
-    task = controller.initialize([UserMessage(content="修复登录注册功能")])
-    run = RunState("run_1", "s1")
-
-    result = ToolResultMessage(tool_call_id="ls_1", tool_name="ls")
-    run.collect_tool_results([result])
-    decision = controller.after_tool_results(task, run, [result])
-
-    assert decision.action == "continue"
-    assert task.open_steps()
-    assert task.completed_step_titles() == []
-    assert task.current_step_id == "step_1"
-
-
-def test_completion_gate_requires_fresh_verification_after_workspace_change() -> None:
-    from codepilot.core.state import RunState
-    from codepilot.core.task import TaskController
-
-    controller = TaskController()
-    task = controller.initialize([UserMessage(content="修改文件")])
-    run = RunState("run_1", "s1")
-    changed = ToolResultMessage(
-        tool_call_id="edit_1",
-        tool_name="edit_file",
-        affected_paths=["src/app.py"],
-        workspace_changed=True,
-    )
-    run.collect_tool_results([changed])
-    controller.after_tool_results(task, run, [changed])
-
-    check = controller.check_completion(task, run)
-    assert check.satisfied is False
-    assert check.reason == "modified_without_fresh_verification"
-    assert check.can_continue is True
-    assert controller.check_completion(task, run).can_continue is False
-
-
-def test_task_state_payload_mapping_builds_task_state() -> None:
-    from codepilot.core.task import build_task_state_from_payload
-
-    task = build_task_state_from_payload(
-        [UserMessage(content="继续任务")],
-        _canonical_task_state(),
-    )
-
-    assert task is not None
-    assert task.task_id == "task_existing"
-    assert task.goal == "继续任务"
-    assert task.current_step_id == "step_2"
-    assert task.steps[1].status == "in_progress"
-
-
-def test_agent_loop_completes_after_passed_verification() -> None:
-    asyncio.run(_agent_loop_completes_after_passed_verification())
-
-
-async def _agent_loop_completes_after_passed_verification() -> None:
-    model = _ScriptedModel(
-        lambda _request, calls: AssistantMessage(
-            content=[ToolCall(id="test_1", name="pytest", arguments={})],
-            stop_reason="toolUse",
-        )
-        if calls == 1
-        else AssistantMessage(content=[TextContent(text="验证已通过，任务完成。")])
-    )
-    tools = _ToolPort(
-        {
-            "pytest": ToolObservation(
-                tool_call_id="test_1",
-                name="pytest",
-                status="success",
-                verification=(
-                    RunVerification(
-                        tool_call_id="test_1",
-                        tool_name="pytest",
-                        status="passed",
-                        command="pytest",
-                        exit_code=0,
-                        summary="passed",
-                    ),
-                ),
+    with pytest.raises(PlanValidationError, match="at most one"):
+        PlanUpdate(
+            items=(
+                PlanUpdateItem(step="a", status="in_progress"),
+                PlanUpdateItem(step="b", status="in_progress"),
             )
-        }
-    )
-
-    outcome = await run_agent_loop(
-        _loop_input("run_verify", limits=AgentLoopLimits(max_tool_iterations=1)),
-        AgentLoopPorts(model=model, tools=tools),
-    )
-
-    assert outcome.status == "completed"
-    assert model.calls == 2
-    assert outcome.final_message is not None
-    assert outcome.final_message.content[0].text == "验证已通过，任务完成。"
-    assert outcome.task is not None
-    assert outcome.task.completion_satisfied is True
-    assert any(event["type"] == "completion_checked" for event in outcome.events)
-
-
-def test_agent_loop_continues_after_task_control_complete_step() -> None:
-    asyncio.run(_agent_loop_continues_after_task_control_complete_step())
-
-
-async def _agent_loop_continues_after_task_control_complete_step() -> None:
-    model = _ScriptedModel(
-        lambda _request, calls: AssistantMessage(
-            content=[
-                ToolCall(
-                    id="complete_1",
-                    name="complete_task_step",
-                    arguments={
-                        "summary": "已读完上下文",
-                        "evidence_refs": ["tool:read_1"],
-                    },
-                )
-            ],
-            stop_reason="toolUse",
         )
-        if calls == 1
-        else AssistantMessage(content=[TextContent(text="上下文已整理完成。")])
+
+
+def test_plan_mode_update_stays_proposed_and_build_mode_update_becomes_active() -> None:
+    plan_mode = PlanState.new(objective="制定方案", origin_mode="plan", run_id="run_1")
+    proposed = plan_mode.apply_update(
+        PlanUpdate(items=(PlanUpdateItem(step="给出方案", status="completed"),)),
+        mode="plan",
+        run_id="run_1",
     )
-    tools = _ToolPort(
-        {
-            "complete_task_step": ToolObservation(
-                tool_call_id="complete_1",
-                name="complete_task_step",
-                status="success",
-                content=(TextContent(text="Current task step completed: 已读完上下文"),),
-                metadata={
-                    "task_control": {
-                        "action": "complete_step",
-                        "summary": "已读完上下文",
-                        "evidence_refs": ["tool:read_1"],
-                        "tool_call_id": "complete_1",
-                    }
-                },
+    assert proposed.status == "proposed"
+
+    build_mode = PlanState.new(objective="实现方案", origin_mode="build", run_id="run_2")
+    active = build_mode.apply_update(
+        PlanUpdate(
+            items=(
+                PlanUpdateItem(step="阅读实现", status="completed"),
+                PlanUpdateItem(step="修改代码", status="in_progress"),
             )
-        }
+        ),
+        mode="build",
+        run_id="run_2",
     )
-
-    outcome = await run_agent_loop(
-        _loop_input("run_task_control_complete", prompt="整理当前上下文"),
-        AgentLoopPorts(model=model, tools=tools),
-    )
-
-    assert outcome.status == "completed"
-    assert model.calls == 2
-    assert tools.executed == ["complete_task_step"]
-    assert outcome.final_message is not None
-    assert outcome.final_message.content[0].text == "上下文已整理完成。"
+    assert active.status == "active"
 
 
 def test_agent_loop_continues_after_read_tool_before_final_answer() -> None:
@@ -394,18 +142,147 @@ async def _agent_loop_continues_after_read_tool_before_final_answer() -> None:
     assert outcome.status == "completed"
     assert model.calls == 2
     assert tools.executed == ["read"]
-    assert outcome.final_message is not None
-    assert outcome.final_message.content[0].text == "已完成分析，准备修改。"
+    assert isinstance(model.requests[-1].messages[-1], ToolResultMessage)
+    assert outcome.final_text == "已完成分析，准备修改。"
 
 
-def test_agent_loop_waits_for_verification_after_workspace_change() -> None:
-    asyncio.run(_agent_loop_waits_for_verification_after_workspace_change())
+def test_update_plan_tool_result_updates_soft_plan_and_continues_to_model() -> None:
+    asyncio.run(_update_plan_tool_result_updates_soft_plan_and_continues_to_model())
 
 
-async def _agent_loop_waits_for_verification_after_workspace_change() -> None:
+async def _update_plan_tool_result_updates_soft_plan_and_continues_to_model() -> None:
     model = _ScriptedModel(
         lambda _request, calls: AssistantMessage(
-            content=[ToolCall(id="edit_1", name="edit_file", arguments={})]
+            content=[
+                ToolCall(
+                    id="plan_1",
+                    name="update_plan",
+                    arguments={
+                        "explanation": "开始重构",
+                        "plan": [
+                            {"step": "阅读实现", "status": "completed"},
+                            {"step": "重写 runner", "status": "in_progress"},
+                        ],
+                    },
+                )
+            ],
+            stop_reason="toolUse",
+        )
+        if calls == 1
+        else AssistantMessage(content=[TextContent(text="计划已更新，继续实现。")])
+    )
+    tools = _ToolPort(
+        {
+            "update_plan": ToolObservation(
+                tool_call_id="plan_1",
+                name="update_plan",
+                status="success",
+                content=(TextContent(text="Plan updated."),),
+                metadata={
+                    "plan_update": {
+                        "explanation": "开始重构",
+                        "plan": [
+                            {"step": "阅读实现", "status": "completed"},
+                            {"step": "重写 runner", "status": "in_progress"},
+                        ],
+                    }
+                },
+            )
+        }
+    )
+
+    outcome = await run_agent_loop(
+        _loop_input("run_update_plan", prompt="重构 runtime"),
+        AgentLoopPorts(model=model, tools=tools),
+    )
+
+    assert outcome.status == "completed"
+    assert model.calls == 2
+    assert outcome.plan is not None
+    assert outcome.plan.status == "active"
+    assert outcome.plan.items[1]["status"] == "in_progress"
+    assert any(event["type"] == "plan_updated" for event in outcome.events)
+
+
+def test_plan_completed_does_not_complete_run_before_model_final_answer() -> None:
+    asyncio.run(_plan_completed_does_not_complete_run_before_model_final_answer())
+
+
+async def _plan_completed_does_not_complete_run_before_model_final_answer() -> None:
+    model = _ScriptedModel(
+        lambda _request, calls: AssistantMessage(
+            content=[
+                ToolCall(
+                    id="plan_1",
+                    name="update_plan",
+                    arguments={"plan": [{"step": "总结", "status": "completed"}]},
+                )
+            ],
+            stop_reason="toolUse",
+        )
+        if calls == 1
+        else AssistantMessage(content=[TextContent(text="完成总结。")])
+    )
+    tools = _ToolPort(
+        {
+            "update_plan": ToolObservation(
+                tool_call_id="plan_1",
+                name="update_plan",
+                status="success",
+                metadata={
+                    "plan_update": {
+                        "plan": [{"step": "总结", "status": "completed"}],
+                    }
+                },
+            )
+        }
+    )
+
+    outcome = await run_agent_loop(
+        _loop_input("run_plan_completed", prompt="总结"),
+        AgentLoopPorts(model=model, tools=tools),
+    )
+
+    assert outcome.status == "completed"
+    assert model.calls == 2
+    assert outcome.plan is not None
+    assert outcome.plan.status == "completed"
+    assert any(event["type"] == "plan_completed" for event in outcome.events)
+
+
+def test_run_guard_rejects_empty_final_answer() -> None:
+    decision = RunGuard().check(
+        assistant=AssistantMessage(content=[TextContent(text=" ")]),
+        signals=RunSignalsSummary(),
+        mode="build",
+    )
+
+    assert decision.action == "continue_with_instruction"
+    assert decision.reason == "empty_final_answer"
+
+
+def test_run_guard_stops_read_mode_workspace_change() -> None:
+    decision = RunGuard().check(
+        assistant=AssistantMessage(content=[TextContent(text="done")]),
+        signals=RunSignalsSummary(
+            workspace_changed=True,
+            verification_status="passed",
+        ),
+        mode="read",
+    )
+
+    assert decision.action == "stopped"
+    assert decision.reason == "read_mode_workspace_changed"
+
+
+def test_run_guard_requires_verification_after_workspace_change() -> None:
+    asyncio.run(_run_guard_requires_verification_after_workspace_change())
+
+
+async def _run_guard_requires_verification_after_workspace_change() -> None:
+    model = _ScriptedModel(
+        lambda _request, calls: AssistantMessage(
+            content=[ToolCall(id="edit_1", name="edit", arguments={})]
             if calls == 1
             else [TextContent(text="done")],
             stop_reason="toolUse" if calls == 1 else "stop",
@@ -413,9 +290,9 @@ async def _agent_loop_waits_for_verification_after_workspace_change() -> None:
     )
     tools = _ToolPort(
         {
-            "edit_file": ToolObservation(
+            "edit": ToolObservation(
                 tool_call_id="edit_1",
-                name="edit_file",
+                name="edit",
                 status="success",
                 affected_paths=("src/app.py",),
                 workspace_changed=True,
@@ -429,49 +306,50 @@ async def _agent_loop_waits_for_verification_after_workspace_change() -> None:
     )
 
     assert outcome.status == "waiting_user"
-    assert outcome.stop_reason == "task_incomplete"
-    assert outcome.task is not None
-    assert outcome.task.completion_reason == "modified_without_fresh_verification"
+    assert outcome.stop_reason == "run_guard"
+    assert outcome.signals.workspace_changed is True
+    assert outcome.signals.verification_status == "stale"
+    assert any(event["type"] == "run_guard_checked" for event in outcome.events)
 
 
-def test_agent_loop_pauses_at_tool_iteration_limit() -> None:
-    asyncio.run(_agent_loop_pauses_at_tool_iteration_limit())
+def test_pytest_passed_still_returns_to_model_for_summary() -> None:
+    asyncio.run(_pytest_passed_still_returns_to_model_for_summary())
 
 
-async def _agent_loop_pauses_at_tool_iteration_limit() -> None:
+async def _pytest_passed_still_returns_to_model_for_summary() -> None:
     model = _ScriptedModel(
         lambda _request, calls: AssistantMessage(
-            content=[ToolCall(id="edit_1", name="edit_file", arguments={})]
-            if calls == 1
-            else [ToolCall(id="test_1", name="pytest", arguments={})],
+            content=[ToolCall(id="test_1", name="pytest", arguments={})],
             stop_reason="toolUse",
         )
+        if calls == 1
+        else AssistantMessage(content=[TextContent(text="测试已通过。")])
     )
     tools = _ToolPort(
         {
-            "edit_file": ToolObservation(
-                tool_call_id="edit_1",
-                name="edit_file",
-                status="success",
-                affected_paths=("src/app.py",),
-                workspace_changed=True,
-            ),
             "pytest": ToolObservation(
                 tool_call_id="test_1",
                 name="pytest",
                 status="success",
-            ),
+                verification=(
+                    RunVerification(
+                        tool_call_id="test_1",
+                        tool_name="pytest",
+                        status="passed",
+                        command="pytest",
+                        exit_code=0,
+                        summary="passed",
+                    ),
+                ),
+            )
         }
     )
 
     outcome = await run_agent_loop(
-        _loop_input(
-            "run_limit",
-            limits=AgentLoopLimits(max_model_turns=3, max_tool_iterations=1),
-        ),
+        _loop_input("run_pytest_passed"),
         AgentLoopPorts(model=model, tools=tools),
     )
 
-    assert outcome.status == "waiting_user"
-    assert outcome.stop_reason == "max_iterations"
-    assert tools.executed == ["edit_file"]
+    assert outcome.status == "completed"
+    assert model.calls == 2
+    assert outcome.final_text == "测试已通过。"

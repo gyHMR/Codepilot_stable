@@ -1,26 +1,18 @@
 from __future__ import annotations
 
-# 新手导读：包门面文件：集中导出本层最常用的类型和入口，降低学习时的导入成本。
-# 关注点：tools 层是工具执行安全边界，统一处理契约、权限、校验、审批和结果防护。
-
-"""内置工具包：提供文件操作、搜索、shell 和工作区状态等基础工具。"""
+"""Built-in tool factory."""
 
 from pathlib import Path
 
-from codepilot.tools.authoring import AgentTool
-from codepilot.tools.registry import (
-    MUTATING_TOOL_NAMES,
-    READ_ONLY_TOOL_NAMES,
-    get_builtin_tool_metadata,
-)
-from codepilot.tools.workspace import WorkspaceSandbox
-from codepilot.tools.workspace import ShellExecutionPolicy
+from codepilot.tools.contracts import ToolDefinition
+from codepilot.tools.registry import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES, get_builtin_tool_metadata
+from codepilot.tools.sandbox import ShellExecutionPolicy, WorkspaceSandbox
 
 from .files import create_file_tools
+from .plan import create_plan_tools
 from .search import create_search_tools
 from .shell import create_shell_tools
-from .task_control import create_task_control_tools
-from .workspace_status import create_workspace_tools
+from .workspace import create_workspace_tools
 
 
 def create_builtin_tools(
@@ -29,15 +21,14 @@ def create_builtin_tools(
     *,
     edit_require_unique_match: bool = True,
     shell_policy: ShellExecutionPolicy | None = None,
-) -> list[AgentTool]:
-    workspace = Path(workspace_dir)
-    sandbox = WorkspaceSandbox(workspace)
+) -> list[ToolDefinition]:
+    sandbox = WorkspaceSandbox(Path(workspace_dir))
     enabled = set(enabled_names) if enabled_names else None
 
     def allow(name: str) -> bool:
         return enabled is None or name in enabled
 
-    tools: list[AgentTool] = []
+    tools: list[ToolDefinition] = []
     tools.extend(
         create_file_tools(
             sandbox,
@@ -48,7 +39,7 @@ def create_builtin_tools(
     tools.extend(create_search_tools(sandbox, allow=allow))
     tools.extend(create_workspace_tools(sandbox, allow=allow))
     tools.extend(create_shell_tools(sandbox, allow=allow, policy=shell_policy))
-    tools.extend(create_task_control_tools(allow=allow))
+    tools.extend(create_plan_tools(allow=allow))
     return tools
 
 
@@ -56,6 +47,6 @@ __all__ = [
     "MUTATING_TOOL_NAMES",
     "READ_ONLY_TOOL_NAMES",
     "create_builtin_tools",
-    "create_task_control_tools",
+    "create_plan_tools",
     "get_builtin_tool_metadata",
 ]

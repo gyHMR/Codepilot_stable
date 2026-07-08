@@ -2,28 +2,26 @@ from __future__ import annotations
 
 import asyncio
 
-from codepilot.core.contracts import TaskStrategy
 
-
-class _TaskStatePromptPort:
+class _PlanPromptPort:
     def prepare(self, request):
         context = request.get("context")
         context = context if isinstance(context, dict) else {}
-        state = context.get("task_state")
+        state = context.get("plan_state")
         lines = []
         if isinstance(state, dict):
-            steps = state.get("steps")
-            if isinstance(steps, list):
-                for step in steps:
-                    if not isinstance(step, dict):
+            items = state.get("items")
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
                         continue
-                    status = step.get("status")
-                    title = step.get("title")
+                    status = item.get("status")
+                    title = item.get("step")
                     if isinstance(status, str) and isinstance(title, str):
                         lines.append(f"- [{status}] {title}")
         system_prompt = request.get("system_prompt", "")
         if lines:
-            system_prompt = f"{system_prompt}\n\nTask State:\n" + "\n".join(lines)
+            system_prompt = f"{system_prompt}\n\nPlan Brief:\n" + "\n".join(lines)
         return {
             "system_prompt": system_prompt,
             "messages": request["messages"],
@@ -39,9 +37,9 @@ def test_core_loop_uses_model_port_and_returns_outcome() -> None:
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
-        from codepilot.protocols import AssistantMessage, TextContent, Usage
+        from codepilot.protocols import AssistantMessage, TextContent, Usage, UserMessage
 
         class FakeModel:
             async def stream(self, request):
@@ -56,7 +54,7 @@ def test_core_loop_uses_model_port_and_returns_outcome() -> None:
         loop_input = AgentLoopInput(
             run_id="run1",
             correlation=RunCorrelation(session_id="s1"),
-            messages=[],
+            messages=[UserMessage(content="hello")],
             user_prompt="hello",
             context={"system_prompt": "sys"},
             model=ModelDescriptor(provider="fake", model_id="unit"),
@@ -76,8 +74,7 @@ def test_core_loop_uses_model_port_and_returns_outcome() -> None:
             "turn_start",
             "message_start",
             "message_end",
-            "message_start",
-            "message_end",
+            "run_guard_checked",
             "turn_end",
             "agent_end",
         ]
@@ -97,7 +94,7 @@ def test_core_loop_emits_model_text_deltas_as_message_updates() -> None:
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, LLMTextDelta, ModelDescriptor
         from codepilot.protocols import AssistantMessage, TextContent
 
@@ -143,10 +140,10 @@ def test_core_loop_turns_tool_approval_observation_into_waiting_outcome() -> Non
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, ToolCall
-        from codepilot.tools.ports import ToolInterruption, ToolObservation, ToolRiskView
+        from codepilot.tools.contracts import ToolInterruption, ToolObservation, ToolRiskView
 
         class FakeModel:
             async def stream(self, request):
@@ -157,7 +154,7 @@ def test_core_loop_turns_tool_approval_observation_into_waiting_outcome() -> Non
                 )
 
         class FakeTools:
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return {"tools": ["shell"]}
 
             async def execute(self, invocation):
@@ -193,9 +190,9 @@ def test_core_loop_turns_tool_approval_observation_into_waiting_outcome() -> Non
         assert outcome.stop_reason == "approval_required"
         assert outcome.interruptions[0].approval_id == "approval1"
         event_types = [event["type"] for event in outcome.events]
-        assert "tool_execution_start" in event_types
-        assert "tool_execution_end" in event_types
-        tool_end = next(event for event in outcome.events if event["type"] == "tool_execution_end")
+        assert "tool_started" in event_types
+        assert "tool_interrupted" in event_types
+        tool_end = next(event for event in outcome.events if event["type"] == "tool_interrupted")
         assert tool_end["toolCallId"] == "call1"
         assert tool_end["toolName"] == "shell"
         assert tool_end["status"] == "approval_required"
@@ -212,10 +209,10 @@ def test_core_loop_preserves_completed_tool_results_before_approval_pause() -> N
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
-        from codepilot.tools.ports import ToolInterruption, ToolObservation, ToolRiskView
+        from codepilot.tools.contracts import ToolInterruption, ToolObservation, ToolRiskView
 
         class FakeModel:
             async def stream(self, request):
@@ -234,7 +231,7 @@ def test_core_loop_preserves_completed_tool_results_before_approval_pause() -> N
             def __init__(self) -> None:
                 self.executed: list[str] = []
 
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return {"tools": ["read", "write", "bash"]}
 
             async def execute(self, invocation):
@@ -295,10 +292,10 @@ def test_core_loop_feeds_tool_observation_back_into_model_until_final_answer() -
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
-        from codepilot.tools.ports import ToolObservation
+        from codepilot.tools.contracts import ToolObservation
 
         class FakeModel:
             def __init__(self) -> None:
@@ -329,7 +326,7 @@ def test_core_loop_feeds_tool_observation_back_into_model_until_final_answer() -
                 )
 
         class FakeTools:
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return {"tools": ["read_file"]}
 
             async def execute(self, invocation):
@@ -367,8 +364,8 @@ def test_core_loop_feeds_tool_observation_back_into_model_until_final_answer() -
         event_types = [event["type"] for event in outcome.events]
         assert event_types.count("turn_start") == 2
         assert event_types.count("turn_end") == 2
-        assert "tool_execution_start" in event_types
-        assert "tool_execution_end" in event_types
+        assert "tool_started" in event_types
+        assert "tool_completed" in event_types
 
     asyncio.run(run_case())
 
@@ -429,10 +426,10 @@ def test_core_loop_stops_before_repeated_tool_call_execution() -> None:
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, ToolCall
-        from codepilot.tools.ports import ToolObservation
+        from codepilot.tools.contracts import ToolObservation
 
         class FakeModel:
             async def stream(self, _request):
@@ -452,7 +449,7 @@ def test_core_loop_stops_before_repeated_tool_call_execution() -> None:
             def __init__(self) -> None:
                 self.executions = 0
 
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return {"tools": ["read_file"]}
 
             async def execute(self, invocation):
@@ -495,10 +492,10 @@ def test_core_loop_pauses_for_user_when_tool_iteration_limit_is_reached() -> Non
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, ToolCall
-        from codepilot.tools.ports import ToolObservation
+        from codepilot.tools.contracts import ToolObservation
 
         class FakeModel:
             def __init__(self) -> None:
@@ -522,7 +519,7 @@ def test_core_loop_pauses_for_user_when_tool_iteration_limit_is_reached() -> Non
             def __init__(self) -> None:
                 self.executions = 0
 
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return {"tools": ["read_file"]}
 
             async def execute(self, invocation):
@@ -561,6 +558,73 @@ def test_core_loop_pauses_for_user_when_tool_iteration_limit_is_reached() -> Non
     asyncio.run(run_case())
 
 
+def test_core_loop_pauses_after_tools_when_no_model_turn_remains() -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import (
+            AgentLoopInput,
+            AgentLoopLimits,
+            AgentLoopPorts,
+            RunCorrelation,
+        )
+        from codepilot.core.runner import run_agent_loop
+        from codepilot.llm.ports import LLMCompleted, ModelDescriptor
+        from codepilot.protocols import AssistantMessage, ToolCall
+        from codepilot.tools.contracts import ToolObservation
+
+        class FakeModel:
+            async def stream(self, _request):
+                yield LLMCompleted(
+                    message=AssistantMessage(
+                        content=[
+                            ToolCall(
+                                id="call_last",
+                                name="edit",
+                                arguments={"path": "app.py"},
+                            )
+                        ]
+                    )
+                )
+
+        class FakeTools:
+            def __init__(self) -> None:
+                self.executions = 0
+
+            def catalog(self, current_mode: str = "build"):
+                return {"tools": ["edit"]}
+
+            async def execute(self, invocation):
+                self.executions += 1
+                return ToolObservation(
+                    tool_call_id=invocation.tool_call_id,
+                    name=invocation.name,
+                    status="success",
+                )
+
+        tools = FakeTools()
+        outcome = await run_agent_loop(
+            AgentLoopInput(
+                run_id="run_model_turn_limit",
+                correlation=RunCorrelation(session_id="s1"),
+                user_prompt="edit once",
+                model=ModelDescriptor(provider="fake", model_id="unit"),
+                limits=AgentLoopLimits(max_model_turns=1),
+            ),
+            AgentLoopPorts(model=FakeModel(), tools=tools),
+        )
+
+        assert outcome.status == "waiting_user"
+        assert outcome.stop_reason == "max_iterations"
+        assert tools.executions == 1
+        assert outcome.counters.tool_iterations == 1
+        assert outcome.counters.tool_calls == 1
+        assert outcome.error is None
+        assert "模型轮次" in outcome.final_text
+        assert "工具已执行" in outcome.final_text
+        assert "继续" in outcome.final_text
+
+    asyncio.run(run_case())
+
+
 def test_core_loop_retries_retryable_model_turn_from_retry_policy() -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import (
@@ -570,7 +634,7 @@ def test_core_loop_retries_retryable_model_turn_from_retry_policy() -> None:
             RetryPolicy,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, LLMFailed, ModelDescriptor
         from codepilot.protocols import AssistantMessage, TextContent
 
@@ -601,7 +665,7 @@ def test_core_loop_retries_retryable_model_turn_from_retry_policy() -> None:
                     base_delay_ms=0,
                 ),
             ),
-            AgentLoopPorts(model=model, tools=None, context=_TaskStatePromptPort()),
+            AgentLoopPorts(model=model, tools=None, context=_PlanPromptPort()),
         )
 
         assert model.calls == 2
@@ -618,7 +682,7 @@ def test_core_loop_retries_retryable_model_turn_from_retry_policy() -> None:
     asyncio.run(run_case())
 
 
-def test_core_loop_injects_task_context_and_returns_task_summary() -> None:
+def test_core_loop_injects_plan_context_and_returns_plan_summary() -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import (
             AgentLoopInput,
@@ -626,9 +690,10 @@ def test_core_loop_injects_task_context_and_returns_task_summary() -> None:
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, TextContent
+        from codepilot.core.plan import PlanState, PlanUpdate, PlanUpdateItem
 
         class FakeModel:
             def __init__(self) -> None:
@@ -640,33 +705,38 @@ def test_core_loop_injects_task_context_and_returns_task_summary() -> None:
                     message=AssistantMessage(content=[TextContent(text="done")])
                 )
 
+        plan = PlanState.new(objective="ship the plan migration", origin_mode="build")
+        plan = plan.apply_update(
+            PlanUpdate(items=(PlanUpdateItem(step="Read code", status="in_progress"),)),
+            mode="build",
+            run_id="run_plan",
+        )
         model = FakeModel()
         outcome = await run_agent_loop(
             AgentLoopInput(
-                run_id="run_task",
+                run_id="run_plan",
                 correlation=RunCorrelation(session_id="s1"),
-                user_prompt="ship the task-control migration",
+                user_prompt="ship the plan migration",
                 context={"system_prompt": "base rules"},
                 model=ModelDescriptor(provider="fake", model_id="unit"),
-                task_strategy=TaskStrategy(enabled=True, mode="build"),
+                plan_state=plan.to_dict(),
                 limits=AgentLoopLimits(max_model_turns=1),
             ),
-            AgentLoopPorts(model=model, tools=None, context=_TaskStatePromptPort()),
+            AgentLoopPorts(model=model, tools=None, context=_PlanPromptPort()),
         )
 
         assert outcome.status == "completed"
-        assert outcome.task is not None
-        assert outcome.task.goal == "ship the task-control migration"
+        assert outcome.plan is not None
+        assert outcome.plan.objective == "ship the plan migration"
         assert "base rules" in model.system_prompts[0]
-        assert "Task State:" in model.system_prompts[0]
+        assert "Plan Brief:" in model.system_prompts[0]
         event_types = [event["type"] for event in outcome.events]
-        assert "task_plan_created" in event_types
-        assert "completion_checked" in event_types
+        assert "run_guard_checked" in event_types
 
     asyncio.run(run_case())
 
 
-def test_core_loop_plan_mode_uses_planning_budget_and_proposed_steps() -> None:
+def test_core_loop_plan_mode_keeps_soft_plan_proposed() -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import (
             AgentLoopInput,
@@ -674,13 +744,25 @@ def test_core_loop_plan_mode_uses_planning_budget_and_proposed_steps() -> None:
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
+        from codepilot.core.plan import PlanState, PlanUpdate, PlanUpdateItem
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, TextContent
 
+        plan = PlanState.new(objective="refactor by plan", origin_mode="plan")
+        plan = plan.apply_update(
+            PlanUpdate(
+                items=(
+                    PlanUpdateItem(step="Inspect target files", status="in_progress"),
+                    PlanUpdateItem(step="Apply focused refactor", status="pending"),
+                )
+            ),
+            mode="plan",
+            run_id="run_plan_task",
+        )
+
         class FakeModel:
             async def stream(self, request):
-                assert "Planning verification hints" not in request.system_prompt
                 assert "- [in_progress] Inspect target files" in request.system_prompt
                 assert "- [pending] Apply focused refactor" in request.system_prompt
                 yield LLMCompleted(
@@ -693,40 +775,21 @@ def test_core_loop_plan_mode_uses_planning_budget_and_proposed_steps() -> None:
                 correlation=RunCorrelation(session_id="s1"),
                 user_prompt="refactor by plan",
                 model=ModelDescriptor(provider="fake", model_id="unit"),
-                task_strategy=TaskStrategy(
-                    enabled=True,
-                    mode="plan",
-                    planning_budget_profile="wide",
-                    steps=[
-                        {
-                            "title": "Inspect target files",
-                            "kind": "read",
-                            "acceptance": "Relevant files are known",
-                        },
-                        {
-                            "title": "Apply focused refactor",
-                            "kind": "edit",
-                            "verification_hint": "python -m pytest -q",
-                        },
-                    ],
-                ),
+                mode="plan",
+                plan_state=plan.to_dict(),
                 limits=AgentLoopLimits(max_model_turns=1),
             ),
-                AgentLoopPorts(model=FakeModel(), tools=None, context=_TaskStatePromptPort()),
+                AgentLoopPorts(model=FakeModel(), tools=None, context=_PlanPromptPort()),
         )
 
-        assert outcome.task is not None
-        assert outcome.task.control_signal["mode"] == "plan"
-        planning = outcome.task.control_signal["planning"]
-        assert planning["phase"] == "execution"
-        assert planning["budget"]["profile"] == "wide"
-        assert outcome.task.completed_steps == ["Inspect target files"]
-        assert outcome.task.pending_steps == ["Apply focused refactor"]
+        assert outcome.plan is not None
+        assert outcome.plan.status == "proposed"
+        assert outcome.plan.items[0]["status"] == "in_progress"
 
     asyncio.run(run_case())
 
 
-def test_core_loop_preserves_task_summary_when_waiting_for_approval() -> None:
+def test_core_loop_preserves_plan_summary_when_waiting_for_approval() -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import (
             AgentLoopInput,
@@ -734,14 +797,22 @@ def test_core_loop_preserves_task_summary_when_waiting_for_approval() -> None:
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
+        from codepilot.core.plan import PlanState, PlanUpdate, PlanUpdateItem
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, ToolCall
-        from codepilot.tools.ports import ToolInterruption, ToolObservation, ToolRiskView
+        from codepilot.tools.contracts import ToolInterruption, ToolObservation, ToolRiskView
+
+        plan = PlanState.new(objective="edit the file", origin_mode="build")
+        plan = plan.apply_update(
+            PlanUpdate(items=(PlanUpdateItem(step="Edit file", status="in_progress"),)),
+            mode="build",
+            run_id="run_approval_plan",
+        )
 
         class FakeModel:
             async def stream(self, request):
-                assert "Task State:" in request.system_prompt
+                assert "Plan Brief:" in request.system_prompt
                 yield LLMCompleted(
                     message=AssistantMessage(
                         content=[
@@ -755,7 +826,7 @@ def test_core_loop_preserves_task_summary_when_waiting_for_approval() -> None:
                 )
 
         class FakeTools:
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return {"tools": ["shell"]}
 
             async def execute(self, invocation):
@@ -781,16 +852,16 @@ def test_core_loop_preserves_task_summary_when_waiting_for_approval() -> None:
                 correlation=RunCorrelation(session_id="s1"),
                 user_prompt="edit the file",
                 model=ModelDescriptor(provider="fake", model_id="unit"),
-                task_strategy=TaskStrategy(enabled=True, mode="build"),
+                plan_state=plan.to_dict(),
                 limits=AgentLoopLimits(max_model_turns=1),
             ),
-                AgentLoopPorts(model=FakeModel(), tools=FakeTools(), context=_TaskStatePromptPort()),
+                AgentLoopPorts(model=FakeModel(), tools=FakeTools(), context=_PlanPromptPort()),
         )
 
         assert outcome.status == "waiting_approval"
-        assert outcome.task is not None
-        assert outcome.task.goal == "edit the file"
-        assert outcome.task.control_signal["recent_error_code"] == "approval_required"
+        assert outcome.plan is not None
+        assert outcome.plan.objective == "edit the file"
+        assert outcome.signals.approval_required is True
 
     asyncio.run(run_case())
 
@@ -802,10 +873,10 @@ def test_resume_agent_loop_uses_tool_port_resume_before_continuing_model() -> No
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import resume_agent_loop
+        from codepilot.core.runner import resume_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
-        from codepilot.protocols import AssistantMessage, TextContent, ToolResultMessage
-        from codepilot.tools.ports import ToolObservation
+        from codepilot.protocols import AssistantMessage, RunVerification, TextContent, ToolCall, ToolResultMessage
+        from codepilot.tools.contracts import ToolObservation
 
         class FakeModel:
             async def stream(self, request):
@@ -820,7 +891,7 @@ def test_resume_agent_loop_uses_tool_port_resume_before_continuing_model() -> No
             def __init__(self) -> None:
                 self.decisions = []
 
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return {"tools": ["shell"]}
 
             async def execute(self, invocation):
@@ -835,6 +906,16 @@ def test_resume_agent_loop_uses_tool_port_resume_before_continuing_model() -> No
                     content=(TextContent(text="approved output"),),
                     affected_paths=("created.txt",),
                     workspace_changed=True,
+                    verification=(
+                        RunVerification(
+                            tool_call_id="call1",
+                            tool_name="shell",
+                            status="passed",
+                            command="pytest",
+                            exit_code=0,
+                            summary="passed",
+                        ),
+                    ),
                     metadata={"approval_id": decision.approval_id},
                 )
 
@@ -843,7 +924,17 @@ def test_resume_agent_loop_uses_tool_port_resume_before_continuing_model() -> No
             AgentResumeInput(
                 run_id="run1",
                 correlation=RunCorrelation(session_id="s1"),
-                messages=[],
+                messages=[
+                    AssistantMessage(
+                        content=[
+                            ToolCall(
+                                id="call1",
+                                name="shell",
+                                arguments={"command": "pytest"},
+                            )
+                        ]
+                    )
+                ],
                 context={},
                 model=ModelDescriptor(provider="fake", model_id="unit"),
                 approval_id="approval1",
@@ -860,9 +951,9 @@ def test_resume_agent_loop_uses_tool_port_resume_before_continuing_model() -> No
         assert outcome.workspace_effects.affected_paths == ("created.txt",)
         event_types = [event["type"] for event in outcome.events]
         assert event_types[:2] == ["agent_start", "turn_start"]
-        assert "tool_execution_start" in event_types
-        assert "tool_execution_end" in event_types
-        tool_end = next(event for event in outcome.events if event["type"] == "tool_execution_end")
+        assert "tool_started" in event_types
+        assert "tool_completed" in event_types
+        tool_end = next(event for event in outcome.events if event["type"] == "tool_completed")
         assert tool_end["approvalId"] == "approval1"
         assert tool_end["toolCallId"] == "call1"
         assert tool_end["status"] == "success"
@@ -878,10 +969,10 @@ def test_core_loop_waits_for_user_when_final_answer_lacks_required_verification(
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
-        from codepilot.tools.ports import ToolObservation
+        from codepilot.tools.contracts import ToolObservation
 
         class FakeModel:
             def __init__(self) -> None:
@@ -902,7 +993,7 @@ def test_core_loop_waits_for_user_when_final_answer_lacks_required_verification(
                 )
 
         class FakeTools:
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return {"tools": ["edit_file"]}
 
             async def execute(self, invocation):
@@ -920,16 +1011,15 @@ def test_core_loop_waits_for_user_when_final_answer_lacks_required_verification(
                 correlation=RunCorrelation(session_id="s1"),
                 user_prompt="edit code",
                 model=ModelDescriptor(provider="fake", model_id="unit"),
-                task_strategy=TaskStrategy(enabled=True, mode="build"),
                 limits=AgentLoopLimits(max_model_turns=2),
             ),
             AgentLoopPorts(model=FakeModel(), tools=FakeTools()),
         )
 
         assert outcome.status == "waiting_user"
-        assert outcome.stop_reason == "task_incomplete"
-        assert outcome.task is not None
-        assert outcome.task.completion_reason == "modified_without_fresh_verification"
+        assert outcome.stop_reason == "run_guard"
+        assert outcome.signals.workspace_changed is True
+        assert outcome.signals.verification_status == "stale"
 
     asyncio.run(run_case())
 
@@ -942,10 +1032,10 @@ def test_core_loop_pauses_at_tool_iteration_limit_before_more_tools() -> None:
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, RunVerification, TextContent, ToolCall
-        from codepilot.tools.ports import ToolObservation
+        from codepilot.tools.contracts import ToolObservation
 
         class FakeModel:
             def __init__(self) -> None:
@@ -976,7 +1066,7 @@ def test_core_loop_pauses_at_tool_iteration_limit_before_more_tools() -> None:
             def __init__(self) -> None:
                 self.executed: list[str] = []
 
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return {"tools": ["edit_file", "bash"]}
 
             async def execute(self, invocation):
@@ -1012,7 +1102,6 @@ def test_core_loop_pauses_at_tool_iteration_limit_before_more_tools() -> None:
                 correlation=RunCorrelation(session_id="s1"),
                 user_prompt="edit and verify",
                 model=ModelDescriptor(provider="fake", model_id="unit"),
-                task_strategy=TaskStrategy(enabled=True, mode="build"),
                 limits=AgentLoopLimits(
                     max_model_turns=3,
                     max_tool_iterations=1,
@@ -1025,14 +1114,13 @@ def test_core_loop_pauses_at_tool_iteration_limit_before_more_tools() -> None:
         assert outcome.status == "waiting_user"
         assert outcome.stop_reason == "max_iterations"
         assert tools.executed == ["edit_file"]
-        assert not any(event["type"] == "tool_execution_grace" for event in outcome.events)
-        assert outcome.task is not None
-        assert outcome.task.completion_satisfied is False
+        assert not any(event["type"] == "tool_interrupted" for event in outcome.events)
+        assert outcome.signals.workspace_changed is True
 
     asyncio.run(run_case())
 
 
-def test_core_loop_denied_tool_blocks_completion_through_task_control() -> None:
+def test_core_loop_feeds_denied_tool_result_back_to_model() -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import (
             AgentLoopInput,
@@ -1040,10 +1128,10 @@ def test_core_loop_denied_tool_blocks_completion_through_task_control() -> None:
             AgentLoopPorts,
             RunCorrelation,
         )
-        from codepilot.core.loop import run_agent_loop
+        from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
-        from codepilot.tools.ports import ToolObservation
+        from codepilot.tools.contracts import ToolObservation
 
         class FakeModel:
             def __init__(self) -> None:
@@ -1058,13 +1146,18 @@ def test_core_loop_denied_tool_blocks_completion_through_task_control() -> None:
                         )
                     )
                     return
-                assert isinstance(request.messages[-1], ToolResultMessage)
+                last = request.messages[-1]
+                assert isinstance(last, ToolResultMessage)
+                assert last.status == "denied"
+                assert last.error_code == "read_only_permission_mode"
                 yield LLMCompleted(
-                    message=AssistantMessage(content=[TextContent(text="final")])
+                    message=AssistantMessage(
+                        content=[TextContent(text="我无法执行写入操作，请切换 build 模式或确认替代方案。")]
+                    )
                 )
 
         class FakeTools:
-            def catalog(self):
+            def catalog(self, current_mode: str = "build"):
                 return {"tools": ["write_file"]}
 
             async def execute(self, invocation):
@@ -1072,25 +1165,26 @@ def test_core_loop_denied_tool_blocks_completion_through_task_control() -> None:
                     tool_call_id=invocation.tool_call_id,
                     name=invocation.name,
                     status="denied",
-                    metadata={"error_code": "read_only_mode"},
+                    metadata={"error_code": "read_only_permission_mode"},
                 )
 
+        model = FakeModel()
         outcome = await run_agent_loop(
             AgentLoopInput(
                 run_id="run_denied",
                 correlation=RunCorrelation(session_id="s1"),
                 user_prompt="write file",
                 model=ModelDescriptor(provider="fake", model_id="unit"),
-                task_strategy=TaskStrategy(enabled=True, mode="build"),
                 limits=AgentLoopLimits(max_model_turns=2),
             ),
-            AgentLoopPorts(model=FakeModel(), tools=FakeTools()),
+            AgentLoopPorts(model=model, tools=FakeTools()),
         )
 
-        assert outcome.status == "waiting_user"
-        assert outcome.stop_reason == "task_blocked"
-        assert outcome.task is not None
-        assert outcome.task.blocked_steps == ["完成当前请求"]
-        assert outcome.task.control_signal["recent_error_code"] == "permission_denied"
+        assert model.calls == 2
+        assert outcome.status == "completed"
+        assert outcome.stop_reason == "final_answer"
+        assert "无法执行写入操作" in outcome.final_text
+        assert outcome.signals.last_error is not None
+        assert outcome.signals.last_error["error_code"] == "read_only_permission_mode"
 
     asyncio.run(run_case())

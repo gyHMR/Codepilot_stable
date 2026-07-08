@@ -31,7 +31,7 @@ def render_event(event: dict[str, Any], *, verbose: bool = False) -> list[str]:
     """Render one Agent event into zero or more DingTalk messages."""
 
     event_type = event.get("type")
-    if event_type == "tool_execution_end":
+    if event_type in {"tool_completed", "tool_failed", "tool_interrupted"}:
         approval = _approval_from_tool_event(event)
         if approval:
             return [safe_reply(approval)]
@@ -39,7 +39,7 @@ def render_event(event: dict[str, Any], *, verbose: bool = False) -> list[str]:
             tool = event.get("toolName") or event.get("tool_name") or "tool"
             status = event.get("status") or _field(event.get("result"), "status") or "done"
             return [safe_reply(f"Tool {tool}: {status}")]
-    if event_type == "tool_execution_start" and verbose:
+    if event_type == "tool_started" and verbose:
         tool = event.get("toolName") or event.get("tool_name") or "tool"
         return [safe_reply(f"Tool {tool}: started")]
     if event_type == "agent_end":

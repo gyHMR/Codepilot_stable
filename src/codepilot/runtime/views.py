@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
-from codepilot.core.task import TaskMode, ensure_task_mode
+from codepilot.core.plan import RunMode, ensure_run_mode
 
 from .config import RuntimePermissionMode
 
@@ -48,7 +48,7 @@ class SessionStatus:
     permission_mode: RuntimePermissionMode
     message_count: int
     leaf_id: str
-    task_mode: TaskMode = "build"
+    current_mode: RunMode = "build"
     is_running: bool = False
     credential_source: str = "unknown"
     warnings: tuple[str, ...] | None = None
@@ -58,7 +58,7 @@ class SessionStatus:
         object.__setattr__(self, "model_id", _require_text(self.model_id, field_name="model_id"))
         object.__setattr__(self, "workspace", _require_text(self.workspace, field_name="workspace"))
         object.__setattr__(self, "permission_mode", _ensure_permission_mode(self.permission_mode))
-        object.__setattr__(self, "task_mode", ensure_task_mode(self.task_mode))
+        object.__setattr__(self, "current_mode", ensure_run_mode(self.current_mode))
         object.__setattr__(
             self,
             "message_count",
@@ -81,7 +81,7 @@ def builtin_commands() -> list[CommandDescriptor]:
     return [
         CommandDescriptor(name="help", description="显示可用命令", source="builtin"),
         CommandDescriptor(name="status", description="查看模型、工作区、会话和权限状态", source="builtin"),
-        CommandDescriptor(name="mode", description="查看或切换任务模式：read/plan/build", source="builtin"),
+        CommandDescriptor(name="mode", description="查看或切换运行模式：read/plan/build", source="builtin"),
         CommandDescriptor(name="session", description="查看当前会话与叶子节点", source="builtin"),
         CommandDescriptor(name="tree", description="查看当前会话树", source="builtin"),
         CommandDescriptor(name="path", description="查看指定节点路径", source="builtin"),

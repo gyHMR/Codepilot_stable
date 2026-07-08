@@ -24,6 +24,13 @@ from .experiments import (
     run_security_ab,
 )
 from .loader import load_eval_suite
+from .memory_retrieval import (
+    DEFAULT_MEMORY_CASES_PATH,
+    DEFAULT_MEMORY_CORPUS_PATH,
+    load_memory_corpus,
+    load_memory_retrieval_cases,
+    run_memory_retrieval_benchmark,
+)
 from .reports import render_comparison_markdown
 from .runner import EvaluationRunner
 from .schema import EvalRunOptions
@@ -51,9 +58,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_run_args(experiment, modules=("memory", "planning"))
     experiment.add_argument("--repeat", type=int, default=2)
 
-    ab = subparsers.add_parser("ab", help="Run deterministic A/B experiments.")
-    ab.add_argument("module", choices=("context", "security"))
+    ab = subparsers.add_parser("ab", help="Run deterministic/offline policy experiments.")
+    ab.add_argument("module", choices=("context", "security", "memory"))
     ab.add_argument("--cases", type=Path)
+    ab.add_argument(
+        "--corpus",
+        type=Path,
+        default=DEFAULT_MEMORY_CORPUS_PATH,
+        help="Memory corpus JSONL path, only used by 'ab memory'.",
+    )
     ab.add_argument("--artifact-root", type=Path, default=Path(".codepilot/evals"))
     ab.add_argument("--eval-id")
 
@@ -154,17 +167,22 @@ def _variant_overrides(module: str, variant: str) -> dict[str, bool]:
     if module == "memory":
         return {"memory_enabled": variant == "on"}
     if module == "planning":
-        return {"task_control_enabled": variant == "on"}
+        return {}
     return {}
 
 
 def _run_ab(args: argparse.Namespace) -> int:
-    cases = _load_ab_cases(args)
-    comparison = (
-        run_context_ab(cases)
-        if args.module == "context"
-        else run_security_ab(cases)
-    )
+    if args.module == "memory":
+        cases = load_memory_retrieval_cases(args.cases or DEFAULT_MEMORY_CASES_PATH)
+        corpus = load_memory_corpus(args.corpus)
+        comparison = run_memory_retrieval_benchmark(cases, corpus)
+    else:
+        cases = _load_ab_cases(args)
+        comparison = (
+            run_context_ab(cases)
+            if args.module == "context"
+            else run_security_ab(cases)
+        )
     eval_id = args.eval_id or f"{args.module}_ab_{uuid.uuid4().hex[:8]}"
     artifacts = EvaluationArtifacts(args.artifact_root, eval_id)
     artifacts.initialize(args.module, case_count=len(cases))
@@ -182,16 +200,35 @@ def _load_ab_cases(args: argparse.Namespace) -> list[dict]:
         if isinstance(payload, list):
             return payload
         raise ValueError("A/B cases must be a list or object with cases")
+    default_path = Path("benchmarks/evaluation_ab") / f"{args.module}.json"
+    if default_path.is_file():
+        payload = json.loads(default_path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return list(payload.get("cases") or [])
+        if isinstance(payload, list):
+            return payload
+        raise ValueError(f"A/B cases must be a list or object with cases: {default_path}")
     if args.module == "context":
         return [
             {
                 "id": "context-smoke",
-                "expected": {"key_context": ["src/app.py"]},
+                "query": "Fix app behavior using current source",
+                "expected": {"gold_evidence": ["src/app.py"]},
                 "candidates": [
-                    {"id": "docs/noise.md", "path": "docs/noise.md", "tokens": 100},
-                    {"id": "src/app.py", "path": "src/app.py", "tokens": 50},
+                    {
+                        "id": "docs/noise.md",
+                        "path": "docs/noise.md",
+                        "tokens": 100,
+                        "freshness": "stale",
+                    },
+                    {
+                        "id": "src/app.py",
+                        "path": "src/app.py",
+                        "tokens": 50,
+                        "freshness": "fresh",
+                    },
                 ],
-                "selected": [
+                "oracle_selected": [
                     {"id": "src/app.py", "path": "src/app.py", "tokens": 50}
                 ],
                 "budget_tokens": 100,

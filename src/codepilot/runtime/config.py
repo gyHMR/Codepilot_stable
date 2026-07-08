@@ -10,14 +10,14 @@ from pathlib import Path
 from typing import Any, Literal, TYPE_CHECKING, cast
 
 from codepilot.core.contracts import ToolExecutionMode
-from codepilot.core.task import (
+from codepilot.core.plan import (
     PlanningBudgetProfile,
-    TaskMode,
+    RunMode,
     ensure_planning_budget_profile,
-    ensure_task_mode,
+    ensure_run_mode,
 )
 from codepilot.protocols import Model, ModelCapabilities
-from codepilot.sessions.storage import SessionOpenMetadata, load_session_open_metadata
+from codepilot.sessions.store import SessionOpenMetadata, load_session_open_metadata
 
 if TYPE_CHECKING:
     from .opening import SessionOpenIntent
@@ -120,13 +120,12 @@ class WorkspaceSettings:
     system_prompt: str | None = None
     thinking_level: str | None = None
     tool_execution: ToolExecutionMode | None = None
-    task_mode: TaskMode | None = None
+    current_mode: RunMode | None = None
     planning_budget_profile: PlanningBudgetProfile | None = None
     max_tool_calls_per_turn: int | None = None
     retry_enabled: bool | None = None
     max_retries: int | None = None
     retry_base_delay_ms: int | None = None
-    read_only_mode: bool | None = None
     tool_permission_mode: RuntimePermissionMode | None = None
     block_dangerous_bash: bool | None = None
     bash_allow_patterns: list[str] | None = None
@@ -163,13 +162,12 @@ class RuntimeConfig:
     system_prompt: str
     thinking_level: str
     tool_execution: ToolExecutionMode
-    task_mode: TaskMode
+    current_mode: RunMode
     planning_budget_profile: PlanningBudgetProfile
     max_tool_calls_per_turn: int
     retry_enabled: bool
     max_retries: int
     retry_base_delay_ms: int
-    read_only_mode: bool
     tool_permission_mode: RuntimePermissionMode
     block_dangerous_bash: bool
     bash_allow_patterns: list[str] | None
@@ -216,7 +214,7 @@ class WorkspaceResourceLoader:
             return WorkspaceSettings()
 
         tool_execution = raw.get("tool_execution")
-        task_mode = raw.get("task_mode")
+        current_mode = raw.get("current_mode")
         planning_budget_profile = raw.get("planning_budget_profile")
         permission_mode = raw.get("tool_permission_mode")
 
@@ -228,8 +226,8 @@ class WorkspaceResourceLoader:
             tool_execution=cast(ToolExecutionMode, tool_execution)
             if tool_execution in _TOOL_EXECUTION_MODES
             else None,
-            task_mode=cast(TaskMode, task_mode)
-            if task_mode in {"read", "plan", "build"}
+            current_mode=cast(RunMode, current_mode)
+            if current_mode in {"read", "plan", "build"}
             else None,
             planning_budget_profile=cast(PlanningBudgetProfile, planning_budget_profile)
             if planning_budget_profile in {"conservative", "balanced", "wide"}
@@ -238,7 +236,6 @@ class WorkspaceResourceLoader:
             retry_enabled=_bool(raw.get("retry_enabled")),
             max_retries=_positive_int(raw.get("max_retries")),
             retry_base_delay_ms=_positive_int(raw.get("retry_base_delay_ms")),
-            read_only_mode=_bool(raw.get("read_only_mode")),
             tool_permission_mode=cast(RuntimePermissionMode, permission_mode)
             if permission_mode in _PERMISSION_MODES
             else None,
@@ -337,11 +334,11 @@ def load_runtime_config(intent: "SessionOpenIntent") -> RuntimeConfig:
         (_project_source("settings.json"), settings.system_prompt),
         default="",
     )
-    task_mode = ensure_task_mode(
+    current_mode = ensure_run_mode(
         choose(
-            "task_mode",
-            (_cli_source(), intent.task_mode),
-            (_project_source("settings.json"), settings.task_mode),
+            "current_mode",
+            (_cli_source(), intent.current_mode),
+            (_project_source("settings.json"), settings.current_mode),
             default="build",
         )
     )
@@ -353,27 +350,14 @@ def load_runtime_config(intent: "SessionOpenIntent") -> RuntimeConfig:
             default="balanced",
         )
     )
-    read_only_mode = bool(
-        choose(
-            "read_only_mode",
-            (_cli_source(), intent.read_only_mode),
-            (_project_source("settings.json"), settings.read_only_mode),
-            default=False,
-        )
-    )
-    if task_mode in {"read", "plan"}:
-        read_only_mode = True
-
     permission_mode = choose(
         "tool_permission_mode",
         (_cli_source(), intent.tool_permission_mode),
         (_project_source("settings.json"), settings.tool_permission_mode),
-        default=("read-only" if read_only_mode else "workspace-write"),
+        default=("read-only" if current_mode in {"read", "plan"} else "workspace-write"),
     )
     permission_mode = _permission_mode(permission_mode)
-    if task_mode in {"read", "plan"} and intent.tool_permission_mode not in {None, "read-only"}:
-        raise ValueError(f"task_mode={task_mode} requires tool_permission_mode=read-only")
-    if read_only_mode:
+    if current_mode in {"read", "plan"}:
         permission_mode = "read-only"
 
     shell_max_timeout_seconds = _positive_int(
@@ -408,7 +392,7 @@ def load_runtime_config(intent: "SessionOpenIntent") -> RuntimeConfig:
                 default="parallel",
             )
         ),
-        task_mode=task_mode,
+        current_mode=current_mode,
         planning_budget_profile=planning_budget_profile,
         max_tool_calls_per_turn=_positive_int(
             choose(
@@ -445,7 +429,6 @@ def load_runtime_config(intent: "SessionOpenIntent") -> RuntimeConfig:
             ),
             default=1200,
         ),
-        read_only_mode=read_only_mode,
         tool_permission_mode=permission_mode,
         block_dangerous_bash=bool(
             choose(

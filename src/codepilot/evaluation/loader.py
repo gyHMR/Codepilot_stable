@@ -67,6 +67,9 @@ def parse_eval_case(payload: dict[str, Any], *, source: Path | None = None) -> E
     expected = payload.get("expected") or {}
     if not isinstance(expected, dict):
         raise EvalCaseValidationError(_where(source, "expected must be an object"))
+    context_profile = payload.get("context_profile") or {}
+    if not isinstance(context_profile, dict):
+        raise EvalCaseValidationError(_where(source, "context_profile must be an object"))
     if case_type == "task" and not prompt.strip():
         raise EvalCaseValidationError(_where(source, "task case requires prompt"))
     if case_type == "scenario" and not steps:
@@ -82,6 +85,7 @@ def parse_eval_case(payload: dict[str, Any], *, source: Path | None = None) -> E
         checks=checks,
         metrics=metrics,
         expected=dict(expected),
+        context_profile=dict(context_profile),
         tags=tags,
         timeout_seconds=int(payload.get("timeout_seconds") or 120),
     )

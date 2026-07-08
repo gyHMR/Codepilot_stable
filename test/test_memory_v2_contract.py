@@ -7,7 +7,7 @@ import pytest
 
 
 def _session_store(tmp_path: Path):
-    from codepilot.sessions.storage import SessionStore
+    from codepilot.sessions.store import SessionStore
 
     store = SessionStore(tmp_path, "session_memory_contract")
     store.ensure_initialized(model_id="test", provider="test", system_prompt="")
@@ -19,7 +19,7 @@ def test_old_memory_normalizer_is_not_public() -> None:
 
     assert not hasattr(memory, "normalize_memory_record_payload")
     with pytest.raises(ImportError):
-        from codepilot.sessions.memory.records import normalize_memory_record_payload  # type: ignore  # noqa: F401
+        from codepilot.sessions.memory import normalize_memory_record_payload  # type: ignore  # noqa: F401
 
 
 def test_memory_store_rejects_old_jsonl_instead_of_normalizing(tmp_path: Path) -> None:
@@ -49,7 +49,7 @@ def test_memory_store_rejects_old_jsonl_instead_of_normalizing(tmp_path: Path) -
 
 
 def test_memory_files_module_does_not_export_global_memory_runtime_tools() -> None:
-    import codepilot.sessions.memory.files as files
+    import codepilot.sessions.memory as files
 
     assert not hasattr(files, "load_global_memory")
     assert not hasattr(files, "save_global_memory")

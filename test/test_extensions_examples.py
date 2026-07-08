@@ -42,13 +42,24 @@ def test_demo_skill_loads_as_command_and_compact_index() -> None:
 
 def test_demo_skill_registers_load_skill_tool_for_on_demand_content() -> None:
     from codepilot.extensions import load_skills
+    from codepilot.tools import ToolCallRequest
 
     loaded = load_skills(ROOT, configured_paths=[str(EXAMPLES / "demo_skill.md")])
 
     assert [tool.name for tool in loaded.tools] == ["load_skill"]
 
     tool = loaded.tools[0]
-    result = asyncio.run(tool.execute("call_load_skill", {"name": "demo-review"}))
+    result = asyncio.run(
+        tool.execute(
+            ToolCallRequest(
+                run_id="run1",
+                tool_call_id="call_load_skill",
+                name="load_skill",
+                arguments={"name": "demo-review"},
+                metadata=tool.metadata,
+            )
+        )
+    )
 
     assert not result.is_error
     assert result.content[0].text.startswith("Loaded skill Demo Review Checklist")
@@ -62,6 +73,7 @@ def test_demo_extension_registers_command_tool_prompt_and_hook() -> None:
     from codepilot.extensions import AfterToolCallContext, SessionCommandContext, load_extensions
     from codepilot.protocols import AssistantMessage, ToolCall
     from codepilot.protocols.commands import ToolHookContextSnapshot
+    from codepilot.tools import ToolCallRequest
 
     loaded = load_extensions(ROOT, configured_paths=[str(EXAMPLES / "demo_extension.py")])
 
@@ -82,7 +94,17 @@ def test_demo_extension_registers_command_tool_prompt_and_hook() -> None:
     assert command_output == "Demo extension is loaded."
 
     tool = loaded.tools[0]
-    result = asyncio.run(tool.execute("call_demo", {"text": "hello"}))
+    result = asyncio.run(
+        tool.execute(
+            ToolCallRequest(
+                run_id="run1",
+                tool_call_id="call_demo",
+                name="demo_echo",
+                arguments={"text": "hello"},
+                metadata=tool.metadata,
+            )
+        )
+    )
     assert result.content[0].text == "hello"
     assert result.details == {"demo_extension": True}
 
@@ -103,6 +125,7 @@ def test_demo_extension_registers_command_tool_prompt_and_hook() -> None:
 
 def test_demo_mcp_config_creates_proxy_tool() -> None:
     from codepilot.extensions.mcp import create_mcp_proxy_tools, parse_mcp_tool_configs
+    from codepilot.tools import ToolCallRequest
 
     raw = json.loads((EXAMPLES / "demo_mcp_config.json").read_text(encoding="utf-8"))
     configs = parse_mcp_tool_configs(raw["mcp_servers"])
@@ -129,7 +152,17 @@ def test_demo_mcp_config_creates_proxy_tool() -> None:
     tools = create_mcp_proxy_tools(configs, client=client)
 
     assert [tool.name for tool in tools] == ["mcp_demo_echo"]
-    result = asyncio.run(tools[0].execute("call_mcp", {"text": "hello"}))
+    result = asyncio.run(
+        tools[0].execute(
+            ToolCallRequest(
+                run_id="run1",
+                tool_call_id="call_mcp",
+                name="mcp_demo_echo",
+                arguments={"text": "hello"},
+                metadata=tools[0].metadata,
+            )
+        )
+    )
 
     assert client.calls == [("demo", "echo", {"text": "hello"})]
     assert "hello" in result.content[0].text

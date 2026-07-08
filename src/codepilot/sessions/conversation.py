@@ -4,7 +4,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Callable
 
-from codepilot.core.task import TaskMode, ensure_task_mode
+from codepilot.core.plan import RunMode, ensure_run_mode
 from codepilot.core.contracts import AgentMessage
 from codepilot.protocols import (
     AgentEvent,
@@ -29,7 +29,7 @@ class SessionConversationState:
     system_prompt: str = ""
     messages: list[AgentMessage] = field(default_factory=list)
     thinking_level: ThinkingLevel | str = "off"
-    task_mode: TaskMode = "build"
+    current_mode: RunMode = "build"
     stream_message: Message | None = None
     error: str | None = None
     pending_tool_calls: set[str] = field(default_factory=set)
@@ -40,7 +40,7 @@ class SessionConversationState:
     def __post_init__(self) -> None:
         self.system_prompt = str(self.system_prompt or "")
         self.messages = list(self.messages)
-        self.task_mode = ensure_task_mode(self.task_mode)
+        self.current_mode = ensure_run_mode(self.current_mode)
 
     def set_messages(self, messages: list[AgentMessage]) -> None:
         self.messages = list(messages)
@@ -52,9 +52,9 @@ class SessionConversationState:
         self.last_run_result = result
         self.error = None if result.status == "completed" else self.error
 
-    def set_task_mode(self, mode: TaskMode | str) -> TaskMode:
-        self.task_mode = ensure_task_mode(mode)
-        return self.task_mode
+    def set_current_mode(self, mode: RunMode | str) -> RunMode:
+        self.current_mode = ensure_run_mode(mode)
+        return self.current_mode
 
     def add_steering_message(self, message: AgentMessage) -> None:
         self._steering_messages.append(message)
@@ -91,11 +91,11 @@ class SessionConversationState:
             self.stream_message = event.get("message")
         elif event_type == "message_end":
             self.stream_message = None
-        elif event_type == "tool_execution_start":
+        elif event_type == "tool_started":
             tool_call_id = event.get("toolCallId")
             if tool_call_id:
                 self.pending_tool_calls.add(str(tool_call_id))
-        elif event_type == "tool_execution_end":
+        elif event_type in {"tool_completed", "tool_failed", "tool_interrupted"}:
             tool_call_id = event.get("toolCallId")
             if tool_call_id:
                 self.pending_tool_calls.discard(str(tool_call_id))

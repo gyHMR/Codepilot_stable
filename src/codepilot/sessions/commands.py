@@ -4,15 +4,12 @@ import inspect
 import uuid
 from typing import Any
 
-from codepilot.core.task import TaskMode, ensure_task_mode
+from codepilot.core.plan import RunMode
 from codepilot.protocols import AssistantMessage
 from codepilot.protocols.commands import SessionCommandContext, SessionCommandView
 
-from .contracts import SessionCommandIntent, SessionCommandRecord
-from .history.branching import create_fresh_session as branch_create_fresh_session
-from .history.branching import fork_session as branch_fork_session
-from .history.branching import switch_to_entry as branch_switch_to_entry
-from .history.git_rollback import (
+from .contracts import SessionCommandIntent, SessionCommandRecord, SessionOptions
+from .rollback import (
     GitRollbackBaseline,
     GitRollbackPlan,
     GitRollbackResult,
@@ -21,6 +18,7 @@ from .history.git_rollback import (
     revert_run_changes,
 )
 from .memory import MemoryRecord, MemoryWriteContext, render_memory
+from .store import new_session_id
 
 
 def cumulative_usage(session: Any) -> dict[str, Any]:
@@ -42,13 +40,8 @@ def cumulative_usage(session: Any) -> dict[str, Any]:
     }
 
 
-def set_task_mode(session: Any, mode: TaskMode | str) -> TaskMode:
-    if hasattr(session, "set_task_mode"):
-        return session.set_task_mode(str(mode))
-    normalized = ensure_task_mode(mode)
-    session.task_mode = normalized
-    session.conversation.set_task_mode(normalized)
-    return normalized
+def _set_current_mode(session: Any, mode: RunMode | str) -> RunMode:
+    return session.set_current_mode(str(mode))
 
 
 def list_entry_ids(session: Any) -> list[str]:
@@ -72,15 +65,25 @@ def get_session_tree(session: Any) -> list[dict[str, Any]]:
 
 
 def create_fresh_session(session: Any) -> Any:
-    return branch_create_fresh_session(session)
+    return _open_derived_runtime(session, new_session_id())
 
 
 def fork_from_entry(session: Any, entry_id: str) -> Any:
-    return branch_fork_session(session, from_entry_id=entry_id)
+    target_id = new_session_id()
+    session.store.fork_to(target_id, from_entry_id=entry_id)
+    return _open_derived_runtime(session, target_id)
 
 
 def switch_to_entry(session: Any, entry_id: str) -> None:
-    branch_switch_to_entry(session, entry_id)
+    session.store.set_leaf(entry_id)
+    session.conversation.set_messages(session.store.load_session_messages(leaf_id=entry_id))
+    session.store.append_event(
+        {
+            "type": "session_leaf_switched",
+            "sessionId": session.session_id,
+            "entryId": entry_id,
+        }
+    )
 
 
 def memory_summary(session: Any) -> dict[str, int]:
@@ -184,19 +187,6 @@ def supersede_memory(session: Any, memory_id: str, content: str) -> str:
     )
     _record_memory_event(session, "memory_record_superseded", record, source_memory_id=memory_id)
     return record.id
-
-
-def promote_memory(session: Any, memory_id: str) -> str:
-    record = session.memory_writer.promote(
-        memory_id,
-        context=_memory_context(session, "memory_record_promote_requested"),
-    )
-    _record_memory_event(session, "memory_record_promoted", record, source_memory_id=memory_id)
-    return record.id
-
-
-def forget_memory(session: Any, memory_id: str) -> str:
-    return delete_memory(session, memory_id)
 
 
 def context_command_view(session: Any, detail: str) -> dict[str, Any]:
@@ -322,6 +312,8 @@ async def apply_session_command(
         return _status_record(session_id, text, session)
     if command == "/mode":
         return _mode_record(session_id, text, session, arg)
+    if command == "/plan":
+        return _plan_record(session_id, text, session, arg)
     if command == "/session":
         return _record(
             session_id,
@@ -426,7 +418,7 @@ def _status_record(session_id: str, text: str, session: Any) -> SessionCommandRe
             f"  Session    : {session.session_id}",
             f"  Leaf       : {get_leaf_id(session)}",
             f"  Messages   : {len(session.conversation.messages)}",
-            f"  Mode       : {session.task_mode}",
+            f"  Mode       : {session.current_mode}",
         ],
     )
 
@@ -436,18 +428,98 @@ def _mode_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
         return _record(
             session_id,
             text,
-            output_lines=[f"current_mode={session.task_mode}"],
-            data={"current_mode": session.task_mode, "task_mode": session.task_mode},
+            output_lines=[f"current_mode={session.current_mode}"],
+            data={"current_mode": session.current_mode},
         )
     try:
-        mode = set_task_mode(session, arg)
+        mode = _set_current_mode(session, arg)
     except ValueError as exc:
         return _record(session_id, text, output_lines=[str(exc), "usage: /mode read|plan|build"])
     return _record(
         session_id,
         text,
         output_lines=[f"current_mode={mode}"],
-        data={"current_mode": mode, "task_mode": mode},
+        data={"current_mode": mode},
+    )
+
+
+def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionCommandRecord:
+    action, _, _rest = arg.partition(" ")
+    action = action.strip().lower()
+    if action in {"help", "-h", "--help"}:
+        return _record(
+            session_id,
+            text,
+            output_lines=[
+                "usage: /plan",
+                "       /plan approve",
+                "       /plan reject",
+                "       /plan clear",
+            ],
+        )
+    if action == "approve":
+        before = session.plan_state.current()
+        if not isinstance(before, dict) or before.get("status") != "proposed":
+            return _record(
+                session_id,
+                text,
+                output_lines=["No proposed plan to approve."],
+                data={"plan_status": before.get("status") if isinstance(before, dict) else None},
+            )
+        state = session.approve_current_plan(switch_to_build=True)
+        return _record(
+            session_id,
+            text,
+            output_lines=["Plan approved. current_mode=build", *_format_plan_lines(state)],
+            data={
+                "plan_status": state.get("status") if isinstance(state, dict) else None,
+                "current_mode": session.current_mode,
+            },
+        )
+    if action == "reject":
+        before = session.plan_state.current()
+        if not isinstance(before, dict) or before.get("status") != "proposed":
+            return _record(
+                session_id,
+                text,
+                output_lines=["No proposed plan to reject."],
+                data={"plan_status": before.get("status") if isinstance(before, dict) else None},
+            )
+        state = session.reject_current_plan()
+        return _record(
+            session_id,
+            text,
+            output_lines=["Plan rejected.", *_format_plan_lines(state)],
+            data={"plan_status": state.get("status") if isinstance(state, dict) else None},
+        )
+    if action in {"clear", "abandon"}:
+        before = session.plan_state.current()
+        if not isinstance(before, dict):
+            return _record(
+                session_id,
+                text,
+                output_lines=["No plan to clear."],
+                data={"plan_status": None},
+            )
+        state = session.abandon_current_plan()
+        return _record(
+            session_id,
+            text,
+            output_lines=["Plan cleared.", *_format_plan_lines(state)],
+            data={"plan_status": state.get("status") if isinstance(state, dict) else None},
+        )
+    if action:
+        return _record(
+            session_id,
+            text,
+            output_lines=["usage: /plan [approve|reject|clear]"],
+        )
+    state = session.plan_state.current()
+    return _record(
+        session_id,
+        text,
+        output_lines=_format_plan_lines(state),
+        data={"plan_status": state.get("status") if isinstance(state, dict) else None},
     )
 
 
@@ -537,14 +609,12 @@ def _memory_record(session_id: str, text: str, session: Any, arg: str) -> Sessio
             return _record(session_id, text, output_lines=["usage: /memory add <project knowledge>"])
         memory_id = add_project_memory(session, value)
         return _record(session_id, text, output_lines=[f"project memory added: {memory_id}"])
-    if action == "promote":
-        return _memory_id_action(session_id, text, value, "promote", lambda mid: promote_memory(session, mid))
     if action == "approve":
         return _memory_id_action(session_id, text, value, "approve", lambda mid: approve_memory(session, mid))
     if action == "disable":
         return _memory_id_action(session_id, text, value, "disable", lambda mid: disable_memory(session, mid))
-    if action in {"delete", "forget"}:
-        return _memory_id_action(session_id, text, value, action, lambda mid: forget_memory(session, mid))
+    if action == "delete":
+        return _memory_id_action(session_id, text, value, action, lambda mid: delete_memory(session, mid))
     if action in {"edit", "supersede"}:
         memory_id, _, content = value.partition(" ")
         if not memory_id or not content.strip():
@@ -614,11 +684,7 @@ def _memory_id_action(
     if not value:
         return _record(session_id, text, output_lines=[f"usage: /memory {action} <memory_id>"])
     memory_id = callback(value)
-    verb = "forgotten" if action == "forget" else f"{action}d"
-    if action == "delete":
-        verb = "deleted"
-    if action == "promote":
-        verb = "promoted"
+    verb = "deleted" if action == "delete" else f"{action}d"
     return _record(session_id, text, output_lines=[f"memory {verb}: {memory_id}"])
 
 
@@ -688,6 +754,7 @@ def _format_help(session: Any) -> str:
         "help",
         "status",
         "mode",
+        "plan",
         "session",
         "tree",
         "path",
@@ -707,6 +774,64 @@ def _format_help(session: Any) -> str:
     return "可用命令：\n" + "\n".join(f"- `/{name}`" for name in names)
 
 
+def _format_plan_lines(state: Any) -> list[str]:
+    if not isinstance(state, dict):
+        return ["No plan."]
+    lines = [
+        "=== Plan ===",
+        f"  Plan ID    : {state.get('plan_id', '')}",
+        f"  Status     : {state.get('status', '')}",
+        f"  Approval   : {state.get('approval_state', '')}",
+        f"  Mode       : {state.get('origin_mode', '')}",
+        f"  Objective  : {state.get('objective', '')}",
+    ]
+    explanation = str(state.get("explanation") or "").strip()
+    if explanation:
+        lines.append(f"  Note       : {explanation}")
+    items = state.get("items")
+    if isinstance(items, list) and items:
+        lines.append("  Items:")
+        for index, item in enumerate(items, start=1):
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                "    "
+                f"{index}. [{item.get('status', '')}] {item.get('step', '')}"
+            )
+    return lines
+
+
+def _open_derived_runtime(session: Any, session_id: str) -> Any:
+    from .runtime import SessionRuntime
+
+    return SessionRuntime(
+        SessionOptions(
+            model=session.conversation.model,
+            workspace_dir=session.workspace_dir,
+            system_prompt=session.conversation.system_prompt,
+            session_id=session_id,
+            thinking_level=session.conversation.thinking_level,
+            tool_execution=session.tool_execution,
+            max_tool_calls_per_turn=session.max_tool_calls_per_turn,
+            memory_enabled=session.memory_enabled,
+            current_mode=session.current_mode,
+            planning_budget_profile=session.planning_budget_profile,
+            convert_to_llm=session.convert_to_llm,
+            get_api_key=session.get_api_key,
+            retry_enabled=session.retry_enabled,
+            max_retries=session.max_retries,
+            retry_base_delay_ms=session.retry_base_delay_ms,
+            extension_commands=dict(session.extension_commands),
+            before_prompt_hooks=list(session.before_prompt_hooks),
+            after_prompt_hooks=list(session.after_prompt_hooks),
+            before_tool_call=session.before_tool_call,
+            after_tool_call=session.after_tool_call,
+            stream_fn=session.stream_fn,
+            prepare_context=getattr(session, "_custom_prepare_context", None),
+        )
+    )
+
+
 def _stage_derived_controller(controller: Any | None, session: Any) -> None:
     if controller is not None and hasattr(controller, "stage_derived_session"):
         controller.stage_derived_session(session)
@@ -717,7 +842,7 @@ def _command_view(session: Any) -> SessionCommandView:
         session_id=str(session.session_id),
         workspace_dir=str(session.workspace_dir),
         message_count=len(session.conversation.messages),
-        task_mode=str(session.task_mode),
+        current_mode=str(session.current_mode),
         leaf_id=get_leaf_id(session),
     )
 
@@ -806,7 +931,6 @@ __all__ = [
     "delete_memory",
     "disable_memory",
     "edit_memory",
-    "forget_memory",
     "fork_from_entry",
     "get_entry_path",
     "get_leaf_id",
@@ -817,12 +941,10 @@ __all__ = [
     "memory_summary",
     "preview_last_run_rollback",
     "preview_run_rollback",
-    "promote_memory",
     "revert_last_run",
     "revert_run",
     "rollback_apply_view",
     "rollback_preview_view",
-    "set_task_mode",
     "search_memory_records",
     "supersede_memory",
     "switch_to_entry",

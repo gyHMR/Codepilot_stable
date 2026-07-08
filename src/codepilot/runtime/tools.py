@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Build the tool runtime for one opened session."""
+"""Load and register tools for one opened runtime session."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,17 +10,10 @@ from codepilot.extensions import load_extensions, load_skills
 from codepilot.extensions.mcp import create_mcp_proxy_tools, parse_mcp_tool_configs
 from codepilot.protocols import Tool
 from codepilot.protocols.commands import RegisteredCommand
-from codepilot.tools import AgentTool
-from codepilot.tools.approval import DeferredApprovalProvider
 from codepilot.tools.builtins import create_builtin_tools
-from codepilot.tools.engine import ToolRuntime
-from codepilot.tools.policy import PermissionPolicy
-from codepilot.tools.registry import (
-    ToolRegistry,
-    get_builtin_tool_metadata,
-    infer_tool_metadata,
-)
-from codepilot.tools.workspace import ShellExecutionPolicy
+from codepilot.tools.contracts import ToolDefinition
+from codepilot.tools.registry import ToolRegistry, get_builtin_tool_metadata
+from codepilot.tools.sandbox import ShellExecutionPolicy
 
 from .config import RuntimeConfig
 from .opening import SessionOpenIntent
@@ -28,8 +21,8 @@ from .opening import SessionOpenIntent
 
 @dataclass
 class RuntimeTools:
+    registry: ToolRegistry
     specs: list[Tool]
-    runtime: ToolRuntime
     commands: dict[str, RegisteredCommand] = field(default_factory=dict)
     before_tool_hooks: list[Any] = field(default_factory=list)
     after_tool_hooks: list[Any] = field(default_factory=list)
@@ -45,8 +38,6 @@ def build_runtime_tools(
     intent: SessionOpenIntent,
     config: RuntimeConfig,
 ) -> RuntimeTools:
-    """Load tools and extension capabilities, then create the ToolRuntime."""
-
     warnings: list[str] = []
     loaded_extensions = load_extensions(workspace, configured_paths=config.extension_paths)
     loaded_skills = load_skills(workspace, configured_paths=config.skill_paths)
@@ -81,43 +72,14 @@ def build_runtime_tools(
     _register_tools(registry, loaded_extensions.tools, source="extension", warnings=warnings)
     _register_tools(registry, mcp_tools, source="mcp", warnings=warnings)
 
-    if config.read_only_mode:
-        registry = _read_only_registry(registry)
-
-    runtime = ToolRuntime(
-        registry=registry,
-        permission_policy=PermissionPolicy(
-            mode=config.tool_permission_mode,
-            block_dangerous_bash=config.block_dangerous_bash,
-            bash_allow_patterns=config.bash_allow_patterns,
-            bash_block_patterns=config.bash_block_patterns,
-        ),
-        approval_provider=intent.approval_provider or DeferredApprovalProvider(),
-    )
-
     return RuntimeTools(
-        specs=[tool.to_spec() for tool in registry.list()],
-        runtime=runtime,
-        commands={
-            **loaded_skills.commands,
-            **loaded_extensions.commands,
-        },
-        before_tool_hooks=[
-            *loaded_extensions.before_tool_hooks,
-            *loaded_skills.before_tool_hooks,
-        ],
-        after_tool_hooks=[
-            *loaded_extensions.after_tool_hooks,
-            *loaded_skills.after_tool_hooks,
-        ],
-        before_prompt_hooks=[
-            *loaded_extensions.before_prompt_hooks,
-            *loaded_skills.before_prompt_hooks,
-        ],
-        after_prompt_hooks=[
-            *loaded_extensions.after_prompt_hooks,
-            *loaded_skills.after_prompt_hooks,
-        ],
+        registry=registry,
+        specs=[item.spec for item in registry.catalog(current_mode=config.current_mode).items],
+        commands={**loaded_skills.commands, **loaded_extensions.commands},
+        before_tool_hooks=[*loaded_extensions.before_tool_hooks, *loaded_skills.before_tool_hooks],
+        after_tool_hooks=[*loaded_extensions.after_tool_hooks, *loaded_skills.after_tool_hooks],
+        before_prompt_hooks=[*loaded_extensions.before_prompt_hooks, *loaded_skills.before_prompt_hooks],
+        after_prompt_hooks=[*loaded_extensions.after_prompt_hooks, *loaded_skills.after_prompt_hooks],
         prompt_guidelines=[
             *(config.prompt_guidelines or []),
             *loaded_extensions.prompt_guidelines,
@@ -135,34 +97,21 @@ def build_runtime_tools(
 
 def _register_tools(
     registry: ToolRegistry,
-    tools: list[AgentTool],
+    tools: list[ToolDefinition],
     *,
     source: str,
     warnings: list[str],
 ) -> None:
     for tool in tools:
+        if not isinstance(tool, ToolDefinition):
+            warnings.append(f"{source} provided non-ToolDefinition tool: {type(tool).__name__}")
+            continue
         if source != "builtin" and get_builtin_tool_metadata(tool.name) is not None:
             warnings.append(f"{source} tool '{tool.name}' uses a reserved builtin name")
             continue
         if registry.get(tool.name) is not None:
             warnings.append(f"{source} tool '{tool.name}' overrides an earlier tool")
-        if not tool.description.strip():
-            warnings.append(f"{source} tool '{tool.name}' has no description")
-        metadata = (
-            get_builtin_tool_metadata(tool.name)
-            if source == "builtin"
-            else tool.metadata or infer_tool_metadata(tool)
-        )
-        registry.register(tool, metadata=metadata)
-
-
-def _read_only_registry(registry: ToolRegistry) -> ToolRegistry:
-    filtered = ToolRegistry()
-    for tool in registry.list():
-        metadata = registry.metadata_for(tool.name)
-        if metadata is not None and metadata.read_only:
-            filtered.register(tool, metadata=metadata)
-    return filtered
+        registry.register(tool)
 
 
 def _debug_prompt_sources(extensions: Any, skills: Any) -> list[str]:
@@ -180,7 +129,4 @@ def _debug_prompt_sources(extensions: Any, skills: Any) -> list[str]:
     return ["\n".join(lines)]
 
 
-__all__ = [
-    "RuntimeTools",
-    "build_runtime_tools",
-]
+__all__ = ["RuntimeTools", "build_runtime_tools"]

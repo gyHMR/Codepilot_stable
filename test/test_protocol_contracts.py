@@ -80,7 +80,7 @@ def test_tool_spec_normalizes_and_validates_provider_visible_fields() -> None:
 
 
 def test_tool_metadata_normalizes_and_validates_permission_facts() -> None:
-    from codepilot.protocols import ToolMetadata
+    from codepilot.tools.contracts import ToolMetadata
 
     extra = {"capabilities": ["filesystem.read"]}
     metadata = ToolMetadata(
@@ -91,7 +91,7 @@ def test_tool_metadata_normalizes_and_validates_permission_facts() -> None:
         exclusive=False,
         requires_approval=False,
         risk_level=" low ",
-        resource_scope=(" workspace ", "", "workspace", "git"),
+        scopes=(" read ", "build", "read"),
         network_access=False,
         credential_required=False,
         extra=extra,
@@ -101,10 +101,10 @@ def test_tool_metadata_normalizes_and_validates_permission_facts() -> None:
     assert metadata.name == "read"
     assert metadata.category == "filesystem"
     assert metadata.risk_level == "low"
-    assert metadata.resource_scope == ("workspace", "git")
+    assert metadata.scopes == ("read", "build")
     assert metadata.extra == {"capabilities": ["filesystem.read"]}
 
-    with pytest.raises(ValueError, match="tool metadata name"):
+    with pytest.raises(ValueError, match="metadata.name"):
         ToolMetadata(
             name="",
             category="filesystem",
@@ -113,7 +113,7 @@ def test_tool_metadata_normalizes_and_validates_permission_facts() -> None:
             exclusive=False,
             requires_approval=False,
             risk_level="low",
-            resource_scope=("workspace",),
+            scopes=("read",),
         )
 
     with pytest.raises(ValueError, match="risk level"):
@@ -125,7 +125,7 @@ def test_tool_metadata_normalizes_and_validates_permission_facts() -> None:
             exclusive=False,
             requires_approval=False,
             risk_level="critical",
-            resource_scope=("workspace",),
+            scopes=("read",),
         )
 
     with pytest.raises(TypeError, match="read_only"):
@@ -137,10 +137,10 @@ def test_tool_metadata_normalizes_and_validates_permission_facts() -> None:
             exclusive=False,
             requires_approval=False,
             risk_level="low",
-            resource_scope=("workspace",),
+            scopes=("read",),
         )
 
-    with pytest.raises(ValueError, match="resource_scope"):
+    with pytest.raises(ValueError, match="scopes"):
         ToolMetadata(
             name="read",
             category="filesystem",
@@ -149,7 +149,7 @@ def test_tool_metadata_normalizes_and_validates_permission_facts() -> None:
             exclusive=False,
             requires_approval=False,
             risk_level="low",
-            resource_scope=(),
+            scopes=(),
         )
 
 
@@ -310,8 +310,9 @@ def test_run_result_models_normalize_and_validate_run_facts() -> None:
         AgentRunResult,
         AssistantMessage,
         ErrorInfo,
+        PlanSummary,
+        RunSignalsSummary,
         RunVerification,
-        TaskSummary,
         TextContent,
         UserMessage,
     )
@@ -352,41 +353,44 @@ def test_run_result_models_normalize_and_validate_run_facts() -> None:
     with pytest.raises(TypeError, match="exit_code"):
         RunVerification(tool_call_id="call-1", tool_name="shell", status="passed", exit_code=False)  # type: ignore[arg-type]
 
-    attempts = [{"status": "failed"}]
-    control_signal = {"action": "continue"}
-    step_details = {"s1": {"title": "Read code"}}
-    task = TaskSummary(
-        task_id=" task-1 ",
-        goal=" Refactor run model. ",
-        completed_steps=[" s1 ", ""],
-        pending_steps=["s2"],
-        blocked_steps=["s3"],
-        next_action=" Write tests. ",
-        completion_satisfied=True,
-        completion_reason=" Verified. ",
-        attempts=attempts,
-        control_signal=control_signal,
-        step_details=step_details,
+    plan = PlanSummary(
+        schema_version=1,
+        plan_id=" plan-1 ",
+        status=" active ",
+        approval_state=" approved ",
+        origin_mode=" build ",
+        objective=" Refactor run model. ",
+        items=[{"id": " item-1 ", "step": " Read code. ", "status": " completed "}],
+        explanation=" Write tests. ",
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
     )
-    attempts[0]["status"] = "mutated"
-    control_signal["action"] = "mutated"
-    step_details["s1"]["title"] = "mutated"
+    signals = RunSignalsSummary(
+        workspace_changed=True,
+        affected_paths=[" src/a.py ", "src/a.py"],
+        verification_status="stale",
+        last_error={"error_code": "verification_failed"},
+        counters=counters,
+    )
 
-    assert task.task_id == "task-1"
-    assert task.goal == "Refactor run model."
-    assert task.completed_steps == ["s1"]
-    assert task.next_action == "Write tests."
-    assert task.completion_satisfied is True
-    assert task.completion_reason == "Verified."
-    assert task.attempts == [{"status": "failed"}]
-    assert task.control_signal == {"action": "continue"}
-    assert task.step_details == {"s1": {"title": "Read code"}}
+    assert plan.plan_id == "plan-1"
+    assert plan.status == "active"
+    assert plan.items == [{"id": "item-1", "step": "Read code.", "status": "completed"}]
+    assert signals.affected_paths == ["src/a.py"]
+    assert signals.verification_status == "stale"
 
-    with pytest.raises(ValueError, match="task_id"):
-        TaskSummary(task_id="", goal="Goal")
+    with pytest.raises(ValueError, match="plan_id"):
+        PlanSummary(
+            schema_version=1,
+            plan_id="",
+            status="active",
+            approval_state="approved",
+            origin_mode="build",
+            objective="Goal",
+        )
 
-    with pytest.raises(TypeError, match="completion_satisfied"):
-        TaskSummary(task_id="task-1", goal="Goal", completion_satisfied="yes")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="run signal verification"):
+        RunSignalsSummary(verification_status="skipped")  # type: ignore[arg-type]
 
     messages = [UserMessage(content="hello")]
     affected_paths = [" src/a.py ", "", "src/a.py", "src/b.py"]
@@ -404,7 +408,8 @@ def test_run_result_models_normalize_and_validate_run_facts() -> None:
         affected_paths=affected_paths,
         workspace_changed=True,
         verification=[verification],
-        task=task,
+        plan=plan,
+        signals=signals,
     )
     messages.append(UserMessage(content="mutated"))
     affected_paths.append("src/c.py")
@@ -418,7 +423,8 @@ def test_run_result_models_normalize_and_validate_run_facts() -> None:
     assert result.workspace_changed is True
     assert result.final_message is final_message
     assert result.error is error
-    assert result.task is task
+    assert result.plan is plan
+    assert result.signals is signals
 
     with pytest.raises(ValueError, match="run_id"):
         AgentRunResult(run_id="", session_id=None, status="completed", stop_reason="final_answer")
@@ -448,13 +454,17 @@ def test_run_result_models_normalize_and_validate_run_facts() -> None:
 def test_runtime_event_type_contract_rejects_unknown_events() -> None:
     from codepilot.protocols import ensure_runtime_event_type
 
-    assert ensure_runtime_event_type(" tool_execution_end ") == "tool_execution_end"
-    assert ensure_runtime_event_type("context_prepared") == "context_prepared"
-    assert ensure_runtime_event_type("memory_updated") == "memory_updated"
-    assert ensure_runtime_event_type("tool_approval_result_replaced") == "tool_approval_result_replaced"
+    assert ensure_runtime_event_type(" tool_completed ") == "tool_completed"
+    assert ensure_runtime_event_type("context_projected") == "context_projected"
+    assert ensure_runtime_event_type("context_compacted") == "context_compacted"
+    assert ensure_runtime_event_type("memory_record_approved") == "memory_record_approved"
+    assert ensure_runtime_event_type("tool_interrupted") == "tool_interrupted"
 
     with pytest.raises(ValueError, match="runtime event type"):
-        ensure_runtime_event_type("context_compacted")
+        ensure_runtime_event_type("context_prepared")
+
+    with pytest.raises(ValueError, match="runtime event type"):
+        ensure_runtime_event_type("memory_updated")
 
     with pytest.raises(ValueError, match="runtime event type"):
         ensure_runtime_event_type("tool_finished")

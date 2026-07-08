@@ -17,9 +17,9 @@ def test_context_governor_prepares_linear_context_with_memory_and_artifacts(
 ) -> None:
     from codepilot.core.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
-    from codepilot.sessions.context.governor import ContextGovernor
-    from codepilot.sessions.context.state import SessionContextState
-    from codepilot.sessions.memory.records import MemoryRecall, MemoryRecord, RetrievedMemory
+    from codepilot.sessions.context import ContextGovernor
+    from codepilot.sessions.context import SessionContextState
+    from codepilot.sessions.memory import MemoryRecall, MemoryRecord, RetrievedMemory
 
     class FakeMemoryRetriever:
         def recall(self, _query) -> MemoryRecall:
@@ -63,17 +63,32 @@ def test_context_governor_prepares_linear_context_with_memory_and_artifacts(
                     ToolResultMessage(
                         tool_call_id="call_1",
                         tool_name="shell",
-                        content=[TextContent(text="pytest failed\n" * 50)],
+                        content=[TextContent(text="pytest failed\n" * 600)],
                         status="error",
                         affected_paths=["test/test_app.py"],
                         verification={"status": "failed"},
                     ),
                 ],
-                task_state={
-                    "raw_user_request": "Fix failing tests.",
-                    "goal": {"value": "Fix failing tests."},
-                    "current_mode": "build",
+                plan_state={
+                    "schema_version": 1,
+                    "plan_id": "plan_1",
+                    "status": "active",
+                    "approval_state": "approved",
+                    "origin_mode": "build",
+                    "objective": "Fix failing tests.",
+                    "items": [
+                        {
+                            "id": "item_1",
+                            "step": "Fix failing tests.",
+                            "status": "in_progress",
+                        }
+                    ],
+                    "explanation": "",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "last_update_run_id": "run_1",
                 },
+                run_signals={"verification_status": "failed"},
             ),
             ContextPreparationRequest(
                 session_id="session_1",
@@ -83,7 +98,7 @@ def test_context_governor_prepares_linear_context_with_memory_and_artifacts(
         )
     )
 
-    assert "## Task State" in prepared.system_prompt
+    assert "## Plan Brief" in prepared.system_prompt
     assert "Fix failing tests." in prepared.system_prompt
     assert "Run pytest from the repo root." in prepared.system_prompt
     assert prepared.report.context_view is not None
@@ -97,8 +112,8 @@ def test_context_governor_surfaces_recent_read_paths_in_working_set(
 ) -> None:
     from codepilot.core.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
-    from codepilot.sessions.context.governor import ContextGovernor
-    from codepilot.sessions.context.state import SessionContextState
+    from codepilot.sessions.context import ContextGovernor
+    from codepilot.sessions.context import SessionContextState
 
     governor = ContextGovernor(
         workspace_dir=tmp_path,
@@ -144,9 +159,9 @@ def test_context_governor_counts_tool_schemas_in_budget_estimates(
 ) -> None:
     from codepilot.core.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import Tool, UserMessage
-    from codepilot.sessions.context.governor import ContextGovernor
-    from codepilot.sessions.context.policy import ContextPressurePolicy
-    from codepilot.sessions.context.state import SessionContextState
+    from codepilot.sessions.context import ContextGovernor
+    from codepilot.sessions.context import ContextPressurePolicy
+    from codepilot.sessions.context import SessionContextState
 
     tools = [
         Tool(
@@ -189,7 +204,7 @@ def test_context_governor_counts_tool_schemas_in_budget_estimates(
 def test_context_ledger_records_simple_projection(tmp_path: Path) -> None:
     from codepilot.core.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
-    from codepilot.sessions.context.governor import ContextGovernor
+    from codepilot.sessions.context import ContextGovernor
 
     governor = ContextGovernor(workspace_dir=tmp_path, session_id="session_ledger")
 
@@ -213,6 +228,56 @@ def test_context_ledger_records_simple_projection(tmp_path: Path) -> None:
     assert payload["type"] == "context_projection"
     assert payload["context_id"] == prepared.report.context_id
     assert "tokens_by_layer" in payload
+    assert "task_plan" in payload["tokens_by_layer"]
+    assert "runtime" in payload["tokens_by_layer"]
+    assert "memory_retrieval_reasons" in payload
+    assert "dropped_memory_reasons" in payload
+    assert "runner_preflight" in payload
+
+
+def test_context_governor_compacts_old_conversation_on_critical_pressure(
+    tmp_path: Path,
+) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import UserMessage
+    from codepilot.sessions.context import ContextGovernor
+
+    messages = [
+        UserMessage(
+            content=f"old request {index} " + ("details " * 80),
+            metadata={"session_message_id": f"msg_{index:03d}"},
+        )
+        for index in range(18)
+    ]
+    governor = ContextGovernor(workspace_dir=tmp_path, session_id="session_compact")
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(system_prompt="System rules.", messages=messages),
+            ContextPreparationRequest(
+                session_id="session_compact",
+                model_context_window=900,
+                model_max_output_tokens=100,
+            ),
+        )
+    )
+
+    meta = governor.store.read_meta()
+    context_meta = meta["context"]
+    ledger_path = tmp_path / ".codepilot" / "sessions" / "session_compact" / "context_ledger.jsonl"
+    rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+
+    assert context_meta["compacted_until_message_id"] == "msg_011"
+    assert context_meta["last_compact_summary"]
+    assert any(row["type"] == "context_compaction" for row in rows)
+    assert [message.metadata.get("session_message_id") for message in prepared.messages] == [
+        "msg_012",
+        "msg_013",
+        "msg_014",
+        "msg_015",
+        "msg_016",
+        "msg_017",
+    ]
 
 
 def test_token_estimator_classifies_content_types_and_calibrates_usage(

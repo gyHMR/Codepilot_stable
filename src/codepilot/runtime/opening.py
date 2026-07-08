@@ -27,11 +27,8 @@ class SessionOpenIntent:
     messages: list[Any] = field(default_factory=list)
     tools: list[Any] = field(default_factory=list)
     memory_enabled: bool = True
-    task_control_enabled: bool = True
-    task_mode: str | None = None
+    current_mode: str | None = None
     planning_budget_profile: str | None = None
-    max_task_replans_per_run: int | None = None
-    read_only_mode: bool | None = None
     load_workspace_resources: bool = True
     tool_permission_mode: str | None = None
     enabled_builtin_tools: list[str] | None = None
@@ -43,6 +40,8 @@ class SessionOpenIntent:
     retry_enabled: bool | None = None
     max_retries: int | None = None
     retry_base_delay_ms: int | None = None
+    model_context_window: int | None = None
+    model_max_output_tokens: int | None = None
     block_dangerous_bash: bool | None = None
     bash_allow_patterns: list[str] | None = None
     bash_block_patterns: list[str] | None = None
@@ -65,6 +64,7 @@ class SessionOpenIntent:
     after_prompt_hooks: list[Any] = field(default_factory=list)
     before_tool_call: Any | None = None
     after_tool_call: Any | None = None
+    prepare_context: Any | None = None
 
 
 @dataclass(frozen=True)

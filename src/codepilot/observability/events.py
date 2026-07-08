@@ -32,15 +32,16 @@ RUN_EVENT_TYPES = {
     "memory_record_disabled",
     "memory_record_deleted",
     "memory_record_superseded",
-    "memory_record_promoted",
     "tool_call_started",
     "tool_call_finished",
-    "task_plan_created",
-    "task_step_updated",
-    "task_state_updated",
-    "task_state_warning",
-    "task_decision_made",
-    "completion_checked",
+    "plan_proposed",
+    "plan_approved",
+    "plan_rejected",
+    "plan_updated",
+    "plan_completed",
+    "plan_abandoned",
+    "plan_state_warning",
+    "run_guard_checked",
     "file_changed",
     "error",
 }
@@ -49,17 +50,15 @@ _LOW_VALUE_EVENTS = {
     "turn_start",
     "turn_end",
     "message_update",
-    "tool_execution_update",
-    "tool_execution_grace",
-    "planning_discovery_started",
-    "planning_discovery_step",
-    "planning_discovery_completed",
-    "planning_synthesis_started",
-    "planning_synthesis_completed",
-    "tool_approval_required",
-    "tool_approval_resolved",
-    "tool_approval_decision",
-    "tool_approval_result_replaced",
+}
+
+_PLAN_EVENTS = {
+    "plan_proposed",
+    "plan_approved",
+    "plan_rejected",
+    "plan_updated",
+    "plan_completed",
+    "plan_abandoned",
 }
 
 
@@ -102,7 +101,7 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
         return {**_base(raw, "model_call_started")}
     if event_type == "message_end" and _message_role(raw) == "assistant":
         return _model_finished(raw)
-    if event_type in {"context_prepared", "context_built"}:
+    if event_type in {"context_projected", "context_built"}:
         return _context_built(raw)
     if event_type == "memory_retrieved":
         return _memory_retrieved(raw)
@@ -110,19 +109,19 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
         "memory_written",
     }:
         return _memory_written(raw, event_type)
-    if event_type in {"tool_call_started", "tool_execution_start"}:
+    if event_type in {"tool_call_started", "tool_started"}:
         return {
             **_base(raw, "tool_call_started"),
             "tool_call_id": str(raw.get("toolCallId") or raw.get("tool_call_id") or ""),
             "tool_name": str(raw.get("toolName") or raw.get("tool_name") or ""),
             "args": _slim_args(_dict(raw.get("args"))),
         }
-    if event_type in {"tool_call_finished", "tool_execution_end"}:
+    if event_type in {"tool_call_finished", "tool_completed", "tool_failed", "tool_interrupted"}:
         return _tool_finished(raw)
-    if event_type in {"task_decision", "task_decision_made"}:
-        return _task_decision(raw)
-    if event_type in {"task_plan_created", "task_step_updated", "completion_checked"}:
-        return _task_event(raw, event_type)
+    if event_type in _PLAN_EVENTS:
+        return _plan_event(raw, event_type)
+    if event_type == "run_guard_checked":
+        return _run_guard_checked(raw)
     if event_type == "file_diff":
         return {
             **_base(raw, "file_changed"),
@@ -245,6 +244,7 @@ def _context_built(raw: dict[str, Any]) -> dict[str, Any]:
         "tokens_before": _int(report.get("estimated_tokens_before") or report.get("tokens_before")),
         "tokens_after": _int(report.get("estimated_tokens_after") or report.get("tokens_after")),
         "selected_items": [_selected_item(item) for item in _list_of_dicts(report.get("selected_items"))],
+        "sections": [_context_section(item) for item in _list_of_dicts(report.get("sections"))],
         "stale_items": [str(item) for item in _list(report.get("stale_items"))],
         "dropped_counts": _dropped_counts(report),
         "tokens_by_layer": {
@@ -267,6 +267,18 @@ def _selected_item(item: dict[str, Any]) -> dict[str, Any]:
         "tokens": _int(item.get("tokens", item.get("estimated_tokens"))),
         "freshness": str(item.get("freshness", "unknown")),
         "reason": _reason(item),
+    }
+
+
+def _context_section(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": str(item.get("name", "")),
+        "budget_tokens": _int(item.get("budget_tokens")),
+        "candidate_items": _int(item.get("candidate_items")),
+        "selected_items": _int(item.get("selected_items")),
+        "estimated_tokens_before": _int(item.get("estimated_tokens_before")),
+        "estimated_tokens_after": _int(item.get("estimated_tokens_after")),
+        "reduction_policy": str(item.get("reduction_policy", "")),
     }
 
 
@@ -365,62 +377,28 @@ def _memory_written(raw: dict[str, Any], action: str) -> dict[str, Any]:
     }
 
 
-def _task_decision(raw: dict[str, Any]) -> dict[str, Any]:
-    decision = _dict(raw.get("decision"))
-    return {
-        **_base(raw, "task_decision_made"),
-        "task_id": _task_field(raw, "task_id"),
-        "mode": _task_field(raw, "mode"),
-        "phase": _task_field(raw, "phase"),
-        "decision": str(
-            decision.get("action") or raw.get("decision") or raw.get("action") or ""
-        ),
-        "reason": str(decision.get("reason") or raw.get("reason") or ""),
-    }
-
-
-def _task_event(raw: dict[str, Any], event_type_hint: str) -> dict[str, Any]:
-    task = _dict(raw.get("task"))
-    step = _dict(raw.get("step")) or _current_step(task)
-    completion = _dict(raw.get("completion"))
-    if event_type_hint == "completion_checked":
-        event_type = "completion_checked"
-    else:
-        event_type = event_type_hint
+def _plan_event(raw: dict[str, Any], event_type: str) -> dict[str, Any]:
+    plan = _dict(raw.get("plan"))
     return {
         **_base(raw, event_type),
-        "task_id": str(task.get("task_id") or raw.get("task_id") or ""),
-        "mode": str(task.get("mode") or raw.get("mode") or ""),
-        "phase": str(task.get("phase") or raw.get("phase") or ""),
-        "step_id": str(raw.get("step_id") or step.get("id", "")),
-        "step_title": str(raw.get("step_title") or step.get("title", "")),
-        "step_status": str(raw.get("step_status") or step.get("status", "")),
-        "evidence_refs": [
-            str(item)
-            for item in _list(raw.get("evidence_refs") or task.get("evidence_refs"))
-        ],
-        "completion_satisfied": raw.get(
-            "completion_satisfied",
-            completion.get("satisfied", task.get("completion_satisfied")),
-        ),
-        "completion_reason": raw.get(
-            "completion_reason",
-            completion.get("reason", task.get("completion_reason")),
-        ),
+        "plan_id": str(plan.get("plan_id") or raw.get("plan_id") or ""),
+        "status": str(plan.get("status") or raw.get("status") or ""),
+        "origin_mode": str(plan.get("origin_mode") or raw.get("origin_mode") or ""),
+        "objective": str(plan.get("objective") or raw.get("objective") or ""),
+        "items": _list_of_dicts(plan.get("items")),
     }
 
 
-def _current_step(task: dict[str, Any]) -> dict[str, Any]:
-    for step in _list_of_dicts(task.get("steps")):
-        if step.get("status") in {"in_progress", "pending"}:
-            return step
-    steps = _list_of_dicts(task.get("steps"))
-    return steps[-1] if steps else {}
-
-
-def _task_field(raw: dict[str, Any], field: str) -> str:
-    task = _dict(raw.get("task"))
-    return str(task.get(field) or raw.get(field) or "")
+def _run_guard_checked(raw: dict[str, Any]) -> dict[str, Any]:
+    decision = _dict(raw.get("decision"))
+    signals = _dict(raw.get("signals"))
+    return {
+        **_base(raw, "run_guard_checked"),
+        "action": str(decision.get("action") or raw.get("action") or ""),
+        "reason": str(decision.get("reason") or raw.get("reason") or ""),
+        "verification_status": str(signals.get("verification_status") or ""),
+        "workspace_changed": bool(signals.get("workspace_changed", False)),
+    }
 
 
 def _slim_args(args: dict[str, Any]) -> dict[str, Any]:

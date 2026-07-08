@@ -1,6 +1,18 @@
 from __future__ import annotations
 
-"""Human CLI flow: read text, dispatch runtime actions, render frames."""
+"""人类 CLI 交互主流程：读取输入、派发 runtime action、渲染 frame。
+
+本文件描述 CLI 模式下“一次用户输入”的完整分流：
+
+1. ``read_user_text`` 从 prompt_toolkit / Rich / stdin 读取一段文本。
+2. ``run_repl`` 判断文本是退出命令、审批命令、斜杠命令还是普通 prompt。
+3. 普通 prompt 通过 ``PromptSubmitted`` 派发给 ``RuntimeGateway``。
+4. 审批通过 ``ApprovalDecided`` 恢复此前被工具权限中断的 run。
+5. 斜杠命令通过 ``CommandSubmitted`` 交给 runtime 的命令系统。
+6. ``render_dispatch`` 消费 runtime 产生的 frame，并交给 renderer 显示。
+
+CLI 层不直接调用模型、工具或 session 内部对象；所有跨层动作都经过 runtime action。
+"""
 
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal
@@ -22,8 +34,17 @@ from .render import OutputFn, SimpleRenderer, TerminalRenderer, build_startup_st
 
 
 InputFn = Callable[[str], str]
+"""纯文本输入函数类型。
+
+测试可传入 fake input；无 prompt_toolkit 时默认使用 Python 内置 ``input``。
+参数是提示符字符串，返回用户输入的一行文本。
+"""
+
 ApprovalDecision = Literal["approve", "deny"]
+"""审批命令允许的决策值。"""
+
 DEFAULT_EXIT_COMMANDS = ("exit", "quit", ":q")
+"""交互 REPL 中的默认退出命令。用户也可以输入 ``/exit``。"""
 
 
 async def run_once(
@@ -33,7 +54,16 @@ async def run_once(
     *,
     output: OutputFn = print,
 ) -> None:
-    """Run one prompt and print only the assistant-facing stream."""
+    """运行单次 prompt 并输出助手回复。
+
+    Args:
+        runtime: CLI 进入 runtime 层的网关。
+        session_id: 已打开的会话 ID。
+        prompt: 用户传入的单次问题，通常来自 ``codepilot -p``。
+        output: 输出函数，默认是 ``print``；测试时可替换为收集函数。
+
+    单次模式使用 ``SimpleRenderer``，只关心面向用户的模型文本，不展示完整启动面板。
+    """
 
     renderer = SimpleRenderer(output=output)
     renderer.render_activity("thinking")
@@ -53,7 +83,19 @@ async def run_repl(
     no_color: bool = False,
     exit_commands: tuple[str, ...] = DEFAULT_EXIT_COMMANDS,
 ) -> None:
-    """Run the interactive terminal loop."""
+    """运行交互式终端循环。
+
+    Args:
+        runtime: runtime 网关，负责接收 Prompt/Command/Approval action。
+        session_id: 初始会话 ID。``/switch`` 等命令可能让当前会话发生切换。
+        input_fn: plain stdin 模式下的输入函数。
+        output: plain 输出函数。Rich 模式下 renderer 会使用自己的 Console。
+        verbose: 是否显示调试事件、错误堆栈等详细信息。
+        no_color: 是否禁用 Rich/prompt_toolkit 彩色界面。
+        exit_commands: 退出命令集合，便于测试或嵌入场景覆盖默认值。
+
+    主循环只负责“识别用户输入类型并派发 action”，不直接执行命令或工具。
+    """
 
     from . import shell as shell_module
 
@@ -69,6 +111,7 @@ async def run_repl(
     )
 
     while True:
+        # 每轮循环只读取一段用户输入；输入为空时不触发 runtime。
         try:
             text = await read_user_text(
                 runtime,
@@ -87,11 +130,13 @@ async def run_repl(
             renderer.render_status("Bye.", kind="info")
             return
 
+        # 审批命令优先于普通斜杠命令，因为 /approve 和 /deny 会恢复被暂停的 run。
         approval_action = approval_action_from_text(text)
         if approval_action is not None:
             await run_approval(runtime, current_session_id, approval_action, renderer, verbose=verbose)
             continue
 
+        # 其他 /xxx 交给 runtime 命令系统，例如 /help、/status、/fork、/switch。
         if text.startswith("/"):
             switched_session_id = await run_command(runtime, current_session_id, text, renderer)
             if switched_session_id is not None:
@@ -103,6 +148,7 @@ async def run_repl(
                 )
             continue
 
+        # 剩余文本视为普通用户消息，进入 agent loop。
         await run_prompt(runtime, current_session_id, text, renderer, verbose=verbose)
 
 
@@ -114,7 +160,20 @@ async def read_user_text(
     shell: Any,
     input_fn: InputFn,
 ) -> str:
-    """Read one input from prompt_toolkit, Rich, or plain stdin."""
+    """读取一段用户输入。
+
+    Args:
+        runtime: 用于读取最新 session view，刷新命令补全和底部工具栏。
+        session_id: 当前会话 ID。
+        renderer: 负责构造提示符、toolbar 或 Rich prompt。
+        shell: ``InteractiveShell`` 实例；为 ``None`` 时退回 Rich console 或普通 stdin。
+        input_fn: 最朴素的输入函数，仅在没有 prompt_toolkit/Rich shell 时使用。
+
+    Returns:
+        去掉首尾空白后的用户输入文本。
+
+    输入层只收集文本，不解析业务含义；解析由 ``run_repl`` 的分流逻辑完成。
+    """
 
     if shell is not None:
         view = runtime.describe(session_id)
@@ -140,7 +199,17 @@ async def run_prompt(
     *,
     verbose: bool,
 ) -> None:
-    """Dispatch a normal user prompt and render its runtime frames."""
+    """派发普通用户消息并渲染 runtime frame。
+
+    Args:
+        runtime: runtime 网关。
+        session_id: 当前会话 ID。
+        text: 用户输入的普通消息。
+        renderer: 终端渲染器。
+        verbose: 发生异常时是否打印 traceback。
+
+    Ctrl+C 会被转换成 ``RunCancelled``，让 runtime 有机会清理当前 run。
+    """
 
     try:
         renderer.reset()
@@ -170,7 +239,17 @@ async def run_approval(
     *,
     verbose: bool,
 ) -> None:
-    """Dispatch an approval decision and render the resumed run."""
+    """派发审批结果并渲染恢复后的 run。
+
+    Args:
+        runtime: runtime 网关。
+        session_id: 当前会话 ID。
+        action: ``ApprovalDecided``，包含 approval_id、approve/deny 和可选原因。
+        renderer: 终端渲染器。
+        verbose: 发生异常时是否打印 traceback。
+
+    审批不是普通 prompt；它恢复此前因工具权限暂停的 agent loop。
+    """
 
     try:
         renderer.reset()
@@ -188,7 +267,17 @@ async def run_command(
     text: str,
     renderer: TerminalRenderer,
 ) -> str | None:
-    """Dispatch a slash command and render its human output."""
+    """派发斜杠命令并渲染人类可读输出。
+
+    Args:
+        runtime: runtime 网关。
+        session_id: 当前会话 ID。
+        text: 用户输入的完整命令文本，例如 ``/help`` 或 ``/switch xxx``。
+        renderer: 终端渲染器。
+
+    Returns:
+        如果命令切换了会话，返回新的 session id；否则返回 ``None``。
+    """
 
     try:
         result = await dispatch_command(runtime, session_id, text)
@@ -214,7 +303,19 @@ async def run_command(
 
 
 async def dispatch_command(runtime: RuntimeGateway, session_id: str, text: str) -> Any:
-    """Submit a slash command through the runtime boundary and return its record."""
+    """通过 runtime 边界提交斜杠命令并返回命令记录。
+
+    Args:
+        runtime: runtime 网关。
+        session_id: 当前会话 ID。
+        text: 完整命令文本。
+
+    Returns:
+        ``CommandFinishedFrame.record``，其中包含 handled、output_lines、data 等信息。
+
+    Raises:
+        RuntimeFrameError: runtime 返回 ``FailedFrame`` 或命令流没有正常结束。
+    """
 
     async for frame in runtime.dispatch(session_id, CommandSubmitted(text=text)):
         if isinstance(frame, CommandFinishedFrame):
@@ -225,7 +326,18 @@ async def dispatch_command(runtime: RuntimeGateway, session_id: str, text: str) 
 
 
 async def render_dispatch(frames: Any, renderer: Any) -> None:
-    """Render the frame stream from one runtime dispatch."""
+    """消费一次 runtime dispatch 的 frame 流并交给 renderer。
+
+    Args:
+        frames: ``RuntimeGateway.dispatch`` 返回的异步 frame 迭代器。
+        renderer: ``TerminalRenderer`` 或 ``SimpleRenderer``。只要求它实现本函数调用的方法。
+
+    Runtime frame 是 CLI 层和 runtime 层之间的显示协议：
+    - ``ProgressFrame``：模型增量、工具开始/结束等过程事件。
+    - ``ApprovalRequiredFrame``：工具需要权限审批，CLI 显示审批提示并停止本轮。
+    - ``RunFinishedFrame``：run 完成，保存最终记录。
+    - ``FailedFrame``：runtime 出错，转换成 CLI 可处理异常。
+    """
 
     final_record = None
     async for frame in frames:
@@ -245,6 +357,15 @@ def is_exit_text(
     *,
     exit_commands: Iterable[str] = DEFAULT_EXIT_COMMANDS,
 ) -> bool:
+    """判断用户输入是否是退出命令。
+
+    Args:
+        text: 用户输入文本。
+        exit_commands: 允许的退出命令集合，不要求带 ``/`` 前缀。
+
+    Returns:
+        是退出命令时返回 ``True``。
+    """
     normalized = text.strip()
     if normalized == "/exit":
         return True
@@ -253,7 +374,15 @@ def is_exit_text(
 
 
 def approval_action_from_text(text: str) -> ApprovalDecided | None:
-    """Parse ``/approve`` and ``/deny`` into runtime actions."""
+    """把 ``/approve`` 和 ``/deny`` 文本解析成 runtime action。
+
+    Args:
+        text: 用户输入文本，格式为 ``/approve <approval_id> [reason]`` 或
+            ``/deny <approval_id> [reason]``。
+
+    Returns:
+        可直接派发给 runtime 的 ``ApprovalDecided``；如果不是审批命令则返回 ``None``。
+    """
 
     parts = text.strip().lstrip("/").split(maxsplit=2)
     if not parts:
@@ -271,13 +400,17 @@ def approval_action_from_text(text: str) -> ApprovalDecided | None:
 
 
 def frame_error_message(error: Any) -> str:
+    """从 runtime error payload 中提取适合展示的人类消息。"""
     if isinstance(error, dict):
         return str(error.get("message") or error.get("code") or "Runtime failed")
     return str(error)
 
 
 class RuntimeFrameError(RuntimeError):
-    """Runtime failure surfaced while consuming a frame stream."""
+    """消费 runtime frame 流时浮出的失败。
+
+    ``code`` 字段用于保留 runtime 的错误类型，CLI 可以在 verbose 或 RPC 模式下继续传递。
+    """
 
     code = "runtime.dispatch_failed"
 
@@ -288,6 +421,7 @@ class RuntimeFrameError(RuntimeError):
 
 
 def runtime_error_from_frame(error: Any) -> RuntimeFrameError:
+    """把 ``FailedFrame.error`` 转换成 CLI 内部异常。"""
     if isinstance(error, dict):
         return RuntimeFrameError(
             frame_error_message(error),
@@ -297,6 +431,7 @@ def runtime_error_from_frame(error: Any) -> RuntimeFrameError:
 
 
 def print_traceback() -> None:
+    """在 verbose 模式下打印当前异常堆栈。"""
     import traceback
 
     traceback.print_exc()

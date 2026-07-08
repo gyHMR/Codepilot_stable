@@ -42,10 +42,13 @@ AgentRunStopReason = Literal[
     "model_error",           # 模型调用出错
     "aborted",               # 被用户中止
     "approval_required",     # 需要用户审批
+    "approval_denied",       # 用户拒绝工具审批
     "repeated_tool_call",    # 检测到重复的工具调用（可能陷入循环）
-    "replan_limit",          # 连续失败后达到重新规划上限
-    "task_blocked",          # 任务控制器判断当前任务阻塞，需要用户确认/指示
-    "task_incomplete",       # 任务控制器判断完成条件未满足
+    "tool_call_limit",       # 工具调用数量超出限制
+    "tool_unavailable",      # 模型请求了不可用工具
+    "run_guard",             # 运行护栏要求继续处理或等待用户
+    "missing_tool_port",     # 内部工具端口缺失
+    "missing_approval_decision",  # approval resume 缺少审批决定
     "internal_error",        # 内部错误
 ]
 
@@ -69,14 +72,20 @@ _STOP_REASONS = frozenset(
         "model_error",
         "aborted",
         "approval_required",
+        "approval_denied",
         "repeated_tool_call",
-        "replan_limit",
-        "task_blocked",
-        "task_incomplete",
+        "tool_call_limit",
+        "tool_unavailable",
+        "run_guard",
+        "missing_tool_port",
+        "missing_approval_decision",
         "internal_error",
     }
 )
 _VERIFICATION_STATUSES = frozenset({"passed", "failed", "cancelled", "unknown"})
+_SIGNAL_VERIFICATION_STATUSES = frozenset(
+    {"unknown", "passed", "failed", "cancelled", "stale"}
+)
 
 
 @dataclass
@@ -166,109 +175,104 @@ class RunVerification:
         )
 
 
+RunSignalsVerificationStatus = Literal["unknown", "passed", "failed", "cancelled", "stale"]
+
+
 @dataclass
-class TaskSummary:
-    """任务摘要：一次运行中活跃任务计划的轻量级快照。
+class PlanSummary:
+    """Soft plan board snapshot saved with a run result."""
 
-    由 TaskController.summarize() 生成，包含任务的完整状态信息。
-    用于事件上报（task_plan_created 等）和 AgentRunResult.task 字段。
-
-    Attributes:
-        task_id: 任务唯一标识。
-        goal: 任务目标描述。
-        completed_steps: 已完成步骤的标题列表。
-        pending_steps: 待处理步骤的标题列表。
-        blocked_steps: 被阻塞步骤的标题列表。
-        next_action: 下一步动作描述。
-        completion_satisfied: 任务是否满足完成条件。
-        completion_reason: 完成/未完成原因。
-        attempts: 工具执行尝试记录列表（字典格式）。
-        change_sets: 文件变更证据集合列表（字典格式）。
-        replans: 重新规划记录列表（字典格式）。
-        control_signal: 轻量级任务控制信号。
-        step_details: 步骤详情字典（步骤标题 → 详情）。
-    """
-
-    task_id: str                                                                 # 任务唯一标识
-    goal: str                                                                    # 任务目标
-    completed_steps: list[str] = field(default_factory=list)                     # 已完成步骤
-    pending_steps: list[str] = field(default_factory=list)                       # 待处理步骤
-    blocked_steps: list[str] = field(default_factory=list)                       # 阻塞步骤
-    next_action: str | None = None                                               # 下一步动作
-    completion_satisfied: bool = False                                           # 是否满足完成条件
-    completion_reason: str = ""                                                  # 完成原因
-    attempts: list[dict[str, Any]] = field(default_factory=list)                 # 尝试记录
-    change_sets: list[dict[str, Any]] = field(default_factory=list)              # 变更集合
-    replans: list[dict[str, Any]] = field(default_factory=list)                  # 重新规划记录
-    control_signal: dict[str, Any] = field(default_factory=dict)                 # 控制信号
-    step_details: dict[str, dict[str, Any]] = field(default_factory=dict)        # 步骤详情
+    schema_version: int
+    plan_id: str
+    status: str
+    approval_state: str
+    origin_mode: str
+    objective: str
+    items: list[dict[str, str]] = field(default_factory=list)
+    explanation: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    last_update_run_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
-            "task_id",
-            _require_text(self.task_id, field_name="task_id"),
+            "schema_version",
+            _ensure_non_negative_int(self.schema_version, field_name="schema_version"),
+        )
+        object.__setattr__(self, "plan_id", _require_text(self.plan_id, field_name="plan_id"))
+        object.__setattr__(self, "status", _require_text(self.status, field_name="status"))
+        object.__setattr__(
+            self,
+            "approval_state",
+            _require_text(self.approval_state, field_name="approval_state"),
         )
         object.__setattr__(
             self,
-            "goal",
-            _require_text(self.goal, field_name="goal"),
+            "origin_mode",
+            _require_text(self.origin_mode, field_name="origin_mode"),
+        )
+        object.__setattr__(self, "objective", _clean_text(self.objective))
+        object.__setattr__(self, "items", _copy_plan_items(self.items))
+        object.__setattr__(self, "explanation", _clean_text(self.explanation))
+        object.__setattr__(self, "created_at", _clean_text(self.created_at))
+        object.__setattr__(self, "updated_at", _clean_text(self.updated_at))
+        object.__setattr__(self, "last_update_run_id", _optional_text(self.last_update_run_id))
+
+
+@dataclass
+class RunSignalsSummary:
+    """Observable run facts used by RunGuard and context reporting."""
+
+    workspace_changed: bool = False
+    affected_paths: list[str] = field(default_factory=list)
+    verification_status: RunSignalsVerificationStatus = "unknown"
+    last_error: dict[str, Any] | None = None
+    approval_required: bool = False
+    tool_unavailable: bool = False
+    cancelled: bool = False
+    counters: AgentRunCounters = field(default_factory=AgentRunCounters)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "workspace_changed",
+            _ensure_bool(self.workspace_changed, field_name="workspace_changed"),
         )
         object.__setattr__(
             self,
-            "completed_steps",
-            _clean_text_list(self.completed_steps, field_name="completed_steps"),
+            "affected_paths",
+            _clean_unique_text_list(self.affected_paths, field_name="affected_paths"),
         )
         object.__setattr__(
             self,
-            "pending_steps",
-            _clean_text_list(self.pending_steps, field_name="pending_steps"),
+            "verification_status",
+            _ensure_signal_verification_status(self.verification_status),
+        )
+        if self.last_error is not None and not isinstance(self.last_error, dict):
+            raise TypeError("RunSignalsSummary last_error must be a dict or None")
+        object.__setattr__(
+            self,
+            "last_error",
+            deepcopy(self.last_error) if self.last_error is not None else None,
         )
         object.__setattr__(
             self,
-            "blocked_steps",
-            _clean_text_list(self.blocked_steps, field_name="blocked_steps"),
+            "approval_required",
+            _ensure_bool(self.approval_required, field_name="approval_required"),
         )
         object.__setattr__(
             self,
-            "next_action",
-            _optional_text(self.next_action),
+            "tool_unavailable",
+            _ensure_bool(self.tool_unavailable, field_name="tool_unavailable"),
         )
         object.__setattr__(
             self,
-            "completion_satisfied",
-            _ensure_bool(self.completion_satisfied, field_name="completion_satisfied"),
+            "cancelled",
+            _ensure_bool(self.cancelled, field_name="cancelled"),
         )
-        object.__setattr__(
-            self,
-            "completion_reason",
-            _clean_text(self.completion_reason),
-        )
-        object.__setattr__(
-            self,
-            "attempts",
-            _copy_dict_list(self.attempts, field_name="attempts"),
-        )
-        object.__setattr__(
-            self,
-            "change_sets",
-            _copy_dict_list(self.change_sets, field_name="change_sets"),
-        )
-        object.__setattr__(
-            self,
-            "replans",
-            _copy_dict_list(self.replans, field_name="replans"),
-        )
-        object.__setattr__(
-            self,
-            "control_signal",
-            _copy_dict(self.control_signal, field_name="control_signal"),
-        )
-        object.__setattr__(
-            self,
-            "step_details",
-            _copy_nested_dict(self.step_details, field_name="step_details"),
-        )
+        if not isinstance(self.counters, AgentRunCounters):
+            raise TypeError("RunSignalsSummary counters must be AgentRunCounters")
 
 
 @dataclass
@@ -302,7 +306,8 @@ class AgentRunResult:
     affected_paths: list[str] = field(default_factory=list)
     workspace_changed: bool = False
     verification: list[RunVerification] = field(default_factory=list)
-    task: TaskSummary | None = None
+    plan: PlanSummary | None = None
+    signals: RunSignalsSummary = field(default_factory=RunSignalsSummary)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -351,8 +356,10 @@ class AgentRunResult:
             "verification",
             _copy_verification(self.verification),
         )
-        if self.task is not None and not isinstance(self.task, TaskSummary):
-            raise TypeError("AgentRunResult task must be TaskSummary or None")
+        if self.plan is not None and not isinstance(self.plan, PlanSummary):
+            raise TypeError("AgentRunResult plan must be PlanSummary or None")
+        if not isinstance(self.signals, RunSignalsSummary):
+            raise TypeError("AgentRunResult signals must be RunSignalsSummary")
 
 
 def _clean_text(value: object) -> str:
@@ -412,6 +419,13 @@ def _ensure_verification_status(value: object) -> RunVerificationStatus:
     if text not in _VERIFICATION_STATUSES:
         raise ValueError(f"Unknown verification status: {value}")
     return cast(RunVerificationStatus, text)
+
+
+def _ensure_signal_verification_status(value: object) -> RunSignalsVerificationStatus:
+    text = _clean_text(value)
+    if text not in _SIGNAL_VERIFICATION_STATUSES:
+        raise ValueError(f"Unknown run signal verification status: {value}")
+    return cast(RunSignalsVerificationStatus, text)
 
 
 def _clean_text_list(value: object, *, field_name: str) -> list[str]:
@@ -482,6 +496,20 @@ def _copy_verification(value: object) -> list[RunVerification]:
     return verification
 
 
+def _copy_plan_items(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise TypeError("PlanSummary items must be a list")
+    items: list[dict[str, str]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise TypeError(f"PlanSummary items[{index}] must be a dict")
+        step = _require_text(item.get("step"), field_name=f"items[{index}].step")
+        status = _require_text(item.get("status"), field_name=f"items[{index}].status")
+        item_id = _require_text(item.get("id"), field_name=f"items[{index}].id")
+        items.append({"id": item_id, "step": step, "status": status})
+    return items
+
+
 # 运行时事件类型枚举：覆盖 Agent 运行全生命周期的公共事件。
 RuntimeEventType = Literal[
     "agent_start",
@@ -492,33 +520,35 @@ RuntimeEventType = Literal[
     "message_update",
     "message_end",
     "model_retry_start",
-    "tool_execution_start",
-    "tool_execution_update",
-    "tool_approval_required",
-    "tool_approval_resolved",
-    "tool_approval_decision",
-    "tool_approval_result_replaced",
-    "tool_execution_grace",
-    "tool_execution_end",
-    "context_prepared",
+    "tool_started",
+    "tool_completed",
+    "tool_failed",
+    "tool_interrupted",
+    "context_projected",
+    "context_preflight",
+    "context_compacted",
+    "context_projection_failed",
     "context_freshness_checked",
+    "checkpoint_saved",
+    "checkpoint_restored",
+    "checkpoint_cleared",
     "memory_retrieved",
-    "memory_created",
-    "memory_promoted",
-    "memory_invalidated",
-    "memory_updated",
     "memory_warning",
-    "planning_discovery_started",
-    "planning_discovery_step",
-    "planning_discovery_completed",
-    "planning_synthesis_started",
-    "planning_synthesis_completed",
-    "task_plan_created",
-    "task_step_updated",
-    "task_decision",
-    "task_state_updated",
-    "task_state_warning",
-    "completion_checked",
+    "memory_candidate_created",
+    "memory_record_created",
+    "memory_record_approved",
+    "memory_record_edited",
+    "memory_record_disabled",
+    "memory_record_deleted",
+    "memory_record_superseded",
+    "plan_proposed",
+    "plan_approved",
+    "plan_rejected",
+    "plan_updated",
+    "plan_completed",
+    "plan_abandoned",
+    "plan_state_warning",
+    "run_guard_checked",
     "file_diff",
     "error",
 ]
@@ -532,33 +562,35 @@ _RUNTIME_EVENT_TYPES = frozenset(
         "message_update",
         "message_end",
         "model_retry_start",
-        "tool_execution_start",
-        "tool_execution_update",
-        "tool_approval_required",
-        "tool_approval_resolved",
-        "tool_approval_decision",
-        "tool_approval_result_replaced",
-        "tool_execution_grace",
-        "tool_execution_end",
-        "context_prepared",
+        "tool_started",
+        "tool_completed",
+        "tool_failed",
+        "tool_interrupted",
+        "context_projected",
+        "context_preflight",
+        "context_compacted",
+        "context_projection_failed",
         "context_freshness_checked",
+        "checkpoint_saved",
+        "checkpoint_restored",
+        "checkpoint_cleared",
         "memory_retrieved",
-        "memory_created",
-        "memory_promoted",
-        "memory_invalidated",
-        "memory_updated",
         "memory_warning",
-        "planning_discovery_started",
-        "planning_discovery_step",
-        "planning_discovery_completed",
-        "planning_synthesis_started",
-        "planning_synthesis_completed",
-        "task_plan_created",
-        "task_step_updated",
-        "task_decision",
-        "task_state_updated",
-        "task_state_warning",
-        "completion_checked",
+        "memory_candidate_created",
+        "memory_record_created",
+        "memory_record_approved",
+        "memory_record_edited",
+        "memory_record_disabled",
+        "memory_record_deleted",
+        "memory_record_superseded",
+        "plan_proposed",
+        "plan_approved",
+        "plan_rejected",
+        "plan_updated",
+        "plan_completed",
+        "plan_abandoned",
+        "plan_state_warning",
+        "run_guard_checked",
         "file_diff",
         "error",
     }
@@ -637,26 +669,18 @@ class ModelRetryStartEvent(AgentEventBase):
     error: ErrorInfo
 
 
-class ToolExecutionStartEvent(AgentEventBase):
-    type: Literal["tool_execution_start"]
+class ToolStartedEvent(AgentEventBase):
+    type: Literal["tool_started"]
     toolCallId: str
     toolName: str
     args: dict[str, Any]
 
 
-class ToolExecutionUpdateEvent(AgentEventBase):
-    type: Literal["tool_execution_update"]
+class ToolFinishedEvent(AgentEventBase):
+    type: Literal["tool_completed", "tool_failed", "tool_interrupted"]
     toolCallId: str
     toolName: str
-    args: dict[str, Any]
-    partialResult: ToolResult
-
-
-class ToolExecutionEndEvent(AgentEventBase):
-    type: Literal["tool_execution_end"]
-    toolCallId: str
-    toolName: str
-    result: ToolResult
+    result: Any
     status: ToolResultStatus
     isError: bool
     approved: bool
@@ -686,9 +710,8 @@ AgentEvent = (
     | MessageUpdateEvent
     | MessageEndEvent
     | ModelRetryStartEvent
-    | ToolExecutionStartEvent
-    | ToolExecutionUpdateEvent
-    | ToolExecutionEndEvent
+    | ToolStartedEvent
+    | ToolFinishedEvent
     | ErrorEvent
 )
 RuntimeEvent = AgentEvent
@@ -712,14 +735,15 @@ __all__ = [
     "MessageStartEvent",
     "MessageUpdateEvent",
     "ModelRetryStartEvent",
+    "PlanSummary",
     "RunVerification",
     "RunVerificationStatus",
+    "RunSignalsSummary",
+    "RunSignalsVerificationStatus",
     "RuntimeEvent",
     "RuntimeEventType",
-    "TaskSummary",
-    "ToolExecutionEndEvent",
-    "ToolExecutionStartEvent",
-    "ToolExecutionUpdateEvent",
+    "ToolFinishedEvent",
+    "ToolStartedEvent",
     "TurnEndEvent",
     "TurnStartEvent",
 ]

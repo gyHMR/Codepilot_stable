@@ -1,122 +1,78 @@
 from __future__ import annotations
 
-# 新手导读：core 包门面只放 V2 agent loop 主入口和稳定的核心构件。
-# 关注点：一次 run 从 AgentLoopInput 进入，通过 AgentLoopPorts 访问模型/工具/上下文，最终得到 AgentLoopOutcome。
-
-"""
-Codepilot core layer.
-
-The default public path is the V2 agent-loop spine:
-
-    AgentLoopInput + AgentLoopPorts -> run_agent_loop() -> AgentLoopOutcome
-
-Old core loop entry points have been removed so newcomers start from the V2
-execution contract.
-"""
+"""Core agent loop public surface."""
 
 from .contracts import (
+    AgentContext,
     AgentLoopInput,
     AgentLoopLimits,
     AgentLoopOutcome,
     AgentLoopPorts,
     AgentLoopStatus,
+    AgentMessage,
     AgentResumeInput,
     ContextPort,
+    ContextPreparationRequest,
     EventSink,
+    PreparedAgentContext,
     PreparedContext,
+    PrepareContextFn,
     RetryPolicy,
     RunCorrelation,
-    TaskStrategy,
+    ToolExecutionMode,
     WorkspaceEffects,
 )
-from .loop import AgentEventEmitter, resume_agent_loop, run_agent_loop
 from .model_step import convert_to_llm
-from .state import RunState, new_run_id
-from .task import (
-    COMPLETE_TASK_STEP_TOOL,
-    CompletionCheck,
-    ExecutionDecision,
-    PlanSource,
-    PlannedTaskStep,
-    PlanningBudget,
+from .plan import (
+    PlanItem,
+    PlanState,
+    PlanUpdate,
+    PlanUpdateItem,
+    PlanValidationError,
     PlanningBudgetProfile,
-    PlanningBudgetUsage,
-    PlanningDiscoveryReport,
-    PlanningPhase,
-    PlanningStatus,
-    TaskController,
-    TaskMode,
-    TaskModePolicy,
-    TaskPlanDraft,
-    TaskPlanner,
-    TaskPlanningState,
-    TaskState,
-    TaskStep,
-    build_task_state_from_payload,
-    budget_for_profile,
-    ensure_plan_source,
+    RunMode,
     ensure_planning_budget_profile,
-    ensure_task_mode,
-    policy_for_mode,
+    ensure_run_mode,
 )
-from .contracts import (
-    AgentContext,
-    AgentMessage,
-    ContextPreparationRequest,
-    PreparedAgentContext,
-    PrepareContextFn,
-    ToolExecutionMode,
-)
+from .run_guard import RunGuard, RunGuardDecision
+from .runner import AgentEventEmitter, maybe_await, resume_agent_loop, run_agent_loop
+from .state import RunState, new_run_id
 
 __all__ = [
+    "AgentContext",
     "AgentLoopInput",
     "AgentLoopLimits",
     "AgentLoopOutcome",
     "AgentLoopPorts",
     "AgentLoopStatus",
+    "AgentMessage",
     "AgentResumeInput",
     "ContextPort",
+    "ContextPreparationRequest",
     "EventSink",
+    "PreparedAgentContext",
     "PreparedContext",
+    "PrepareContextFn",
     "RetryPolicy",
     "RunCorrelation",
-    "TaskStrategy",
+    "ToolExecutionMode",
     "WorkspaceEffects",
+    "convert_to_llm",
+    "PlanItem",
+    "PlanState",
+    "PlanUpdate",
+    "PlanUpdateItem",
+    "PlanValidationError",
+    "PlanningBudgetProfile",
+    "RunMode",
+    "ensure_planning_budget_profile",
+    "ensure_run_mode",
+    "RunGuard",
+    "RunGuardDecision",
+    "AgentEventEmitter",
+    "maybe_await",
     "run_agent_loop",
     "resume_agent_loop",
-    "AgentEventEmitter",
-    "convert_to_llm",
     "RunState",
     "new_run_id",
-    "TaskController",
-    "PlanSource",
-    "TaskMode",
-    "TaskModePolicy",
-    "PlanningBudget",
-    "PlanningBudgetProfile",
-    "PlanningBudgetUsage",
-    "PlanningDiscoveryReport",
-    "PlanningPhase",
-    "PlanningStatus",
-    "TaskPlanningState",
-    "build_task_state_from_payload",
-    "budget_for_profile",
-    "ensure_plan_source",
-    "ensure_planning_budget_profile",
-    "ensure_task_mode",
-    "policy_for_mode",
-    "PlannedTaskStep",
-    "TaskPlanDraft",
-    "TaskPlanner",
-    "COMPLETE_TASK_STEP_TOOL",
-    "CompletionCheck",
-    "ExecutionDecision",
-    "TaskState",
-    "TaskStep",
-    "AgentContext",
-    "AgentMessage",
-    "ContextPreparationRequest",
-    "PreparedAgentContext",
-    "PrepareContextFn",
-    "ToolExecutionMode",
 ]

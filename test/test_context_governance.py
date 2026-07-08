@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def test_repository_tracker_detects_external_dirty_file_changes(tmp_path: Path) -> None:
-    from codepilot.sessions.context.repository_tracker import RepositoryTracker
+    from codepilot.sessions.context import RepositoryTracker
 
     tracked = tmp_path / "app.py"
     tracked.write_text("value = 1\n", encoding="utf-8", newline="\n")
@@ -28,7 +28,7 @@ def test_repository_tracker_detects_external_dirty_file_changes(tmp_path: Path) 
 
 
 def test_repository_tracker_ignores_codepilot_internal_artifacts(tmp_path: Path) -> None:
-    from codepilot.sessions.context.repository_tracker import RepositoryTracker
+    from codepilot.sessions.context import RepositoryTracker
 
     tracked = tmp_path / "app.py"
     tracked.write_text("value = 1\n", encoding="utf-8", newline="\n")
@@ -60,7 +60,7 @@ def test_repository_tracker_ignores_codepilot_internal_artifacts(tmp_path: Path)
 
 def test_context_state_records_reject_unknown_enum_values() -> None:
     import pytest
-    from codepilot.sessions.context.state import ActiveFile, ContextEvidence, FileSummary
+    from codepilot.sessions.context import ActiveFile, ContextEvidence, FileSummary
 
     with pytest.raises(ValueError, match="Unknown active file role"):
         ActiveFile(path="src/app.py", role="scratch", reason="bad role")
@@ -130,8 +130,8 @@ def test_context_freshness_notice_summarizes_stale_run_files(
     tmp_path: Path,
 ) -> None:
     from codepilot.protocols import TextContent, UserMessage
-    from codepilot.sessions.context.freshness import build_context_freshness_notice
-    from codepilot.sessions.storage import FreshnessResult
+    from codepilot.sessions.context import build_context_freshness_notice
+    from codepilot.sessions.store import FreshnessResult
 
     result = FreshnessResult(
         status="stale",
@@ -156,8 +156,8 @@ def test_context_freshness_notice_summarizes_stale_run_files(
 
 
 def test_context_freshness_notice_is_absent_for_valid_state(tmp_path: Path) -> None:
-    from codepilot.sessions.context.freshness import build_context_freshness_notice
-    from codepilot.sessions.storage import FreshnessResult
+    from codepilot.sessions.context import build_context_freshness_notice
+    from codepilot.sessions.store import FreshnessResult
 
     result = FreshnessResult(status="valid", workspace_path=str(tmp_path))
 
@@ -168,7 +168,7 @@ def test_session_context_state_caps_verification_only_evidence(
     tmp_path: Path,
 ) -> None:
     from codepilot.protocols import ToolResultMessage
-    from codepilot.sessions.context.state import SessionContextState
+    from codepilot.sessions.context import SessionContextState
 
     state = SessionContextState(workspace_dir=tmp_path)
     for index in range(90):
@@ -192,7 +192,7 @@ def test_session_context_state_promotes_successful_read_paths_to_active_targets(
     tmp_path: Path,
 ) -> None:
     from codepilot.protocols import TextContent, ToolResultMessage
-    from codepilot.sessions.context.state import SessionContextState
+    from codepilot.sessions.context import SessionContextState
 
     state = SessionContextState(workspace_dir=tmp_path)
 
@@ -216,7 +216,7 @@ def test_session_context_state_promotes_successful_read_paths_to_active_targets(
 
 
 def test_session_context_state_caps_active_files_by_relevance(tmp_path: Path) -> None:
-    from codepilot.sessions.context.state import SessionContextState
+    from codepilot.sessions.context import SessionContextState
 
     state = SessionContextState(workspace_dir=tmp_path, max_active_files=3)
     state.touch_file("docs/old.md", role="reference", reason="read")
@@ -232,7 +232,7 @@ def test_session_context_state_caps_active_files_by_relevance(tmp_path: Path) ->
 
 
 def test_session_context_state_never_prunes_recent_target_file(tmp_path: Path) -> None:
-    from codepilot.sessions.context.state import SessionContextState
+    from codepilot.sessions.context import SessionContextState
 
     state = SessionContextState(workspace_dir=tmp_path, max_active_files=2)
     state.touch_file("docs/reference.md", role="reference", reason="read")

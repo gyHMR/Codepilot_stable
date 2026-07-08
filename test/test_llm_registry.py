@@ -93,7 +93,6 @@ def test_runtime_assembly_explicitly_registers_builtin_providers(tmp_path) -> No
             model_id="deepseek-v4-pro",
             load_workspace_resources=False,
             memory_enabled=False,
-            task_control_enabled=False,
         )
     )
     session.controller.close()

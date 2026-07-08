@@ -1,15 +1,399 @@
 from __future__ import annotations
 
-# 新手导读：内置文件工具实现 ls/read/write/edit，并把路径边界和文件状态证据写入结果。
-# 关注点：重点看写入前后如何记录 affected_paths、workspace_changed 和 file_state。
+"""Built-in filesystem tools: ls, read, write, edit, apply_patch."""
 
-"""内置文件工具：ls（列目录）、read（读文件）、write（写文件）、edit（精确替换）。"""
-
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from codepilot.protocols import TextContent
-from codepilot.tools.workspace import WorkspaceSandbox, file_state_for_path
-from codepilot.tools.authoring import AgentTool, AgentToolResult
+from codepilot.tools.contracts import ToolCallRequest, ToolDefinition, ToolResult
+from codepilot.tools.registry import get_builtin_tool_metadata
+from codepilot.tools.sandbox import WorkspaceSandbox, file_state_for_path
+
+
+@dataclass(frozen=True)
+class _PatchEdit:
+    path: str
+    old_text: str
+    new_text: str
+
+
+def create_file_tools(
+    sandbox: WorkspaceSandbox,
+    *,
+    allow: Callable[[str], bool],
+    edit_require_unique_match: bool = True,
+) -> list[ToolDefinition]:
+    tools: list[ToolDefinition] = []
+    max_write_chars = 1_000_000
+
+    async def ls_tool(request: ToolCallRequest, signal=None, on_update=None) -> ToolResult:
+        _ = signal, on_update
+        params = request.arguments
+        path_text = str(params.get("path", "."))
+        max_entries = int(params.get("max_entries", 100))
+        target, error = _resolve_read_path(sandbox, path_text)
+        if error is not None:
+            return error
+        if not target.exists():
+            return _error_result(f"Path not found: {path_text}", "path_not_found")
+        if not target.is_dir():
+            return _error_result(f"Not a directory: {path_text}", "not_a_directory")
+        items = sorted(target.iterdir(), key=lambda path: path.name)[:max_entries]
+        lines = []
+        for item in items:
+            suffix = "/" if item.is_dir() else ""
+            size = "-" if item.is_dir() else str(item.stat().st_size)
+            lines.append(f"{item.name}{suffix}\t{size}")
+        rel = target.relative_to(sandbox.root).as_posix()
+        return ToolResult(
+            content=[TextContent(text="\n".join(lines) if lines else "(empty)")],
+            metadata={
+                "read_paths": [rel],
+                "output_quality": {"truncated": len(lines) >= max_entries},
+            },
+        )
+
+    async def read_tool(request: ToolCallRequest, signal=None, on_update=None) -> ToolResult:
+        _ = signal, on_update
+        params = request.arguments
+        path_text = str(params.get("path", ""))
+        if not path_text:
+            return _error_result("Missing path", "missing_path")
+        max_chars = int(params.get("max_chars", 4000))
+        offset = int(params.get("offset", 1))
+        limit = params.get("limit")
+        limit = int(limit) if limit is not None else None
+        target, error = _resolve_read_path(sandbox, path_text)
+        if error is not None:
+            return error
+        if not target.exists():
+            return _error_result(f"Path not found: {path_text}", "path_not_found")
+        if not target.is_file():
+            return _error_result(f"Not a file: {path_text}", "not_a_file")
+        try:
+            raw = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return _error_result(
+                f"File is not valid UTF-8 text: {path_text}",
+                "invalid_utf8",
+                metadata={"output_quality": _output_quality(decode_status="invalid_utf8", may_be_binary=True)},
+            )
+        lines = raw.splitlines()
+        start_index = min(max(offset, 1) - 1, len(lines))
+        end_index = len(lines) if limit is None else min(len(lines), start_index + max(limit, 1))
+        selected = lines[start_index:end_index]
+        rendered = "\n".join(
+            f"{line_no}\t{line}"
+            for line_no, line in enumerate(selected, start=start_index + 1)
+        )
+        char_truncated = len(rendered) > max_chars
+        if char_truncated:
+            rendered = rendered[:max_chars] + "\n...<truncated>..."
+        truncated = char_truncated or end_index < len(lines)
+        relative_path = target.relative_to(sandbox.root).as_posix()
+        state = file_state_for_path(sandbox.root, relative_path)
+        return ToolResult(
+            content=[TextContent(text=rendered or "(empty)")],
+            details={"file_state": state},
+            metadata={
+                "file_state": state,
+                "read_paths": [relative_path],
+                "start_line": start_index + 1 if selected else None,
+                "end_line": end_index if selected else None,
+                "total_lines": len(lines),
+                "truncated": truncated,
+                "char_truncated": char_truncated,
+                "output_quality": _output_quality(
+                    truncated=truncated,
+                    original_chars=len(raw),
+                    returned_chars=len(rendered),
+                ),
+            },
+        )
+
+    async def write_tool(request: ToolCallRequest, signal=None, on_update=None) -> ToolResult:
+        _ = signal, on_update
+        params = request.arguments
+        path_text = str(params.get("path", ""))
+        content = str(params.get("content", ""))
+        overwrite = bool(params.get("overwrite", True))
+        if not path_text:
+            return _error_result("Missing path", "missing_path")
+        if len(content) > max_write_chars:
+            return _error_result("Content is too large", "content_too_large")
+        target, error = _resolve_write_path(sandbox, path_text)
+        if error is not None:
+            return error
+        if target.exists() and not target.is_file():
+            return _error_result(f"Target is not a file: {path_text}", "target_not_file")
+        if target.exists() and not overwrite:
+            return _error_result(f"File exists: {path_text}", "file_exists")
+        try:
+            original = target.read_text(encoding="utf-8") if target.exists() else None
+        except UnicodeDecodeError:
+            return _error_result(f"Existing file is not valid UTF-8: {path_text}", "invalid_utf8")
+        relative_path = target.relative_to(sandbox.root).as_posix()
+        before_hash = _state_hash(sandbox.root, relative_path)
+        if original == content:
+            state = file_state_for_path(sandbox.root, relative_path)
+            return ToolResult(
+                content=[TextContent(text=f"File unchanged: {relative_path}")],
+                affected_paths=[relative_path],
+                workspace_changed=False,
+                diff_summary="No content change",
+                details={"changed": False, "file_state": state},
+                metadata={"file_state": state, "change_evidence": _change_evidence("unchanged", relative_path, before_hash, _state_hash(sandbox.root, relative_path))},
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8", newline="\n")
+        state = file_state_for_path(sandbox.root, relative_path)
+        action = "created" if original is None else "updated"
+        return ToolResult(
+            content=[TextContent(text=f"Wrote file: {relative_path}")],
+            affected_paths=[relative_path],
+            workspace_changed=True,
+            diff_summary=f"{action} {relative_path}: {len(original or '')} -> {len(content)} characters",
+            details={"changed": True, "action": action, "file_state": state},
+            metadata={
+                "file_state": state,
+                "change_evidence": _change_evidence(
+                    "create" if original is None else "update",
+                    relative_path,
+                    before_hash,
+                    str(state.get("sha256", "<missing>")),
+                ),
+            },
+        )
+
+    async def edit_tool(request: ToolCallRequest, signal=None, on_update=None) -> ToolResult:
+        _ = signal, on_update
+        params = request.arguments
+        edit = _PatchEdit(
+            path=str(params.get("path", "")),
+            old_text=str(params.get("old_text", "")),
+            new_text=str(params.get("new_text", "")),
+        )
+        replace_all = bool(params.get("replace_all", False))
+        occurrence_index = params.get("occurrence_index")
+        occurrence_index = int(occurrence_index) if occurrence_index is not None else None
+        expected_occurrences = params.get("expected_occurrences")
+        expected_occurrences = int(expected_occurrences) if expected_occurrences is not None else None
+        expected_hash = params.get("expected_file_hash")
+        return _apply_single_edit(
+            sandbox,
+            edit,
+            replace_all=replace_all,
+            occurrence_index=occurrence_index,
+            expected_occurrences=expected_occurrences,
+            expected_file_hash=str(expected_hash) if expected_hash is not None else None,
+            require_unique_match=edit_require_unique_match,
+            max_chars=max_write_chars,
+            label="Edited file",
+        )
+
+    async def apply_patch_tool(request: ToolCallRequest, signal=None, on_update=None) -> ToolResult:
+        _ = signal, on_update
+        params = request.arguments
+        raw_edits = params.get("edits")
+        if not isinstance(raw_edits, list) or not raw_edits:
+            return _error_result("edits must contain at least one edit", "invalid_patch")
+        if len(raw_edits) > 20:
+            return _error_result("apply_patch supports at most 20 edits", "patch_too_large")
+        edits: list[_PatchEdit] = []
+        for index, item in enumerate(raw_edits):
+            if not isinstance(item, dict):
+                return _error_result(f"edits[{index}] must be an object", "invalid_patch")
+            edit = _PatchEdit(
+                path=str(item.get("path", "")),
+                old_text=str(item.get("old_text", "")),
+                new_text=str(item.get("new_text", "")),
+            )
+            if not edit.path or edit.old_text == "":
+                return _error_result(f"edits[{index}] requires path and old_text", "invalid_patch")
+            edits.append(edit)
+        prepared: list[tuple[_PatchEdit, Any, str, str, str]] = []
+        for edit in edits:
+            target, error = _resolve_write_path(sandbox, edit.path)
+            if error is not None:
+                return error
+            if not target.exists() or not target.is_file():
+                return _error_result(f"Path not found or not file: {edit.path}", "path_not_file")
+            try:
+                original = target.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                return _error_result(f"File is not valid UTF-8: {edit.path}", "invalid_utf8")
+            count = original.count(edit.old_text)
+            if count != 1:
+                return _error_result(
+                    f"Patch for {edit.path} expected exactly one match, found {count}",
+                    "patch_match_count",
+                    metadata={"matches": count},
+                )
+            updated = original.replace(edit.old_text, edit.new_text, 1)
+            rel = target.relative_to(sandbox.root).as_posix()
+            before_hash = _state_hash(sandbox.root, rel)
+            prepared.append((edit, target, rel, updated, before_hash))
+        affected: list[str] = []
+        evidences = []
+        for _edit, target, rel, updated, before_hash in prepared:
+            target.write_text(updated, encoding="utf-8", newline="\n")
+            affected.append(rel)
+            evidences.append(
+                _change_evidence("update", rel, before_hash, _state_hash(sandbox.root, rel))
+            )
+        return ToolResult(
+            content=[TextContent(text=f"Applied patch edits: {len(prepared)}")],
+            affected_paths=affected,
+            workspace_changed=True,
+            diff_summary=f"applied {len(prepared)} patch edit(s)",
+            details={"edits": len(prepared)},
+            metadata={"change_evidence": evidences},
+        )
+
+    if allow("ls"):
+        tools.append(_tool("ls", "List Directory", "列出目录内容，返回文件名和大小。", _ls_schema(), ls_tool))
+    if allow("read"):
+        tools.append(_tool("read", "Read File", "读取文本文件内容。", _read_schema(), read_tool))
+    if allow("write"):
+        tools.append(_tool("write", "Write File", "写入文本文件。", _write_schema(), write_tool))
+    if allow("edit"):
+        tools.append(_tool("edit", "Edit File", "按 old_text -> new_text 替换文件内容。", _edit_schema(), edit_tool))
+    if allow("apply_patch"):
+        tools.append(_tool("apply_patch", "Apply Patch", "按结构化 edits 对多个文件执行唯一匹配替换。", _apply_patch_schema(), apply_patch_tool))
+    return tools
+
+
+def _apply_single_edit(
+    sandbox: WorkspaceSandbox,
+    edit: _PatchEdit,
+    *,
+    replace_all: bool,
+    occurrence_index: int | None,
+    expected_occurrences: int | None,
+    expected_file_hash: str | None,
+    require_unique_match: bool,
+    max_chars: int,
+    label: str,
+) -> ToolResult:
+    if not edit.path:
+        return _error_result("Missing path", "missing_path")
+    if edit.old_text == "":
+        return _error_result("old_text cannot be empty", "empty_old_text")
+    if len(edit.old_text) + len(edit.new_text) > max_chars:
+        return _error_result("Edit payload is too large", "content_too_large")
+    target, error = _resolve_write_path(sandbox, edit.path)
+    if error is not None:
+        return error
+    if not target.exists() or not target.is_file():
+        return _error_result(f"Path not found or not file: {edit.path}", "path_not_file")
+    try:
+        original = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return _error_result(f"File is not valid UTF-8: {edit.path}", "invalid_utf8")
+    relative_path = target.relative_to(sandbox.root).as_posix()
+    state = file_state_for_path(sandbox.root, relative_path)
+    before_hash = str(state.get("sha256", "<missing>"))
+    if expected_file_hash is not None and before_hash != expected_file_hash:
+        return _error_result(
+            "File changed since it was read; read it again before editing",
+            "stale_file",
+            metadata={"file_state": state},
+        )
+    count = original.count(edit.old_text)
+    if expected_occurrences is not None and count != expected_occurrences:
+        return _error_result(f"Expected {expected_occurrences} matches, found {count}", "unexpected_match_count")
+    if count == 0:
+        return _error_result("No match found", "no_match")
+    if not replace_all and count > 1 and occurrence_index is None and require_unique_match:
+        return _error_result("Multiple matches found; refine old_text or use occurrence_index", "multiple_matches")
+    if replace_all:
+        updated = original.replace(edit.old_text, edit.new_text)
+        replacements = count
+    elif occurrence_index is not None:
+        if occurrence_index < 1 or occurrence_index > count:
+            return _error_result("occurrence_index is out of range", "occurrence_out_of_range")
+        updated = _replace_nth(original, edit.old_text, edit.new_text, occurrence_index)
+        replacements = 1
+    else:
+        updated = original.replace(edit.old_text, edit.new_text, 1)
+        replacements = 1
+    target.write_text(updated, encoding="utf-8", newline="\n")
+    new_state = file_state_for_path(sandbox.root, relative_path)
+    return ToolResult(
+        content=[TextContent(text=f"{label}: {relative_path} (replacements={replacements})")],
+        affected_paths=[relative_path],
+        workspace_changed=updated != original,
+        diff_summary=f"edited {relative_path}: {replacements} replacement(s)",
+        details={"replacements": replacements, "file_state": new_state},
+        metadata={
+            "file_state": new_state,
+            "change_evidence": _change_evidence(
+                "update" if updated != original else "unchanged",
+                relative_path,
+                before_hash,
+                str(new_state.get("sha256", "<missing>")),
+            ),
+        },
+    )
+
+
+def _tool(name: str, label: str, description: str, parameters: dict[str, Any], execute) -> ToolDefinition:
+    metadata = get_builtin_tool_metadata(name)
+    if metadata is None:
+        raise ValueError(f"Missing builtin metadata for {name}")
+    return ToolDefinition(
+        name=name,
+        label=label,
+        description=description,
+        parameters=parameters,
+        metadata=metadata,
+        execute=execute,
+    )
+
+
+def _resolve_read_path(sandbox: WorkspaceSandbox, path_text: str) -> tuple[Any | None, ToolResult | None]:
+    try:
+        return sandbox.resolve_path(path_text), None
+    except ValueError:
+        return None, _error_result(f"Path escapes workspace boundary: {path_text}", "path_escapes_workspace")
+
+
+def _resolve_write_path(sandbox: WorkspaceSandbox, path_text: str) -> tuple[Any | None, ToolResult | None]:
+    try:
+        return sandbox.ensure_mutable_path(sandbox.resolve_path(path_text)), None
+    except ValueError as exc:
+        return None, _error_result(str(exc), "path_escapes_workspace")
+
+
+def _error_result(
+    message: str,
+    error_code: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> ToolResult:
+    return ToolResult(
+        content=[TextContent(text=message)],
+        status="error",
+        is_error=True,
+        error_code=error_code,
+        metadata={**_metadata_for_error(error_code), **(metadata or {})},
+    )
+
+
+def _metadata_for_error(error_code: str) -> dict[str, Any]:
+    hints = {
+        "path_not_found": "List or search the workspace to confirm the path.",
+        "path_not_file": "List or search the workspace to confirm the path.",
+        "path_escapes_workspace": "Use a path inside the current workspace.",
+        "stale_file": "Read the file again before editing.",
+        "multiple_matches": "Read a larger target region and provide unique old_text.",
+        "no_match": "Read the current file content before retrying.",
+        "invalid_patch": "Pass edits as [{path, old_text, new_text}].",
+    }
+    if error_code not in hints:
+        return {}
+    return {"recovery_hint": {"message": hints[error_code]}}
 
 
 def _output_quality(
@@ -27,160 +411,11 @@ def _output_quality(
         "original_chars": original_chars,
         "returned_chars": returned_chars,
         "may_be_binary": may_be_binary,
-        "reliable_for_reasoning": (
-            decode_status == "ok"
-            and not truncated
-            and not may_be_binary
-        ),
+        "reliable_for_reasoning": decode_status == "ok" and not truncated and not may_be_binary,
     }
 
 
-def _recovery_hint(error_code: str) -> dict[str, Any] | None:
-    hints: dict[str, tuple[str, str, str, bool]] = {
-        "invalid_utf8": (
-            "ask_user",
-            "The file is not valid UTF-8 text. Do not treat it as reliable source text.",
-            "inspect_non_text_file",
-            True,
-        ),
-        "stale_file": (
-            "retry_read",
-            "The file changed since it was read. Read it again before editing.",
-            "read_context",
-            False,
-        ),
-        "multiple_matches": (
-            "refine_edit",
-            "Read a larger target region and provide unique old_text or occurrence_index.",
-            "edit_file",
-            False,
-        ),
-        "no_match": (
-            "retry_read",
-            "Read the current file content before retrying the edit.",
-            "read_context",
-            False,
-        ),
-        "unexpected_match_count": (
-            "refine_edit",
-            "Re-read the target area and adjust the expected match count or old_text.",
-            "edit_file",
-            False,
-        ),
-        "path_not_found": (
-            "retry_read",
-            "List or search the workspace to confirm the current path.",
-            "read_context",
-            False,
-        ),
-        "path_not_file": (
-            "retry_read",
-            "List or search the workspace to confirm the current path.",
-            "read_context",
-            False,
-        ),
-        "path_escapes_workspace": (
-            "retry_read",
-            "Use a path inside the current workspace.",
-            "read_context",
-            False,
-        ),
-        "invalid_argument": (
-            "refine_edit",
-            "Correct the tool argument type or range before retrying.",
-            "refine_tool_args",
-            False,
-        ),
-    }
-    spec = hints.get(error_code)
-    if spec is None:
-        return None
-    category, message, suggested, requires_user = spec
-    return {
-        "category": category,
-        "message": message,
-        "suggested_action_intent": suggested,
-        "requires_user_confirmation": requires_user,
-    }
-
-
-def _metadata_for_error(error_code: str) -> dict[str, Any]:
-    metadata: dict[str, Any] = {}
-    hint = _recovery_hint(error_code)
-    if hint is not None:
-        metadata["recovery_hint"] = hint
-    if error_code == "invalid_utf8":
-        metadata["output_quality"] = _output_quality(
-            decode_status="invalid_utf8",
-            may_be_binary=True,
-        )
-    return metadata
-
-
-def _error_result(message: str, error_code: str, **details: Any) -> AgentToolResult:
-    return AgentToolResult(
-        content=[TextContent(text=message)],
-        status="error",
-        error_code=error_code,
-        details=details,
-        metadata=_metadata_for_error(error_code),
-    )
-
-
-def _coerce_int(
-    value: Any,
-    *,
-    name: str,
-    default: int | None = None,
-    minimum: int | None = None,
-) -> tuple[int | None, AgentToolResult | None]:
-    if value is None:
-        return default, None
-    if isinstance(value, bool):
-        return None, _error_result(
-            f"{name} must be an integer",
-            "invalid_argument",
-            argument=name,
-        )
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None, _error_result(
-            f"{name} must be an integer",
-            "invalid_argument",
-            argument=name,
-        )
-    if minimum is not None and parsed < minimum:
-        return None, _error_result(
-            f"{name} must be >= {minimum}",
-            "invalid_argument",
-            argument=name,
-            minimum=minimum,
-        )
-    return parsed, None
-
-
-def _resolve_path(
-    sandbox: WorkspaceSandbox,
-    path_text: str,
-) -> tuple[Any | None, AgentToolResult | None]:
-    try:
-        return sandbox.resolve_path(path_text), None
-    except ValueError:
-        return None, _error_result(
-            f"Path escapes workspace boundary: {path_text}",
-            "path_escapes_workspace",
-            path=path_text,
-        )
-
-
-def _change_evidence(
-    *,
-    change_kind: str,
-    path: str,
-    before_hash: str,
-    after_hash: str,
-) -> dict[str, Any]:
+def _change_evidence(change_kind: str, path: str, before_hash: str, after_hash: str) -> dict[str, Any]:
     return {
         "change_kind": change_kind,
         "before_hashes": {path: before_hash},
@@ -192,426 +427,101 @@ def _change_evidence(
     }
 
 
+def _state_hash(workspace: Any, path: str) -> str:
+    return str(file_state_for_path(workspace, path).get("sha256", "<missing>"))
+
+
 def _replace_nth(text: str, old: str, new: str, nth: int) -> str:
-    if nth <= 0:
-        raise ValueError("nth must be >= 1")
     start = 0
-    match_count = 0
-    while True:
-        idx = text.find(old, start)
-        if idx < 0:
+    for index in range(nth):
+        found = text.find(old, start)
+        if found < 0:
             raise ValueError("nth occurrence not found")
-        match_count += 1
-        if match_count == nth:
-            return text[:idx] + new + text[idx + len(old) :]
-        start = idx + len(old)
+        if index == nth - 1:
+            return text[:found] + new + text[found + len(old) :]
+        start = found + len(old)
+    return text
 
 
-def create_file_tools(
-    sandbox: WorkspaceSandbox,
-    *,
-    allow: Callable[[str], bool],
-    edit_require_unique_match: bool = True,
-) -> list[AgentTool]:
-    workspace = sandbox.root
-    tools: list[AgentTool] = []
-    max_write_chars = 1_000_000
+def _ls_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "max_entries": {"type": "integer"},
+        },
+        "required": [],
+        "additionalProperties": False,
+    }
 
-    async def ls_tool(tool_call_id: str, params: dict[str, Any], signal=None, on_update=None) -> AgentToolResult:
-        _ = tool_call_id, signal, on_update
-        path_text = str(params.get("path", "."))
-        max_entries, arg_error = _coerce_int(
-            params.get("max_entries"),
-            name="max_entries",
-            default=100,
-            minimum=1,
-        )
-        if arg_error is not None:
-            return arg_error
-        target, path_error = _resolve_path(sandbox, path_text)
-        if path_error is not None:
-            return path_error
-        if not target.exists():
-            return _error_result(f"Path not found: {path_text}", "path_not_found")
-        if not target.is_dir():
-            return _error_result(f"Not a directory: {path_text}", "not_a_directory")
 
-        items = sorted(target.iterdir(), key=lambda p: p.name)[:max_entries]
-        lines = []
-        for item in items:
-            suffix = "/" if item.is_dir() else ""
-            size = "-" if item.is_dir() else str(item.stat().st_size)
-            lines.append(f"{item.name}{suffix}\t{size}")
-        return AgentToolResult(content=[TextContent(text="\n".join(lines) if lines else "(empty)")], details={})
+def _read_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "max_chars": {"type": "integer"},
+            "offset": {"type": "integer"},
+            "limit": {"type": "integer"},
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    }
 
-    async def read_tool(tool_call_id: str, params: dict[str, Any], signal=None, on_update=None) -> AgentToolResult:
-        _ = tool_call_id, signal, on_update
-        path_text = str(params.get("path", ""))
-        if not path_text:
-            return _error_result("Missing path", "missing_path")
-        max_chars, arg_error = _coerce_int(
-            params.get("max_chars"),
-            name="max_chars",
-            default=4000,
-            minimum=1,
-        )
-        if arg_error is not None:
-            return arg_error
-        offset, arg_error = _coerce_int(
-            params.get("offset"),
-            name="offset",
-            default=1,
-            minimum=1,
-        )
-        if arg_error is not None:
-            return arg_error
-        limit, arg_error = _coerce_int(
-            params.get("limit"),
-            name="limit",
-            default=None,
-            minimum=1,
-        )
-        if arg_error is not None:
-            return arg_error
-        target, path_error = _resolve_path(sandbox, path_text)
-        if path_error is not None:
-            return path_error
-        if not target.exists():
-            return _error_result(f"Path not found: {path_text}", "path_not_found")
-        if not target.is_file():
-            return _error_result(f"Not a file: {path_text}", "not_a_file")
 
-        try:
-            raw = target.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return _error_result(
-                f"File is not valid UTF-8 text: {path_text}",
-                "invalid_utf8",
-            )
-        lines = raw.splitlines()
-        start_index = min(offset - 1, len(lines))
-        end_index = len(lines) if limit is None else min(len(lines), start_index + limit)
-        selected = lines[start_index:end_index]
-        rendered = "\n".join(
-            f"{line_no}\t{line}"
-            for line_no, line in enumerate(selected, start=offset)
-        )
-        truncated = end_index < len(lines)
-        char_truncated = len(rendered) > max_chars
-        if char_truncated:
-            rendered = rendered[:max_chars] + "\n...<truncated>..."
-            truncated = True
-        relative_path = target.relative_to(workspace).as_posix()
-        state = file_state_for_path(workspace, relative_path)
-        quality = _output_quality(
-            truncated=truncated,
-            original_chars=len(raw),
-            returned_chars=len(rendered),
-        )
-        return AgentToolResult(
-            content=[TextContent(text=rendered)],
-            details={"file_state": state},
-            metadata={
-                "file_state": state,
-                "read_paths": [relative_path],
-                "start_line": offset if selected else None,
-                "end_line": end_index if selected else None,
-                "total_lines": len(lines),
-                "truncated": truncated,
-                "char_truncated": char_truncated,
-                "output_quality": quality,
-            },
-        )
+def _write_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "content": {"type": "string"},
+            "overwrite": {"type": "boolean"},
+        },
+        "required": ["path", "content"],
+        "additionalProperties": False,
+    }
 
-    async def write_tool(tool_call_id: str, params: dict[str, Any], signal=None, on_update=None) -> AgentToolResult:
-        _ = tool_call_id, signal, on_update
-        path_text = str(params.get("path", ""))
-        content = str(params.get("content", ""))
-        overwrite = bool(params.get("overwrite", True))
-        if not path_text:
-            return _error_result("Missing path", "missing_path")
-        if len(content) > max_write_chars:
-            return _error_result(
-                f"Content exceeds {max_write_chars} characters",
-                "content_too_large",
-                content_chars=len(content),
-            )
 
-        target, path_error = _resolve_path(sandbox, path_text)
-        if path_error is not None:
-            return path_error
-        if target.exists() and not target.is_file():
-            return _error_result(
-                f"Target is not a file: {path_text}",
-                "target_not_file",
-            )
-        if target.exists() and not overwrite:
-            return _error_result(f"File exists: {path_text}", "file_exists")
-        try:
-            original = target.read_text(encoding="utf-8") if target.exists() else None
-        except UnicodeDecodeError:
-            return _error_result(
-                f"Existing file is not valid UTF-8: {path_text}",
-                "invalid_utf8",
-            )
-        changed = original != content
-        relative_path = target.relative_to(workspace).as_posix()
-        before_hash = (
-            file_state_for_path(workspace, relative_path).get("sha256", "<missing>")
-            if target.exists()
-            else "<missing>"
-        )
-        if not changed:
-            state = file_state_for_path(workspace, relative_path)
-            return AgentToolResult(
-                content=[TextContent(text=f"File unchanged: {relative_path}")],
-                affected_paths=[relative_path],
-                workspace_changed=False,
-                diff_summary="No content change",
-                details={"changed": False, "file_state": state},
-                metadata={
-                    "file_state": state,
-                    "change_evidence": _change_evidence(
-                        change_kind="unchanged",
-                        path=relative_path,
-                        before_hash=str(before_hash),
-                        after_hash=str(state.get("sha256", before_hash)),
-                    ),
-                },
-            )
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        action = "created" if original is None else "updated"
-        state = file_state_for_path(workspace, relative_path)
-        return AgentToolResult(
-            content=[TextContent(text=f"Wrote file: {relative_path}")],
-            affected_paths=[relative_path],
-            workspace_changed=True,
-            diff_summary=(
-                f"{action} {relative_path}: "
-                f"{len(original or '')} -> {len(content)} characters"
-            ),
-            details={"changed": True, "action": action, "file_state": state},
-            metadata={
-                "file_state": state,
-                "change_evidence": _change_evidence(
-                    change_kind="create" if original is None else "update",
-                    path=relative_path,
-                    before_hash=str(before_hash),
-                    after_hash=str(state.get("sha256", "<missing>")),
-                ),
-            },
-        )
+def _edit_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "old_text": {"type": "string"},
+            "new_text": {"type": "string"},
+            "replace_all": {"type": "boolean"},
+            "occurrence_index": {"type": "integer"},
+            "expected_occurrences": {"type": "integer"},
+            "expected_file_hash": {"type": "string"},
+        },
+        "required": ["path", "old_text", "new_text"],
+        "additionalProperties": False,
+    }
 
-    async def edit_tool(tool_call_id: str, params: dict[str, Any], signal=None, on_update=None) -> AgentToolResult:
-        _ = tool_call_id, signal, on_update
-        path_text = str(params.get("path", ""))
-        old_text = str(params.get("old_text", ""))
-        new_text = str(params.get("new_text", ""))
-        replace_all = bool(params.get("replace_all", False))
-        occurrence_index_raw = params.get("occurrence_index")
-        expected_occurrences_raw = params.get("expected_occurrences")
-        expected_file_hash = params.get("expected_file_hash")
-        if not path_text:
-            return _error_result("Missing path", "missing_path")
-        if old_text == "":
-            return _error_result("old_text cannot be empty", "empty_old_text")
-        occurrence_index, arg_error = _coerce_int(
-            occurrence_index_raw,
-            name="occurrence_index",
-            default=None,
-            minimum=1,
-        )
-        if arg_error is not None:
-            return arg_error
-        expected_occurrences, arg_error = _coerce_int(
-            expected_occurrences_raw,
-            name="expected_occurrences",
-            default=None,
-            minimum=0,
-        )
-        if arg_error is not None:
-            return arg_error
-        if len(old_text) + len(new_text) > max_write_chars:
-            return _error_result(
-                "Edit payload is too large",
-                "content_too_large",
-            )
-        target, path_error = _resolve_path(sandbox, path_text)
-        if path_error is not None:
-            return path_error
-        if not target.exists() or not target.is_file():
-            return _error_result(
-                f"Path not found or not file: {path_text}",
-                "path_not_file",
-            )
 
-        try:
-            original = target.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return _error_result(
-                f"File is not valid UTF-8: {path_text}",
-                "invalid_utf8",
-            )
-        current_state = file_state_for_path(workspace, path_text)
-        before_hash = str(current_state.get("sha256", "<missing>"))
-        if (
-            expected_file_hash is not None
-            and current_state.get("sha256") != str(expected_file_hash)
-        ):
-            return _error_result(
-                "File changed since it was read; read it again before editing",
-                "stale_file",
-                path=current_state.get("path"),
-                expected_file_hash=str(expected_file_hash),
-                actual_file_hash=current_state.get("sha256"),
-                file_state=current_state,
-            )
-        count = original.count(old_text)
-        if expected_occurrences is not None and count != expected_occurrences:
-            return _error_result(
-                f"Expected {expected_occurrences} matches, but found {count}",
-                "unexpected_match_count",
-                matches=count,
-                expected_occurrences=expected_occurrences,
-            )
-        if count == 0:
-            return _error_result(
-                "No match found",
-                "no_match",
-                replacements=0,
-            )
-        if not replace_all and count > 1 and occurrence_index is None and edit_require_unique_match:
-            return _error_result(
-                "Multiple matches found; set replace_all=true or provide more unique old_text",
-                "multiple_matches",
-                matches=count,
-            )
-        if replace_all:
-            updated = original.replace(old_text, new_text)
-            replaced = count
-        else:
-            if occurrence_index is not None:
-                if occurrence_index > count:
-                    return _error_result(
-                        f"occurrence_index={occurrence_index} is out of range (matches={count})",
-                        "occurrence_out_of_range",
-                        matches=count,
-                        occurrence_index=occurrence_index,
-                    )
-                updated = _replace_nth(original, old_text, new_text, occurrence_index)
-            else:
-                updated = original.replace(old_text, new_text, 1)
-            replaced = 1
-        target.write_text(updated, encoding="utf-8")
-        relative_path = target.relative_to(workspace).as_posix()
-        state = file_state_for_path(workspace, relative_path)
-        after_hash = str(state.get("sha256", "<missing>"))
-        return AgentToolResult(
-            content=[TextContent(text=f"Edited file: {relative_path} (replacements={replaced})")],
-            affected_paths=[relative_path],
-            workspace_changed=updated != original,
-            diff_summary=(
-                f"edited {relative_path}: {replaced} replacement"
-                f"{'s' if replaced != 1 else ''}"
-            ),
-            details={"replacements": replaced, "file_state": state},
-            metadata={
-                "file_state": state,
-                "change_evidence": _change_evidence(
-                    change_kind="update" if updated != original else "unchanged",
-                    path=relative_path,
-                    before_hash=before_hash,
-                    after_hash=after_hash,
-                ),
-            },
-        )
-
-    if allow("ls"):
-        tools.append(
-            AgentTool(
-                name="ls",
-                label="List Directory",
-                description="列出目录内容，返回文件名和大小。",
-                parameters={
+def _apply_patch_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "edits": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "相对 workspace 的目录路径"},
-                        "max_entries": {"type": "number", "description": "最多返回条目数，默认 100"},
-                    },
-                    "required": [],
-                    "additionalProperties": False,
-                },
-                execute=ls_tool,
-            )
-        )
-
-    if allow("read"):
-        tools.append(
-            AgentTool(
-                name="read",
-                label="Read File",
-                description="读取文本文件内容。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "相对 workspace 的文件路径"},
-                        "max_chars": {"type": "number", "description": "最大返回字符数，默认 4000"},
-                        "offset": {"type": "number", "description": "起始行，1-based，默认 1"},
-                        "limit": {"type": "number", "description": "最多读取行数"},
-                    },
-                    "required": ["path"],
-                    "additionalProperties": False,
-                },
-                execute=read_tool,
-            )
-        )
-
-    if allow("write"):
-        tools.append(
-            AgentTool(
-                name="write",
-                label="Write File",
-                description="写入文本文件。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "相对 workspace 的文件路径"},
-                        "content": {"type": "string", "description": "写入内容"},
-                        "overwrite": {"type": "boolean", "description": "是否覆盖已存在文件，默认 true"},
-                    },
-                    "required": ["path", "content"],
-                    "additionalProperties": False,
-                },
-                execute=write_tool,
-            )
-        )
-
-    if allow("edit"):
-        tools.append(
-            AgentTool(
-                name="edit",
-                label="Edit File",
-                description="按 old_text -> new_text 替换文件内容。",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "相对 workspace 的文件路径"},
-                        "old_text": {"type": "string", "description": "待替换原文"},
-                        "new_text": {"type": "string", "description": "替换后的新文本"},
-                        "replace_all": {"type": "boolean", "description": "是否替换全部匹配，默认 false"},
-                        "occurrence_index": {"type": "number", "description": "替换第几次匹配（1-based）"},
-                        "expected_occurrences": {"type": "number", "description": "期望 old_text 出现次数，不匹配则拒绝修改"},
-                        "expected_file_hash": {
-                            "type": "string",
-                            "description": "可选；最近一次 read 返回的 sha256，不一致时拒绝编辑",
-                        },
+                        "path": {"type": "string"},
+                        "old_text": {"type": "string"},
+                        "new_text": {"type": "string"},
                     },
                     "required": ["path", "old_text", "new_text"],
                     "additionalProperties": False,
                 },
-                execute=edit_tool,
-            )
-        )
+            }
+        },
+        "required": ["edits"],
+        "additionalProperties": False,
+    }
 
-    return tools
+
+__all__ = ["create_file_tools"]

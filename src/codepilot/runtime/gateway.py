@@ -8,7 +8,7 @@ from typing import Any, Callable
 from typing import TYPE_CHECKING
 
 from codepilot.core.contracts import AgentLoopOutcome, AgentLoopPorts, ContextPort
-from codepilot.core.loop import resume_agent_loop, run_agent_loop
+from codepilot.core.runner import resume_agent_loop, run_agent_loop
 from codepilot.sessions.contracts import (
     PreparedAgentRun,
     SessionCommandIntent,
@@ -18,7 +18,8 @@ from codepilot.sessions.contracts import (
     SessionView,
 )
 from codepilot.sessions.controller import SessionController
-from codepilot.tools.ports import ToolCatalogView
+from codepilot.protocols import RunSignalsSummary
+from codepilot.tools.contracts import ToolCatalogView
 
 from .actions import (
     ApprovalDecided,
@@ -34,7 +35,7 @@ from .actions import (
     RuntimeFrame,
     UserAction,
 )
-from .approvals import ApprovalRegistry
+from .approvals import ApprovalRegistry, ApprovalView
 from .builder import build_runtime_session
 from .opening import AppSessionView, SessionRef
 from .sessions import ActiveRunRegistry, RuntimeSession, RuntimeSessionStore
@@ -101,7 +102,7 @@ class RuntimeGateway:
             status=self._status_for(session, view),
             state=dict(view.context),
             commands=tuple(self._commands_for(session)),
-            pending_approvals=tuple(self._approvals.list(session_id)),
+            pending_approvals=tuple(self._pending_approvals_for(session)),
         )
 
     def close(self, session_id: str) -> None:
@@ -161,7 +162,8 @@ class RuntimeGateway:
         action: ApprovalDecided,
     ) -> AsyncIterator[RuntimeFrame]:
         transaction = self._approvals.get(action.approval_id)
-        if transaction is None:
+        checkpoint_approval = session.controller.pending_approval(action.approval_id)
+        if transaction is None and checkpoint_approval is None:
             yield FailedFrame(
                 error={
                     "code": "runtime.approval_not_found",
@@ -169,7 +171,7 @@ class RuntimeGateway:
                 }
             )
             return
-        if transaction.session_id != session.session_id:
+        if transaction is not None and transaction.session_id != session.session_id:
             yield FailedFrame(
                 error={
                     "code": "runtime.approval_session_mismatch",
@@ -204,7 +206,7 @@ class RuntimeGateway:
         self._approvals.pop(action.approval_id)
 
     def _cancel_run(self, session_id: str, action: RunCancelled) -> CancelledFrame:
-        active = self._active_runs.finish(session_id)
+        active = self._active_runs.cancel(session_id)
         return CancelledFrame(
             session_id=session_id,
             cancelled=active is not None,
@@ -221,7 +223,9 @@ class RuntimeGateway:
         event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
         def event_sink(event: dict[str, Any]) -> None:
-            event_queue.put_nowait(dict(event))
+            payload = dict(event)
+            session.controller.record_event(payload)
+            event_queue.put_nowait(payload)
 
         try:
             ports = self._ports_for(
@@ -230,6 +234,7 @@ class RuntimeGateway:
                 event_sink=event_sink,
             )
             task = asyncio.create_task(run_loop(ports))
+            self._active_runs.attach_task(session.session_id, task)
             while not task.done() or not event_queue.empty():
                 try:
                     event = await asyncio.wait_for(event_queue.get(), timeout=0.05)
@@ -238,8 +243,33 @@ class RuntimeGateway:
                 yield ProgressFrame(event=event)
             outcome = await task
             record = await session.controller.commit_run(prepared, outcome)
+        except asyncio.CancelledError:
+            outcome = AgentLoopOutcome(
+                run_id=prepared.run_id,
+                status="aborted",
+                stop_reason="aborted",
+                signals=RunSignalsSummary(cancelled=True),
+                error={
+                    "code": "runtime.cancelled",
+                    "message": "Run cancelled by user",
+                },
+            )
+            record = await session.controller.commit_run(prepared, outcome)
         except Exception as exc:
-            yield FailedFrame(error=_runtime_error_payload(exc))
+            error = _runtime_error_payload(exc)
+            outcome = AgentLoopOutcome(
+                run_id=prepared.run_id,
+                status="failed",
+                stop_reason="internal_error",
+                error=error,
+            )
+            try:
+                await session.controller.commit_run(prepared, outcome)
+            except Exception as commit_exc:
+                details = dict(error.get("details") or {})
+                details["commit_error"] = str(commit_exc)
+                error["details"] = details
+            yield FailedFrame(error=error)
             return
         finally:
             self._active_runs.finish(session.session_id)
@@ -283,7 +313,11 @@ class RuntimeGateway:
         tool_port = session.tool_port or self._tool_port
         if tool_port is None:
             return []
-        catalog = tool_port.catalog()
+        mode = session.controller.describe().current_mode
+        try:
+            catalog = tool_port.catalog(mode)
+        except TypeError:
+            catalog = tool_port.catalog()
         if isinstance(catalog, ToolCatalogView):
             return list(catalog.tools)
         if isinstance(catalog, dict):
@@ -292,6 +326,26 @@ class RuntimeGateway:
         if isinstance(catalog, (list, tuple)):
             return list(catalog)
         return [catalog]
+
+    def _pending_approvals_for(self, session: RuntimeSession) -> list[ApprovalView]:
+        by_id = {
+            view.approval_id: view
+            for view in self._approvals.list(session.session_id)
+        }
+        for item in session.controller.pending_approvals():
+            approval_id = _optional_text(item.get("approval_id"))
+            if approval_id is None or approval_id in by_id:
+                continue
+            by_id[approval_id] = ApprovalView(
+                approval_id=approval_id,
+                session_id=session.session_id,
+                run_id=_optional_text(item.get("run_id")) or "",
+                tool_call_id=_optional_text(item.get("id")) or "",
+                tool_name=_optional_text(item.get("name")) or "",
+                reason=_optional_text(item.get("reason")) or "",
+                risk_level=_optional_text(item.get("risk_level")) or "unknown",
+            )
+        return sorted(by_id.values(), key=lambda item: item.approval_id)
 
     def _register_derived_controller(
         self,
@@ -321,7 +375,7 @@ class RuntimeGateway:
                 permission_mode="workspace-write",
                 message_count=view.message_count,
                 leaf_id=leaf_id,
-                task_mode=view.task_mode,  # type: ignore[arg-type]
+                current_mode=view.current_mode,  # type: ignore[arg-type]
                 is_running=self._active_runs.is_running(session.session_id),
                 credential_source="unknown",
             )
@@ -332,7 +386,7 @@ class RuntimeGateway:
             permission_mode=info.permission_mode,
             message_count=view.message_count,
             leaf_id=leaf_id,
-            task_mode=view.task_mode,  # type: ignore[arg-type]
+            current_mode=view.current_mode,  # type: ignore[arg-type]
             is_running=self._active_runs.is_running(session.session_id),
             credential_source=info.credential_source,
             warnings=info.warnings,
@@ -354,6 +408,11 @@ class RuntimeGateway:
                 )
             )
         return commands
+
+
+def _optional_text(value: object) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
 
 
 def _runtime_error_payload(error: Any) -> dict[str, Any]:

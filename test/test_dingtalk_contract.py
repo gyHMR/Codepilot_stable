@@ -235,7 +235,7 @@ def test_dingtalk_approval_required_markdown_contains_commands() -> None:
 
     replies = render_event(
         {
-            "type": "tool_execution_end",
+            "type": "tool_interrupted",
             "toolName": "write_file",
             "status": "approval_required",
             "riskLevel": "high",

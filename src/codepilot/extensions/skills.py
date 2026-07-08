@@ -11,7 +11,7 @@ from typing import Any
 
 from codepilot.protocols import TextContent
 from codepilot.protocols.commands import RegisteredCommand
-from codepilot.tools import AgentTool, AgentToolResult, ToolMetadata
+from codepilot.tools import ToolCallRequest, ToolDefinition, ToolMetadata, ToolResult
 
 from .types import LoadedExtensions, SkillSpec
 
@@ -113,7 +113,7 @@ def _render_skill_index(skills: list[SkillSpec]) -> str:
     return "\n".join(lines)
 
 
-def _create_skill_loader_tool(skills: list[SkillSpec]) -> AgentTool:
+def _create_skill_loader_tool(skills: list[SkillSpec]) -> ToolDefinition:
     """创建模型可调用的 skill 正文加载工具。"""
 
     lookup: dict[str, SkillSpec] = {}
@@ -122,18 +122,17 @@ def _create_skill_loader_tool(skills: list[SkillSpec]) -> AgentTool:
         lookup[_skill_lookup_key(skill.command_name)] = skill
 
     async def _execute(
-        tool_call_id: str,
-        params: dict[str, Any],
+        request: ToolCallRequest,
         signal: Any | None = None,
         on_update: Any | None = None,
-    ) -> AgentToolResult:
+    ) -> ToolResult:
         _ = signal, on_update
-        raw_name = params.get("name", "") if isinstance(params, dict) else ""
+        raw_name = request.arguments.get("name", "")
         skill = lookup.get(_skill_lookup_key(raw_name))
         if skill is None:
             available = [skill.command_name for skill in skills]
-            return AgentToolResult(
-                tool_call_id=tool_call_id,
+            return ToolResult(
+                tool_call_id=request.tool_call_id,
                 tool_name=SKILL_LOADER_TOOL_NAME,
                 content=[
                     TextContent(
@@ -152,8 +151,8 @@ def _create_skill_loader_tool(skills: list[SkillSpec]) -> AgentTool:
                     "available": available,
                 },
             )
-        return AgentToolResult(
-            tool_call_id=tool_call_id,
+        return ToolResult(
+            tool_call_id=request.tool_call_id,
             tool_name=SKILL_LOADER_TOOL_NAME,
             content=[TextContent(text=_render_loaded_skill(skill))],
             details={
@@ -163,7 +162,7 @@ def _create_skill_loader_tool(skills: list[SkillSpec]) -> AgentTool:
             },
         )
 
-    return AgentTool(
+    return ToolDefinition(
         name=SKILL_LOADER_TOOL_NAME,
         label="Load Skill",
         description=(
@@ -190,7 +189,7 @@ def _create_skill_loader_tool(skills: list[SkillSpec]) -> AgentTool:
             exclusive=False,
             requires_approval=False,
             risk_level="low",
-            resource_scope=("skill",),
+            scopes=("read", "plan", "build"),
             network_access=False,
             credential_required=False,
             extra={"capabilities": ["skill.load"]},

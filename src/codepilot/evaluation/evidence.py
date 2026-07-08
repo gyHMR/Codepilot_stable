@@ -17,7 +17,9 @@ from codepilot.observability import RunTrace
 class ContextEvidence:
     selected_items: list[dict[str, Any]] = field(default_factory=list)
     stale_items: list[str] = field(default_factory=list)
+    tokens_before: int = 0
     tokens_after: int = 0
+    sections: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,8 @@ class EvalEvidence:
     module: str
     task_passed: bool = False
     expected: dict[str, Any] = field(default_factory=dict)
+    variant_passed: dict[str, bool] = field(default_factory=dict)
+    variant_context_tokens: dict[str, dict[str, int]] = field(default_factory=dict)
     contexts: list[ContextEvidence] = field(default_factory=list)
     tools: list[ToolCallEvidence] = field(default_factory=list)
     steps: list[TaskStepEvidence] = field(default_factory=list)
@@ -69,7 +73,9 @@ def evidence_from_traces(
         ContextEvidence(
             selected_items=list(context.selected_items),
             stale_items=list(context.stale_items),
+            tokens_before=context.tokens_before,
             tokens_after=context.tokens_after,
+            sections=list(context.sections),
         )
         for trace in traces
         for context in trace.contexts
@@ -90,14 +96,15 @@ def evidence_from_traces(
     ]
     steps = [
         TaskStepEvidence(
-            step_id=task.step_id,
-            title=task.step_title,
-            status=task.step_status,
-            evidence_refs=list(task.evidence_refs),
+            step_id=str(item.get("id", "")),
+            title=str(item.get("step", "")),
+            status=str(item.get("status", "")),
+            evidence_refs=[],
         )
         for trace in traces
-        for task in trace.tasks
-        if task.step_id or task.step_title
+        for plan in trace.plans
+        for item in plan.items
+        if item.get("id") or item.get("step")
     ]
     memory_ids = sorted(
         {

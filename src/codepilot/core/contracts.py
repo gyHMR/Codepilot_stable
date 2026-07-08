@@ -13,23 +13,17 @@ from codepilot.protocols import (
     AssistantMessage,
     ContextReport,
     Message,
+    PlanSummary,
+    RunSignalsSummary,
     RunVerification,
-    TaskSummary,
     TextContent,
     Tool,
     ToolResultMessage,
     Usage,
     UserMessage,
 )
-from codepilot.tools.ports import ToolInterruption, ToolPort
-from .task import (
-    PlanningBudgetProfile,
-    TaskMode,
-    TaskPlanningState,
-    ensure_planning_budget_profile,
-    ensure_task_mode,
-    task_planning_state_from_mapping,
-)
+from codepilot.tools.contracts import ToolInterruption, ToolPort
+from .plan import RunMode, ensure_run_mode, plan_state_to_dict
 
 
 ToolExecutionMode = Literal["sequential", "parallel"]
@@ -43,20 +37,20 @@ class AgentContext:
     system_prompt: str
     messages: list[AgentMessage]
     tools: list[Tool] = field(default_factory=list)
-    task_state: dict[str, object] | None = None
-    task_signal: dict[str, object] | None = None
+    plan_state: dict[str, object] | None = None
+    run_signals: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         self.system_prompt = _clean_core_text(self.system_prompt)
         self.messages = _copy_messages(self.messages, field_name="messages")
         self.tools = _copy_tools(self.tools, field_name="tools")
-        self.task_state = _copy_optional_dict(
-            self.task_state,
-            field_name="task_state",
+        self.plan_state = _copy_optional_dict(
+            self.plan_state,
+            field_name="plan_state",
         )
-        self.task_signal = _copy_optional_dict(
-            self.task_signal,
-            field_name="task_signal",
+        self.run_signals = _copy_optional_dict(
+            self.run_signals,
+            field_name="run_signals",
         )
 
 
@@ -160,46 +154,6 @@ class RetryPolicy:
 
 
 @dataclass(frozen=True)
-class TaskStrategy:
-    enabled: bool = False
-    mode: TaskMode = "build"
-    goal: str | None = None
-    steps: tuple[Any, ...] = ()
-    planning: TaskPlanningState | None = None
-    planning_budget_profile: PlanningBudgetProfile = "balanced"
-    max_replans_per_run: int | None = None
-    task_state: dict[str, object] | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "enabled", bool(self.enabled))
-        object.__setattr__(self, "mode", ensure_task_mode(self.mode))
-        object.__setattr__(self, "goal", _optional_text(self.goal))
-        object.__setattr__(self, "steps", tuple(self.steps or ()))
-        if self.planning is not None and not isinstance(self.planning, TaskPlanningState):
-            object.__setattr__(
-                self,
-                "planning",
-                task_planning_state_from_mapping(self.planning),
-            )
-        object.__setattr__(
-            self,
-            "planning_budget_profile",
-            ensure_planning_budget_profile(self.planning_budget_profile),
-        )
-        object.__setattr__(
-            self,
-            "max_replans_per_run",
-            _positive_int_or_none(self.max_replans_per_run),
-        )
-        if self.task_state is not None:
-            object.__setattr__(
-                self,
-                "task_state",
-                dict(self.task_state),
-            )
-
-
-@dataclass(frozen=True)
 class AgentLoopInput:
     run_id: str
     correlation: RunCorrelation
@@ -208,12 +162,15 @@ class AgentLoopInput:
     context: PreparedContext = field(default_factory=PreparedContext)
     model: ModelDescriptor = field(default_factory=lambda: ModelDescriptor(provider="unknown", model_id="unknown"))
     tools: list[Any] = field(default_factory=list)
-    task_strategy: TaskStrategy = field(default_factory=TaskStrategy)
+    mode: RunMode = "build"
+    plan_state: dict[str, object] | None = None
     limits: AgentLoopLimits = field(default_factory=AgentLoopLimits)
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "context", _prepared_context(self.context))
+        object.__setattr__(self, "mode", ensure_run_mode(self.mode))
+        object.__setattr__(self, "plan_state", plan_state_to_dict(self.plan_state))
 
 
 @dataclass(frozen=True)
@@ -227,12 +184,23 @@ class AgentResumeInput:
     approval_id: str | None = None
     decision: str | None = None
     reason: str = ""
-    task_strategy: TaskStrategy = field(default_factory=TaskStrategy)
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    arguments: dict[str, Any] = field(default_factory=dict)
+    mode: RunMode = "build"
+    plan_state: dict[str, object] | None = None
     limits: AgentLoopLimits = field(default_factory=AgentLoopLimits)
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "context", _prepared_context(self.context))
+        object.__setattr__(self, "mode", ensure_run_mode(self.mode))
+        object.__setattr__(self, "plan_state", plan_state_to_dict(self.plan_state))
+        object.__setattr__(self, "tool_call_id", _optional_text(self.tool_call_id))
+        object.__setattr__(self, "tool_name", _optional_text(self.tool_name))
+        if not isinstance(self.arguments, dict):
+            raise TypeError("AgentResumeInput arguments must be a dict")
+        object.__setattr__(self, "arguments", deepcopy(self.arguments))
 
 
 @dataclass(frozen=True)
@@ -262,7 +230,8 @@ class AgentLoopOutcome:
     verification: list[RunVerification] = field(default_factory=list)
     workspace_effects: WorkspaceEffects = field(default_factory=WorkspaceEffects)
     events: list[AgentEvent] = field(default_factory=list)
-    task: TaskSummary | None = None
+    plan: PlanSummary | None = None
+    signals: RunSignalsSummary = field(default_factory=RunSignalsSummary)
     error: Any = None
 
     @property
@@ -297,12 +266,6 @@ def _non_negative_int(value: object, *, default: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return default
     return max(0, value)
-
-
-def _positive_int_or_none(value: object) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value if value > 0 else None
 
 
 def _optional_text(value: object) -> str | None:
@@ -372,7 +335,6 @@ __all__ = [
     "PrepareContextFn",
     "RetryPolicy",
     "RunCorrelation",
-    "TaskStrategy",
     "ToolExecutionMode",
     "WorkspaceEffects",
 ]

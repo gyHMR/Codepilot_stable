@@ -181,10 +181,23 @@ class ContextView:
     """本轮模型调用实际消费的分层上下文视图。"""
 
     system: list[str] = field(default_factory=list)
-    task_state: list[str] = field(default_factory=list)
+    task_plan: list[str] = field(default_factory=list)
     working_set: list[str] = field(default_factory=list)
     memory: list[str] = field(default_factory=list)
     conversation: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RunnerPreflightReport:
+    """每次模型请求前对消息链做的机械修复和裁剪。"""
+
+    orphan_tool_results_dropped: int = 0
+    missing_tool_results_backfilled: int = 0
+    tool_outputs_snipped: int = 0
+    snipped_messages: int = 0
+
+    def to_dict(self) -> dict[str, int]:
+        return asdict(self)
 
 
 @dataclass
@@ -216,6 +229,7 @@ class ContextReport:
     artifact_refs: list[ContextArtifactRef] = field(default_factory=list)
     tokens_by_layer: dict[str, int] = field(default_factory=dict)
     compact_summary: str = ""
+    runner_preflight: RunnerPreflightReport = field(default_factory=RunnerPreflightReport)
     prefix_hash: str | None = None
     dynamic_hash: str | None = None
     estimation: dict[str, Any] = field(default_factory=dict)
@@ -263,4 +277,5 @@ __all__ = [
     "DroppedContextReason",
     "RepositoryDelta",
     "RepositorySnapshot",
+    "RunnerPreflightReport",
 ]

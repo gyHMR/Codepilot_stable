@@ -112,7 +112,7 @@ def test_cli_defaults_leave_runtime_config_unspecified() -> None:
     assert args.prompt == "hello"
     assert args.model is None
     assert args.permission_mode is None
-    assert args.task_mode is None
+    assert args.current_mode is None
 
 
 def test_cli_interactive_uses_runtime_deferred_approval_path(tmp_path, monkeypatch) -> None:
@@ -191,8 +191,8 @@ def test_config_check_and_show_use_sanitized_human_output(tmp_path, capsys) -> N
 
 
 def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> None:
-    from codepilot.sessions.storage import load_session_open_metadata
-    from codepilot.sessions.storage import SessionStore
+    from codepilot.sessions.store import load_session_open_metadata
+    from codepilot.sessions.store import SessionStore
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -216,8 +216,8 @@ def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> Non
     assert load_session_open_metadata(tmp_path, "session_restore") is not None
     assert resolved.model.provider == "deepseek"
     assert resolved.model.id == "deepseek-v4-pro"
-    assert config.system_prompt == "restored prompt"
-    assert config.sources["system_prompt"].kind == "session"
+    assert config.system_prompt == "workspace prompt"
+    assert config.sources["system_prompt"].kind == "project"
 
 
 def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> None:
@@ -227,7 +227,7 @@ def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> 
         json.dumps(
             {
                 "retry_enabled": True,
-                "read_only_mode": True,
+                "tool_permission_mode": "ask",
                 "block_dangerous_bash": True,
                 "prompt_debug_sources": True,
                 "bash_allow_patterns": ["pytest"],
@@ -241,7 +241,7 @@ def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> 
         SessionOpenIntent(
             workspace_dir=tmp_path,
             retry_enabled=False,
-            read_only_mode=False,
+            tool_permission_mode="workspace-write",
             block_dangerous_bash=False,
             prompt_debug_sources=False,
             bash_allow_patterns=[],
@@ -250,7 +250,7 @@ def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> 
     )
 
     assert config.retry_enabled is False
-    assert config.read_only_mode is False
+    assert config.tool_permission_mode == "workspace-write"
     assert config.block_dangerous_bash is False
     assert config.prompt_debug_sources is False
     assert config.bash_allow_patterns == []
@@ -277,18 +277,18 @@ def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
     assert config.sources["max_retries"].kind == "default"
 
 
-def test_workspace_settings_can_select_task_mode(tmp_path) -> None:
+def test_workspace_settings_can_select_current_mode(tmp_path) -> None:
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
     (root / "settings.json").write_text(
-        json.dumps({"task_mode": "plan"}),
+        json.dumps({"current_mode": "plan"}),
         encoding="utf-8",
     )
 
     config = load_runtime_config(SessionOpenIntent(workspace_dir=tmp_path))
 
-    assert config.task_mode == "plan"
-    assert config.sources["task_mode"].kind == "project"
+    assert config.current_mode == "plan"
+    assert config.sources["current_mode"].kind == "project"
 
 
 def test_workspace_settings_can_select_planning_budget_profile(tmp_path) -> None:
@@ -301,48 +301,50 @@ def test_workspace_settings_can_select_planning_budget_profile(tmp_path) -> None
 
     config = load_runtime_config(SessionOpenIntent(workspace_dir=tmp_path))
 
-    assert config.task_mode == "build"
+    assert config.current_mode == "build"
     assert config.planning_budget_profile == "wide"
     assert config.sources["planning_budget_profile"].kind == "project"
 
 
-def test_read_task_mode_forces_read_only_permission(tmp_path) -> None:
+def test_read_current_mode_forces_read_only_permission(tmp_path) -> None:
     config = load_runtime_config(
-        SessionOpenIntent(workspace_dir=tmp_path, task_mode="read")
+        SessionOpenIntent(workspace_dir=tmp_path, current_mode="read")
     )
 
-    assert config.task_mode == "read"
-    assert config.read_only_mode is True
+    assert config.current_mode == "read"
     assert config.tool_permission_mode == "read-only"
 
 
-def test_read_task_mode_rejects_workspace_write_override(tmp_path) -> None:
-    with pytest.raises(ValueError, match="task_mode=read"):
-        load_runtime_config(
-            SessionOpenIntent(
-                workspace_dir=tmp_path,
-                task_mode="read",
-                tool_permission_mode="workspace-write",
-            ),
-        )
-
-
-def test_plan_task_mode_forces_read_only_permission(tmp_path) -> None:
+def test_read_current_mode_forces_workspace_write_override_to_read_only(tmp_path) -> None:
     config = load_runtime_config(
-        SessionOpenIntent(workspace_dir=tmp_path, task_mode="plan")
+        SessionOpenIntent(
+            workspace_dir=tmp_path,
+            current_mode="read",
+            tool_permission_mode="workspace-write",
+        ),
     )
 
-    assert config.task_mode == "plan"
-    assert config.read_only_mode is True
+    assert config.current_mode == "read"
     assert config.tool_permission_mode == "read-only"
 
 
-def test_plan_task_mode_rejects_workspace_write_override(tmp_path) -> None:
-    with pytest.raises(ValueError, match="task_mode=plan"):
-        load_runtime_config(
-            SessionOpenIntent(
-                workspace_dir=tmp_path,
-                task_mode="plan",
-                tool_permission_mode="workspace-write",
-            ),
-        )
+def test_plan_current_mode_forces_read_only_permission(tmp_path) -> None:
+    config = load_runtime_config(
+        SessionOpenIntent(workspace_dir=tmp_path, current_mode="plan")
+    )
+
+    assert config.current_mode == "plan"
+    assert config.tool_permission_mode == "read-only"
+
+
+def test_plan_current_mode_forces_workspace_write_override_to_read_only(tmp_path) -> None:
+    config = load_runtime_config(
+        SessionOpenIntent(
+            workspace_dir=tmp_path,
+            current_mode="plan",
+            tool_permission_mode="workspace-write",
+        ),
+    )
+
+    assert config.current_mode == "plan"
+    assert config.tool_permission_mode == "read-only"
