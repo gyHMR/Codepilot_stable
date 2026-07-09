@@ -69,26 +69,39 @@ def test_context_governor_prepares_linear_context_with_memory_and_artifacts(
                         verification={"status": "failed"},
                     ),
                 ],
+                mode="build",
                 plan_state={
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "plan_id": "plan_1",
+                    "owner_run_id": "run_1",
                     "status": "active",
                     "approval_state": "approved",
                     "origin_mode": "build",
                     "objective": "Fix failing tests.",
+                    "summary": "Fix the failing test suite with a focused change.",
                     "items": [
                         {
                             "id": "item_1",
                             "step": "Fix failing tests.",
+                            "details": "Locate and repair the failing implementation.",
+                            "verification": "Run the focused tests.",
                             "status": "in_progress",
                         }
                     ],
+                    "revision": 1,
                     "explanation": "",
                     "created_at": "2026-01-01T00:00:00+00:00",
                     "updated_at": "2026-01-01T00:00:00+00:00",
-                    "last_update_run_id": "run_1",
+                    "completed_at": None,
+                    "completion_source": None,
                 },
                 run_signals={"verification_status": "failed"},
+                runtime_state={
+                    "run_id": "run_1",
+                    "mode": "build",
+                    "checkpoint_phase": "running",
+                    "mode_policy": "Execute the approved plan.",
+                },
             ),
             ContextPreparationRequest(
                 session_id="session_1",
@@ -98,7 +111,10 @@ def test_context_governor_prepares_linear_context_with_memory_and_artifacts(
         )
     )
 
-    assert "## Plan Brief" in prepared.system_prompt
+    assert "## Mode Policy" in prepared.system_prompt
+    assert "## Runtime State" in prepared.system_prompt
+    assert "## Task Plan" in prepared.system_prompt
+    assert "Approved Execution Contract" in prepared.system_prompt
     assert "Fix failing tests." in prepared.system_prompt
     assert "Run pytest from the repo root." in prepared.system_prompt
     assert prepared.report.context_view is not None

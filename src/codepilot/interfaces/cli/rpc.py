@@ -26,6 +26,7 @@ from codepilot.runtime.actions import (
     ProgressFrame,
     PromptSubmitted,
     RunFinishedFrame,
+    RunPausedFrame,
 )
 from codepilot.runtime.gateway import RuntimeGateway
 
@@ -396,6 +397,10 @@ def handle_rpc_run_frame(
         }
     if isinstance(frame, RunFinishedFrame):
         return run_record_rpc_data(frame.record)
+    if isinstance(frame, RunPausedFrame):
+        result = run_record_rpc_data(frame.record)
+        result["checkpoint"] = dict(frame.checkpoint)
+        return result
     if isinstance(frame, FailedFrame):
         raise runtime_error_from_frame(frame.error)
     return current_result

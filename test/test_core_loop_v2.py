@@ -705,9 +705,23 @@ def test_core_loop_injects_plan_context_and_returns_plan_summary() -> None:
                     message=AssistantMessage(content=[TextContent(text="done")])
                 )
 
-        plan = PlanState.new(objective="ship the plan migration", origin_mode="build")
+        plan = PlanState.new(
+            objective="ship the plan migration",
+            origin_mode="build",
+            run_id="run_plan",
+        )
         plan = plan.apply_update(
-            PlanUpdate(items=(PlanUpdateItem(step="Read code", status="in_progress"),)),
+            PlanUpdate(
+                summary="Read and migrate the plan code.",
+                items=(
+                    PlanUpdateItem(
+                        step="Read code",
+                        details="Inspect the current implementation.",
+                        verification="Confirm the relevant symbols.",
+                        status="completed",
+                    ),
+                ),
+            ),
             mode="build",
             run_id="run_plan",
         )
@@ -749,12 +763,27 @@ def test_core_loop_plan_mode_keeps_soft_plan_proposed() -> None:
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, TextContent
 
-        plan = PlanState.new(objective="refactor by plan", origin_mode="plan")
+        plan = PlanState.new(
+            objective="refactor by plan",
+            origin_mode="plan",
+            run_id="run_plan_task",
+        )
         plan = plan.apply_update(
             PlanUpdate(
+                summary="Inspect the target and apply a focused refactor.",
                 items=(
-                    PlanUpdateItem(step="Inspect target files", status="pending"),
-                    PlanUpdateItem(step="Apply focused refactor", status="pending"),
+                    PlanUpdateItem(
+                        step="Inspect target files",
+                        details="Read the files that own the behavior.",
+                        verification="Identify the exact edit points.",
+                        status="pending",
+                    ),
+                    PlanUpdateItem(
+                        step="Apply focused refactor",
+                        details="Implement the agreed behavior.",
+                        verification="Run focused tests.",
+                        status="pending",
+                    ),
                 )
             ),
             mode="plan",
@@ -803,9 +832,23 @@ def test_core_loop_preserves_plan_summary_when_waiting_for_approval() -> None:
         from codepilot.protocols import AssistantMessage, ToolCall
         from codepilot.tools.contracts import ToolInterruption, ToolObservation, ToolRiskView
 
-        plan = PlanState.new(objective="edit the file", origin_mode="build")
+        plan = PlanState.new(
+            objective="edit the file",
+            origin_mode="build",
+            run_id="run_approval_plan",
+        )
         plan = plan.apply_update(
-            PlanUpdate(items=(PlanUpdateItem(step="Edit file", status="in_progress"),)),
+            PlanUpdate(
+                summary="Edit and verify the target file.",
+                items=(
+                    PlanUpdateItem(
+                        step="Edit file",
+                        details="Apply the required source change.",
+                        verification="Inspect the diff.",
+                        status="in_progress",
+                    ),
+                ),
+            ),
             mode="build",
             run_id="run_approval_plan",
         )

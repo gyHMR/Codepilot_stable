@@ -37,6 +37,7 @@ from codepilot.protocols import (
     ToolResultMessage,
     UserMessage,
 )
+from codepilot.core.plan import MAX_PLAN_ITEMS
 from codepilot.sessions.memory import MemoryQuery, MemoryRecall, render_memory
 from codepilot.sessions.plan_state import PlanStateStore
 from codepilot.sessions.store import SessionStore, build_repository_bootstrap
@@ -48,16 +49,16 @@ ContextEvidenceKind = Literal["tool_result", "verification", "observation"]
 
 _LAYER_ORDER = ("system", "task_plan", "working_set", "memory", "conversation")
 _LAYER_BUDGET_RATIOS = {
-    "system": 0.15,
-    "task_plan": 0.15,
-    "working_set": 0.42,
-    "memory": 0.10,
-    "conversation": 0.18,
+    "system": 0.10,
+    "task_plan": 0.10,
+    "working_set": 0.32,
+    "memory": 0.08,
+    "conversation": 0.40,
 }
 _KEEP_COUNTS = {
-    "normal": {"task_plan": 20, "working_set": 18, "memory": 5, "conversation": 8},
-    "tight": {"task_plan": 12, "working_set": 10, "memory": 4, "conversation": 4},
-    "critical": {"task_plan": 8, "working_set": 6, "memory": 2, "conversation": 2},
+    "normal": {"task_plan": 32, "working_set": 18, "memory": 5, "conversation": 20},
+    "tight": {"task_plan": 32, "working_set": 12, "memory": 4, "conversation": 12},
+    "critical": {"task_plan": 32, "working_set": 8, "memory": 2, "conversation": 8},
 }
 _CONTEXT_FILE_ROLES = {"target", "test", "dependency", "config", "reference"}
 _CONTEXT_EVIDENCE_KINDS = {"tool_result", "verification", "observation"}
@@ -444,15 +445,19 @@ class ContextGovernor:
         stale_items = self.state.validate_sources(snapshot.fingerprint)
         plan_state = _plan_state_from_context(context, self.plan_state_store)
         run_signals = _run_signals_from_context(context)
+        visible_messages = _without_published_plan_summaries(
+            context.messages,
+            plan_state,
+        )
 
         raw_estimate = estimate_context(
-            context.messages,
+            visible_messages,
             context.system_prompt,
             context.tools,
             correction_factors=correction_factors,
         )
         history_tokens = estimate_context_tokens(
-            context.messages,
+            visible_messages,
             "",
             correction_factors=correction_factors,
         )
@@ -460,11 +465,11 @@ class ContextGovernor:
         pressure = self.pressure_policy.evaluate(
             request,
             estimated_tokens=raw_estimate.total,
-            tool_output_tokens=_tool_output_tokens(context.messages),
+            tool_output_tokens=_tool_output_tokens(visible_messages),
             history_tokens=history_tokens,
         )
         compact_summary, compact_cursor = self._maybe_compact_context(
-            context.messages,
+            visible_messages,
             pressure=pressure,
             run_id=_request_run_id(request),
         )
@@ -476,7 +481,7 @@ class ContextGovernor:
             "working_set": self._working_items(snapshot, delta, stale_items, artifact_refs),
             "memory": _memory_items(memory_recall),
             "conversation": _conversation_items(
-                context.messages,
+                visible_messages,
                 compacted_until_message_id=compact_cursor,
                 compact_summary=compact_summary,
             ),
@@ -490,12 +495,12 @@ class ContextGovernor:
             conversation=[item.content for item in selected["conversation"]],
         )
         selected_messages = _select_messages(
-            context.messages,
+            visible_messages,
             pressure.level,
             self.tool_ledger,
             compacted_until_message_id=compact_cursor,
         )
-        system_prompt = _compose_system_prompt(context.system_prompt, view)
+        system_prompt = _compose_system_prompt(context, view)
         after_estimate = estimate_context(
             selected_messages,
             system_prompt,
@@ -668,9 +673,6 @@ class ContextGovernor:
         plan_state: Mapping[str, object] | None,
     ) -> list[ContextItem]:
         lines = [line.strip() for line in system_prompt.splitlines() if line.strip()]
-        mode = _plan_string(plan_state, "origin_mode")
-        if mode:
-            lines.append(f"Current run mode: {mode}")
         return [
             _item(f"system:{index}", "system", line, "system_prompt", 100 - index)
             for index, line in enumerate(lines[:10])
@@ -1041,10 +1043,22 @@ def _plan_items(
 ) -> list[ContextItem]:
     if plan_state is None and run_signals is None:
         return []
+    approved = (
+        _plan_string(plan_state, "status") == "active"
+        and _plan_string(plan_state, "approval_state") == "approved"
+    )
     lines = [
+        (
+            "Approved Execution Contract: execute this canonical plan; do not replace it "
+            "with a newly invented plan."
+            if approved
+            else "Task Plan: canonical runtime state for the current task."
+        ),
         f"Objective: {_plan_objective(plan_state)}",
+        f"Summary: {_plan_string(plan_state, 'summary') or '(none)'}",
         f"Plan status: {_plan_string(plan_state, 'status') or 'none'}",
-        f"Mode: {_plan_string(plan_state, 'origin_mode') or 'build'}",
+        f"Approval: {_plan_string(plan_state, 'approval_state') or 'not_required'}",
+        f"Origin mode: {_plan_string(plan_state, 'origin_mode') or 'build'}",
         f"Verification: {_signal_text(run_signals, 'verification_status') or 'unknown'}",
     ]
     last_error = _signal_error_text(run_signals)
@@ -1052,9 +1066,33 @@ def _plan_items(
         lines.append(f"Last error: {last_error}")
     items = plan_state.get("items") if isinstance(plan_state, Mapping) else None
     if isinstance(items, list):
-        for item in items[:8]:
+        active_items = [
+            item
+            for item in items[:MAX_PLAN_ITEMS]
+            if isinstance(item, Mapping)
+            and item.get("status") in {"pending", "in_progress"}
+        ]
+        completed_items = [
+            item
+            for item in items[:MAX_PLAN_ITEMS]
+            if isinstance(item, Mapping) and item.get("status") == "completed"
+        ]
+        for item in active_items:
             if isinstance(item, Mapping):
-                lines.append(f"Step {item.get('id')}: {item.get('step')} [{item.get('status')}]")
+                lines.append(
+                    "Step "
+                    f"{item.get('id')}: {item.get('step')} [{item.get('status')}] "
+                    f"details={item.get('details') or '(none)'} "
+                    f"verification={item.get('verification') or '(none)'}"
+                )
+        if completed_items:
+            lines.append(
+                "Completed steps: "
+                + ", ".join(
+                    f"{item.get('id')}={item.get('step')}"
+                    for item in completed_items
+                )
+            )
     return [
         _item(f"task_plan:{index}", "task_plan", line, "plan_state", 75 - index)
         for index, line in enumerate(lines)
@@ -1072,6 +1110,26 @@ def _memory_items(recall: MemoryRecall) -> list[ContextItem]:
             70 - index,
         )
         for index, item in enumerate(recall.retrieved[:5])
+    ]
+
+
+def _without_published_plan_summaries(
+    messages: list[Message],
+    plan_state: Mapping[str, object] | None,
+) -> list[Message]:
+    if (
+        _plan_string(plan_state, "status") != "active"
+        or _plan_string(plan_state, "approval_state") != "approved"
+    ):
+        return list(messages)
+    return [
+        message
+        for message in messages
+        if not (
+            getattr(message, "role", None) == "assistant"
+            and isinstance(getattr(message, "metadata", None), dict)
+            and message.metadata.get("message_kind") == "plan_summary"
+        )
     ]
 
 
@@ -1162,19 +1220,63 @@ def _message_groups(messages: list[Message]) -> list[list[Message]]:
     return groups
 
 
-def _compose_system_prompt(base: str, view: ContextView) -> str:
+def _compose_system_prompt(context: AgentContext, view: ContextView) -> str:
+    runtime_state = (
+        context.runtime_state
+        if isinstance(context.runtime_state, Mapping)
+        else {}
+    )
     sections = [
-        ("System", view.system),
-        ("Plan Brief", view.task_plan),
+        ("Mode Policy", [_mapping_text(runtime_state, "mode_policy")]),
+        ("Runtime State", _runtime_state_lines(runtime_state)),
+        ("Task Plan", view.task_plan),
         ("Working Set", view.working_set),
         ("Memory", view.memory),
         ("Conversation", view.conversation),
+        ("Available Tools", _tool_prompt_lines(context.tools)),
     ]
-    parts = [base.rstrip()]
+    parts = [context.system_prompt.rstrip()]
     for name, lines in sections:
-        if lines:
-            parts.append(f"## {name}\n" + "\n".join(f"- {line}" for line in lines))
+        visible = [line for line in lines if line]
+        if visible:
+            parts.append(f"## {name}\n" + "\n".join(f"- {line}" for line in visible))
     return "\n\n".join(part for part in parts if part).strip()
+
+
+def _runtime_state_lines(runtime_state: Mapping[str, object]) -> list[str]:
+    labels = (
+        ("run_id", "Run"),
+        ("mode", "Mode"),
+        ("checkpoint_phase", "Checkpoint"),
+        ("plan_status", "Plan status"),
+        ("plan_approval_state", "Plan approval"),
+        ("verification_status", "Verification"),
+        ("directive", "Continuation directive"),
+    )
+    return [
+        f"{label}: {value}"
+        for key, label in labels
+        if (value := _mapping_text(runtime_state, key))
+    ]
+
+
+def _tool_prompt_lines(tools: list[object]) -> list[str]:
+    lines: list[str] = []
+    for tool in tools:
+        if isinstance(tool, Mapping):
+            name = _optional_text(tool.get("name"))
+            description = _optional_text(tool.get("description"))
+        else:
+            name = _optional_text(getattr(tool, "name", None))
+            description = _optional_text(getattr(tool, "description", None))
+        if name:
+            lines.append(f"{name}: {description or 'See the runtime tool schema.'}")
+    return lines
+
+
+def _mapping_text(mapping: Mapping[str, object], key: str) -> str:
+    value = mapping.get(key)
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _projection_payload(report: ContextReport, *, run_id: str | None) -> dict[str, Any]:

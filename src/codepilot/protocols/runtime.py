@@ -44,6 +44,7 @@ AgentRunStopReason = Literal[
     "approval_required",     # 需要用户审批
     "approval_denied",       # 用户拒绝工具审批
     "plan_approval_required",  # plan 模式提出计划后等待用户批准
+    "plan_clarification_required",  # plan 模式等待用户补充或修改意见
     "repeated_tool_call",    # 检测到重复的工具调用（可能陷入循环）
     "tool_call_limit",       # 工具调用数量超出限制
     "tool_unavailable",      # 模型请求了不可用工具
@@ -75,6 +76,7 @@ _STOP_REASONS = frozenset(
         "approval_required",
         "approval_denied",
         "plan_approval_required",
+        "plan_clarification_required",
         "repeated_tool_call",
         "tool_call_limit",
         "tool_unavailable",
@@ -182,19 +184,23 @@ RunSignalsVerificationStatus = Literal["unknown", "passed", "failed", "cancelled
 
 @dataclass
 class PlanSummary:
-    """Soft plan board snapshot saved with a run result."""
+    """Structured execution-plan snapshot saved with a run result."""
 
     schema_version: int
     plan_id: str
+    owner_run_id: str
     status: str
     approval_state: str
     origin_mode: str
     objective: str
+    summary: str
     items: list[dict[str, str]] = field(default_factory=list)
+    revision: int = 0
     explanation: str = ""
     created_at: str = ""
     updated_at: str = ""
-    last_update_run_id: str | None = None
+    completed_at: str | None = None
+    completion_source: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -203,6 +209,11 @@ class PlanSummary:
             _ensure_non_negative_int(self.schema_version, field_name="schema_version"),
         )
         object.__setattr__(self, "plan_id", _require_text(self.plan_id, field_name="plan_id"))
+        object.__setattr__(
+            self,
+            "owner_run_id",
+            _require_text(self.owner_run_id, field_name="owner_run_id"),
+        )
         object.__setattr__(self, "status", _require_text(self.status, field_name="status"))
         object.__setattr__(
             self,
@@ -215,11 +226,22 @@ class PlanSummary:
             _require_text(self.origin_mode, field_name="origin_mode"),
         )
         object.__setattr__(self, "objective", _clean_text(self.objective))
+        object.__setattr__(self, "summary", _clean_text(self.summary))
         object.__setattr__(self, "items", _copy_plan_items(self.items))
+        object.__setattr__(
+            self,
+            "revision",
+            _ensure_non_negative_int(self.revision, field_name="revision"),
+        )
         object.__setattr__(self, "explanation", _clean_text(self.explanation))
         object.__setattr__(self, "created_at", _clean_text(self.created_at))
         object.__setattr__(self, "updated_at", _clean_text(self.updated_at))
-        object.__setattr__(self, "last_update_run_id", _optional_text(self.last_update_run_id))
+        object.__setattr__(self, "completed_at", _optional_text(self.completed_at))
+        object.__setattr__(
+            self,
+            "completion_source",
+            _optional_text(self.completion_source),
+        )
 
 
 @dataclass
@@ -506,9 +528,25 @@ def _copy_plan_items(value: object) -> list[dict[str, str]]:
         if not isinstance(item, dict):
             raise TypeError(f"PlanSummary items[{index}] must be a dict")
         step = _require_text(item.get("step"), field_name=f"items[{index}].step")
+        details = _require_text(
+            item.get("details"),
+            field_name=f"items[{index}].details",
+        )
+        verification = _require_text(
+            item.get("verification"),
+            field_name=f"items[{index}].verification",
+        )
         status = _require_text(item.get("status"), field_name=f"items[{index}].status")
         item_id = _require_text(item.get("id"), field_name=f"items[{index}].id")
-        items.append({"id": item_id, "step": step, "status": status})
+        items.append(
+            {
+                "id": item_id,
+                "step": step,
+                "details": details,
+                "verification": verification,
+                "status": status,
+            }
+        )
     return items
 
 
@@ -544,6 +582,7 @@ RuntimeEventType = Literal[
     "memory_record_deleted",
     "memory_record_superseded",
     "plan_proposed",
+    "plan_clarification_required",
     "plan_approval_required",
     "plan_approved",
     "plan_rejected",
@@ -587,6 +626,7 @@ _RUNTIME_EVENT_TYPES = frozenset(
         "memory_record_deleted",
         "memory_record_superseded",
         "plan_proposed",
+        "plan_clarification_required",
         "plan_approval_required",
         "plan_approved",
         "plan_rejected",

@@ -190,6 +190,50 @@ class RunStore:
         run_dir = self.layout.run_dir(result.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         existing = _read_json(self.layout.run_file(result.run_id)) or {}
+        events = self.load_events(result.run_id)
+        model_attempts = sum(
+            1
+            for event in events
+            if event.get("type") == "message_end"
+            and _message_role(event.get("message")) == "assistant"
+        )
+        tool_calls = sum(
+            1
+            for event in events
+            if event.get("type") in {"tool_completed", "tool_failed", "tool_interrupted"}
+        )
+        agent_starts = sum(1 for event in events if event.get("type") == "agent_start")
+        affected_paths = sorted(
+            {
+                *(
+                    path
+                    for path in existing.get("affected_paths", [])
+                    if isinstance(path, str)
+                ),
+                *result.affected_paths,
+            }
+        )
+        tracked_files = {
+            str(item["path"]): item
+            for item in existing.get("tracked_files", [])
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        }
+        tracked_files.update(
+            {
+                str(item["path"]): item
+                for item in self._tracked_files_from_result(result)
+                if isinstance(item.get("path"), str)
+            }
+        )
+        rollback = existing.get("rollback")
+        if isinstance(rollback, dict):
+            rollback = {
+                **rollback,
+                "affected_paths": affected_paths,
+                "workspace_changed": bool(
+                    existing.get("workspace_changed") or result.workspace_changed
+                ),
+            }
         record = redact_artifact(normalize_event_value(result))
         record.update(
             {
@@ -198,15 +242,19 @@ class RunStore:
                 "session_id": result.session_id or self.session_id,
                 "status": result.status,
                 "stop_reason": result.stop_reason,
-                "model_attempts": result.counters.model_attempts,
-                "tool_calls": result.counters.tool_calls,
+                "model_attempts": model_attempts or result.counters.model_attempts,
+                "tool_calls": tool_calls or result.counters.tool_calls,
+                "resume_count": max(0, agent_starts - 1),
+                "phase": _run_phase(result.status, result.stop_reason),
                 "workspace_path": str(self.workspace_dir.resolve()),
-                "affected_paths": list(result.affected_paths),
-                "workspace_changed": result.workspace_changed,
+                "affected_paths": affected_paths,
+                "workspace_changed": bool(
+                    existing.get("workspace_changed") or result.workspace_changed
+                ),
                 "plan": redact_artifact(normalize_event_value(result.plan)),
                 "signals": redact_artifact(normalize_event_value(result.signals)),
-                "tracked_files": self._tracked_files_from_result(result),
-                "rollback": existing.get("rollback"),
+                "tracked_files": list(tracked_files.values()),
+                "rollback": rollback,
                 "updated_at": _utc_now_iso(),
             }
         )
@@ -621,7 +669,7 @@ class SessionStore:
         )
         active_plan_id = (
             canonical.get("plan_id")
-            if canonical.get("status") in {"proposed", "active", "completed"}
+            if canonical.get("status") in {"proposed", "active"}
             else None
         )
         self.update_meta({"active_plan_id": active_plan_id})
@@ -846,6 +894,18 @@ def _tool_event_effects(result: object) -> tuple[list[str], bool | None]:
         changed = getattr(result, "workspace_changed", None)
     paths = [str(path) for path in affected or []]
     return paths, changed if isinstance(changed, bool) else None
+
+
+def _run_phase(status: object, stop_reason: object) -> str:
+    if status == "waiting_approval":
+        return "tool_approval"
+    if status == "waiting_user":
+        if stop_reason == "plan_approval_required":
+            return "plan_approval"
+        if stop_reason == "plan_clarification_required":
+            return "plan_clarification"
+        return "waiting_user"
+    return "terminal"
 
 
 def _preview_message(message: dict[str, Any]) -> str:

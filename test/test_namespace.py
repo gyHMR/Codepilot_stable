@@ -112,9 +112,11 @@ def test_session_controller_public_surface_matches_v2_contract() -> None:
             "describe",
             "pending_approval",
             "pending_approvals",
+            "prepare_continuation",
             "prepare_resume",
             "prepare_run",
             "record_event",
+            "runtime_checkpoint",
         "stage_derived_session",
     }
     assert not hasattr(controller_module, "_controller_from_runtime_session")

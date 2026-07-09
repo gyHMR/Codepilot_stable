@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Session-owned persistence for soft PlanState."""
+"""Session-owned persistence for the current structured execution plan."""
 
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -41,32 +41,21 @@ class PlanStateStore:
         origin_mode: RunMode = "build",
         run_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.save(
-            PlanState.new(
-                objective=objective,
-                origin_mode=ensure_run_mode(origin_mode),
-                run_id=run_id,
-            )
-        )
+        if run_id is None:
+            raise PlanValidationError("run_id is required")
+        return PlanState.new(
+            objective=objective,
+            origin_mode=ensure_run_mode(origin_mode),
+            run_id=run_id,
+        ).to_dict()
 
     def approve_current(self, *, run_id: str | None = None) -> dict[str, Any] | None:
         current = load_plan_state(self.current())
         if current is None or current.status != "proposed":
             return current.to_dict() if current is not None else None
-        return self.save(
-            PlanState(
-                plan_id=current.plan_id,
-                status="active",
-                approval_state="approved",
-                origin_mode=current.origin_mode,
-                objective=current.objective,
-                items=current.items,
-                explanation=current.explanation,
-                created_at=current.created_at,
-                updated_at=_utc_now_iso(),
-                last_update_run_id=run_id or current.last_update_run_id,
-            )
-        )
+        if run_id is not None and current.owner_run_id != run_id:
+            raise PlanValidationError("plan belongs to a different run")
+        return self.save(current.approve())
 
     def reject_current(self, *, run_id: str | None = None) -> dict[str, Any] | None:
         current = load_plan_state(self.current())
@@ -74,41 +63,37 @@ class PlanStateStore:
             return None
         if current.status != "proposed":
             return current.to_dict()
-        return self.save(
-            PlanState(
-                plan_id=current.plan_id,
-                status="rejected",
-                approval_state="rejected",
-                origin_mode=current.origin_mode,
-                objective=current.objective,
-                items=current.items,
-                explanation=current.explanation,
-                created_at=current.created_at,
-                updated_at=_utc_now_iso(),
-                last_update_run_id=run_id or current.last_update_run_id,
-            )
-        )
+        if run_id is not None and current.owner_run_id != run_id:
+            raise PlanValidationError("plan belongs to a different run")
+        return self.save(current.reject())
 
-    def abandon_current(self, *, run_id: str | None = None) -> dict[str, Any] | None:
+    def abandon_current(
+        self,
+        *,
+        run_id: str | None = None,
+        source: str = "user_abandoned",
+    ) -> dict[str, Any] | None:
         current = load_plan_state(self.current())
         if current is None:
             return None
         if current.status == "abandoned":
             return current.to_dict()
-        return self.save(
-            PlanState(
-                plan_id=current.plan_id,
-                status="abandoned",
-                approval_state=current.approval_state,
-                origin_mode=current.origin_mode,
-                objective=current.objective,
-                items=current.items,
-                explanation=current.explanation,
-                created_at=current.created_at,
-                updated_at=_utc_now_iso(),
-                last_update_run_id=run_id or current.last_update_run_id,
-            )
-        )
+        if run_id is not None and current.owner_run_id != run_id:
+            raise PlanValidationError("plan belongs to a different run")
+        return self.save(current.abandon(source=source))
+
+    def complete_current(
+        self,
+        *,
+        run_id: str,
+        source: str = "run_finalized",
+    ) -> dict[str, Any] | None:
+        current = load_plan_state(self.current())
+        if current is None or current.status != "active":
+            return current.to_dict() if current is not None else None
+        if current.owner_run_id != run_id:
+            raise PlanValidationError("plan belongs to a different run")
+        return self.save(current.complete(source=source))
 
 
 def validate_plan_state_payload(raw: object) -> dict[str, Any]:

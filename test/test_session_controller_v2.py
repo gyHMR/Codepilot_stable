@@ -3,6 +3,50 @@ from __future__ import annotations
 import asyncio
 
 
+def _plan_state_v2(
+    plan_id: str,
+    *,
+    owner_run_id: str = "run_plan",
+    status: str = "proposed",
+    approval_state: str | None = None,
+    origin_mode: str = "plan",
+    objective: str = "先制定方案",
+    summary: str = "阅读当前实现并执行聚焦修改。",
+    items: list[dict[str, str]] | None = None,
+    explanation: str = "",
+) -> dict[str, object]:
+    resolved_approval = approval_state or (
+        "pending" if status == "proposed" else "approved"
+    )
+    resolved_items = items or [
+        {
+            "id": "item_1",
+            "step": "阅读实现",
+            "details": "定位相关代码和约束。",
+            "verification": "确认准确的修改点。",
+            "status": "pending" if status == "proposed" else "in_progress",
+        }
+    ]
+    completed = status == "completed"
+    return {
+        "schema_version": 2,
+        "plan_id": plan_id,
+        "owner_run_id": owner_run_id,
+        "status": status,
+        "approval_state": resolved_approval,
+        "origin_mode": origin_mode,
+        "objective": objective,
+        "summary": summary,
+        "items": resolved_items,
+        "revision": 1,
+        "explanation": explanation,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "completed_at": "2026-01-01T00:00:00+00:00" if completed else None,
+        "completion_source": "test" if completed else None,
+    }
+
+
 async def _run_real_session_spine(session, text: str, *, run_id: str):
     from codepilot.core.contracts import AgentLoopPorts
     from codepilot.core.runner import run_agent_loop
@@ -132,13 +176,23 @@ def test_session_commit_keeps_plan_approval_checkpoint(tmp_path) -> None:
         controller = _bind_session_runtime(session)
         prepared = await controller.prepare_run(SessionRunIntent(text="先给计划"))
         plan = PlanSummary(
-            schema_version=1,
+            schema_version=2,
             plan_id="plan_wait",
+            owner_run_id=prepared.run_id,
             status="proposed",
-            approval_state="proposed",
+            approval_state="pending",
             origin_mode="plan",
             objective="先给计划",
-            items=[{"id": "item_1", "step": "阅读实现", "status": "pending"}],
+            summary="阅读当前实现并形成执行方案。",
+            items=[
+                {
+                    "id": "item_1",
+                    "step": "阅读实现",
+                    "details": "定位相关代码。",
+                    "verification": "确认修改点。",
+                    "status": "pending",
+                }
+            ],
             created_at="2026-01-01T00:00:00+00:00",
             updated_at="2026-01-01T00:00:00+00:00",
         )
@@ -162,7 +216,7 @@ def test_session_commit_keeps_plan_approval_checkpoint(tmp_path) -> None:
         )
 
         checkpoint = session.store.read_meta()["runtime_checkpoint"]
-        assert checkpoint["phase"] == "awaiting_plan_approval"
+        assert checkpoint["phase"] == "plan_approval"
         assert checkpoint["plan_id"] == "plan_wait"
         assert "plan" not in checkpoint
         assert session.pending_plan_approval()["plan_id"] == "plan_wait"
@@ -198,19 +252,12 @@ def test_streamed_plan_event_is_immediately_visible_to_plan_command(tmp_path) ->
             )
         )
         controller = _bind_session_runtime(session)
-        plan = {
-            "schema_version": 1,
-            "plan_id": "plan_streamed",
-            "status": "proposed",
-            "approval_state": "proposed",
-            "origin_mode": "plan",
-            "objective": "优化登录逻辑",
-            "items": [{"id": "item_1", "step": "阅读实现", "status": "pending"}],
-            "explanation": "等待用户确认",
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "updated_at": "2026-01-01T00:00:00+00:00",
-            "last_update_run_id": "run_streamed",
-        }
+        plan = _plan_state_v2(
+            "plan_streamed",
+            owner_run_id="run_streamed",
+            objective="优化登录逻辑",
+            explanation="等待用户确认",
+        )
 
         session.record_event(
             {
@@ -238,7 +285,7 @@ def test_streamed_plan_event_is_immediately_visible_to_plan_command(tmp_path) ->
             }
         )
         checkpoint = session.store.read_meta()["runtime_checkpoint"]
-        assert checkpoint["phase"] == "awaiting_plan_approval"
+        assert checkpoint["phase"] == "plan_approval"
         assert checkpoint["plan_id"] == "plan_streamed"
         assert "plan" not in checkpoint
         session.close()
@@ -273,23 +320,11 @@ def test_pending_plan_feedback_forces_plan_mode(tmp_path) -> None:
             )
         )
         session.plan_state.save(
-            {
-                "schema_version": 1,
-                "plan_id": "plan_feedback",
-                "status": "proposed",
-                "approval_state": "proposed",
-                "origin_mode": "plan",
-                "objective": "优化登录",
-                "items": [{"id": "item_1", "step": "阅读实现", "status": "pending"}],
-                "explanation": "",
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "updated_at": "2026-01-01T00:00:00+00:00",
-                "last_update_run_id": "run_plan",
-            }
+            _plan_state_v2("plan_feedback", objective="优化登录")
         )
         session.store.set_checkpoint(
             {
-                "phase": "awaiting_plan_approval",
+                "phase": "plan_approval",
                 "run_id": "run_plan",
                 "plan_id": "plan_feedback",
             }
@@ -333,28 +368,87 @@ def test_plan_mode_replanning_uses_fresh_seed_instead_of_active_plan(tmp_path) -
         )
         try:
             session.plan_state.save(
-                {
-                    "schema_version": 1,
-                    "plan_id": "plan_active",
-                    "status": "active",
-                    "approval_state": "approved",
-                    "origin_mode": "build",
-                    "objective": "旧执行计划",
-                    "items": [{"id": "item_1", "step": "修改实现", "status": "in_progress"}],
-                    "explanation": "",
-                    "created_at": "2026-01-01T00:00:00+00:00",
-                    "updated_at": "2026-01-01T00:00:00+00:00",
-                    "last_update_run_id": "run_old",
-                }
+                _plan_state_v2(
+                    "plan_active",
+                    owner_run_id="run_old",
+                    status="active",
+                    origin_mode="build",
+                    objective="旧执行计划",
+                )
             )
             session.set_current_mode("plan")
             controller = _bind_session_runtime(session)
             prepared = await controller.prepare_run(SessionRunIntent(text="重新设计方案"))
 
+            archived = session.plan_state.current()
+            assert archived is not None
+            assert archived["plan_id"] == "plan_active"
+            assert archived["status"] == "abandoned"
             assert prepared.loop_input.mode == "plan"
-            assert prepared.loop_input.plan_state["status"] == "none"
-            assert prepared.loop_input.plan_state["plan_id"] != "plan_active"
+            assert prepared.loop_input.plan_state is None
             assert session.context_plan_state() is None
+            assert session.store.read_meta()["active_plan_id"] is None
+            assert any(event["type"] == "plan_abandoned" for event in session.store.load_events())
+        finally:
+            session.close()
+
+    asyncio.run(run_case())
+
+
+def test_mode_hint_plan_archives_active_plan_before_context(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.protocols import Model
+        from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
+        from codepilot.sessions.controller import _bind_session_runtime
+        from codepilot.sessions.runtime import SessionRuntime
+
+        session = SessionRuntime(
+            SessionOptions(
+                model=Model(
+                    id="session-v2",
+                    name="Session V2",
+                    api="unit-test",
+                    provider="unit-test",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=4000,
+                    max_tokens=500,
+                ),
+                workspace_dir=tmp_path,
+                session_id="s_plan_hint_rework",
+                current_mode="build",
+                memory_enabled=False,
+                system_prompt_builder=lambda mode: f"prompt:{mode}",
+            )
+        )
+        try:
+            session.plan_state.save(
+                _plan_state_v2(
+                    "plan_active",
+                    owner_run_id="run_old",
+                    status="active",
+                    origin_mode="build",
+                    objective="旧执行计划",
+                )
+            )
+            controller = _bind_session_runtime(session)
+            prepared = await controller.prepare_run(
+                SessionRunIntent(text="重新设计方案", mode_hint="plan")
+            )
+
+            archived = session.plan_state.current()
+            assert archived is not None
+            assert archived["plan_id"] == "plan_active"
+            assert archived["status"] == "abandoned"
+            assert prepared.loop_input.mode == "plan"
+            assert prepared.loop_input.context["mode"] == "plan"
+            assert prepared.loop_input.context["system_prompt"] == "prompt:build"
+            assert prepared.loop_input.plan_state is None
+            assert session.context_plan_state_for_mode("plan") is None
+            assert session.store.read_meta()["active_plan_id"] is None
+            assert session.current_mode == "build"
+            assert any(event["type"] == "plan_abandoned" for event in session.store.load_events())
         finally:
             session.close()
 
@@ -564,19 +658,13 @@ def test_session_continue_reuses_existing_plan_objective(tmp_path) -> None:
         )
         try:
             session.plan_state.save(
-                {
-                    "schema_version": 1,
-                    "plan_id": "plan_existing",
-                    "status": "active",
-                    "approval_state": "approved",
-                    "origin_mode": "build",
-                    "objective": "帮我完善修复登录注册功能",
-                    "items": [],
-                    "explanation": "",
-                    "created_at": "2026-01-01T00:00:00+00:00",
-                    "updated_at": "2026-01-01T00:00:00+00:00",
-                    "last_update_run_id": "run_seed",
-                }
+                _plan_state_v2(
+                    "plan_existing",
+                    owner_run_id="run_seed",
+                    status="active",
+                    origin_mode="build",
+                    objective="帮我完善修复登录注册功能",
+                )
             )
 
             controller = _bind_session_runtime(session)
@@ -595,7 +683,7 @@ def test_session_continue_reuses_existing_plan_objective(tmp_path) -> None:
     asyncio.run(run_case())
 
 
-def test_session_continue_keeps_completed_plan_as_soft_context(tmp_path) -> None:
+def test_session_continue_ignores_completed_plan_as_archived_context(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.protocols import Model, UserMessage
         from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
@@ -623,25 +711,23 @@ def test_session_continue_keeps_completed_plan_as_soft_context(tmp_path) -> None
         )
         try:
             session.plan_state.save(
-                {
-                    "schema_version": 1,
-                    "plan_id": "plan_closed",
-                    "status": "completed",
-                    "approval_state": "approved",
-                    "origin_mode": "build",
-                    "objective": "帮我完善修复登录注册功能",
-                    "items": [
+                _plan_state_v2(
+                    "plan_closed",
+                    owner_run_id="run_bad",
+                    status="completed",
+                    origin_mode="build",
+                    objective="帮我完善修复登录注册功能",
+                    explanation="已完成上轮计划",
+                    items=[
                         {
                             "id": "item_1",
                             "step": "完成当前请求",
+                            "details": "完成上轮任务。",
+                            "verification": "上轮验证通过。",
                             "status": "completed",
                         }
                     ],
-                    "explanation": "已完成上轮计划",
-                    "created_at": "2026-01-01T00:00:00+00:00",
-                    "updated_at": "2026-01-01T00:00:00+00:00",
-                    "last_update_run_id": "run_bad",
-                }
+                )
             )
 
             controller = _bind_session_runtime(session)
@@ -650,10 +736,9 @@ def test_session_continue_keeps_completed_plan_as_soft_context(tmp_path) -> None
             )
 
             state = prepared.loop_input.plan_state
-            assert state is not None
-            assert state["objective"] == "帮我完善修复登录注册功能"
-            assert state["status"] == "completed"
-            assert state["items"][0]["status"] == "completed"
+            assert state is None
+            assert session.context_plan_state() is None
+            assert session.store.read_meta()["active_plan_id"] is None
         finally:
             session.close()
 
@@ -686,22 +771,10 @@ def test_mode_build_does_not_approve_proposed_plan_without_plan_command(tmp_path
     )
     try:
         session.plan_state.save(
-            {
-                "schema_version": 1,
-                "plan_id": "plan_proposed",
-                "status": "proposed",
-                "approval_state": "proposed",
-                "origin_mode": "plan",
-                "objective": "先制定方案",
-                "items": [
-                    {"id": "item_1", "step": "阅读实现", "status": "pending"},
-                    {"id": "item_2", "step": "执行修改", "status": "pending"},
-                ],
-                "explanation": "等待用户切换到 build 后执行",
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "updated_at": "2026-01-01T00:00:00+00:00",
-                "last_update_run_id": "run_plan",
-            }
+            _plan_state_v2(
+                "plan_proposed",
+                explanation="等待用户批准后执行",
+            )
         )
 
         import pytest
@@ -712,13 +785,51 @@ def test_mode_build_does_not_approve_proposed_plan_without_plan_command(tmp_path
         state = session.plan_state.current()
         assert state is not None
         assert state["status"] == "proposed"
-        assert state["approval_state"] == "proposed"
+        assert state["approval_state"] == "pending"
         assert not any(event["type"] == "plan_approved" for event in session.store.load_events())
     finally:
         session.close()
 
 
-def test_mode_switch_refreshes_model_system_prompt(tmp_path) -> None:
+def test_rejected_plan_can_switch_to_build_without_context_plan(tmp_path) -> None:
+    from codepilot.protocols import Model
+    from codepilot.sessions.contracts import SessionOptions
+    from codepilot.sessions.runtime import SessionRuntime
+
+    session = SessionRuntime(
+        SessionOptions(
+            model=Model(
+                id="session-v2-task",
+                name="Session V2 Task",
+                api="unit-test",
+                provider="unit-test",
+                base_url="",
+                reasoning=False,
+                input=["text"],
+                context_window=4000,
+                max_tokens=500,
+            ),
+            workspace_dir=tmp_path,
+            session_id="s_rejected_to_build",
+            memory_enabled=False,
+            current_mode="plan",
+        )
+    )
+    try:
+        session.plan_state.save(_plan_state_v2("plan_rejected"))
+
+        rejected = session.reject_current_plan()
+        assert rejected is not None
+        assert rejected["status"] == "rejected"
+        assert session.set_current_mode("build") == "build"
+        assert session.context_plan_state() is None
+        assert session.active_plan_state() is None
+        assert session.store.read_meta()["active_plan_id"] is None
+    finally:
+        session.close()
+
+
+def test_mode_switch_keeps_base_system_prompt_stable(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.protocols import Model
         from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
@@ -748,13 +859,13 @@ def test_mode_switch_refreshes_model_system_prompt(tmp_path) -> None:
         try:
             assert session.conversation.system_prompt == "rules for build"
             assert session.set_current_mode("plan") == "plan"
-            assert session.conversation.system_prompt == "rules for plan"
+            assert session.conversation.system_prompt == "rules for build"
 
             controller = _bind_session_runtime(session)
             prepared = await controller.prepare_run(SessionRunIntent(text="只制定计划"))
 
             assert prepared.loop_input.mode == "plan"
-            assert prepared.loop_input.context.system_prompt == "rules for plan"
+            assert prepared.loop_input.context.system_prompt == "rules for build"
         finally:
             session.close()
 
@@ -790,22 +901,10 @@ def test_plan_commands_approve_reject_and_clear_current_plan(tmp_path) -> None:
             )
 
         def proposed_plan(plan_id: str) -> dict[str, object]:
-            return {
-                "schema_version": 1,
-                "plan_id": plan_id,
-                "status": "proposed",
-                "approval_state": "proposed",
-                "origin_mode": "plan",
-                "objective": "先制定方案",
-                "items": [
-                    {"id": "item_1", "step": "阅读实现", "status": "pending"},
-                    {"id": "item_2", "step": "执行修改", "status": "pending"},
-                ],
-                "explanation": "等待用户确认",
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "updated_at": "2026-01-01T00:00:00+00:00",
-                "last_update_run_id": "run_plan",
-            }
+            return _plan_state_v2(
+                plan_id,
+                explanation="等待用户确认",
+            )
 
         approve_session = make_session("approve_case")
         reject_session = make_session("reject_case")
@@ -818,7 +917,8 @@ def test_plan_commands_approve_reject_and_clear_current_plan(tmp_path) -> None:
             )
             approve_state = approve_session.plan_state.current()
             assert approve_record.handled
-            assert approve_record.data["followup_mode"] == "build"
+            assert approve_record.data["continuation_kind"] == "plan_approved"
+            assert approve_record.data["continuation_run_id"] == "run_plan"
             assert approve_session.current_mode == "build"
             assert approve_controller.current_mode == "build"
             assert approve_state is not None
@@ -842,12 +942,11 @@ def test_plan_commands_approve_reject_and_clear_current_plan(tmp_path) -> None:
             assert any(event["type"] == "plan_rejected" for event in reject_session.store.load_events())
 
             clear_session.plan_state.save(
-                {
-                    **proposed_plan("plan_clear"),
-                    "status": "active",
-                    "approval_state": "approved",
-                    "origin_mode": "build",
-                }
+                _plan_state_v2(
+                    "plan_clear",
+                    status="active",
+                    origin_mode="build",
+                )
             )
             clear_controller = _bind_session_runtime(clear_session)
             clear_record = await clear_controller.apply_command(
@@ -906,12 +1005,8 @@ def test_session_commit_does_not_change_plan_when_failed_outcome_has_no_plan(tmp
 
         session._finalize_plan_state(outcome)
 
-        after = session.plan_state.current()
-        assert after is not None
-        assert after["plan_id"] == before["plan_id"]
-        assert after["items"] == before["items"]
-        assert after["status"] == "none"
-        assert after["last_update_run_id"] == "run_start"
+        assert before["status"] == "active"
+        assert session.plan_state.current() is None
     finally:
         session.close()
 
@@ -1121,7 +1216,7 @@ def test_session_runtime_records_streamed_checkpoint_phases(tmp_path) -> None:
                     "message": assistant,
                 }
             )
-            assert session.store.read_meta()["runtime_checkpoint"]["phase"] == "awaiting_tools"
+            assert session.store.read_meta()["runtime_checkpoint"]["phase"] == "tool_approval"
 
             session.record_event(
                 {
@@ -1133,7 +1228,7 @@ def test_session_runtime_records_streamed_checkpoint_phases(tmp_path) -> None:
                 }
             )
             checkpoint = session.store.read_meta()["runtime_checkpoint"]
-            assert checkpoint["phase"] == "awaiting_tools"
+            assert checkpoint["phase"] == "tool_approval"
             assert checkpoint["pending_tool_call_ids"] == ["call_read_b"]
 
             session.record_event(

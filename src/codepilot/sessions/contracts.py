@@ -30,6 +30,26 @@ from codepilot.protocols.commands import (
 
 ConvertToLlmFn = Callable[[list[AgentMessage]], list[Message] | Awaitable[list[Message]]]
 SystemPromptBuilder = Callable[[RunMode], str]
+SessionContinuationKind = Literal[
+    "plan_approved",
+    "plan_rejected",
+    "plan_feedback",
+    "plan_clarification",
+    "tool_approved",
+    "tool_denied",
+    "mode_changed",
+    "automatic_continuation",
+]
+_CONTINUATION_KINDS = {
+    "plan_approved",
+    "plan_rejected",
+    "plan_feedback",
+    "plan_clarification",
+    "tool_approved",
+    "tool_denied",
+    "mode_changed",
+    "automatic_continuation",
+}
 
 
 @dataclass
@@ -100,6 +120,33 @@ class SessionResumeIntent:
 
 
 @dataclass(frozen=True)
+class SessionContinuationIntent:
+    kind: SessionContinuationKind
+    run_id: str | None = None
+    text: str = ""
+    approval_id: str = ""
+    decision: str = ""
+    reason: str = ""
+    target_mode: str | None = None
+
+    def __post_init__(self) -> None:
+        kind = _require_text(self.kind, "continuation kind")
+        if kind not in _CONTINUATION_KINDS:
+            raise ValueError(f"Unknown continuation kind: {self.kind}")
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "run_id", _optional_text(self.run_id))
+        object.__setattr__(self, "text", _optional_text(self.text) or "")
+        object.__setattr__(self, "approval_id", _optional_text(self.approval_id) or "")
+        object.__setattr__(self, "decision", _optional_text(self.decision) or "")
+        object.__setattr__(self, "reason", _optional_text(self.reason) or "")
+        object.__setattr__(self, "target_mode", _optional_text(self.target_mode))
+        if kind == "plan_feedback" and not self.text:
+            raise ValueError("plan feedback text is required")
+        if kind in {"tool_approved", "tool_denied"} and not self.approval_id:
+            raise ValueError("tool continuation approval_id is required")
+
+
+@dataclass(frozen=True)
 class SessionCommandIntent:
     text: str
     tool_catalog: tuple[Any, ...] = ()
@@ -119,7 +166,13 @@ class CancelRunIntent:
         object.__setattr__(self, "reason", _optional_text(self.reason) or "user")
 
 
-SessionIntent = SessionRunIntent | SessionResumeIntent | SessionCommandIntent | CancelRunIntent
+SessionIntent = (
+    SessionRunIntent
+    | SessionResumeIntent
+    | SessionContinuationIntent
+    | SessionCommandIntent
+    | CancelRunIntent
+)
 
 
 @dataclass(frozen=True)
@@ -213,6 +266,8 @@ __all__ = [
     "RollbackBaselineRef",
     "SessionCommandIntent",
     "SessionCommandRecord",
+    "SessionContinuationIntent",
+    "SessionContinuationKind",
     "SessionIntent",
     "SessionResumeIntent",
     "SessionRunIntent",

@@ -118,6 +118,7 @@ async def build_model_request(
     request_data: dict[str, Any] = {
         "run_id": input.run_id,
         "session_id": input.correlation.session_id or "",
+        "mode": input.mode,
         "model": input.model,
         "messages": list(messages),
         "system_prompt": str(input.context.get("system_prompt", "")),
@@ -157,6 +158,8 @@ async def build_model_request(
 
 
 def tool_catalog_for_request(input: AgentLoopInput, ports: AgentLoopPorts) -> list[Tool]:
+    if bool(input.context.get("suppress_tools", False)):
+        return []
     if ports.tools is not None:
         catalog = ports.tools.catalog(input.mode)
         if catalog:

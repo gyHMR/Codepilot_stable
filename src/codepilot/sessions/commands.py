@@ -424,16 +424,13 @@ def _mode_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
         )
     requested_mode = arg.strip().lower()
     plan = session.pending_plan_approval() if hasattr(session, "pending_plan_approval") else None
-    if (
-        requested_mode == "build"
-        and isinstance(plan, dict)
-    ):
+    if requested_mode in {"build", "read"} and isinstance(plan, dict):
         return _record(
             session_id,
             text,
             output_lines=[
                 f"current_mode={session.current_mode}",
-                "Build mode is blocked while a proposed plan is waiting for approval.",
+                f"{requested_mode} mode is blocked while a proposed plan is waiting for approval.",
                 "Use /plan to review it, /plan approve to execute, or /plan reject to discard it.",
                 *_format_plan_lines(plan),
             ],
@@ -444,12 +441,44 @@ def _mode_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
                 "blocked": True,
             },
         )
+    checkpoint = session.runtime_checkpoint() if hasattr(session, "runtime_checkpoint") else None
+    checkpoint_phase = (
+        str(checkpoint.get("phase") or "")
+        if isinstance(checkpoint, dict)
+        else ""
+    )
+    if checkpoint_phase == "tool_approval":
+        return _record(
+            session_id,
+            text,
+            output_lines=[
+                f"current_mode={session.current_mode}",
+                "Resolve the pending tool approval before switching mode.",
+            ],
+            data={
+                "current_mode": session.current_mode,
+                "blocked": True,
+                "checkpoint_phase": checkpoint_phase,
+            },
+        )
+    previous_mode = session.current_mode
     try:
         mode = _set_current_mode(session, arg)
     except ValueError as exc:
         return _record(session_id, text, output_lines=[str(exc), "usage: /mode read|plan|build"])
     lines = [f"current_mode={mode}"]
     data: dict[str, Any] = {"current_mode": mode}
+    if (
+        isinstance(checkpoint, dict)
+        and str(checkpoint.get("run_id") or "").strip()
+        and mode != previous_mode
+    ):
+        data.update(
+            {
+                "continuation_kind": "mode_changed",
+                "continuation_run_id": str(checkpoint["run_id"]),
+            }
+        )
     return _record(
         session_id,
         text,
@@ -503,6 +532,7 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
                 data={"plan_status": before.get("status")},
             )
         state = session.approve_current_plan(switch_to_build=True)
+        continuation_run_id = str(before.get("owner_run_id") or "").strip()
         return _record(
             session_id,
             text,
@@ -515,8 +545,8 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
                 "plan_status": state.get("status") if isinstance(state, dict) else None,
                 "approval_state": state.get("approval_state") if isinstance(state, dict) else None,
                 "current_mode": session.current_mode,
-                "followup_prompt": _approved_plan_followup_prompt(state),
-                "followup_mode": "build",
+                "continuation_kind": "plan_approved",
+                "continuation_run_id": continuation_run_id,
             },
         )
     if action == "reject":
@@ -529,11 +559,17 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
                 data={"plan_status": before.get("status") if isinstance(before, dict) else None},
             )
         state = session.reject_current_plan()
+        continuation_run_id = str(before.get("owner_run_id") or "").strip()
         return _record(
             session_id,
             text,
             output_lines=["Plan rejected.", *_format_plan_lines(state)],
-            data={"plan_status": state.get("status") if isinstance(state, dict) else None},
+            data={
+                "plan_status": state.get("status") if isinstance(state, dict) else None,
+                "continuation_kind": "plan_rejected",
+                "continuation_run_id": continuation_run_id,
+                "current_mode": session.current_mode,
+            },
         )
     if action in {"clear", "abandon"}:
         before = session.current_plan_state()
@@ -872,22 +908,6 @@ def _format_plan_lines(state: Any) -> list[str]:
                 f"{index}. [{item.get('status', '')}] {item.get('step', '')}"
             )
     return lines
-
-
-def _approved_plan_followup_prompt(state: Any) -> str:
-    objective = ""
-    if isinstance(state, dict):
-        objective = str(state.get("objective") or "").strip()
-    if objective:
-        return (
-            "用户已经批准当前计划，请按已批准计划开始执行。"
-            f"任务目标：{objective}。"
-            "执行时继续使用 update_plan 更新进度，完成后运行必要验证并汇报结果。"
-        )
-    return (
-        "用户已经批准当前计划，请按已批准计划开始执行。"
-        "执行时继续使用 update_plan 更新进度，完成后运行必要验证并汇报结果。"
-    )
 
 
 def _open_derived_runtime(session: Any, session_id: str) -> Any:

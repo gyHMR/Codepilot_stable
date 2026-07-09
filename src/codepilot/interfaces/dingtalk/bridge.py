@@ -21,6 +21,7 @@ from codepilot.runtime.actions import (
     PromptSubmitted,
     RunCancelled,
     RunFinishedFrame,
+    RunPausedFrame,
 )
 from codepilot.runtime import RuntimeGateway, SessionOpenIntent
 
@@ -305,7 +306,7 @@ class DingTalkBridge:
                             title="Approval Required",
                         )
                     continue
-                if isinstance(frame, RunFinishedFrame):
+                if isinstance(frame, (RunFinishedFrame, RunPausedFrame)):
                     if not final_emitted:
                         self._audit_run_record(inbound, frame.record, command="prompt")
                         emitted = True
@@ -435,7 +436,7 @@ class DingTalkBridge:
                             title="Approval Required",
                         )
                     continue
-                if isinstance(frame, RunFinishedFrame):
+                if isinstance(frame, (RunFinishedFrame, RunPausedFrame)):
                     result = frame.record
                     continue
                 if isinstance(frame, FailedFrame):

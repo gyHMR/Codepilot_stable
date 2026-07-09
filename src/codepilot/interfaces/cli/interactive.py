@@ -27,6 +27,7 @@ from codepilot.runtime.actions import (
     PromptSubmitted,
     RunCancelled,
     RunFinishedFrame,
+    RunPausedFrame,
 )
 from codepilot.runtime.gateway import RuntimeGateway
 
@@ -305,6 +306,9 @@ async def run_command(
             if isinstance(frame, RunFinishedFrame):
                 final_record = frame.record
                 continue
+            if isinstance(frame, RunPausedFrame):
+                final_record = frame.record
+                continue
             if isinstance(frame, FailedFrame):
                 raise runtime_error_from_frame(frame.error)
     except Exception as exc:
@@ -364,6 +368,7 @@ async def render_dispatch(frames: Any, renderer: Any) -> None:
     Runtime frame 是 CLI 层和 runtime 层之间的显示协议：
     - ``ProgressFrame``：模型增量、工具开始/结束等过程事件。
     - ``ApprovalRequiredFrame``：工具需要权限审批，CLI 显示审批提示并停止本轮。
+    - ``RunPausedFrame``：run 暂停等待用户输入或审批，保留同一个 run。
     - ``RunFinishedFrame``：run 完成，保存最终记录。
     - ``FailedFrame``：runtime 出错，转换成 CLI 可处理异常。
     """
@@ -377,6 +382,8 @@ async def render_dispatch(frames: Any, renderer: Any) -> None:
         elif isinstance(frame, ApprovalRequiredFrame):
             renderer.render_approval_required(frame)
         elif isinstance(frame, RunFinishedFrame):
+            final_record = frame.record
+        elif isinstance(frame, RunPausedFrame):
             final_record = frame.record
         elif isinstance(frame, FailedFrame):
             raise runtime_error_from_frame(frame.error)

@@ -6,8 +6,10 @@ from __future__ import annotations
 该工具用于向用户展示或更新执行计划（软计划），是一种通信手段而非控制手段。
 它不会终止运行，仅为进度展示或计划提案服务。
 
-计划中的每个项包含：
+计划包含整体 summary，且每个项包含：
   - step: 步骤描述文本
+  - details: 具体动作、边界和实现意图
+  - verification: 该步骤的验证方式
   - status: 步骤状态（pending / in_progress / completed）
 
 关键约束：
@@ -71,6 +73,10 @@ def create_plan_tools(*, allow: Callable[[str], bool]) -> list[ToolDefinition]:
             parameters={
                 "type": "object",
                 "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "整体实现思路、关键决策和范围约束。",
+                    },
                     # explanation: 可选的人类可读说明文本，描述本次更新的意图
                     "explanation": {"type": "string"},
                     # plan: 计划项数组，必须包含至少 1 项、至多 PLAN_ITEM_LIMIT 项
@@ -83,19 +89,27 @@ def create_plan_tools(*, allow: Callable[[str], bool]) -> list[ToolDefinition]:
                             "properties": {
                                 # step: 步骤描述（必填）
                                 "step": {"type": "string"},
+                                "details": {
+                                    "type": "string",
+                                    "description": "该步骤的具体动作、边界和实现意图。",
+                                },
+                                "verification": {
+                                    "type": "string",
+                                    "description": "完成该步骤后应执行的验证。",
+                                },
                                 # status: 步骤状态（必填），只能是三种预定义状态之一
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed"],
                                 },
                             },
-                            "required": ["step", "status"],
+                            "required": ["step", "details", "verification", "status"],
                             "additionalProperties": False,
                         },
                     },
                 },
-                # plan 为必填参数；explanation 可选
-                "required": ["plan"],
+                # summary 和 plan 为必填参数；explanation 可选
+                "required": ["summary", "plan"],
                 "additionalProperties": False,
             },
             metadata=metadata,
@@ -211,6 +225,10 @@ def _validated_plan_update(
     if len(plan) > PLAN_ITEM_LIMIT:
         raise ValueError(f"plan cannot contain more than {PLAN_ITEM_LIMIT} items")
 
+    summary = _clean_text(params.get("summary"))
+    if not summary:
+        raise ValueError("summary is required")
+
     # ---- 清洗 explanation 字段 ----
     # _clean_text 会去除首尾空白并将内部连续空白合并为单个空格
     explanation = _clean_text(params.get("explanation")) or ""
@@ -229,6 +247,12 @@ def _validated_plan_update(
         step = _clean_text(raw.get("step"))
         if not step:
             raise ValueError(f"plan[{index}].step is required")
+        details = _clean_text(raw.get("details"))
+        if not details:
+            raise ValueError(f"plan[{index}].details is required")
+        verification = _clean_text(raw.get("verification"))
+        if not verification:
+            raise ValueError(f"plan[{index}].verification is required")
 
         # 规则 5：status 字段必须为合法状态值
         status = _clean_text(raw.get("status"))
@@ -241,14 +265,25 @@ def _validated_plan_update(
             in_progress += 1
 
         # 收集清洗后的合法条目
-        items.append({"step": step, "status": "pending" if proposal else status})
+        items.append(
+            {
+                "step": step,
+                "details": details,
+                "verification": verification,
+                "status": "pending" if proposal else status,
+            }
+        )
 
     # ---- 规则 6：同时最多只能有 1 个 in_progress 项 ----
     # 这是业务语义约束：同一时间只能有一个步骤处于进行中状态
     if not proposal and in_progress > 1:
         raise ValueError("plan can contain at most one in_progress item")
 
-    return {"explanation": explanation, "plan": items}, original_statuses
+    return {
+        "summary": summary,
+        "explanation": explanation,
+        "plan": items,
+    }, original_statuses
 
 
 # ---------------------------------------------------------------------------

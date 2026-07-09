@@ -12,7 +12,7 @@ from codepilot.core.runner import resume_agent_loop, run_agent_loop
 from codepilot.sessions.contracts import (
     PreparedAgentRun,
     SessionCommandIntent,
-    SessionResumeIntent,
+    SessionContinuationIntent,
     SessionRunIntent,
     SessionRunRecord,
     SessionView,
@@ -32,6 +32,7 @@ from .actions import (
     PromptSubmitted,
     RunCancelled,
     RunFinishedFrame,
+    RunPausedFrame,
     RuntimeFrame,
     UserAction,
 )
@@ -62,6 +63,7 @@ class RuntimeGateway:
         self._tool_port = tool_port
         self._approvals = ApprovalRegistry()
         self._active_runs = ActiveRunRegistry()
+        self._session_locks: dict[str, asyncio.Lock] = {}
 
     def open_session(self, intent: "SessionOpenIntent") -> SessionRef:
         session = build_runtime_session(intent)
@@ -78,19 +80,52 @@ class RuntimeGateway:
         action: UserAction,
     ) -> AsyncIterator[RuntimeFrame]:
         session = self._sessions.require(session_id)
+        if isinstance(action, RunCancelled):
+            yield self._cancel_run(session_id, action)
+            return
+        if self._active_runs.is_running(session_id):
+            yield self._run_active_frame(session_id)
+            return
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            if self._active_runs.is_running(session_id):
+                yield self._run_active_frame(session_id)
+                return
+            async for frame in self._dispatch_action(session, action):
+                yield frame
+
+    async def _dispatch_action(
+        self,
+        session: RuntimeSession,
+        action: UserAction,
+    ) -> AsyncIterator[RuntimeFrame]:
         if isinstance(action, PromptSubmitted):
-            plan_command = self._plan_command_from_prompt(session, action)
-            if plan_command is not None:
-                record = await self._run_command(session, CommandSubmitted(plan_command))
-                yield CommandFinishedFrame(record=record)
-                async for frame in self._follow_up_from_command(session, record):
+            checkpoint = session.controller.runtime_checkpoint()
+            if _is_plan_wait_checkpoint(checkpoint):
+                async for frame in self._run_continuation(
+                    session,
+                    SessionContinuationIntent(
+                        kind=(
+                            "plan_clarification"
+                            if _optional_text(checkpoint.get("phase"))
+                            == "plan_clarification"
+                            else "plan_feedback"
+                        ),
+                        run_id=_optional_text(checkpoint.get("run_id")),
+                        text=action.text,
+                    ),
+                ):
                     yield frame
                 return
             async for frame in self._run_prompt(session, action):
                 yield frame
             return
         if isinstance(action, CommandSubmitted):
-            record = await self._run_command(session, action)
+            plan_command = _explicit_plan_command(session, action.text)
+            record = await self._run_command(
+                session,
+                CommandSubmitted(plan_command or action.text),
+            )
             yield CommandFinishedFrame(record=record)
             async for frame in self._follow_up_from_command(session, record):
                 yield frame
@@ -99,10 +134,17 @@ class RuntimeGateway:
             async for frame in self._resume_after_approval(session, action):
                 yield frame
             return
-        if isinstance(action, RunCancelled):
-            yield self._cancel_run(session_id, action)
-            return
         yield FailedFrame(error={"code": "runtime.unknown_action", "action": type(action).__name__})
+
+    @staticmethod
+    def _run_active_frame(session_id: str) -> FailedFrame:
+        return FailedFrame(
+            error={
+                "code": "runtime.run_active",
+                "message": "Wait for the active run to pause or cancel it before sending another action.",
+                "session_id": session_id,
+            }
+        )
 
     def describe(self, session_id: str) -> AppSessionView:
         session = self._sessions.require(session_id)
@@ -119,11 +161,13 @@ class RuntimeGateway:
         self._sessions.close(session_id)
         self._approvals.remove_session(session_id)
         self._active_runs.finish(session_id)
+        self._session_locks.pop(session_id, None)
 
     async def close_all(self) -> None:
         self._sessions.close_all()
         self._approvals.clear()
         self._active_runs.clear()
+        self._session_locks.clear()
 
     def _require_session(self, session_id: str) -> SessionController:
         return self._sessions.require(session_id).controller
@@ -166,37 +210,37 @@ class RuntimeGateway:
             )
         return record
 
-    def _plan_command_from_prompt(
-        self,
-        session: RuntimeSession,
-        action: PromptSubmitted,
-    ) -> str | None:
-        if session.controller.pending_approvals():
-            return None
-        view = session.controller.describe()
-        plan = (view.context or {}).get("plan_summary")
-        decision = _plan_decision_alias(action.text)
-        if decision is None or not isinstance(plan, dict):
-            return None
-        if plan.get("status") != "proposed":
-            return None
-        if plan.get("approval_state") != "proposed":
-            return None
-        return "/plan approve" if decision == "approve" else "/plan reject"
-
     async def _follow_up_from_command(
         self,
         session: RuntimeSession,
         record: SessionCommandRecord,
     ) -> AsyncIterator[RuntimeFrame]:
-        prompt = _optional_text(record.data.get("followup_prompt"))
-        if prompt is None:
+        kind = _optional_text(record.data.get("continuation_kind"))
+        run_id = _optional_text(record.data.get("continuation_run_id"))
+        if kind is None or run_id is None:
             return
-        mode_hint = _optional_text(record.data.get("followup_mode"))
-        async for frame in self._run_prompt(
+        async for frame in self._run_continuation(
             session,
-            PromptSubmitted(text=prompt, mode_hint=mode_hint),
+            SessionContinuationIntent(
+                kind=kind,  # type: ignore[arg-type]
+                run_id=run_id,
+                target_mode=_optional_text(record.data.get("current_mode")),
+            ),
         ):
+            yield frame
+
+    async def _run_continuation(
+        self,
+        session: RuntimeSession,
+        intent: SessionContinuationIntent,
+    ) -> AsyncIterator[RuntimeFrame]:
+        prepared = await session.controller.prepare_continuation(intent)
+        run_loop = (
+            (lambda ports: resume_agent_loop(prepared.resume_input, ports))
+            if prepared.resume_input is not None
+            else (lambda ports: run_agent_loop(prepared.loop_input, ports))
+        )
+        async for frame in self._run_agent_loop(session, prepared, run_loop):
             yield frame
 
     async def _resume_after_approval(
@@ -224,10 +268,10 @@ class RuntimeGateway:
             )
             return
 
-        prepared = await session.controller.prepare_resume(
-            SessionResumeIntent(
+        prepared = await session.controller.prepare_continuation(
+            SessionContinuationIntent(
+                kind="tool_approved" if action.decision == "approve" else "tool_denied",
                 approval_id=action.approval_id,
-                decision=action.decision,
                 reason=action.reason,
             )
         )
@@ -330,6 +374,16 @@ class RuntimeGateway:
             for interruption in outcome.interruptions:
                 self._approvals.add(controller.session_id, interruption)
                 yield ApprovalRequiredFrame(approval=interruption)
+            yield RunPausedFrame(
+                record=record,
+                checkpoint=controller.runtime_checkpoint() or {},
+            )
+            return
+        if outcome.status == "waiting_user":
+            yield RunPausedFrame(
+                record=record,
+                checkpoint=controller.runtime_checkpoint() or {},
+            )
             return
         if outcome.status == "failed":
             yield FailedFrame(error=_runtime_error_payload(outcome.error))
@@ -460,13 +514,27 @@ def _optional_text(value: object) -> str | None:
     return text or None
 
 
-def _plan_decision_alias(value: object) -> str | None:
-    text = str(value).strip().lower().lstrip("/") if value is not None else ""
-    if text in {"approve", "yes", "y", "ok", "同意", "批准", "可以", "确认"}:
-        return "approve"
-    if text in {"reject", "deny", "no", "n", "拒绝", "不同意", "不行"}:
-        return "reject"
-    return None
+def _is_plan_wait_checkpoint(checkpoint: object) -> bool:
+    if not isinstance(checkpoint, dict):
+        return False
+    phase = _optional_text(checkpoint.get("phase"))
+    return phase in {
+        "plan_approval",
+        "plan_feedback",
+        "plan_clarification",
+    }
+
+
+def _explicit_plan_command(session: RuntimeSession, text: str) -> str | None:
+    normalized = text.strip().lower()
+    if normalized not in {"/approve", "/reject"}:
+        return None
+    plan = (session.controller.describe().context or {}).get("plan_summary")
+    if not isinstance(plan, dict):
+        return None
+    if plan.get("status") != "proposed" or plan.get("approval_state") != "pending":
+        return None
+    return "/plan approve" if normalized == "/approve" else "/plan reject"
 
 
 def _plan_summary_from_view(view: SessionView) -> dict[str, object] | None:

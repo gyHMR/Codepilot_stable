@@ -3,6 +3,10 @@ from __future__ import annotations
 import asyncio
 
 
+async def _collect_frames(iterator):
+    return [frame async for frame in iterator]
+
+
 class _EchoModelPort:
     async def stream(self, _request):
         from codepilot.llm.ports import LLMCompleted
@@ -10,6 +14,60 @@ class _EchoModelPort:
 
         yield LLMCompleted(
             message=AssistantMessage(content=[TextContent(text="echo done")])
+        )
+
+
+class _PlanLifecycleModelPort:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.requests = []
+
+    async def stream(self, request):
+        from codepilot.llm.ports import LLMCompleted
+        from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+
+        self.calls += 1
+        self.requests.append(request)
+        if self.calls == 1:
+            yield LLMCompleted(
+                message=AssistantMessage(
+                    content=[
+                        ToolCall(
+                            id="plan_done",
+                            name="update_plan",
+                            arguments={
+                                "summary": "先确认注册边界，再实施并验证。",
+                                "explanation": "执行完成",
+                                "plan": [
+                                    {
+                                        "step": "阅读实现",
+                                        "details": "确认注册逻辑和调用入口。",
+                                        "verification": "列出受影响文件和行为。",
+                                        "status": "completed",
+                                    },
+                                    {
+                                        "step": "修改登录逻辑",
+                                        "details": "按现有风格实施修改。",
+                                        "verification": "运行注册相关测试。",
+                                        "status": "in_progress",
+                                    },
+                                ],
+                            },
+                        )
+                    ],
+                    stop_reason="toolUse",
+                )
+            )
+            return
+        if self.calls == 2:
+            yield LLMCompleted(
+                message=AssistantMessage(
+                    content=[TextContent(text="计划已整理，请审批。")]
+                )
+            )
+            return
+        yield LLMCompleted(
+            message=AssistantMessage(content=[TextContent(text="实现和验证已完成。")])
         )
 
 
@@ -99,33 +157,34 @@ def test_runtime_gateway_dispatch_command_and_cancel_as_frames(tmp_path) -> None
     asyncio.run(run_case())
 
 
-def test_runtime_gateway_plan_approve_runs_build_followup(tmp_path) -> None:
+def test_runtime_gateway_plan_approval_resumes_same_task_run(tmp_path) -> None:
     async def run_case() -> None:
-        from codepilot.runtime.actions import CommandFinishedFrame, CommandSubmitted, RunFinishedFrame
+        from codepilot.runtime.actions import (
+            CommandFinishedFrame,
+            CommandSubmitted,
+            PromptSubmitted,
+            RunFinishedFrame,
+            RunPausedFrame,
+        )
         from codepilot.runtime.gateway import RuntimeGateway
 
-        gateway = RuntimeGateway(model_port=_EchoModelPort())
+        model = _PlanLifecycleModelPort()
+        gateway = RuntimeGateway(model_port=model)
         ref = _open_test_session(gateway, tmp_path)
         session = _persistent_session(gateway, ref.session_id)
         session.set_current_mode("plan")
-        session.plan_state.save(
-            {
-                "schema_version": 1,
-                "plan_id": "plan_gateway",
-                "status": "proposed",
-                "approval_state": "proposed",
-                "origin_mode": "plan",
-                "objective": "优化登录逻辑",
-                "items": [
-                    {"id": "item_1", "step": "阅读实现", "status": "pending"},
-                    {"id": "item_2", "step": "修改登录逻辑", "status": "pending"},
-                ],
-                "explanation": "",
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "updated_at": "2026-01-01T00:00:00+00:00",
-                "last_update_run_id": "run_plan",
-            }
-        )
+
+        plan_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                PromptSubmitted(text="优化登录逻辑"),
+            )
+        ]
+        paused = next(frame for frame in plan_frames if isinstance(frame, RunPausedFrame))
+        run_id = paused.record.run_id
+        assert not any(isinstance(frame, RunFinishedFrame) for frame in plan_frames)
+        assert session.store.read_meta()["runtime_checkpoint"]["run_id"] == run_id
 
         frames = [
             frame
@@ -139,43 +198,106 @@ def test_runtime_gateway_plan_approve_runs_build_followup(tmp_path) -> None:
         finished = [frame for frame in frames if isinstance(frame, RunFinishedFrame)]
         current_plan = session.plan_state.current()
 
-        assert command.record.data["followup_mode"] == "build"
+        assert "followup_prompt" not in command.record.data
         assert finished
+        assert finished[-1].record.run_id == run_id
         assert finished[-1].record.status == "completed"
         assert session.current_mode == "build"
-        assert current_plan["status"] == "active"
+        assert current_plan["status"] == "completed"
         assert current_plan["approval_state"] == "approved"
+        assert session.store.read_meta()["active_plan_id"] is None
         assert session.store.read_meta()["runtime_checkpoint"] is None
+        assert len(list((tmp_path / ".codepilot" / "runs").iterdir())) == 1
+        stored_user_texts = [
+            message.content
+            for message in session.store.load_session_messages()
+            if getattr(message, "role", "") == "user"
+        ]
+        assert stored_user_texts == ["优化登录逻辑"]
+        assert model.requests[-1].correlation.run_id == run_id
+        assert "## Mode Policy" in model.requests[-1].system_prompt
+        assert "Approved Execution Contract" in model.requests[-1].system_prompt
+        assert "重新制定" in model.requests[-1].system_prompt
+        assert not any(
+            getattr(message, "metadata", {}).get("message_kind") == "plan_summary"
+            for message in model.requests[-1].messages
+        )
+
+        events = session.store.run_store.load_events(run_id)
+        event_ids = [event["eventId"] for event in events if "eventId" in event]
+        turn_ids = [
+            event["turnId"]
+            for event in events
+            if isinstance(event.get("turnId"), int)
+        ]
+        stored_run = session.store.run_store.load_run_result(run_id)
+        assert len(event_ids) == len(set(event_ids))
+        assert turn_ids == sorted(turn_ids)
+        assert stored_run["resume_count"] == 1
+        assert stored_run["model_attempts"] == 3
+        assert stored_run["tool_calls"] == 1
+        assert stored_run["phase"] == "terminal"
 
     asyncio.run(run_case())
 
 
-def test_runtime_gateway_plain_plan_approval_uses_same_command_chain(tmp_path) -> None:
+def test_runtime_gateway_natural_language_is_plan_feedback_not_approval(tmp_path) -> None:
     async def run_case() -> None:
-        from codepilot.runtime.actions import CommandFinishedFrame, PromptSubmitted, RunFinishedFrame
+        from codepilot.runtime.actions import PromptSubmitted, RunPausedFrame
         from codepilot.runtime.gateway import RuntimeGateway
 
-        gateway = RuntimeGateway(model_port=_EchoModelPort())
+        class FeedbackModel(_PlanLifecycleModelPort):
+            async def stream(self, request):
+                from codepilot.llm.ports import LLMCompleted
+                from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+
+                self.calls += 1
+                self.requests.append(request)
+                if self.calls in {1, 3}:
+                    suffix = "并先补测试" if self.calls == 3 else ""
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[
+                                ToolCall(
+                                    id=f"plan_{self.calls}",
+                                    name="update_plan",
+                                    arguments={
+                                        "summary": f"优化登录逻辑{suffix}。",
+                                        "plan": [
+                                            {
+                                                "step": "修改登录逻辑",
+                                                "details": f"实施目标内调整{suffix}。",
+                                                "verification": "运行注册测试。",
+                                                "status": "pending",
+                                            }
+                                        ],
+                                    },
+                                )
+                            ],
+                            stop_reason="toolUse",
+                        )
+                    )
+                    return
+                yield LLMCompleted(
+                    message=AssistantMessage(
+                        content=[TextContent(text="计划已整理，请审批。")]
+                    )
+                )
+
+        gateway = RuntimeGateway(model_port=FeedbackModel())
         ref = _open_test_session(gateway, tmp_path)
         session = _persistent_session(gateway, ref.session_id)
         session.set_current_mode("plan")
-        session.plan_state.save(
-            {
-                "schema_version": 1,
-                "plan_id": "plan_gateway_plain",
-                "status": "proposed",
-                "approval_state": "proposed",
-                "origin_mode": "plan",
-                "objective": "优化登录逻辑",
-                "items": [
-                    {"id": "item_1", "step": "阅读实现", "status": "pending"},
-                    {"id": "item_2", "step": "修改登录逻辑", "status": "pending"},
-                ],
-                "explanation": "",
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "updated_at": "2026-01-01T00:00:00+00:00",
-                "last_update_run_id": "run_plan",
-            }
+
+        first_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                PromptSubmitted(text="优化登录逻辑"),
+            )
+        ]
+        first_pause = next(
+            frame for frame in first_frames if isinstance(frame, RunPausedFrame)
         )
 
         frames = [
@@ -186,16 +308,182 @@ def test_runtime_gateway_plain_plan_approval_uses_same_command_chain(tmp_path) -
             )
         ]
 
-        command = next(frame for frame in frames if isinstance(frame, CommandFinishedFrame))
-        finished = [frame for frame in frames if isinstance(frame, RunFinishedFrame)]
+        second_pause = next(frame for frame in frames if isinstance(frame, RunPausedFrame))
         current_plan = session.plan_state.current()
 
-        assert command.record.command == "/plan approve"
-        assert command.record.data["followup_mode"] == "build"
-        assert finished
+        assert second_pause.record.run_id == first_pause.record.run_id
+        assert current_plan["status"] == "proposed"
+        assert current_plan["approval_state"] == "pending"
+        assert current_plan["revision"] == 2
+        assert session.current_mode == "plan"
+
+    asyncio.run(run_case())
+
+
+def test_runtime_gateway_plan_reject_waits_for_feedback_in_same_run(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.runtime.actions import (
+            CommandFinishedFrame,
+            CommandSubmitted,
+            PromptSubmitted,
+            RunPausedFrame,
+        )
+        from codepilot.runtime.gateway import RuntimeGateway
+
+        gateway = RuntimeGateway(model_port=_PlanLifecycleModelPort())
+        ref = _open_test_session(gateway, tmp_path)
+        session = _persistent_session(gateway, ref.session_id)
+        session.set_current_mode("plan")
+
+        plan_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                PromptSubmitted(text="优化登录逻辑"),
+            )
+        ]
+        first_pause = next(
+            frame for frame in plan_frames if isinstance(frame, RunPausedFrame)
+        )
+
+        reject_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                CommandSubmitted(text="/reject"),
+            )
+        ]
+        command = next(
+            frame for frame in reject_frames if isinstance(frame, CommandFinishedFrame)
+        )
+        second_pause = next(
+            frame for frame in reject_frames if isinstance(frame, RunPausedFrame)
+        )
+        plan = session.plan_state.current()
+
+        assert command.record.command == "/plan reject"
+        assert second_pause.record.run_id == first_pause.record.run_id
+        assert second_pause.record.stop_reason == "plan_clarification_required"
+        assert plan["status"] == "rejected"
+        assert plan["approval_state"] == "rejected"
+        assert session.store.read_meta()["runtime_checkpoint"]["phase"] == "plan_clarification"
+
+    asyncio.run(run_case())
+
+
+def test_runtime_gateway_mode_switch_continues_paused_run(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.llm.ports import LLMCompleted
+        from codepilot.protocols import AssistantMessage, TextContent
+        from codepilot.runtime.actions import (
+            CommandFinishedFrame,
+            CommandSubmitted,
+            PromptSubmitted,
+            RunFinishedFrame,
+            RunPausedFrame,
+        )
+        from codepilot.runtime.gateway import RuntimeGateway
+
+        class ClarifyThenBuildModel:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def stream(self, _request):
+                self.calls += 1
+                text = (
+                    "是否保留旧命令兼容？"
+                    if self.calls == 1
+                    else "已按 build 模式完成任务。"
+                )
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text=text)])
+                )
+
+        gateway = RuntimeGateway(model_port=ClarifyThenBuildModel())
+        ref = _open_test_session(gateway, tmp_path)
+        session = _persistent_session(gateway, ref.session_id)
+        session.set_current_mode("plan")
+
+        plan_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                PromptSubmitted(text="处理兼容性重构"),
+            )
+        ]
+        paused = next(frame for frame in plan_frames if isinstance(frame, RunPausedFrame))
+
+        mode_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                CommandSubmitted(text="/mode build"),
+            )
+        ]
+        command = next(
+            frame for frame in mode_frames if isinstance(frame, CommandFinishedFrame)
+        )
+        finished = next(
+            frame for frame in mode_frames if isinstance(frame, RunFinishedFrame)
+        )
+
+        assert command.record.data["current_mode"] == "build"
+        assert finished.record.run_id == paused.record.run_id
         assert session.current_mode == "build"
-        assert current_plan["status"] == "active"
-        assert current_plan["approval_state"] == "approved"
+        assert len(list((tmp_path / ".codepilot" / "runs").iterdir())) == 1
+
+    asyncio.run(run_case())
+
+
+def test_runtime_gateway_rejects_mode_switch_while_run_is_executing(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.llm.ports import LLMCompleted
+        from codepilot.protocols import AssistantMessage, TextContent
+        from codepilot.runtime.actions import (
+            CommandSubmitted,
+            FailedFrame,
+            PromptSubmitted,
+        )
+        from codepilot.runtime.gateway import RuntimeGateway
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class SlowModel:
+            async def stream(self, _request):
+                started.set()
+                await release.wait()
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text="done")])
+                )
+
+        gateway = RuntimeGateway(model_port=SlowModel())
+        ref = _open_test_session(gateway, tmp_path)
+        session = _persistent_session(gateway, ref.session_id)
+
+        prompt_task = asyncio.create_task(
+            _collect_frames(
+                gateway.dispatch(
+                    ref.session_id,
+                    PromptSubmitted(text="执行长任务"),
+                )
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        mode_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                CommandSubmitted(text="/mode plan"),
+            )
+        ]
+        release.set()
+        await prompt_task
+
+        assert isinstance(mode_frames[-1], FailedFrame)
+        assert mode_frames[-1].error["code"] == "runtime.run_active"
+        assert session.current_mode == "build"
 
     asyncio.run(run_case())
 

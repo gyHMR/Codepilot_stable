@@ -72,6 +72,13 @@ class RunFinishedFrame:
 
 
 @dataclass(frozen=True)
+class RunPausedFrame:
+    record: SessionRunRecord
+    checkpoint: dict[str, Any] = field(default_factory=dict)
+    kind: Literal["run_paused"] = field(default="run_paused", init=False)
+
+
+@dataclass(frozen=True)
 class CommandFinishedFrame:
     record: SessionCommandRecord
     kind: Literal["command_finished"] = field(default="command_finished", init=False)
@@ -97,6 +104,7 @@ class FailedFrame:
 RuntimeFrame = (
     ProgressFrame
     | ApprovalRequiredFrame
+    | RunPausedFrame
     | RunFinishedFrame
     | CommandFinishedFrame
     | CancelledFrame
@@ -151,6 +159,7 @@ __all__ = [
     "PromptSubmitted",
     "RunCancelled",
     "RunFinishedFrame",
+    "RunPausedFrame",
     "RuntimeFrame",
     "UserAction",
 ]

@@ -53,6 +53,30 @@ def _raise(message: str) -> Any:
     raise AssertionError(message)
 
 
+def _plan_item(step: str, status: str) -> PlanUpdateItem:
+    return PlanUpdateItem(
+        step=step,
+        details=f"执行：{step}",
+        verification=f"验证：{step}",
+        status=status,  # type: ignore[arg-type]
+    )
+
+
+def _plan_payload(*items: tuple[str, str], summary: str = "按可验证步骤推进。") -> dict[str, Any]:
+    return {
+        "summary": summary,
+        "plan": [
+            {
+                "step": step,
+                "details": f"执行：{step}",
+                "verification": f"验证：{step}",
+                "status": status,
+            }
+            for step, status in items
+        ],
+    }
+
+
 def _loop_input(
     run_id: str,
     *,
@@ -74,19 +98,21 @@ def _loop_input(
 
 def test_plan_update_validates_shape() -> None:
     update = PlanUpdate(
+        summary="阅读后重构 runner。",
         explanation="推进实现",
         items=(
-            PlanUpdateItem(step="阅读相关实现", status="completed"),
-            PlanUpdateItem(step="重构 runner", status="in_progress"),
+            _plan_item("阅读相关实现", "completed"),
+            _plan_item("重构 runner", "in_progress"),
         ),
     )
     assert update.items[1].status == "in_progress"
 
     with pytest.raises(PlanValidationError, match="at most one"):
         PlanUpdate(
+            summary="并行执行两个步骤。",
             items=(
-                PlanUpdateItem(step="a", status="in_progress"),
-                PlanUpdateItem(step="b", status="in_progress"),
+                _plan_item("a", "in_progress"),
+                _plan_item("b", "in_progress"),
             )
         )
 
@@ -95,23 +121,35 @@ def test_plan_mode_update_stays_proposed_and_build_mode_update_becomes_active() 
     plan_mode = PlanState.new(objective="制定方案", origin_mode="plan", run_id="run_1")
     proposed = plan_mode.apply_update(
         PlanUpdate(
+            summary="阅读后给出方案。",
             items=(
-                PlanUpdateItem(step="阅读实现", status="completed"),
-                PlanUpdateItem(step="给出方案", status="in_progress"),
+                _plan_item("阅读实现", "completed"),
+                _plan_item("给出方案", "in_progress"),
             )
         ),
         mode="plan",
         run_id="run_1",
     )
     assert proposed.status == "proposed"
-    assert proposed.approval_state == "proposed"
+    assert proposed.approval_state == "pending"
     assert [item.status for item in proposed.items] == ["pending", "pending"]
 
     from_mapping = PlanUpdate.from_mapping(
         {
+            "summary": "测试 proposal 归一化。",
             "plan": [
-                {"step": "a", "status": "in_progress"},
-                {"step": "b", "status": "in_progress"},
+                {
+                    "step": "a",
+                    "details": "执行 a",
+                    "verification": "验证 a",
+                    "status": "in_progress",
+                },
+                {
+                    "step": "b",
+                    "details": "执行 b",
+                    "verification": "验证 b",
+                    "status": "in_progress",
+                },
             ]
         },
         proposal=True,
@@ -121,9 +159,10 @@ def test_plan_mode_update_stays_proposed_and_build_mode_update_becomes_active() 
     build_mode = PlanState.new(objective="实现方案", origin_mode="build", run_id="run_2")
     active = build_mode.apply_update(
         PlanUpdate(
+            summary="阅读后修改代码。",
             items=(
-                PlanUpdateItem(step="阅读实现", status="completed"),
-                PlanUpdateItem(step="修改代码", status="in_progress"),
+                _plan_item("阅读实现", "completed"),
+                _plan_item("修改代码", "in_progress"),
             )
         ),
         mode="build",
@@ -180,11 +219,11 @@ async def _update_plan_tool_result_updates_soft_plan_and_continues_to_model() ->
                     id="plan_1",
                     name="update_plan",
                     arguments={
+                        **_plan_payload(
+                            ("阅读实现", "completed"),
+                            ("重写 runner", "completed"),
+                        ),
                         "explanation": "开始重构",
-                        "plan": [
-                            {"step": "阅读实现", "status": "completed"},
-                            {"step": "重写 runner", "status": "in_progress"},
-                        ],
                     },
                 )
             ],
@@ -200,14 +239,14 @@ async def _update_plan_tool_result_updates_soft_plan_and_continues_to_model() ->
                 name="update_plan",
                 status="success",
                 content=(TextContent(text="Plan updated."),),
-                metadata={
-                    "plan_update": {
-                        "explanation": "开始重构",
-                        "plan": [
-                            {"step": "阅读实现", "status": "completed"},
-                            {"step": "重写 runner", "status": "in_progress"},
-                        ],
-                    }
+                    metadata={
+                        "plan_update": {
+                            **_plan_payload(
+                                ("阅读实现", "completed"),
+                                ("重写 runner", "completed"),
+                            ),
+                            "explanation": "开始重构",
+                        }
                 },
             )
         }
@@ -222,8 +261,56 @@ async def _update_plan_tool_result_updates_soft_plan_and_continues_to_model() ->
     assert model.calls == 2
     assert outcome.plan is not None
     assert outcome.plan.status == "active"
-    assert outcome.plan.items[1]["status"] == "in_progress"
+    assert outcome.plan.approval_state == "not_required"
+    assert outcome.plan.items[1]["status"] == "completed"
     assert any(event["type"] == "plan_updated" for event in outcome.events)
+
+
+def test_active_plan_items_do_not_block_final_answer() -> None:
+    asyncio.run(_active_plan_items_do_not_block_final_answer())
+
+
+async def _active_plan_items_do_not_block_final_answer() -> None:
+    active_plan = PlanState.new(
+        objective="重构 runtime",
+        origin_mode="build",
+        run_id="run_plan_completion_guard",
+    ).apply_update(
+        PlanUpdate(
+            summary="阅读后重写 runner。",
+            items=(
+                _plan_item("阅读实现", "completed"),
+                _plan_item("重写 runner", "in_progress"),
+            )
+        ),
+        mode="build",
+        run_id="run_plan_completion_guard",
+    )
+    model = _ScriptedModel(
+        lambda _request, _calls: AssistantMessage(
+            content=[TextContent(text="已经完成。")]
+        )
+    )
+    tools = _ToolPort({})
+
+    outcome = await run_agent_loop(
+        _loop_input(
+            "run_plan_completion_guard",
+            prompt="重构 runtime",
+            plan_state=active_plan.to_dict(),
+        ),
+        AgentLoopPorts(model=model, tools=tools),
+    )
+
+    assert outcome.status == "completed"
+    assert model.calls == 1
+    assert outcome.plan is not None
+    assert outcome.plan.status == "active"
+    assert not any(
+        event["type"] == "run_guard_checked"
+        and event["decision"]["reason"] == "plan_completion_missing"
+        for event in outcome.events
+    )
 
 
 def test_plan_mode_update_plan_pauses_for_user_approval() -> None:
@@ -235,20 +322,21 @@ async def _plan_mode_update_plan_pauses_for_user_approval() -> None:
         lambda _request, calls: AssistantMessage(
             content=[
                 ToolCall(
-                    id="plan_1",
-                    name="update_plan",
-                    arguments={
-                        "plan": [
-                            {"step": "阅读注册逻辑", "status": "completed"},
-                            {"step": "提出重构方案", "status": "in_progress"},
-                        ],
-                    },
+                        id="plan_1",
+                        name="update_plan",
+                        arguments=_plan_payload(
+                            ("阅读注册逻辑", "completed"),
+                            ("提出重构方案", "in_progress"),
+                            summary="重构注册逻辑并补充验证。",
+                        ),
                 )
             ],
             stop_reason="toolUse",
         )
         if calls == 1
-        else (_raise("model should wait for user approval after proposed plan"))
+        else AssistantMessage(
+            content=[TextContent(text="方案已经整理完毕，请审批。")]
+        )
     )
     tools = _ToolPort(
         {
@@ -257,13 +345,12 @@ async def _plan_mode_update_plan_pauses_for_user_approval() -> None:
                 name="update_plan",
                 status="success",
                 content=(TextContent(text="Plan updated."),),
-                metadata={
-                    "plan_update": {
-                        "plan": [
-                            {"step": "阅读注册逻辑", "status": "completed"},
-                            {"step": "提出重构方案", "status": "in_progress"},
-                        ],
-                    }
+                    metadata={
+                    "plan_update": _plan_payload(
+                        ("阅读注册逻辑", "completed"),
+                        ("提出重构方案", "in_progress"),
+                        summary="重构注册逻辑并补充验证。",
+                    )
                 },
             )
         }
@@ -276,15 +363,100 @@ async def _plan_mode_update_plan_pauses_for_user_approval() -> None:
 
     assert outcome.status == "waiting_user"
     assert outcome.stop_reason == "plan_approval_required"
-    assert model.calls == 1
+    assert model.calls == 2
     assert tools.executed == ["update_plan"]
+    assert outcome.final_text == "方案已经整理完毕，请审批。"
     assert outcome.plan is not None
     assert outcome.plan.status == "proposed"
-    assert outcome.plan.approval_state == "proposed"
+    assert outcome.plan.approval_state == "pending"
     assert [item["status"] for item in outcome.plan.items] == ["pending", "pending"]
     event_types = [event["type"] for event in outcome.events]
     assert "plan_proposed" in event_types
     assert "plan_approval_required" in event_types
+
+
+def test_plan_mode_question_pauses_same_run_for_clarification() -> None:
+    async def run_case() -> None:
+        model = _ScriptedModel(
+            lambda _request, _calls: AssistantMessage(
+                content=[TextContent(text="你希望保留旧命令兼容吗？")]
+            )
+        )
+
+        outcome = await run_agent_loop(
+            _loop_input(
+                "run_plan_clarification",
+                prompt="先设计重构方案",
+                mode="plan",
+            ),
+            AgentLoopPorts(model=model, tools=_ToolPort({})),
+        )
+
+        assert outcome.status == "waiting_user"
+        assert outcome.stop_reason == "plan_clarification_required"
+        assert outcome.run_id == "run_plan_clarification"
+        assert outcome.final_text == "你希望保留旧命令兼容吗？"
+
+    asyncio.run(run_case())
+
+
+def test_plan_summary_model_failure_uses_canonical_fallback() -> None:
+    async def run_case() -> None:
+        class SummaryFailureModel:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def stream(self, _request):
+                self.calls += 1
+                if self.calls == 1:
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[
+                                ToolCall(
+                                    id="plan_1",
+                                    name="update_plan",
+                                    arguments=_plan_payload(
+                                        ("阅读实现", "pending"),
+                                        ("执行修改", "pending"),
+                                        summary="阅读实现后完成聚焦修改。",
+                                    ),
+                                )
+                            ],
+                            stop_reason="toolUse",
+                        )
+                    )
+                    return
+                raise RuntimeError("summary model unavailable")
+
+        tools = _ToolPort(
+            {
+                "update_plan": ToolObservation(
+                    tool_call_id="plan_1",
+                    name="update_plan",
+                    status="success",
+                    metadata={
+                        "plan_update": _plan_payload(
+                            ("阅读实现", "pending"),
+                            ("执行修改", "pending"),
+                            summary="阅读实现后完成聚焦修改。",
+                        )
+                    },
+                )
+            }
+        )
+        outcome = await run_agent_loop(
+            _loop_input("run_plan_fallback", prompt="先给计划", mode="plan"),
+            AgentLoopPorts(model=SummaryFailureModel(), tools=tools),
+        )
+
+        assert outcome.status == "waiting_user"
+        assert outcome.stop_reason == "plan_approval_required"
+        assert "阅读实现后完成聚焦修改" in outcome.final_text
+        assert outcome.final_message is not None
+        assert outcome.final_message.metadata["summary_fallback"] is True
+        assert outcome.final_message.metadata["message_kind"] == "plan_summary"
+
+    asyncio.run(run_case())
 
 
 def test_plan_completed_does_not_complete_run_before_model_final_answer() -> None:
@@ -298,7 +470,7 @@ async def _plan_completed_does_not_complete_run_before_model_final_answer() -> N
                 ToolCall(
                     id="plan_1",
                     name="update_plan",
-                    arguments={"plan": [{"step": "总结", "status": "completed"}]},
+                    arguments=_plan_payload(("总结", "completed")),
                 )
             ],
             stop_reason="toolUse",
@@ -313,9 +485,7 @@ async def _plan_completed_does_not_complete_run_before_model_final_answer() -> N
                 name="update_plan",
                 status="success",
                 metadata={
-                    "plan_update": {
-                        "plan": [{"step": "总结", "status": "completed"}],
-                    }
+                    "plan_update": _plan_payload(("总结", "completed"))
                 },
             )
         }
@@ -329,8 +499,8 @@ async def _plan_completed_does_not_complete_run_before_model_final_answer() -> N
     assert outcome.status == "completed"
     assert model.calls == 2
     assert outcome.plan is not None
-    assert outcome.plan.status == "completed"
-    assert any(event["type"] == "plan_completed" for event in outcome.events)
+    assert outcome.plan.status == "active"
+    assert any(event["type"] == "plan_updated" for event in outcome.events)
 
 
 def test_run_guard_rejects_empty_final_answer() -> None:

@@ -7,7 +7,7 @@ resume work, but it never proves that the user's task is complete.
 """
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
@@ -17,35 +17,37 @@ from codepilot.protocols import PLAN_ITEM_LIMIT, PlanSummary
 
 RunMode = Literal["read", "plan", "build"]
 PlanningBudgetProfile = Literal["conservative", "balanced", "wide"]
-PlanStatus = Literal["none", "proposed", "active", "completed", "rejected", "abandoned"]
-PlanApprovalState = Literal["none", "proposed", "approved", "rejected"]
+PlanStatus = Literal["proposed", "active", "completed", "rejected", "abandoned"]
+PlanApprovalState = Literal["pending", "approved", "not_required", "rejected"]
 PlanItemStatus = Literal["pending", "in_progress", "completed"]
 
 _RUN_MODES = frozenset({"read", "plan", "build"})
 _PLANNING_BUDGET_PROFILES = frozenset({"conservative", "balanced", "wide"})
-_PLAN_STATUSES = frozenset(
-    {"none", "proposed", "active", "completed", "rejected", "abandoned"}
-)
-_APPROVAL_STATES = frozenset({"none", "proposed", "approved", "rejected"})
+_PLAN_STATUSES = frozenset({"proposed", "active", "completed", "rejected", "abandoned"})
+_APPROVAL_STATES = frozenset({"pending", "approved", "not_required", "rejected"})
 _ITEM_STATUSES = frozenset({"pending", "in_progress", "completed"})
 _PLAN_KEYS = frozenset(
     {
         "schema_version",
         "plan_id",
+        "owner_run_id",
         "status",
         "approval_state",
         "origin_mode",
         "objective",
+        "summary",
         "items",
+        "revision",
         "explanation",
         "created_at",
         "updated_at",
-        "last_update_run_id",
+        "completed_at",
+        "completion_source",
     }
 )
-_ITEM_KEYS = frozenset({"id", "step", "status"})
+_ITEM_KEYS = frozenset({"id", "step", "details", "verification", "status"})
 
-PLAN_STATE_SCHEMA_VERSION = 1
+PLAN_STATE_SCHEMA_VERSION = 2
 MAX_PLAN_ITEMS = PLAN_ITEM_LIMIT
 
 
@@ -57,33 +59,57 @@ class PlanValidationError(ValueError):
 class PlanItem:
     id: str
     step: str
+    details: str
+    verification: str
     status: PlanItemStatus = "pending"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _required_text(self.id, "plan item id"))
         object.__setattr__(self, "step", _required_text(self.step, "plan item step"))
+        object.__setattr__(self, "details", _required_text(self.details, "plan item details"))
+        object.__setattr__(
+            self,
+            "verification",
+            _required_text(self.verification, "plan item verification"),
+        )
         object.__setattr__(self, "status", ensure_plan_item_status(self.status))
 
     def to_dict(self) -> dict[str, str]:
-        return {"id": self.id, "step": self.step, "status": self.status}
+        return {
+            "id": self.id,
+            "step": self.step,
+            "details": self.details,
+            "verification": self.verification,
+            "status": self.status,
+        }
 
 
 @dataclass(frozen=True)
 class PlanUpdateItem:
     step: str
+    details: str
+    verification: str
     status: PlanItemStatus
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "step", _required_text(self.step, "plan update step"))
+        object.__setattr__(self, "details", _required_text(self.details, "plan update details"))
+        object.__setattr__(
+            self,
+            "verification",
+            _required_text(self.verification, "plan update verification"),
+        )
         object.__setattr__(self, "status", ensure_plan_item_status(self.status))
 
 
 @dataclass(frozen=True)
 class PlanUpdate:
+    summary: str
     explanation: str = ""
     items: tuple[PlanUpdateItem, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "summary", _required_text(self.summary, "plan summary"))
         object.__setattr__(self, "explanation", _optional_text(self.explanation) or "")
         items = tuple(self.items)
         if not items:
@@ -108,10 +134,16 @@ class PlanUpdate:
             items.append(
                 PlanUpdateItem(
                     step=_required_text(item.get("step"), f"plan[{index}].step"),
+                    details=_required_text(item.get("details"), f"plan[{index}].details"),
+                    verification=_required_text(
+                        item.get("verification"),
+                        f"plan[{index}].verification",
+                    ),
                     status="pending" if proposal else status,
                 )
             )
         return cls(
+            summary=_required_text(raw.get("summary"), "plan summary"),
             explanation=_optional_text(raw.get("explanation")) or "",
             items=tuple(items),
         )
@@ -120,9 +152,15 @@ class PlanUpdate:
         if all(item.status == "pending" for item in self.items):
             return self
         return PlanUpdate(
+            summary=self.summary,
             explanation=self.explanation,
             items=tuple(
-                PlanUpdateItem(step=item.step, status="pending")
+                PlanUpdateItem(
+                    step=item.step,
+                    details=item.details,
+                    verification=item.verification,
+                    status="pending",
+                )
                 for item in self.items
             ),
         )
@@ -132,20 +170,29 @@ class PlanUpdate:
 class PlanState:
     schema_version: int = PLAN_STATE_SCHEMA_VERSION
     plan_id: str = field(default_factory=lambda: f"plan_{uuid4().hex[:12]}")
-    status: PlanStatus = "none"
-    approval_state: PlanApprovalState = "none"
+    owner_run_id: str = ""
+    status: PlanStatus = "active"
+    approval_state: PlanApprovalState = "not_required"
     origin_mode: RunMode = "build"
     objective: str = ""
+    summary: str = ""
     items: tuple[PlanItem, ...] = field(default_factory=tuple)
+    revision: int = 0
     explanation: str = ""
     created_at: str = field(default_factory=lambda: _utc_now_iso())
     updated_at: str = field(default_factory=lambda: _utc_now_iso())
-    last_update_run_id: str | None = None
+    completed_at: str | None = None
+    completion_source: str | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != PLAN_STATE_SCHEMA_VERSION:
             raise PlanValidationError("unsupported plan state schema")
         object.__setattr__(self, "plan_id", _required_text(self.plan_id, "plan_id"))
+        object.__setattr__(
+            self,
+            "owner_run_id",
+            _required_text(self.owner_run_id, "owner_run_id"),
+        )
         object.__setattr__(self, "status", ensure_plan_status(self.status))
         object.__setattr__(
             self,
@@ -153,7 +200,8 @@ class PlanState:
             ensure_plan_approval_state(self.approval_state),
         )
         object.__setattr__(self, "origin_mode", ensure_run_mode(self.origin_mode))
-        object.__setattr__(self, "objective", _optional_text(self.objective) or "")
+        object.__setattr__(self, "objective", _required_text(self.objective, "objective"))
+        object.__setattr__(self, "summary", _optional_text(self.summary) or "")
         items = tuple(self.items)
         if len(items) > MAX_PLAN_ITEMS:
             raise PlanValidationError(f"plan cannot contain more than {MAX_PLAN_ITEMS} items")
@@ -163,30 +211,40 @@ class PlanState:
         if len(ids) != len(set(ids)):
             raise PlanValidationError("plan item ids must be unique")
         object.__setattr__(self, "items", items)
+        if not isinstance(self.revision, int) or isinstance(self.revision, bool) or self.revision < 0:
+            raise PlanValidationError("revision must be a non-negative integer")
         object.__setattr__(self, "explanation", _optional_text(self.explanation) or "")
         object.__setattr__(self, "created_at", _required_text(self.created_at, "created_at"))
         object.__setattr__(self, "updated_at", _required_text(self.updated_at, "updated_at"))
         object.__setattr__(
             self,
-            "last_update_run_id",
-            _optional_text(self.last_update_run_id),
+            "completed_at",
+            _optional_text(self.completed_at),
+        )
+        object.__setattr__(
+            self,
+            "completion_source",
+            _optional_text(self.completion_source),
         )
 
     @classmethod
     def new(
         cls,
         *,
-        objective: str = "",
+        objective: str,
         origin_mode: RunMode = "build",
-        run_id: str | None = None,
+        run_id: str,
     ) -> "PlanState":
         now = _utc_now_iso()
+        mode = ensure_run_mode(origin_mode)
         return cls(
-            objective=_optional_text(objective) or "",
-            origin_mode=ensure_run_mode(origin_mode),
+            owner_run_id=_required_text(run_id, "owner_run_id"),
+            status="proposed" if mode == "plan" else "active",
+            approval_state="pending" if mode == "plan" else "not_required",
+            objective=_required_text(objective, "objective"),
+            origin_mode=mode,
             created_at=now,
             updated_at=now,
-            last_update_run_id=_optional_text(run_id),
         )
 
     @classmethod
@@ -219,21 +277,33 @@ class PlanState:
                 PlanItem(
                     id=_required_text(item.get("id"), f"items[{index}].id"),
                     step=_required_text(item.get("step"), f"items[{index}].step"),
+                    details=_required_text(
+                        item.get("details"),
+                        f"items[{index}].details",
+                    ),
+                    verification=_required_text(
+                        item.get("verification"),
+                        f"items[{index}].verification",
+                    ),
                     status=ensure_plan_item_status(item.get("status")),
                 )
             )
         return cls(
             schema_version=_ensure_schema_version(raw.get("schema_version")),
             plan_id=_required_text(raw.get("plan_id"), "plan_id"),
+            owner_run_id=_required_text(raw.get("owner_run_id"), "owner_run_id"),
             status=ensure_plan_status(raw.get("status")),
             approval_state=ensure_plan_approval_state(raw.get("approval_state")),
             origin_mode=ensure_run_mode(raw.get("origin_mode")),
-            objective=_optional_text(raw.get("objective")) or "",
+            objective=_required_text(raw.get("objective"), "objective"),
+            summary=_optional_text(raw.get("summary")) or "",
             items=tuple(items),
+            revision=_ensure_non_negative_int(raw.get("revision"), "revision"),
             explanation=_optional_text(raw.get("explanation")) or "",
             created_at=_required_text(raw.get("created_at"), "created_at"),
             updated_at=_required_text(raw.get("updated_at"), "updated_at"),
-            last_update_run_id=_optional_text(raw.get("last_update_run_id")),
+            completed_at=_optional_text(raw.get("completed_at")),
+            completion_source=_optional_text(raw.get("completion_source")),
         )
 
     def apply_update(
@@ -243,65 +313,107 @@ class PlanState:
         mode: RunMode,
         run_id: str,
     ) -> "PlanState":
-        if self.status == "rejected":
-            raise PlanValidationError("rejected plan cannot be changed by the model")
+        if self.status in {"completed", "rejected", "abandoned"}:
+            raise PlanValidationError(f"{self.status} plan cannot be changed by the model")
+        if self.owner_run_id != _required_text(run_id, "run_id"):
+            raise PlanValidationError("plan belongs to a different run")
         run_mode = ensure_run_mode(mode)
-        if run_mode == "plan" and self.status in {"active", "completed"}:
-            raise PlanValidationError("approved plan progress can only be updated in build mode")
+        if run_mode == "plan" and self.status != "proposed":
+            raise PlanValidationError("active plan must be abandoned before replanning")
+        if run_mode != "plan" and self.status == "proposed":
+            raise PlanValidationError("proposed plan must be approved before execution")
         if run_mode == "plan":
             update = update.as_proposal()
         now = _utc_now_iso()
-        next_status = self.status
-        if next_status in {"none", "abandoned"}:
-            next_status = "proposed" if run_mode == "plan" else "active"
-        if next_status == "active" and all(item.status == "completed" for item in update.items):
-            next_status = "completed"
-        approval_state = self.approval_state
-        if next_status == "proposed":
-            approval_state = "proposed"
-        elif next_status in {"active", "completed"} and approval_state == "none":
-            approval_state = "approved"
-        return PlanState(
-            plan_id=self.plan_id,
-            status=next_status,
-            approval_state=approval_state,
-            origin_mode=run_mode,
-            objective=self.objective,
+        return replace(
+            self,
+            summary=update.summary,
             items=tuple(_items_from_update(self.items, update)),
+            revision=self.revision + 1,
             explanation=update.explanation,
-            created_at=self.created_at,
             updated_at=now,
-            last_update_run_id=run_id,
+        )
+
+    def approve(self) -> "PlanState":
+        if self.status != "proposed" or self.approval_state != "pending":
+            raise PlanValidationError("only a pending proposed plan can be approved")
+        return replace(
+            self,
+            status="active",
+            approval_state="approved",
+            updated_at=_utc_now_iso(),
+        )
+
+    def reject(self) -> "PlanState":
+        if self.status != "proposed" or self.approval_state != "pending":
+            raise PlanValidationError("only a pending proposed plan can be rejected")
+        return replace(
+            self,
+            status="rejected",
+            approval_state="rejected",
+            updated_at=_utc_now_iso(),
+        )
+
+    def complete(self, *, source: str) -> "PlanState":
+        if self.status != "active":
+            raise PlanValidationError("only an active plan can be completed")
+        now = _utc_now_iso()
+        return replace(
+            self,
+            status="completed",
+            completed_at=now,
+            completion_source=_required_text(source, "completion_source"),
+            updated_at=now,
+        )
+
+    def abandon(self, *, source: str) -> "PlanState":
+        if self.status in {"completed", "rejected", "abandoned"}:
+            return self
+        now = _utc_now_iso()
+        return replace(
+            self,
+            status="abandoned",
+            completed_at=now,
+            completion_source=_required_text(source, "completion_source"),
+            updated_at=now,
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "plan_id": self.plan_id,
+            "owner_run_id": self.owner_run_id,
             "status": self.status,
             "approval_state": self.approval_state,
             "origin_mode": self.origin_mode,
             "objective": self.objective,
+            "summary": self.summary,
             "items": [item.to_dict() for item in self.items],
+            "revision": self.revision,
             "explanation": self.explanation,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "last_update_run_id": self.last_update_run_id,
+            "completed_at": self.completed_at,
+            "completion_source": self.completion_source,
         }
 
-    def summary(self) -> PlanSummary:
+    def to_summary(self) -> PlanSummary:
         return PlanSummary(
             schema_version=self.schema_version,
             plan_id=self.plan_id,
+            owner_run_id=self.owner_run_id,
             status=self.status,
             approval_state=self.approval_state,
             origin_mode=self.origin_mode,
             objective=self.objective,
+            summary=self.summary,
             items=[item.to_dict() for item in self.items],
+            revision=self.revision,
             explanation=self.explanation,
             created_at=self.created_at,
             updated_at=self.updated_at,
-            last_update_run_id=self.last_update_run_id,
+            completed_at=self.completed_at,
+            completion_source=self.completion_source,
         )
 
 
@@ -329,27 +441,15 @@ def apply_plan_update_metadata(
     run_mode = ensure_run_mode(mode)
     update = PlanUpdate.from_mapping(raw_update, proposal=run_mode == "plan")
     current = state
-    if current is not None and run_mode == "plan" and current.status in {
-        "active",
-        "completed",
-        "rejected",
-        "abandoned",
-    }:
+    if current is not None and (
+        current.owner_run_id != run_id
+        or (
+            run_mode == "plan"
+            and current.status in {"active", "completed", "rejected", "abandoned"}
+        )
+    ):
         current = None
     current = current or PlanState.new(objective=objective, origin_mode=run_mode, run_id=run_id)
-    if not current.objective and objective:
-        current = PlanState(
-            plan_id=current.plan_id,
-            status=current.status,
-            approval_state=current.approval_state,
-            origin_mode=current.origin_mode,
-            objective=objective,
-            items=current.items,
-            explanation=current.explanation,
-            created_at=current.created_at,
-            updated_at=current.updated_at,
-            last_update_run_id=current.last_update_run_id,
-        )
     return current.apply_update(update, mode=run_mode, run_id=run_id)
 
 
@@ -396,7 +496,15 @@ def _items_from_update(
     items: list[PlanItem] = []
     for index, item in enumerate(update.items):
         item_id = ids_by_step.get(item.step) or f"item_{index + 1}"
-        items.append(PlanItem(id=item_id, step=item.step, status=item.status))
+        items.append(
+            PlanItem(
+                id=item_id,
+                step=item.step,
+                details=item.details,
+                verification=item.verification,
+                status=item.status,
+            )
+        )
     return items
 
 
@@ -404,6 +512,12 @@ def _ensure_schema_version(value: object) -> int:
     if value != PLAN_STATE_SCHEMA_VERSION:
         raise PlanValidationError("unsupported plan state schema")
     return PLAN_STATE_SCHEMA_VERSION
+
+
+def _ensure_non_negative_int(value: object, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise PlanValidationError(f"{field_name} must be a non-negative integer")
+    return value
 
 
 def _required_text(value: object, field_name: str) -> str:

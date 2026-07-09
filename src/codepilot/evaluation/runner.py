@@ -44,6 +44,7 @@ from codepilot.runtime.actions import (
     FailedFrame,
     PromptSubmitted,
     RunFinishedFrame,
+    RunPausedFrame,
 )
 from codepilot.sessions.memory import MEMORY_SCHEMA_VERSION
 
@@ -761,7 +762,7 @@ async def _run_prompt(
             if hasattr(frame, "event"):
                 event = dict(getattr(frame, "event"))
                 events.append(event)
-            elif isinstance(frame, RunFinishedFrame):
+            elif isinstance(frame, (RunFinishedFrame, RunPausedFrame)):
                 result = frame.record
                 run_id = _optional_text(_field(frame.record, "run_id"))
                 final_text = _optional_text(_field(frame.record, "final_text")) or ""

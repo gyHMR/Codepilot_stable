@@ -40,14 +40,14 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         )
     tools = build_runtime_tools(config.workspace, intent, config)
 
-    def system_prompt_for(mode: str) -> str:
-        return build_system_prompt(
-            workspace=config.workspace,
-            config=replace(config, current_mode=mode),
-            tools=tools,
-        )
+    system_prompt = build_system_prompt(
+        workspace=config.workspace,
+        config=config,
+        tools=tools,
+    )
 
-    system_prompt = system_prompt_for(config.current_mode)
+    def system_prompt_for(_mode: str) -> str:
+        return system_prompt
 
     before_tool_call = compose_before_tool_call(
         intent.before_tool_call,

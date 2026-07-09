@@ -23,20 +23,24 @@ def test_session_store_persists_plan_state_in_dedicated_file(tmp_path: Path) -> 
     store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
 
     plan_state = {
-        "schema_version": 1,
+        "schema_version": 2,
         "plan_id": "plan_1",
+        "owner_run_id": "run_1",
         "status": "proposed",
-        "approval_state": "proposed",
+        "approval_state": "pending",
         "origin_mode": "plan",
         "objective": "先规划再执行",
+        "summary": "阅读实现后给出可执行方案。",
         "items": [
-            {"id": "item_1", "step": "阅读实现", "status": "in_progress"},
-            {"id": "item_2", "step": "给出方案", "status": "pending"},
+            {"id": "item_1", "step": "阅读实现", "details": "定位相关代码。", "verification": "确认调用路径。", "status": "pending"},
+            {"id": "item_2", "step": "给出方案", "details": "形成实施步骤。", "verification": "覆盖边界和验证方法。", "status": "pending"},
         ],
+        "revision": 1,
         "explanation": "准备方案",
         "created_at": "2026-01-01T00:00:00+00:00",
         "updated_at": "2026-01-01T00:00:00+00:00",
-        "last_update_run_id": "run_1",
+        "completed_at": None,
+        "completion_source": None,
     }
 
     store.save_plan_state(plan_state)
@@ -97,10 +101,11 @@ def test_update_plan_is_soft_progress_without_evidence_requirements() -> None:
         state,
         {
             "plan_update": {
+                "summary": "阅读代码后修改实现。",
                 "explanation": "阅读完成，继续修改",
                 "plan": [
-                    {"step": "阅读代码", "status": "completed"},
-                    {"step": "修改实现", "status": "in_progress"},
+                    {"step": "阅读代码", "details": "理解当前实现。", "verification": "确认调用路径。", "status": "completed"},
+                    {"step": "修改实现", "details": "完成目标修改。", "verification": "运行相关测试。", "status": "in_progress"},
                 ],
             }
         },
@@ -145,15 +150,14 @@ def test_plan_state_store_begins_authoritative_plan_shape(tmp_path: Path) -> Non
     state = PlanStateStore(store).begin("修复运行编排链路", run_id="run_1")
     stored = store.load_plan_state()
 
-    assert stored is not None
-    assert state == stored
-    assert stored["schema_version"] == 1
-    assert stored["objective"] == "修复运行编排链路"
-    assert stored["origin_mode"] == "build"
-    assert stored["status"] == "none"
-    assert stored["approval_state"] == "none"
-    assert stored["items"] == []
-    assert stored["last_update_run_id"] == "run_1"
+    assert stored is None
+    assert state["schema_version"] == 2
+    assert state["objective"] == "修复运行编排链路"
+    assert state["origin_mode"] == "build"
+    assert state["status"] == "active"
+    assert state["approval_state"] == "not_required"
+    assert state["items"] == []
+    assert state["owner_run_id"] == "run_1"
 
 
 def test_runtime_context_port_passes_plan_and_run_signals_to_context_governor() -> None:

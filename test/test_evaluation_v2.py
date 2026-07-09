@@ -294,7 +294,22 @@ def test_context_compression_benchmark_reaches_runtime_pressure_path(
     assert _pressure_level(tight_raw) == "tight"
     assert tight_raw["estimated_tokens_before"] == tight_raw["estimated_tokens_after"]
     assert _pressure_level(tight_compressed) == "tight"
-    assert tight_compressed["estimated_tokens_after"] < tight_compressed["estimated_tokens_before"]
+    tight_sections = {
+        section["name"]: section
+        for section in tight_compressed.get("sections", [])
+        if isinstance(section, dict)
+    }
+    assert (
+        tight_sections["working_set"]["estimated_tokens_after"]
+        < tight_sections["working_set"]["estimated_tokens_before"]
+    )
+    assert tight_sections["conversation"]["budget_tokens"] > (
+        tight_sections["task_plan"]["budget_tokens"] * 3
+    )
+    assert 0.03 <= (
+        tight_sections["task_plan"]["budget_tokens"]
+        / tight_compressed["total_budget_tokens"]
+    ) <= 0.07
     assert not tight_compressed.get("compact_summary")
     assert _pressure_level(critical_compressed) == "critical"
     assert critical_compressed["estimated_tokens_after"] < critical_compressed["estimated_tokens_before"]

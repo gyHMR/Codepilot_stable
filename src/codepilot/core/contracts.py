@@ -37,13 +37,16 @@ class AgentContext:
     system_prompt: str
     messages: list[AgentMessage]
     tools: list[Tool] = field(default_factory=list)
+    mode: RunMode = "build"
     plan_state: dict[str, object] | None = None
     run_signals: dict[str, object] | None = None
+    runtime_state: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         self.system_prompt = _clean_core_text(self.system_prompt)
         self.messages = _copy_messages(self.messages, field_name="messages")
         self.tools = _copy_tools(self.tools, field_name="tools")
+        self.mode = ensure_run_mode(self.mode)
         self.plan_state = _copy_optional_dict(
             self.plan_state,
             field_name="plan_state",
@@ -51,6 +54,10 @@ class AgentContext:
         self.run_signals = _copy_optional_dict(
             self.run_signals,
             field_name="run_signals",
+        )
+        self.runtime_state = _copy_optional_dict(
+            self.runtime_state,
+            field_name="runtime_state",
         )
 
 
@@ -167,6 +174,7 @@ class AgentLoopInput:
     limits: AgentLoopLimits = field(default_factory=AgentLoopLimits)
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     event_start_seq: int = 0
+    turn_start_seq: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "context", _prepared_context(self.context))
@@ -176,6 +184,11 @@ class AgentLoopInput:
             self,
             "event_start_seq",
             _non_negative_int(self.event_start_seq, default=0),
+        )
+        object.__setattr__(
+            self,
+            "turn_start_seq",
+            _non_negative_int(self.turn_start_seq, default=0),
         )
 
 
@@ -198,6 +211,7 @@ class AgentResumeInput:
     limits: AgentLoopLimits = field(default_factory=AgentLoopLimits)
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     event_start_seq: int = 0
+    turn_start_seq: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "context", _prepared_context(self.context))
@@ -212,6 +226,11 @@ class AgentResumeInput:
             self,
             "event_start_seq",
             _non_negative_int(self.event_start_seq, default=0),
+        )
+        object.__setattr__(
+            self,
+            "turn_start_seq",
+            _non_negative_int(self.turn_start_seq, default=0),
         )
 
 

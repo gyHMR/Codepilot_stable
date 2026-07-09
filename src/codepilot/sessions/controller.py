@@ -12,6 +12,7 @@ from .contracts import (
     PreparedAgentRun,
     SessionCommandIntent,
     SessionCommandRecord,
+    SessionContinuationIntent,
     SessionResumeIntent,
     SessionRunIntent,
     SessionRunRecord,
@@ -26,6 +27,8 @@ def create_session_controller(options: Any) -> "SessionController":
 
 def _bind_session_runtime(session: SessionRuntime) -> "SessionController":
     model = session.conversation.model
+    meta = session.store.read_meta() or {}
+    last_run_id = meta.get("last_run_id")
     return SessionController(
         session_id=session.session_id,
         model=ModelDescriptor(
@@ -34,6 +37,7 @@ def _bind_session_runtime(session: SessionRuntime) -> "SessionController":
         ),
         current_mode=session.current_mode,
         _session=session,
+        _last_run_id=last_run_id if isinstance(last_run_id, str) else None,
     )
 
 
@@ -66,6 +70,16 @@ class SessionController:
         return await self._session.prepare_resume(
             intent,
             run_id=intent.run_id or self._session.resume_run_id(intent.approval_id),
+            model=self.model,
+        )
+
+    async def prepare_continuation(
+        self,
+        intent: SessionContinuationIntent,
+    ) -> PreparedAgentRun:
+        return await self._session.prepare_continuation(
+            intent,
+            run_id=intent.run_id or self._session.continuation_run_id(),
             model=self.model,
         )
 
@@ -108,6 +122,9 @@ class SessionController:
 
     def pending_approval(self, approval_id: str) -> dict[str, Any] | None:
         return self._session.pending_approval(approval_id)
+
+    def runtime_checkpoint(self) -> dict[str, Any] | None:
+        return self._session.runtime_checkpoint()
 
     def stage_derived_session(self, session: SessionRuntime) -> None:
         self._derived_controllers[session.session_id] = _bind_session_runtime(session)

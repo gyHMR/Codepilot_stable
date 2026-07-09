@@ -116,13 +116,13 @@ def test_default_runtime_prompt_describes_coding_agent_workflow(tmp_path: Path) 
     prompt = build_system_prompt(workspace=tmp_path, config=config, tools=tools)
 
     assert "面向学生学习与求职展示" in prompt
-    assert "Plan State" in prompt
+    assert "Task Plan" in prompt
     assert "update_plan" in prompt
     assert "验证" in prompt
-    assert "当前模式：build" in prompt
+    assert "当前模式：" not in prompt
 
 
-def test_plan_mode_prompt_requires_user_approval_before_build(tmp_path: Path) -> None:
+def test_base_prompt_does_not_embed_plan_mode_policy(tmp_path: Path) -> None:
     from codepilot.runtime import SessionOpenIntent
     from codepilot.runtime.config import load_runtime_config
     from codepilot.runtime.prompt import build_system_prompt
@@ -138,10 +138,8 @@ def test_plan_mode_prompt_requires_user_approval_before_build(tmp_path: Path) ->
 
     prompt = build_system_prompt(workspace=tmp_path, config=config, tools=tools)
 
-    assert "当前模式：plan" in prompt
-    assert "/plan approve" in prompt
-    assert "不要执行写入" in prompt
-    assert "等待用户确认" in prompt
+    assert "当前模式：" not in prompt
+    assert "proposed plan" not in prompt
     assert "- write:" not in prompt
     assert "- edit:" not in prompt
     assert "- apply_patch:" not in prompt
