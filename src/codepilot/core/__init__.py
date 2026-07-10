@@ -25,9 +25,9 @@ from .contracts import (
 from .model_step import convert_to_llm
 from .plan import (
     PlanItem,
+    PlanSnapshot,
+    PlanSnapshotItem,
     PlanState,
-    PlanUpdate,
-    PlanUpdateItem,
     PlanValidationError,
     PlanningBudgetProfile,
     RunMode,
@@ -59,9 +59,9 @@ __all__ = [
     "WorkspaceEffects",
     "convert_to_llm",
     "PlanItem",
+    "PlanSnapshot",
+    "PlanSnapshotItem",
     "PlanState",
-    "PlanUpdate",
-    "PlanUpdateItem",
     "PlanValidationError",
     "PlanningBudgetProfile",
     "RunMode",

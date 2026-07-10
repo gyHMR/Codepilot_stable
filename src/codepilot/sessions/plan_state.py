@@ -2,14 +2,11 @@ from __future__ import annotations
 
 """Session-owned persistence for the current structured execution plan."""
 
-from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from codepilot.core.plan import (
     PlanState,
     PlanValidationError,
-    RunMode,
-    ensure_run_mode,
     load_plan_state,
 )
 
@@ -21,7 +18,9 @@ class PlanStateStore:
         self.session_store = session_store
 
     def load(self) -> dict[str, Any] | None:
-        return self.session_store.load_plan_state()
+        raw = self.session_store.load_plan_state()
+        plan = load_plan_state(raw)
+        return plan.to_dict() if plan is not None else None
 
     def current(self) -> dict[str, Any] | None:
         return self.load()
@@ -33,21 +32,6 @@ class PlanStateStore:
         payload = plan.to_dict()
         self.session_store.save_plan_state(payload)
         return payload
-
-    def begin(
-        self,
-        objective: str,
-        *,
-        origin_mode: RunMode = "build",
-        run_id: str | None = None,
-    ) -> dict[str, Any]:
-        if run_id is None:
-            raise PlanValidationError("run_id is required")
-        return PlanState.new(
-            objective=objective,
-            origin_mode=ensure_run_mode(origin_mode),
-            run_id=run_id,
-        ).to_dict()
 
     def approve_current(self, *, run_id: str | None = None) -> dict[str, Any] | None:
         current = load_plan_state(self.current())
@@ -82,20 +66,6 @@ class PlanStateStore:
             raise PlanValidationError("plan belongs to a different run")
         return self.save(current.abandon(source=source))
 
-    def complete_current(
-        self,
-        *,
-        run_id: str,
-        source: str = "run_finalized",
-    ) -> dict[str, Any] | None:
-        current = load_plan_state(self.current())
-        if current is None or current.status != "active":
-            return current.to_dict() if current is not None else None
-        if current.owner_run_id != run_id:
-            raise PlanValidationError("plan belongs to a different run")
-        return self.save(current.complete(source=source))
-
-
 def validate_plan_state_payload(raw: object) -> dict[str, Any]:
     plan = load_plan_state(raw)
     if plan is None:
@@ -104,7 +74,3 @@ def validate_plan_state_payload(raw: object) -> dict[str, Any]:
 
 
 __all__ = ["PlanStateStore", "PlanValidationError", "validate_plan_state_payload"]
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()

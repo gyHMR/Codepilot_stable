@@ -71,14 +71,14 @@ def test_context_governor_prepares_linear_context_with_memory_and_artifacts(
                 ],
                 mode="build",
                 plan_state={
-                    "schema_version": 2,
+                    "schema_version": 4,
                     "plan_id": "plan_1",
                     "owner_run_id": "run_1",
                     "status": "active",
-                    "approval_state": "approved",
                     "origin_mode": "build",
                     "objective": "Fix failing tests.",
                     "summary": "Fix the failing test suite with a focused change.",
+                    "completion_criteria": ["Focused tests pass"],
                     "items": [
                         {
                             "id": "item_1",
@@ -113,6 +113,7 @@ def test_context_governor_prepares_linear_context_with_memory_and_artifacts(
 
     assert "## Mode Policy" in prepared.system_prompt
     assert "## Runtime State" in prepared.system_prompt
+    assert "## Current User Request" in prepared.system_prompt
     assert "## Task Plan" in prepared.system_prompt
     assert "Approved Execution Contract" in prepared.system_prompt
     assert "Fix failing tests." in prepared.system_prompt
@@ -134,14 +135,14 @@ def test_context_governor_filters_archived_plan_from_store(tmp_path: Path) -> No
     session_store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
     PlanStateStore(session_store).save(
         {
-            "schema_version": 2,
+            "schema_version": 4,
             "plan_id": "plan_done",
             "owner_run_id": "run_done",
             "status": "completed",
-            "approval_state": "approved",
             "origin_mode": "plan",
             "objective": "旧任务",
             "summary": "旧计划已经完成。",
+            "completion_criteria": ["旧任务完成"],
             "items": [
                 {
                     "id": "item_1",

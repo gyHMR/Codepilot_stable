@@ -184,14 +184,14 @@ async def _run_mode_build_plan_warning_case(tmp_path: Path) -> None:
         session.set_current_mode("plan")
         session.plan_state.save(
             {
-                "schema_version": 2,
+                "schema_version": 4,
                 "plan_id": "plan_cli_warning",
                 "owner_run_id": "run_plan",
                 "status": "proposed",
-                "approval_state": "pending",
                 "origin_mode": "plan",
                 "objective": "先制定方案",
                 "summary": "阅读当前实现后执行聚焦修改。",
+                "completion_criteria": ["相关测试通过"],
                 "items": [
                     {"id": "item_1", "step": "阅读实现", "details": "定位相关代码。", "verification": "确认修改点。", "status": "pending"},
                     {"id": "item_2", "step": "执行修改", "details": "实现目标行为。", "verification": "运行相关测试。", "status": "pending"},
@@ -210,9 +210,8 @@ async def _run_mode_build_plan_warning_case(tmp_path: Path) -> None:
         assert result.handled
         assert result.data["current_mode"] == "plan"
         assert result.data["blocked"] is True
-        assert result.data["plan_status"] == "proposed"
+        assert result.data["status"] == "proposed"
         assert any("/plan approve" in line for line in result.output_lines)
-        assert session.plan_state.current()["approval_state"] == "pending"
         assert session.current_mode == "plan"
     finally:
         await runtime.close_all()
@@ -227,14 +226,14 @@ async def _run_plan_approve_command_case(tmp_path: Path) -> None:
         session.set_current_mode("plan")
         session.plan_state.save(
             {
-                "schema_version": 2,
+                "schema_version": 4,
                 "plan_id": "plan_cli_approve",
                 "owner_run_id": "run_plan",
                 "status": "proposed",
-                "approval_state": "pending",
                 "origin_mode": "plan",
                 "objective": "优化登录逻辑",
                 "summary": "阅读实现并修改登录逻辑。",
+                "completion_criteria": ["登录测试通过"],
                 "items": [
                     {"id": "item_1", "step": "阅读实现", "details": "定位登录流程。", "verification": "确认调用路径。", "status": "pending"},
                     {"id": "item_2", "step": "修改登录逻辑", "details": "实现目标行为。", "verification": "运行登录测试。", "status": "pending"},
@@ -256,7 +255,7 @@ async def _run_plan_approve_command_case(tmp_path: Path) -> None:
         assert approved.data["continuation_run_id"] == "run_plan"
         assert any("Plan approved" in line for line in approved.output_lines)
         assert any("=== Plan ===" in line for line in approved.output_lines)
-        assert repeated.data["plan_status"] == "active"
+        assert repeated.data["status"] == "active"
         assert any("Plan already approved" in line for line in repeated.output_lines)
         assert any("=== Plan ===" in line for line in repeated.output_lines)
     finally:

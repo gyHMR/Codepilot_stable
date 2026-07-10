@@ -45,6 +45,7 @@ AgentRunStopReason = Literal[
     "approval_denied",       # 用户拒绝工具审批
     "plan_approval_required",  # plan 模式提出计划后等待用户批准
     "plan_clarification_required",  # plan 模式等待用户补充或修改意见
+    "plan_incomplete",       # active plan 尚未满足完成标准，等待用户决定下一步
     "repeated_tool_call",    # 检测到重复的工具调用（可能陷入循环）
     "tool_call_limit",       # 工具调用数量超出限制
     "tool_unavailable",      # 模型请求了不可用工具
@@ -77,6 +78,7 @@ _STOP_REASONS = frozenset(
         "approval_denied",
         "plan_approval_required",
         "plan_clarification_required",
+        "plan_incomplete",
         "repeated_tool_call",
         "tool_call_limit",
         "tool_unavailable",
@@ -190,10 +192,10 @@ class PlanSummary:
     plan_id: str
     owner_run_id: str
     status: str
-    approval_state: str
     origin_mode: str
     objective: str
     summary: str
+    completion_criteria: list[str] = field(default_factory=list)
     items: list[dict[str, str]] = field(default_factory=list)
     revision: int = 0
     explanation: str = ""
@@ -217,16 +219,12 @@ class PlanSummary:
         object.__setattr__(self, "status", _require_text(self.status, field_name="status"))
         object.__setattr__(
             self,
-            "approval_state",
-            _require_text(self.approval_state, field_name="approval_state"),
-        )
-        object.__setattr__(
-            self,
             "origin_mode",
             _require_text(self.origin_mode, field_name="origin_mode"),
         )
         object.__setattr__(self, "objective", _clean_text(self.objective))
         object.__setattr__(self, "summary", _clean_text(self.summary))
+        object.__setattr__(self, "completion_criteria", _copy_completion_criteria(self.completion_criteria))
         object.__setattr__(self, "items", _copy_plan_items(self.items))
         object.__setattr__(
             self,
@@ -548,6 +546,15 @@ def _copy_plan_items(value: object) -> list[dict[str, str]]:
             }
         )
     return items
+
+
+def _copy_completion_criteria(value: object) -> list[str]:
+    if not isinstance(value, list):
+        raise TypeError("PlanSummary completion_criteria must be a list")
+    return [
+        _require_text(item, field_name=f"completion_criteria[{index}]")
+        for index, item in enumerate(value)
+    ]
 
 
 # 运行时事件类型枚举：覆盖 Agent 运行全生命周期的公共事件。

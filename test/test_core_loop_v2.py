@@ -736,7 +736,7 @@ def test_core_loop_injects_plan_context_and_returns_plan_summary() -> None:
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, TextContent, ToolCall
         from codepilot.tools.contracts import ToolObservation
-        from codepilot.core.plan import PlanState, PlanUpdate, PlanUpdateItem
+        from codepilot.core.plan import PlanSnapshot, apply_plan_snapshot
 
         class FakeModel:
             def __init__(self) -> None:
@@ -755,9 +755,11 @@ def test_core_loop_injects_plan_context_and_returns_plan_summary() -> None:
                                     name="update_plan",
                                     arguments={
                                         "summary": "Read and migrate the plan code.",
-                                        "plan_status": "completed",
-                                        "plan": [
+                                        "completion_criteria": ["相关验证通过"],
+                                        "status": "completed",
+                                        "items": [
                                             {
+                                                "id": "item_1",
                                                 "step": "Read code",
                                                 "details": "Inspect the current implementation.",
                                                 "verification": "Confirm the relevant symbols.",
@@ -786,10 +788,13 @@ def test_core_loop_injects_plan_context_and_returns_plan_summary() -> None:
                     status="success",
                     content=(TextContent(text="Plan updated and marked completed."),),
                     metadata={
-                        "plan_update": {
+                        "plan_snapshot": {
                             "summary": "Read and migrate the plan code.",
-                            "plan": [
+                            "completion_criteria": ["相关验证通过"],
+                            "status": "completed",
+                            "items": [
                                 {
+                                    "id": "item_1",
                                     "step": "Read code",
                                     "details": "Inspect the current implementation.",
                                     "verification": "Confirm the relevant symbols.",
@@ -797,26 +802,25 @@ def test_core_loop_injects_plan_context_and_returns_plan_summary() -> None:
                                 }
                             ],
                         },
-                        "plan_status": "completed",
                     },
                 )
 
-        plan = PlanState.new(
-            objective="ship the plan migration",
-            origin_mode="build",
-            run_id="run_plan",
-        )
-        plan = plan.apply_update(
-            PlanUpdate(
-                summary="Read and migrate the plan code.",
-                items=(
-                    PlanUpdateItem(
-                        step="Read code",
-                        details="Inspect the current implementation.",
-                        verification="Confirm the relevant symbols.",
-                        status="completed",
-                    ),
-                ),
+        plan = apply_plan_snapshot(
+            None,
+            PlanSnapshot.from_mapping(
+                {
+                    "execution_objective": "ship the plan migration",
+                    "summary": "Read and migrate the plan code.",
+                    "completion_criteria": ["相关验证通过"],
+                    "items": [
+                        {
+                            "step": "Read code",
+                            "details": "Inspect the current implementation.",
+                            "verification": "Confirm the relevant symbols.",
+                            "status": "in_progress",
+                        }
+                    ],
+                }
             ),
             mode="build",
             run_id="run_plan",
@@ -856,32 +860,32 @@ def test_core_loop_plan_mode_keeps_soft_plan_proposed() -> None:
             RunCorrelation,
         )
         from codepilot.core.runner import run_agent_loop
-        from codepilot.core.plan import PlanState, PlanUpdate, PlanUpdateItem
+        from codepilot.core.plan import PlanSnapshot, apply_plan_snapshot
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, TextContent
 
-        plan = PlanState.new(
-            objective="refactor by plan",
-            origin_mode="plan",
-            run_id="run_plan_task",
-        )
-        plan = plan.apply_update(
-            PlanUpdate(
-                summary="Inspect the target and apply a focused refactor.",
-                items=(
-                    PlanUpdateItem(
-                        step="Inspect target files",
-                        details="Read the files that own the behavior.",
-                        verification="Identify the exact edit points.",
-                        status="pending",
-                    ),
-                    PlanUpdateItem(
-                        step="Apply focused refactor",
-                        details="Implement the agreed behavior.",
-                        verification="Run focused tests.",
-                        status="pending",
-                    ),
-                )
+        plan = apply_plan_snapshot(
+            None,
+            PlanSnapshot.from_mapping(
+                {
+                    "execution_objective": "refactor by plan",
+                    "summary": "Inspect the target and apply a focused refactor.",
+                    "completion_criteria": ["Focused tests pass"],
+                    "items": [
+                        {
+                            "step": "Inspect target files",
+                            "details": "Read the files that own the behavior.",
+                            "verification": "Identify the exact edit points.",
+                            "status": "pending",
+                        },
+                        {
+                            "step": "Apply focused refactor",
+                            "details": "Implement the agreed behavior.",
+                            "verification": "Run focused tests.",
+                            "status": "pending",
+                        },
+                    ],
+                }
             ),
             mode="plan",
             run_id="run_plan_task",
@@ -924,27 +928,27 @@ def test_core_loop_preserves_plan_summary_when_waiting_for_approval() -> None:
             RunCorrelation,
         )
         from codepilot.core.runner import run_agent_loop
-        from codepilot.core.plan import PlanState, PlanUpdate, PlanUpdateItem
+        from codepilot.core.plan import PlanSnapshot, apply_plan_snapshot
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
         from codepilot.protocols import AssistantMessage, ToolCall
         from codepilot.tools.contracts import ToolInterruption, ToolObservation, ToolRiskView
 
-        plan = PlanState.new(
-            objective="edit the file",
-            origin_mode="build",
-            run_id="run_approval_plan",
-        )
-        plan = plan.apply_update(
-            PlanUpdate(
-                summary="Edit and verify the target file.",
-                items=(
-                    PlanUpdateItem(
-                        step="Edit file",
-                        details="Apply the required source change.",
-                        verification="Inspect the diff.",
-                        status="in_progress",
-                    ),
-                ),
+        plan = apply_plan_snapshot(
+            None,
+            PlanSnapshot.from_mapping(
+                {
+                    "execution_objective": "edit the file",
+                    "summary": "Edit and verify the target file.",
+                    "completion_criteria": ["Diff is correct"],
+                    "items": [
+                        {
+                            "step": "Edit file",
+                            "details": "Apply the required source change.",
+                            "verification": "Inspect the diff.",
+                            "status": "in_progress",
+                        }
+                    ],
+                }
             ),
             mode="build",
             run_id="run_approval_plan",
@@ -1002,6 +1006,159 @@ def test_core_loop_preserves_plan_summary_when_waiting_for_approval() -> None:
         assert outcome.plan is not None
         assert outcome.plan.objective == "edit the file"
         assert outcome.signals.approval_required is True
+
+    asyncio.run(run_case())
+
+
+def test_active_plan_closeout_stops_after_model_reports_incomplete() -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import (
+            AgentLoopInput,
+            AgentLoopLimits,
+            AgentLoopPorts,
+            RunCorrelation,
+        )
+        from codepilot.core.plan import PlanSnapshot, apply_plan_snapshot
+        from codepilot.core.runner import run_agent_loop
+        from codepilot.llm.ports import LLMCompleted, ModelDescriptor
+        from codepilot.protocols import AssistantMessage, TextContent
+
+        plan = apply_plan_snapshot(
+            None,
+            PlanSnapshot.from_mapping(
+                {
+                    "execution_objective": "完成目标修改",
+                    "summary": "完成并验证目标修改。",
+                    "completion_criteria": ["相关测试通过"],
+                    "items": [
+                        {
+                            "step": "完成目标修改",
+                            "details": "实现用户要求。",
+                            "verification": "运行相关测试。",
+                            "status": "in_progress",
+                        }
+                    ],
+                }
+            ),
+            mode="build",
+            run_id="run_incomplete_plan",
+        )
+
+        class Model:
+            calls = 0
+
+            async def stream(self, _request):
+                self.calls += 1
+                yield LLMCompleted(
+                    message=AssistantMessage(
+                        content=[TextContent(text="当前仍未满足完成标准，存在阻塞。")]
+                    )
+                )
+
+        model = Model()
+        outcome = await run_agent_loop(
+            AgentLoopInput(
+                run_id="run_incomplete_plan",
+                correlation=RunCorrelation(session_id="s1"),
+                user_prompt="完成目标修改",
+                model=ModelDescriptor(provider="fake", model_id="unit"),
+                plan_state=plan.to_dict(),
+                limits=AgentLoopLimits(max_model_turns=3),
+            ),
+            AgentLoopPorts(model=model, tools=None, context=_PlanPromptPort()),
+        )
+
+        assert outcome.status == "waiting_user"
+        assert outcome.stop_reason == "plan_incomplete"
+        assert model.calls == 2
+        assert outcome.plan is not None
+        assert outcome.plan.status == "active"
+
+    asyncio.run(run_case())
+
+
+def test_plan_mode_rejects_proposal_before_repository_exploration() -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import (
+            AgentLoopInput,
+            AgentLoopLimits,
+            AgentLoopPorts,
+            RunCorrelation,
+        )
+        from codepilot.core.runner import run_agent_loop
+        from codepilot.llm.ports import LLMCompleted, ModelDescriptor
+        from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+        from codepilot.tools.contracts import ToolObservation
+
+        class Model:
+            calls = 0
+
+            async def stream(self, _request):
+                self.calls += 1
+                if self.calls == 1:
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[
+                                ToolCall(
+                                    id="premature_plan",
+                                    name="update_plan",
+                                    arguments={
+                                        "execution_objective": "完善注册逻辑",
+                                        "summary": "修改注册流程并补充测试。",
+                                        "completion_criteria": ["注册测试通过"],
+                                        "items": [
+                                            {
+                                                "step": "修改注册逻辑",
+                                                "details": "调整注册实现。",
+                                                "verification": "运行注册测试。",
+                                                "status": "pending",
+                                            }
+                                        ],
+                                    },
+                                )
+                            ]
+                        )
+                    )
+                    return
+                yield LLMCompleted(
+                    message=AssistantMessage(
+                        content=[TextContent(text="需要先阅读相关实现和测试。")]
+                    )
+                )
+
+        class Tools:
+            def catalog(self, current_mode: str = "plan"):
+                return {"tools": ["update_plan"]}
+
+            async def execute(self, invocation):
+                return ToolObservation(
+                    tool_call_id=invocation.tool_call_id,
+                    name=invocation.name,
+                    status="success",
+                    content=(TextContent(text="Plan snapshot submitted."),),
+                    metadata={"plan_snapshot": dict(invocation.arguments)},
+                )
+
+        outcome = await run_agent_loop(
+            AgentLoopInput(
+                run_id="run_premature_plan",
+                correlation=RunCorrelation(session_id="s1"),
+                user_prompt="完善注册逻辑，给我方案",
+                model=ModelDescriptor(provider="fake", model_id="unit"),
+                mode="plan",
+                limits=AgentLoopLimits(max_model_turns=2),
+            ),
+            AgentLoopPorts(model=Model(), tools=Tools(), context=_PlanPromptPort()),
+        )
+
+        assert outcome.plan is None
+        result = next(
+            message
+            for message in outcome.new_messages
+            if getattr(message, "role", "") == "toolResult"
+        )
+        assert result.error_code == "plan_exploration_required"
+        assert result.status == "error"
 
     asyncio.run(run_case())
 

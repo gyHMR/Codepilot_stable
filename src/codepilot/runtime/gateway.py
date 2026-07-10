@@ -67,6 +67,11 @@ class RuntimeGateway:
 
     def open_session(self, intent: "SessionOpenIntent") -> SessionRef:
         session = build_runtime_session(intent)
+        if self._active_runs.is_running(session.session_id):
+            session.controller.close()
+            raise RuntimeError(
+                f"Session {session.session_id} still stopping its previous run; reopen it after cancellation completes."
+            )
         if self._model_port is not None:
             session.model_port = self._model_port
         if self._tool_port is not None:
@@ -102,13 +107,15 @@ class RuntimeGateway:
         if isinstance(action, PromptSubmitted):
             checkpoint = session.controller.runtime_checkpoint()
             if _is_plan_wait_checkpoint(checkpoint):
+                phase = _optional_text(checkpoint.get("phase"))
                 async for frame in self._run_continuation(
                     session,
                     SessionContinuationIntent(
                         kind=(
                             "plan_clarification"
-                            if _optional_text(checkpoint.get("phase"))
-                            == "plan_clarification"
+                            if phase == "plan_clarification"
+                            else "automatic_continuation"
+                            if phase == "plan_incomplete"
                             else "plan_feedback"
                         ),
                         run_id=_optional_text(checkpoint.get("run_id")),
@@ -158,15 +165,17 @@ class RuntimeGateway:
         )
 
     def close(self, session_id: str) -> None:
+        active_run_id = self._active_runs.cancel(session_id)
         self._sessions.close(session_id)
         self._approvals.remove_session(session_id)
-        self._active_runs.finish(session_id)
+        if active_run_id is None or not self._active_runs.has_attached_task(session_id):
+            self._active_runs.finish(session_id)
         self._session_locks.pop(session_id, None)
 
     async def close_all(self) -> None:
+        self._active_runs.cancel_all()
         self._sessions.close_all()
         self._approvals.clear()
-        self._active_runs.clear()
         self._session_locks.clear()
 
     def _require_session(self, session_id: str) -> SessionController:
@@ -359,7 +368,7 @@ class RuntimeGateway:
             yield FailedFrame(error=error)
             return
         finally:
-            self._active_runs.finish(session.session_id)
+            self._active_runs.finish(session.session_id, run_id=prepared.run_id)
 
         async for frame in self._frames_from_outcome(session.controller, outcome, record):
             yield frame
@@ -522,6 +531,7 @@ def _is_plan_wait_checkpoint(checkpoint: object) -> bool:
         "plan_approval",
         "plan_feedback",
         "plan_clarification",
+        "plan_incomplete",
     }
 
 
@@ -532,7 +542,7 @@ def _explicit_plan_command(session: RuntimeSession, text: str) -> str | None:
     plan = (session.controller.describe().context or {}).get("plan_summary")
     if not isinstance(plan, dict):
         return None
-    if plan.get("status") != "proposed" or plan.get("approval_state") != "pending":
+    if plan.get("status") != "proposed":
         return None
     return "/plan approve" if normalized == "/approve" else "/plan reject"
 

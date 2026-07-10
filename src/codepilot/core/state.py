@@ -18,6 +18,19 @@ from codepilot.protocols import (
 )
 
 
+_PLAN_EXPLORATION_TOOL_NAMES = frozenset(
+    {
+        "ls",
+        "find",
+        "read",
+        "grep",
+        "workspace_status",
+        "list_exploration_agents",
+        "dispatch_exploration",
+    }
+)
+
+
 def new_run_id() -> str:
     return f"run_{uuid.uuid4().hex[:12]}"
 
@@ -48,6 +61,12 @@ class RunState:
     truncated_read_recovery_sent: bool = False
     seen_tool_call_ids: set[str] = field(default_factory=set)
     pending_approval_tool_call_ids: set[str] = field(default_factory=set)
+    qualified_plan_failure_item_id: str | None = None
+    qualified_plan_failure_count: int = 0
+    plan_exploration_tool_call_ids: set[str] = field(default_factory=set)
+
+    def has_plan_exploration_evidence(self) -> bool:
+        return bool(self.plan_exploration_tool_call_ids)
 
     def has_repeated_call(
         self,
@@ -122,6 +141,15 @@ class RunState:
                 self.tool_unavailable = True
             if result.is_error:
                 self.last_error = _tool_error(result)
+            if (
+                result.status == "success"
+                and not result.is_error
+                and result.tool_name in _PLAN_EXPLORATION_TOOL_NAMES
+            ):
+                evidence_id = result.tool_call_id or (
+                    f"{result.tool_name}:{len(self.plan_exploration_tool_call_ids)}"
+                )
+                self.plan_exploration_tool_call_ids.add(evidence_id)
             if result.verification:
                 status = _verification_status(result.verification.get("status"))
                 self.verification.append(
@@ -136,6 +164,28 @@ class RunState:
                 )
                 self.verification_status = _signal_verification_status(status)
         self.approval_required = bool(self.pending_approval_tool_call_ids)
+
+    def observe_plan_execution(
+        self,
+        results: list[ToolResultMessage],
+        *,
+        in_progress_item_id: str | None,
+    ) -> None:
+        if in_progress_item_id is None:
+            self.reset_plan_failures()
+            return
+        if self.qualified_plan_failure_item_id != in_progress_item_id:
+            self.qualified_plan_failure_item_id = in_progress_item_id
+            self.qualified_plan_failure_count = 0
+        if any(_is_successful_verification(result) for result in results):
+            self.qualified_plan_failure_count = 0
+            return
+        if any(_is_qualified_plan_failure(result) for result in results):
+            self.qualified_plan_failure_count += 1
+
+    def reset_plan_failures(self) -> None:
+        self.qualified_plan_failure_item_id = None
+        self.qualified_plan_failure_count = 0
 
     def summary(self) -> RunSignalsSummary:
         return RunSignalsSummary(
@@ -175,6 +225,9 @@ class RunState:
             "truncated_read_recovery_sent": self.truncated_read_recovery_sent,
             "seen_tool_call_ids": sorted(self.seen_tool_call_ids),
             "pending_approval_tool_call_ids": sorted(self.pending_approval_tool_call_ids),
+            "qualified_plan_failure_item_id": self.qualified_plan_failure_item_id,
+            "qualified_plan_failure_count": self.qualified_plan_failure_count,
+            "plan_exploration_tool_call_ids": sorted(self.plan_exploration_tool_call_ids),
         }
 
     @classmethod
@@ -220,6 +273,15 @@ class RunState:
             pending_approval_tool_call_ids=set(
                 _string_list(value.get("pending_approval_tool_call_ids"))
             ),
+            qualified_plan_failure_item_id=_optional_text(
+                value.get("qualified_plan_failure_item_id")
+            ),
+            qualified_plan_failure_count=_non_negative_int(
+                value.get("qualified_plan_failure_count")
+            ),
+            plan_exploration_tool_call_ids=set(
+                _string_list(value.get("plan_exploration_tool_call_ids"))
+            ),
         )
         state.approval_required = state.approval_required or bool(
             state.pending_approval_tool_call_ids
@@ -234,6 +296,24 @@ def _tool_error(result: ToolResultMessage) -> dict[str, Any]:
         "status": result.status,
         "error_code": result.error_code,
     }
+
+
+def _is_successful_verification(result: ToolResultMessage) -> bool:
+    verification = result.verification
+    return isinstance(verification, dict) and verification.get("status") == "passed"
+
+
+def _is_qualified_plan_failure(result: ToolResultMessage) -> bool:
+    verification = result.verification
+    if isinstance(verification, dict) and verification.get("status") == "failed":
+        return True
+    if not result.is_error:
+        return False
+    code = str(result.error_code or "").strip().lower()
+    if not code:
+        return False
+    ignored_prefixes = ("invalid_", "tool_not_found", "permission", "approval", "cancel")
+    return not code.startswith(ignored_prefixes)
 
 
 def _truncated_read_fingerprint(

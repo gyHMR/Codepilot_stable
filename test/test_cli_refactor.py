@@ -84,7 +84,6 @@ class TestTerminalRenderer:
                 "plan": {
                     "plan_id": "plan_1",
                     "status": "proposed",
-                    "approval_state": "proposed",
                     "origin_mode": "plan",
                     "objective": "优化登录逻辑",
                     "items": [

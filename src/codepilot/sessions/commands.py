@@ -436,8 +436,7 @@ def _mode_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
             ],
             data={
                 "current_mode": session.current_mode,
-                "plan_status": "proposed",
-                "approval_state": plan.get("approval_state"),
+                "status": "proposed",
                 "blocked": True,
             },
         )
@@ -508,16 +507,15 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
                 session_id,
                 text,
                 output_lines=["No proposed plan to approve."],
-                data={"plan_status": None},
+                data={"status": None},
             )
-        if before.get("status") in {"active", "completed"} and before.get("approval_state") == "approved":
+        if before.get("status") in {"active", "completed"}:
             return _record(
                 session_id,
                 text,
                 output_lines=["Plan already approved.", *_format_plan_lines(before)],
                 data={
-                    "plan_status": before.get("status"),
-                    "approval_state": before.get("approval_state"),
+                    "status": before.get("status"),
                     "current_mode": session.current_mode,
                 },
             )
@@ -529,7 +527,7 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
                     f"Cannot approve plan with status={before.get('status')}.",
                     *_format_plan_lines(before),
                 ],
-                data={"plan_status": before.get("status")},
+                data={"status": before.get("status")},
             )
         state = session.approve_current_plan(switch_to_build=True)
         continuation_run_id = str(before.get("owner_run_id") or "").strip()
@@ -542,8 +540,7 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
                 *_format_plan_lines(state),
             ],
             data={
-                "plan_status": state.get("status") if isinstance(state, dict) else None,
-                "approval_state": state.get("approval_state") if isinstance(state, dict) else None,
+                "status": state.get("status") if isinstance(state, dict) else None,
                 "current_mode": session.current_mode,
                 "continuation_kind": "plan_approved",
                 "continuation_run_id": continuation_run_id,
@@ -556,7 +553,7 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
                 session_id,
                 text,
                 output_lines=["No proposed plan to reject."],
-                data={"plan_status": before.get("status") if isinstance(before, dict) else None},
+                data={"status": before.get("status") if isinstance(before, dict) else None},
             )
         state = session.reject_current_plan()
         continuation_run_id = str(before.get("owner_run_id") or "").strip()
@@ -565,7 +562,7 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
             text,
             output_lines=["Plan rejected.", *_format_plan_lines(state)],
             data={
-                "plan_status": state.get("status") if isinstance(state, dict) else None,
+                "status": state.get("status") if isinstance(state, dict) else None,
                 "continuation_kind": "plan_rejected",
                 "continuation_run_id": continuation_run_id,
                 "current_mode": session.current_mode,
@@ -578,14 +575,14 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
                 session_id,
                 text,
                 output_lines=["No plan to clear."],
-                data={"plan_status": None},
+                data={"status": None},
             )
         state = session.abandon_current_plan()
         return _record(
             session_id,
             text,
             output_lines=["Plan cleared.", *_format_plan_lines(state)],
-            data={"plan_status": state.get("status") if isinstance(state, dict) else None},
+            data={"status": state.get("status") if isinstance(state, dict) else None},
         )
     if action:
         return _record(
@@ -607,7 +604,7 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
         session_id,
         text,
         output_lines=lines,
-        data={"plan_status": state.get("status") if isinstance(state, dict) else None},
+        data={"status": state.get("status") if isinstance(state, dict) else None},
     )
 
 
@@ -890,13 +887,16 @@ def _format_plan_lines(state: Any) -> list[str]:
         "=== Plan ===",
         f"  Plan ID    : {state.get('plan_id', '')}",
         f"  Status     : {state.get('status', '')}",
-        f"  Approval   : {state.get('approval_state', '')}",
         f"  Mode       : {state.get('origin_mode', '')}",
         f"  Objective  : {state.get('objective', '')}",
     ]
     explanation = str(state.get("explanation") or "").strip()
     if explanation:
         lines.append(f"  Note       : {explanation}")
+    criteria = state.get("completion_criteria")
+    if isinstance(criteria, list) and criteria:
+        lines.append("  Completion criteria:")
+        lines.extend(f"    - {criterion}" for criterion in criteria if str(criterion).strip())
     items = state.get("items")
     if isinstance(items, list) and items:
         lines.append("  Items:")

@@ -101,8 +101,11 @@ class ActiveRunRegistry:
         if active is not None:
             active.task = task
 
-    def finish(self, session_id: str) -> str | None:
+    def finish(self, session_id: str, *, run_id: str | None = None) -> str | None:
         active = self._items.pop(session_id, None)
+        if active is not None and run_id is not None and active.run_id != run_id:
+            self._items[session_id] = active
+            return None
         return active.run_id if active is not None else None
 
     def cancel(self, session_id: str) -> str | None:
@@ -116,8 +119,16 @@ class ActiveRunRegistry:
     def is_running(self, session_id: str) -> bool:
         return session_id in self._items
 
+    def has_attached_task(self, session_id: str) -> bool:
+        active = self._items.get(session_id)
+        return active is not None and active.task is not None
+
     def clear(self) -> None:
         self._items.clear()
+
+    def cancel_all(self) -> None:
+        for session_id in tuple(self._items):
+            self.cancel(session_id)
 
 
 __all__ = [

@@ -1195,13 +1195,16 @@ def _format_plan_payload_lines(value: object) -> list[str]:
         "=== Plan ===",
         f"  Plan ID    : {value.get('plan_id', '')}",
         f"  Status     : {value.get('status', '')}",
-        f"  Approval   : {value.get('approval_state', '')}",
         f"  Mode       : {value.get('origin_mode', '')}",
         f"  Objective  : {value.get('objective', '')}",
     ]
     explanation = str(value.get("explanation") or "").strip()
     if explanation:
         lines.append(f"  Note       : {explanation}")
+    criteria = value.get("completion_criteria")
+    if isinstance(criteria, list) and criteria:
+        lines.append("  Completion criteria:")
+        lines.extend(f"    - {criterion}" for criterion in criteria if str(criterion).strip())
     items = value.get("items")
     if isinstance(items, list) and items:
         lines.append("  Items:")

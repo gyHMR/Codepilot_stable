@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 
 async def _collect_frames(iterator):
     return [frame async for frame in iterator]
@@ -33,19 +35,37 @@ class _PlanLifecycleModelPort:
                 message=AssistantMessage(
                     content=[
                         ToolCall(
+                            id="inspect_workspace",
+                            name="ls",
+                            arguments={"path": "."},
+                        )
+                    ],
+                    stop_reason="toolUse",
+                )
+            )
+            return
+        if self.calls == 2:
+            yield LLMCompleted(
+                message=AssistantMessage(
+                    content=[
+                        ToolCall(
                             id="plan_done",
                             name="update_plan",
                             arguments={
+                                "execution_objective": "优化登录逻辑并验证注册行为",
                                 "summary": "先确认注册边界，再实施并验证。",
                                 "explanation": "执行完成",
-                                "plan": [
+                                "completion_criteria": ["注册测试通过"],
+                                "items": [
                                     {
+                                        "id": "item_1",
                                         "step": "阅读实现",
                                         "details": "确认注册逻辑和调用入口。",
                                         "verification": "列出受影响文件和行为。",
                                         "status": "completed",
                                     },
                                     {
+                                        "id": "item_2",
                                         "step": "修改登录逻辑",
                                         "details": "按现有风格实施修改。",
                                         "verification": "运行注册相关测试。",
@@ -59,7 +79,7 @@ class _PlanLifecycleModelPort:
                 )
             )
             return
-        if self.calls == 2:
+        if self.calls == 3:
             yield LLMCompleted(
                 message=AssistantMessage(
                     content=[
@@ -68,15 +88,18 @@ class _PlanLifecycleModelPort:
                             name="update_plan",
                             arguments={
                                 "summary": "登录逻辑修改和验证已完成。",
-                                "plan_status": "completed",
-                                "plan": [
+                                "completion_criteria": ["注册测试通过"],
+                                "status": "completed",
+                                "items": [
                                     {
+                                        "id": "item_1",
                                         "step": "阅读实现",
                                         "details": "确认注册逻辑和调用入口。",
                                         "verification": "列出受影响文件和行为。",
                                         "status": "completed",
                                     },
                                     {
+                                        "id": "item_2",
                                         "step": "修改登录逻辑",
                                         "details": "按现有风格实施修改。",
                                         "verification": "运行注册相关测试。",
@@ -228,7 +251,7 @@ def test_runtime_gateway_plan_approval_resumes_same_task_run(tmp_path) -> None:
         assert finished[-1].record.status == "completed"
         assert session.current_mode == "build"
         assert current_plan["status"] == "completed"
-        assert current_plan["approval_state"] == "approved"
+        assert current_plan["objective"] == "优化登录逻辑并验证注册行为"
         assert session.store.read_meta()["active_plan_id"] is None
         assert session.store.read_meta()["runtime_checkpoint"] is None
         assert len(list((tmp_path / ".codepilot" / "runs").iterdir())) == 1
@@ -260,8 +283,8 @@ def test_runtime_gateway_plan_approval_resumes_same_task_run(tmp_path) -> None:
         assert len(event_ids) == len(set(event_ids))
         assert turn_ids == sorted(turn_ids)
         assert stored_run["resume_count"] == 1
-        assert stored_run["model_attempts"] == 4
-        assert stored_run["tool_calls"] == 2
+        assert stored_run["model_attempts"] == 5
+        assert stored_run["tool_calls"] == 3
         assert stored_run["phase"] == "terminal"
 
     asyncio.run(run_case())
@@ -279,8 +302,27 @@ def test_runtime_gateway_natural_language_is_plan_feedback_not_approval(tmp_path
 
                 self.calls += 1
                 self.requests.append(request)
-                if self.calls in {1, 2}:
-                    suffix = "并先补测试" if self.calls == 2 else ""
+                if self.calls == 1:
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[
+                                ToolCall(
+                                    id="inspect_workspace",
+                                    name="ls",
+                                    arguments={"path": "."},
+                                )
+                            ],
+                            stop_reason="toolUse",
+                        )
+                    )
+                    return
+                if self.calls in {2, 3}:
+                    suffix = "并先补测试" if self.calls == 3 else ""
+                    objective = (
+                        {"execution_objective": "优化登录逻辑并验证注册行为"}
+                        if self.calls == 2
+                        else {}
+                    )
                     yield LLMCompleted(
                         message=AssistantMessage(
                             content=[
@@ -288,8 +330,10 @@ def test_runtime_gateway_natural_language_is_plan_feedback_not_approval(tmp_path
                                     id=f"plan_{self.calls}",
                                     name="update_plan",
                                     arguments={
+                                        **objective,
                                         "summary": f"优化登录逻辑{suffix}。",
-                                        "plan": [
+                                        "completion_criteria": ["注册测试通过"],
+                                        "items": [
                                             {
                                                 "step": "修改登录逻辑",
                                                 "details": f"实施目标内调整{suffix}。",
@@ -336,9 +380,8 @@ def test_runtime_gateway_natural_language_is_plan_feedback_not_approval(tmp_path
 
         assert second_pause.record.run_id == first_pause.record.run_id
         assert current_plan["status"] == "proposed"
-        assert current_plan["approval_state"] == "pending"
         assert current_plan["revision"] == 2
-        assert model.calls == 2
+        assert model.calls == 3
         assert session.current_mode == "plan"
 
     asyncio.run(run_case())
@@ -389,7 +432,6 @@ def test_runtime_gateway_plan_reject_waits_for_feedback_in_same_run(tmp_path) ->
         assert second_pause.record.run_id == first_pause.record.run_id
         assert second_pause.record.stop_reason == "plan_clarification_required"
         assert plan["status"] == "rejected"
-        assert plan["approval_state"] == "rejected"
         assert session.store.read_meta()["runtime_checkpoint"]["phase"] == "plan_clarification"
 
     asyncio.run(run_case())
@@ -1601,3 +1643,124 @@ def test_runtime_gateway_close_clears_active_run_marker_for_session_id(tmp_path)
 
     assert reopened.session_id == ref.session_id
     assert gateway.describe(reopened.session_id).status.is_running is False
+
+
+def test_runtime_gateway_close_blocks_reopen_until_active_run_stops(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.runtime import RuntimeGateway, SessionOpenIntent
+        from codepilot.runtime.actions import PromptSubmitted
+
+        class BlockingModel:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+
+            async def stream(self, _request):
+                self.started.set()
+                await asyncio.Event().wait()
+                yield  # pragma: no cover
+
+        model = BlockingModel()
+        gateway = RuntimeGateway(model_port=model)
+        ref = _open_test_session(gateway, tmp_path)
+        dispatch_task = asyncio.create_task(
+            _collect_frames(gateway.dispatch(ref.session_id, PromptSubmitted(text="long task")))
+        )
+        await model.started.wait()
+
+        gateway.close(ref.session_id)
+        with pytest.raises(RuntimeError, match="still stopping"):
+            gateway.open_session(
+                SessionOpenIntent(
+                    workspace_dir=tmp_path,
+                    session_id=ref.session_id,
+                    model=_unit_model(),
+                    memory_enabled=False,
+                )
+            )
+
+        await dispatch_task
+
+        reopened = gateway.open_session(
+            SessionOpenIntent(
+                workspace_dir=tmp_path,
+                session_id=ref.session_id,
+                model=_unit_model(),
+                memory_enabled=False,
+            )
+        )
+        assert gateway.describe(reopened.session_id).status.is_running is False
+
+    asyncio.run(run_case())
+
+
+def test_plan_incomplete_commits_as_a_resumable_pause(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import AgentLoopOutcome
+        from codepilot.core.plan import PlanSnapshot, apply_plan_snapshot
+        from codepilot.runtime import RuntimeGateway
+        from codepilot.runtime.actions import PromptSubmitted, RunPausedFrame
+        from codepilot.sessions.contracts import SessionRunIntent
+
+        gateway = RuntimeGateway(model_port=_EchoModelPort())
+        ref = _open_test_session(gateway, tmp_path)
+        controller = gateway._require_session(ref.session_id)  # noqa: SLF001
+        session = controller._session  # noqa: SLF001
+        assert session is not None
+        run_id = "run_plan_incomplete"
+        plan = apply_plan_snapshot(
+            None,
+            PlanSnapshot.from_mapping(
+                {
+                    "execution_objective": "完成注册逻辑",
+                    "summary": "完成注册逻辑并验证。",
+                    "completion_criteria": ["注册测试通过"],
+                    "items": [
+                        {
+                            "step": "完成注册逻辑",
+                            "details": "实现尚未完成的目标修改。",
+                            "verification": "运行注册测试。",
+                            "status": "in_progress",
+                        }
+                    ],
+                }
+            ),
+            mode="build",
+            run_id=run_id,
+        )
+        session.plan_state.save(plan.to_dict())
+        session.store.update_meta({"active_plan_id": plan.plan_id})
+        prepared = await controller.prepare_run(
+            SessionRunIntent(text="完成注册逻辑", run_id=run_id)
+        )
+
+        record = await controller.commit_run(
+            prepared,
+            AgentLoopOutcome(
+                run_id=run_id,
+                status="waiting_user",
+                stop_reason="plan_incomplete",
+                plan=plan.to_summary(),
+                run_state={"plan_closeout_attempted": True},
+            ),
+        )
+
+        checkpoint = controller.runtime_checkpoint()
+        assert record.status == "waiting_user"
+        assert record.stop_reason == "plan_incomplete"
+        assert checkpoint is not None
+        assert checkpoint["phase"] == "plan_incomplete"
+        assert checkpoint["run_id"] == run_id
+        assert checkpoint["plan_id"] == plan.plan_id
+
+        frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                PromptSubmitted(text="继续处理当前阻塞"),
+            )
+        ]
+        paused = next(frame for frame in frames if isinstance(frame, RunPausedFrame))
+
+        assert paused.record.run_id == run_id
+
+    asyncio.run(run_case())

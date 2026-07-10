@@ -23,14 +23,14 @@ def test_session_store_persists_plan_state_in_dedicated_file(tmp_path: Path) -> 
     store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
 
     plan_state = {
-        "schema_version": 2,
+        "schema_version": 4,
         "plan_id": "plan_1",
         "owner_run_id": "run_1",
         "status": "proposed",
-        "approval_state": "pending",
         "origin_mode": "plan",
         "objective": "先规划再执行",
         "summary": "阅读实现后给出可执行方案。",
+        "completion_criteria": ["确认方案可执行"],
         "items": [
             {"id": "item_1", "step": "阅读实现", "details": "定位相关代码。", "verification": "确认调用路径。", "status": "pending"},
             {"id": "item_2", "step": "给出方案", "details": "形成实施步骤。", "verification": "覆盖边界和验证方法。", "status": "pending"},
@@ -94,24 +94,24 @@ def test_repeated_build_verification_failure_keeps_model_in_control() -> None:
 
 
 def test_update_plan_is_soft_progress_without_evidence_requirements() -> None:
-    from codepilot.core.plan import PlanState, apply_plan_update_metadata
+    from codepilot.core.plan import PlanSnapshot, apply_plan_snapshot
 
-    state = PlanState.new(objective="按步骤执行", origin_mode="build", run_id="run_1")
-    updated = apply_plan_update_metadata(
-        state,
-        {
-            "plan_update": {
-                "summary": "阅读代码后修改实现。",
+    updated = apply_plan_snapshot(
+        None,
+        PlanSnapshot.from_mapping(
+                {
+                    "execution_objective": "按步骤执行",
+                    "summary": "阅读代码后修改实现。",
+                "completion_criteria": ["相关测试通过"],
                 "explanation": "阅读完成，继续修改",
-                "plan": [
+                "items": [
                     {"step": "阅读代码", "details": "理解当前实现。", "verification": "确认调用路径。", "status": "completed"},
                     {"step": "修改实现", "details": "完成目标修改。", "verification": "运行相关测试。", "status": "in_progress"},
                 ],
             }
-        },
-        mode="build",
-        objective="按步骤执行",
-        run_id="run_1",
+            ),
+            mode="build",
+            run_id="run_1",
     )
 
     assert updated is not None
@@ -142,21 +142,42 @@ def test_passed_verification_is_run_signal_not_plan_completion_proof() -> None:
 
 
 def test_plan_state_store_begins_authoritative_plan_shape(tmp_path: Path) -> None:
+    from codepilot.core.plan import PlanSnapshot, apply_plan_snapshot
     from codepilot.sessions.store import SessionStore
     from codepilot.sessions.plan_state import PlanStateStore
 
     store = SessionStore(tmp_path, "session_plan_state")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
-    state = PlanStateStore(store).begin("修复运行编排链路", run_id="run_1")
+    state = apply_plan_snapshot(
+        None,
+        PlanSnapshot.from_mapping(
+                {
+                    "execution_objective": "修复运行编排链路",
+                    "summary": "修复运行编排链路。",
+                "completion_criteria": ["相关测试通过"],
+                "items": [
+                    {
+                        "step": "修复运行编排链路",
+                        "details": "完成目标修改。",
+                        "verification": "运行相关测试。",
+                        "status": "pending",
+                    }
+                ],
+            }
+            ),
+            mode="build",
+            run_id="run_1",
+    )
+    state = PlanStateStore(store).save(state)
     stored = store.load_plan_state()
 
-    assert stored is None
-    assert state["schema_version"] == 2
+    assert stored == state
+    assert state["schema_version"] == 4
     assert state["objective"] == "修复运行编排链路"
     assert state["origin_mode"] == "build"
     assert state["status"] == "active"
-    assert state["approval_state"] == "not_required"
-    assert state["items"] == []
+    assert state["completion_criteria"] == ["相关测试通过"]
+    assert len(state["items"]) == 1
     assert state["owner_run_id"] == "run_1"
 
 

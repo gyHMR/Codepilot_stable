@@ -18,7 +18,6 @@ from codepilot.protocols import (
     TextContent,
     ToolCall,
     ToolResultMessage,
-    UserMessage,
     ensure_runtime_event_type,
 )
 from codepilot.tools.contracts import ToolInvocation, ToolObservation, ToolResumeDecision
@@ -36,7 +35,7 @@ from .model_step import ModelTurnResult, run_model_turn, tool_catalog_for_reques
 from .plan import (
     PlanState,
     PlanValidationError,
-    apply_plan_update_metadata,
+    apply_plan_snapshot_metadata,
     ensure_run_mode,
     load_plan_state,
 )
@@ -206,13 +205,17 @@ async def resume_agent_loop(
     new_messages.append(tool_message)
     _emit_message(recorder, tool_message)
     run_state.collect_tool_results([tool_message])
+    run_state.observe_plan_execution(
+        [tool_message],
+        in_progress_item_id=_in_progress_plan_item_id(plan_state),
+    )
     run_state.counters.tool_iterations += 1
     plan_state = _apply_plan_updates(
         plan_state,
         [tool_message],
         input=loop_input,
         recorder=recorder,
-        objective=_objective_for_plan(loop_input, messages),
+        qualified_failure_count=run_state.qualified_plan_failure_count,
     )
 
     interruption = _interruption_after_tool_results(
@@ -298,6 +301,7 @@ async def _drive_loop(
     usage = None
     max_model_turns = max(1, input.limits.max_model_turns)
     runtime_directive: _RuntimeDirective | None = None
+    plan_closeout_attempted = False
 
     for turn_index in range(max_model_turns):
         if turn_index > 0 or not first_turn_started:
@@ -357,10 +361,13 @@ async def _drive_loop(
                 usage=usage,
                 turn_index=turn_index,
                 max_model_turns=max_model_turns,
+                plan_closeout_attempted=plan_closeout_attempted,
             )
             if outcome is not None:
                 if isinstance(outcome, _RuntimeDirective):
                     runtime_directive = outcome
+                    if outcome.reason.startswith("plan_"):
+                        plan_closeout_attempted = True
                     continue
                 return outcome
             continue
@@ -401,6 +408,8 @@ async def _drive_loop(
         if limit_outcome is not None:
             return limit_outcome
 
+        has_prior_plan_exploration = run_state.has_plan_exploration_evidence()
+
         turn_observations = await execute_tool_turn(
             run_id=input.run_id,
             session_id=input.correlation.session_id,
@@ -422,7 +431,17 @@ async def _drive_loop(
         run_state.counters.tool_iterations += 1
 
         tool_messages = _tool_messages_from_observations(turn_observations)
+        if _must_explore_before_plan_submission(
+            input=input,
+            plan_state=plan_state,
+            has_prior_exploration=has_prior_plan_exploration,
+        ):
+            tool_messages = _reject_premature_plan_submissions(tool_messages)
         run_state.collect_tool_results(tool_messages)
+        run_state.observe_plan_execution(
+            tool_messages,
+            in_progress_item_id=_in_progress_plan_item_id(plan_state),
+        )
         visible_tool_messages = [
             message
             for message in tool_messages
@@ -438,13 +457,17 @@ async def _drive_loop(
             visible_tool_messages,
             input=input,
             recorder=recorder,
-            objective=_objective_for_plan(input, messages),
+            qualified_failure_count=run_state.qualified_plan_failure_count,
+        )
+        run_state.observe_plan_execution(
+            [],
+            in_progress_item_id=_in_progress_plan_item_id(plan_state),
         )
 
         plan_ready_for_approval = input.mode == "plan" and _is_pending_plan(plan_state) and any(
             message.tool_name == "update_plan"
             and message.status == "success"
-            and isinstance(message.metadata.get("plan_update"), dict)
+            and isinstance(message.metadata.get("plan_snapshot"), dict)
             for message in visible_tool_messages
         )
 
@@ -574,6 +597,7 @@ def _finish_or_steer(
     usage: Any,
     turn_index: int,
     max_model_turns: int,
+    plan_closeout_attempted: bool,
 ) -> AgentLoopOutcome | _RuntimeDirective | None:
     if input.mode == "plan":
         recorder.emit(
@@ -627,6 +651,21 @@ def _finish_or_steer(
         )
         if plan_guard is not None:
             reason, instruction = plan_guard
+            if plan_closeout_attempted:
+                recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+                recorder.emit({"type": "agent_end", "status": "waiting_user"})
+                return _outcome(
+                    input=input,
+                    status="waiting_user",
+                    stop_reason="plan_incomplete",
+                    new_messages=new_messages,
+                    final_message=assistant,
+                    run_state=run_state,
+                    plan_state=plan_state,
+                    observations=observations,
+                    events=recorder.events,
+                    usage=usage,
+                )
             recorder.emit(
                 {
                     "type": "run_guard_checked",
@@ -700,11 +739,8 @@ def _plan_closeout_guard(
         return None
     if plan_state is None or plan_state.status != "active":
         return None
-    if _has_explicit_plan_closeout(new_messages):
-        return None
     if (
-        plan_state.approval_state == "approved"
-        and plan_state.origin_mode == "plan"
+        plan_state.origin_mode == "plan"
         and run_state.counters.tool_calls == 0
     ):
         step = _first_unfinished_plan_step(plan_state)
@@ -719,10 +755,9 @@ def _plan_closeout_guard(
     return (
         "plan_closeout_missing",
         (
-            "当前 active Task Plan 还没有终态收尾。请先基于实际工具结果做一次简短检查，"
-            "然后调用 update_plan：如果用户任务已经完成，设置 plan_status=\"completed\"；"
-            "如果存在明显未完成事项，设置 plan_status=\"active\" 并保留/更新未完成步骤。"
-            "不要因为部分步骤仍是 pending 就拒绝完成；步骤状态是软进度，plan_status 才是终态。"
+            "当前 active Task Plan 需要收尾确认。请依据 completion criteria、步骤验证和实际工具结果"
+            "检查任务是否完成；完成时调用 update_plan 并将 snapshot.status 设为 completed。"
+            "若尚未完成，请明确说明阻塞，保留 active plan，等待用户下一步指示。"
         ),
     )
 
@@ -734,15 +769,13 @@ def _first_unfinished_plan_step(plan_state: PlanState) -> str:
     return ""
 
 
-def _has_explicit_plan_closeout(messages: list[Message]) -> bool:
-    for message in reversed(messages):
-        if not isinstance(message, ToolResultMessage):
-            continue
-        if message.tool_name != "update_plan":
-            continue
-        if message.metadata.get("plan_status") in {"active", "completed"}:
-            return True
-    return False
+def _in_progress_plan_item_id(plan_state: PlanState | None) -> str | None:
+    if plan_state is None or plan_state.status != "active":
+        return None
+    for item in plan_state.items:
+        if item.status == "in_progress":
+            return item.id
+    return None
 
 
 def _tool_limit_outcome(
@@ -1018,11 +1051,7 @@ def _plan_approval_pause_outcome(
 
 
 def _is_pending_plan(plan_state: PlanState | None) -> bool:
-    return (
-        plan_state is not None
-        and plan_state.status == "proposed"
-        and plan_state.approval_state == "pending"
-    )
+    return plan_state is not None and plan_state.status == "proposed"
 
 
 def _mark_plan_summary_message(
@@ -1049,6 +1078,8 @@ def _plan_approval_message(plan_state: PlanState) -> AssistantMessage:
             )
             for index, item in enumerate(plan_state.items, start=1)
         ],
+        "完成标准：",
+        *[f"- {criterion}" for criterion in plan_state.completion_criteria],
         "请使用 /plan approve 批准后交给 build 模式执行，使用 /plan reject 拒绝，或直接说明需要调整的内容。",
     ]
     message = AssistantMessage(
@@ -1110,17 +1141,17 @@ def _apply_plan_updates(
     *,
     input: AgentLoopInput,
     recorder: "_EventRecorder",
-    objective: str,
+    qualified_failure_count: int,
 ) -> PlanState | None:
     current = plan_state
     for message in tool_messages:
         try:
-            next_state = apply_plan_update_metadata(
+            next_state = apply_plan_snapshot_metadata(
                 current,
                 message.metadata,
                 mode=ensure_run_mode(input.mode),
-                objective=objective,
                 run_id=input.run_id,
+                qualified_failure_count=qualified_failure_count,
             )
         except PlanValidationError as exc:
             recorder.emit(
@@ -1254,24 +1285,46 @@ def last_assistant(messages: list[Message]) -> AssistantMessage | None:
     return None
 
 
-def _objective_for_plan(input: AgentLoopInput, messages: list[Message]) -> str:
-    if input.user_prompt:
-        return input.user_prompt
-    for message in reversed(messages):
-        if isinstance(message, UserMessage):
-            if isinstance(message.content, str):
-                text = " ".join(message.content.strip().split())
-                if text:
-                    return text
-            else:
-                text = " ".join(
-                    block.text.strip()
-                    for block in message.content
-                    if isinstance(block, TextContent) and block.text.strip()
+def _must_explore_before_plan_submission(
+    *,
+    input: AgentLoopInput,
+    plan_state: PlanState | None,
+    has_prior_exploration: bool,
+) -> bool:
+    return input.mode == "plan" and plan_state is None and not has_prior_exploration
+
+
+def _reject_premature_plan_submissions(
+    messages: list[ToolResultMessage],
+) -> list[ToolResultMessage]:
+    rejected: list[ToolResultMessage] = []
+    for message in messages:
+        if (
+            message.tool_name == "update_plan"
+            and message.status == "success"
+            and isinstance(message.metadata.get("plan_snapshot"), dict)
+        ):
+            rejected.append(
+                replace(
+                    message,
+                    content=[
+                        TextContent(
+                            text=(
+                                "Plan proposals require repository evidence first. Use read/grep/find/ls "
+                                "or dispatch_exploration to inspect the relevant implementation and tests, "
+                                "then submit an implementation plan."
+                            )
+                        )
+                    ],
+                    status="error",
+                    is_error=True,
+                    error_code="plan_exploration_required",
+                    metadata={},
                 )
-                if text:
-                    return text
-    return ""
+            )
+            continue
+        rejected.append(message)
+    return rejected
 
 
 def _guard_stop_reason(reason: str) -> AgentRunStopReason:

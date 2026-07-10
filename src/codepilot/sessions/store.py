@@ -904,6 +904,8 @@ def _run_phase(status: object, stop_reason: object) -> str:
             return "plan_approval"
         if stop_reason == "plan_clarification_required":
             return "plan_clarification"
+        if stop_reason == "plan_incomplete":
+            return "plan_incomplete"
         return "waiting_user"
     return "terminal"
 

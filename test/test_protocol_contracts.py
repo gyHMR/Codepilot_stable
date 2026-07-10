@@ -51,7 +51,21 @@ def test_error_info_normalizes_and_validates_cross_layer_fields() -> None:
             message="wrong source",
             kind="timeout",
             source="runtime",
-        )
+    )
+
+
+def test_agent_run_result_accepts_plan_incomplete_pause_reason() -> None:
+    from codepilot.protocols import AgentRunResult
+
+    result = AgentRunResult(
+        run_id="run_plan_pause",
+        session_id="session_plan_pause",
+        status="waiting_user",
+        stop_reason="plan_incomplete",
+    )
+
+    assert result.status == "waiting_user"
+    assert result.stop_reason == "plan_incomplete"
 
 
 def test_tool_spec_normalizes_and_validates_provider_visible_fields() -> None:
@@ -354,14 +368,14 @@ def test_run_result_models_normalize_and_validate_run_facts() -> None:
         RunVerification(tool_call_id="call-1", tool_name="shell", status="passed", exit_code=False)  # type: ignore[arg-type]
 
     plan = PlanSummary(
-        schema_version=2,
+        schema_version=4,
         plan_id=" plan-1 ",
         owner_run_id=" run-1 ",
         status=" active ",
-        approval_state=" approved ",
         origin_mode=" build ",
         objective=" Refactor run model. ",
         summary=" Read the code and implement the refactor. ",
+        completion_criteria=[" Focused tests pass. "],
         items=[
             {
                 "id": " item-1 ",
@@ -386,6 +400,7 @@ def test_run_result_models_normalize_and_validate_run_facts() -> None:
 
     assert plan.plan_id == "plan-1"
     assert plan.status == "active"
+    assert plan.completion_criteria == ["Focused tests pass."]
     assert plan.items == [
         {
             "id": "item-1",
@@ -400,14 +415,14 @@ def test_run_result_models_normalize_and_validate_run_facts() -> None:
 
     with pytest.raises(ValueError, match="plan_id"):
         PlanSummary(
-            schema_version=2,
+            schema_version=4,
             plan_id="",
             owner_run_id="run-1",
             status="active",
-            approval_state="approved",
             origin_mode="build",
             objective="Goal",
             summary="Summary",
+            completion_criteria=["Verify outcome"],
         )
 
     with pytest.raises(ValueError, match="run signal verification"):

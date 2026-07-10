@@ -1043,10 +1043,7 @@ def _plan_items(
 ) -> list[ContextItem]:
     if plan_state is None and run_signals is None:
         return []
-    approved = (
-        _plan_string(plan_state, "status") == "active"
-        and _plan_string(plan_state, "approval_state") == "approved"
-    )
+    approved = _plan_string(plan_state, "status") == "active"
     lines = [
         (
             "Approved Execution Contract: execute this canonical plan; do not replace it "
@@ -1057,13 +1054,15 @@ def _plan_items(
         f"Objective: {_plan_objective(plan_state)}",
         f"Summary: {_plan_string(plan_state, 'summary') or '(none)'}",
         f"Plan status: {_plan_string(plan_state, 'status') or 'none'}",
-        f"Approval: {_plan_string(plan_state, 'approval_state') or 'not_required'}",
         f"Origin mode: {_plan_string(plan_state, 'origin_mode') or 'build'}",
         f"Verification: {_signal_text(run_signals, 'verification_status') or 'unknown'}",
     ]
     last_error = _signal_error_text(run_signals)
     if last_error:
         lines.append(f"Last error: {last_error}")
+    criteria = plan_state.get("completion_criteria") if isinstance(plan_state, Mapping) else None
+    if isinstance(criteria, list):
+        lines.extend(f"Completion criterion: {criterion}" for criterion in criteria if str(criterion).strip())
     items = plan_state.get("items") if isinstance(plan_state, Mapping) else None
     if isinstance(items, list):
         proposed = _plan_string(plan_state, "status") == "proposed"
@@ -1119,10 +1118,7 @@ def _without_published_plan_summaries(
     messages: list[Message],
     plan_state: Mapping[str, object] | None,
 ) -> list[Message]:
-    if (
-        _plan_string(plan_state, "status") != "active"
-        or _plan_string(plan_state, "approval_state") != "approved"
-    ):
+    if _plan_string(plan_state, "status") != "active":
         return list(messages)
     return [
         message
@@ -1231,6 +1227,7 @@ def _compose_system_prompt(context: AgentContext, view: ContextView) -> str:
     sections = [
         ("Mode Policy", [_mapping_text(runtime_state, "mode_policy")]),
         ("Runtime State", _runtime_state_lines(runtime_state)),
+        ("Current User Request", _current_user_request_lines(context.messages)),
         ("Task Plan", view.task_plan),
         ("Working Set", view.working_set),
         ("Memory", view.memory),
@@ -1245,13 +1242,22 @@ def _compose_system_prompt(context: AgentContext, view: ContextView) -> str:
     return "\n\n".join(part for part in parts if part).strip()
 
 
+def _current_user_request_lines(messages: list[Message]) -> list[str]:
+    request = _latest_user_text(messages)
+    if not request:
+        return []
+    return [
+        f"Raw request: {request}",
+        "Treat delivery wording such as 'give a plan', 'analyze first', or 'do not edit yet' as control-level instructions. Keep the software work itself as the object-level task.",
+    ]
+
+
 def _runtime_state_lines(runtime_state: Mapping[str, object]) -> list[str]:
     labels = (
         ("run_id", "Run"),
         ("mode", "Mode"),
         ("checkpoint_phase", "Checkpoint"),
-        ("plan_status", "Plan status"),
-        ("plan_approval_state", "Plan approval"),
+        ("plan_state_status", "Plan status"),
         ("verification_status", "Verification"),
         ("directive", "Continuation directive"),
     )

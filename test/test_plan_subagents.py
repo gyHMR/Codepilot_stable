@@ -90,6 +90,36 @@ def test_restricted_tool_port_only_exposes_and_executes_read_allowlist() -> None
     asyncio.run(run_case())
 
 
+def test_plan_policy_prioritizes_subagents_for_broad_repository_analysis() -> None:
+    from codepilot.sessions.runtime import _mode_policy
+
+    policy = _mode_policy("plan")
+
+    assert "多文件" in policy
+    assert "长文件" in policy
+    assert "跨模块" in policy
+    assert "优先" in policy
+    assert "list_exploration_agents" in policy
+    assert "dispatch_exploration" in policy
+
+
+def test_mode_policies_keep_one_agent_identity_and_separate_control_from_task() -> None:
+    from codepilot.sessions.runtime import _mode_policy
+
+    plan = _mode_policy("plan")
+    build = _mode_policy("build")
+    read = _mode_policy("read")
+
+    assert "同一个 Coding Agent" in plan
+    assert "对象级" in plan
+    assert "控制级" in plan
+    assert "先探索" in plan
+    assert "禁止修改工作区" in plan
+    assert "执行目标" in build
+    assert "不是重新制定方案" in build
+    assert "不得创建、推进或完成" in read
+
+
 def test_subagent_store_persists_session_scoped_reports_and_marks_stale(tmp_path) -> None:
     from codepilot.sessions.subagents import SubagentStore
 
@@ -282,10 +312,12 @@ def test_plan_mode_dispatch_exploration_feeds_update_plan_and_pauses(tmp_path) -
                         content=[
                             ToolCall(
                                 id="plan1",
-                                name="update_plan",
-                                arguments={
-                                    "summary": "Use exploration evidence to edit src/app.py.",
-                                    "plan": [
+                                    name="update_plan",
+                                    arguments={
+                                        "execution_objective": "完善 src/app.py 的实现并完成验证。",
+                                        "summary": "Use exploration evidence to edit src/app.py.",
+                                        "completion_criteria": ["Python 检查通过"],
+                                        "items": [
                                         {
                                             "step": "修改 src/app.py",
                                             "details": "批准后基于探索结果修改 src/app.py。",
@@ -322,7 +354,10 @@ def test_plan_mode_dispatch_exploration_feeds_update_plan_and_pauses(tmp_path) -
 
         frames = [
             frame
-            async for frame in gateway.dispatch(ref.session_id, PromptSubmitted(text="plan edit"))
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                PromptSubmitted(text="完善 src/app.py，给我一个方案"),
+            )
         ]
         paused = [frame for frame in frames if isinstance(frame, RunPausedFrame)]
         session = gateway._require_session(ref.session_id)._session  # noqa: SLF001
@@ -330,6 +365,7 @@ def test_plan_mode_dispatch_exploration_feeds_update_plan_and_pauses(tmp_path) -
 
         assert paused
         assert paused[-1].record.stop_reason == "plan_approval_required"
+        assert session.plan_state.current()["objective"] == "完善 src/app.py 的实现并完成验证。"
         assert model_port.subagent_calls == 1
         assert any(
             message.tool_name == "dispatch_exploration"
