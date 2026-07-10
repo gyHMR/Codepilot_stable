@@ -273,6 +273,68 @@ def test_update_plan_tool_normalizes_proposed_items_in_plan_mode() -> None:
     ] == ["pending", "pending", "pending"]
 
 
+def test_update_plan_tool_accepts_closeout_only_outside_plan_mode() -> None:
+    import asyncio
+
+    from codepilot.protocols import UPDATE_PLAN_TOOL
+    from codepilot.tools.builtins.plan import create_plan_tools
+    from codepilot.tools.contracts import ToolCallRequest
+
+    tool = create_plan_tools(allow=lambda name: name == UPDATE_PLAN_TOOL)[0]
+    result = asyncio.run(
+        tool.execute(
+            ToolCallRequest(
+                run_id="run_build",
+                tool_call_id="call_plan",
+                name=UPDATE_PLAN_TOOL,
+                current_mode="build",
+                arguments={
+                    "summary": "实现已完成，准备收尾。",
+                    "plan_status": "completed",
+                    "plan": [
+                        {
+                            "step": "修改实现",
+                            "details": "完成目标实现。",
+                            "verification": "运行聚焦测试。",
+                            "status": "pending",
+                        }
+                    ],
+                },
+            )
+        )
+    )
+
+    assert result.status == "success"
+    assert result.metadata["plan_status"] == "completed"
+    assert "marked completed" in result.content[0].text
+
+    rejected = asyncio.run(
+        tool.execute(
+            ToolCallRequest(
+                run_id="run_plan",
+                tool_call_id="call_plan_2",
+                name=UPDATE_PLAN_TOOL,
+                current_mode="plan",
+                arguments={
+                    "summary": "待审批方案。",
+                    "plan_status": "completed",
+                    "plan": [
+                        {
+                            "step": "修改实现",
+                            "details": "批准后修改实现。",
+                            "verification": "批准后运行测试。",
+                            "status": "pending",
+                        }
+                    ],
+                },
+            )
+        )
+    )
+
+    assert rejected.status == "error"
+    assert "plan mode cannot set plan_status" in rejected.content[0].text
+
+
 def test_rejected_plan_cannot_be_changed_by_model_update() -> None:
     from codepilot.core.plan import PlanState, PlanUpdate, PlanUpdateItem, PlanValidationError
 

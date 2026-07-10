@@ -123,6 +123,68 @@ def test_context_governor_prepares_linear_context_with_memory_and_artifacts(
     assert (tmp_path / ".codepilot" / "sessions" / "session_1" / "context_ledger.jsonl").exists()
 
 
+def test_context_governor_filters_archived_plan_from_store(tmp_path: Path) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import UserMessage
+    from codepilot.sessions.context import ContextGovernor
+    from codepilot.sessions.plan_state import PlanStateStore
+    from codepilot.sessions.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "session_archived_plan")
+    session_store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
+    PlanStateStore(session_store).save(
+        {
+            "schema_version": 2,
+            "plan_id": "plan_done",
+            "owner_run_id": "run_done",
+            "status": "completed",
+            "approval_state": "approved",
+            "origin_mode": "plan",
+            "objective": "旧任务",
+            "summary": "旧计划已经完成。",
+            "items": [
+                {
+                    "id": "item_1",
+                    "step": "旧步骤",
+                    "details": "旧步骤详情。",
+                    "verification": "旧验证。",
+                    "status": "pending",
+                }
+            ],
+            "revision": 1,
+            "explanation": "",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T01:00:00+00:00",
+            "completed_at": "2026-01-01T01:00:00+00:00",
+            "completion_source": "model_closeout",
+        }
+    )
+    governor = ContextGovernor(
+        workspace_dir=tmp_path,
+        session_id="session_archived_plan",
+        store=session_store,
+    )
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(
+                system_prompt="System rules.",
+                messages=[UserMessage(content="开始新任务。")],
+                mode="build",
+            ),
+            ContextPreparationRequest(
+                session_id="session_archived_plan",
+                model_context_window=4000,
+                model_max_output_tokens=500,
+            ),
+        )
+    )
+
+    assert "## Task Plan" not in prepared.system_prompt
+    assert prepared.report.context_view is not None
+    assert prepared.report.context_view.task_plan == []
+
+
 def test_context_governor_surfaces_recent_read_paths_in_working_set(
     tmp_path: Path,
 ) -> None:

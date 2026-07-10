@@ -21,6 +21,7 @@ from .model import resolve_runtime_model
 from .opening import SessionOpenIntent
 from .prompt import build_system_prompt
 from .sessions import RuntimeSession, RuntimeStatusInfo
+from .subagents import create_exploration_tools
 from .tools import build_runtime_tools
 
 
@@ -117,7 +118,7 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         after_tool_call=effective_options.after_tool_call,
     )
 
-    return RuntimeSession(
+    runtime_session = RuntimeSession(
         controller=controller,
         model_port=model_port,
         tool_port=tool_port,
@@ -134,6 +135,13 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
             **tools.commands,
         },
     )
+    tools.registry.extend(
+        create_exploration_tools(
+            workspace=config.workspace,
+            session_provider=lambda: runtime_session,
+        )
+    )
+    return runtime_session
 
 
 __all__ = [

@@ -292,6 +292,7 @@ async def run_command(
     try:
         result = None
         final_record = None
+        run_finished = False
         async for frame in runtime.dispatch(session_id, CommandSubmitted(text=text)):
             if isinstance(frame, CommandFinishedFrame):
                 result = frame.record
@@ -305,6 +306,7 @@ async def run_command(
                 continue
             if isinstance(frame, RunFinishedFrame):
                 final_record = frame.record
+                run_finished = True
                 continue
             if isinstance(frame, RunPausedFrame):
                 final_record = frame.record
@@ -319,6 +321,10 @@ async def run_command(
         renderer.render_status("Command error: runtime command finished without a result", kind="error")
         return None
     renderer.render_final(final_record)
+    if run_finished:
+        render_input_ready = getattr(renderer, "render_input_ready", None)
+        if callable(render_input_ready):
+            render_input_ready()
     switched_session_id = getattr(result, "switched_session_id", None)
     if switched_session_id is not None:
         return str(switched_session_id)
@@ -374,6 +380,7 @@ async def render_dispatch(frames: Any, renderer: Any) -> None:
     """
 
     final_record = None
+    run_finished = False
     async for frame in frames:
         if isinstance(frame, ProgressFrame):
             renderer.render_progress_event(frame.event)
@@ -383,11 +390,16 @@ async def render_dispatch(frames: Any, renderer: Any) -> None:
             renderer.render_approval_required(frame)
         elif isinstance(frame, RunFinishedFrame):
             final_record = frame.record
+            run_finished = True
         elif isinstance(frame, RunPausedFrame):
             final_record = frame.record
         elif isinstance(frame, FailedFrame):
             raise runtime_error_from_frame(frame.error)
     renderer.render_final(final_record)
+    if run_finished:
+        render_input_ready = getattr(renderer, "render_input_ready", None)
+        if callable(render_input_ready):
+            render_input_ready()
 
 
 def is_exit_text(

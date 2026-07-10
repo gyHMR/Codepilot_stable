@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from codepilot.protocols import (
@@ -61,6 +61,12 @@ async def maybe_await(value: Any) -> Any:
     return value
 
 
+@dataclass(frozen=True)
+class _RuntimeDirective:
+    instruction: str
+    reason: str = ""
+
+
 class AgentEventEmitter:
     """Small public helper for tests and adapters that need enriched events."""
 
@@ -99,7 +105,8 @@ async def run_agent_loop(
     ports: AgentLoopPorts,
 ) -> AgentLoopOutcome:
     recorder = _EventRecorder(input, ports)
-    run_state = RunState(
+    run_state = RunState.from_mapping(
+        input.run_state,
         run_id=input.run_id,
         session_id=input.correlation.session_id,
     )
@@ -156,9 +163,15 @@ async def resume_agent_loop(
         limits=input.limits,
         retry_policy=input.retry_policy,
         event_start_seq=input.event_start_seq,
+        turn_start_seq=input.turn_start_seq,
+        run_state=input.run_state,
     )
     recorder = _EventRecorder(loop_input, ports)
-    run_state = RunState(input.run_id, input.correlation.session_id)
+    run_state = RunState.from_mapping(
+        input.run_state,
+        run_id=input.run_id,
+        session_id=input.correlation.session_id,
+    )
     plan_state = load_plan_state(input.plan_state)
     messages = list(input.messages)
     new_messages: list[Message] = []
@@ -284,59 +297,29 @@ async def _drive_loop(
 ) -> AgentLoopOutcome:
     usage = None
     max_model_turns = max(1, input.limits.max_model_turns)
-    plan_summary_pending = False
+    runtime_directive: _RuntimeDirective | None = None
 
     for turn_index in range(max_model_turns):
         if turn_index > 0 or not first_turn_started:
             recorder.emit({"type": "turn_start"})
 
-        turn_input = (
-            _with_plan_summary_context(input, plan_state)
-            if plan_summary_pending
-            else input
+        turn_input = input
+        if runtime_directive is not None:
+            turn_input = _with_runtime_directive(
+                input,
+                runtime_directive.instruction,
+                reason=runtime_directive.reason,
+            )
+            runtime_directive = None
+        model_turn = await _model_turn_with_retries(
+            input=turn_input,
+            ports=ports,
+            recorder=recorder,
+            messages=messages,
+            run_state=run_state,
+            plan_state=plan_state,
         )
-        try:
-            model_turn = await _model_turn_with_retries(
-                input=turn_input,
-                ports=ports,
-                recorder=recorder,
-                messages=messages,
-                run_state=run_state,
-                plan_state=plan_state,
-            )
-        except Exception:
-            if not (plan_summary_pending and _is_pending_plan(plan_state)):
-                raise
-            assistant = _plan_summary_fallback_message(plan_state)
-            messages.append(assistant)
-            new_messages.append(assistant)
-            _emit_message(recorder, assistant)
-            return _plan_approval_pause_outcome(
-                input=input,
-                recorder=recorder,
-                assistant=assistant,
-                new_messages=new_messages,
-                run_state=run_state,
-                plan_state=plan_state,
-                observations=observations,
-                usage=usage,
-            )
         if model_turn.error is not None:
-            if plan_summary_pending and _is_pending_plan(plan_state):
-                assistant = _plan_summary_fallback_message(plan_state)
-                messages.append(assistant)
-                new_messages.append(assistant)
-                _emit_message(recorder, assistant)
-                return _plan_approval_pause_outcome(
-                    input=input,
-                    recorder=recorder,
-                    assistant=assistant,
-                    new_messages=new_messages,
-                    run_state=run_state,
-                    plan_state=plan_state,
-                    observations=observations,
-                    usage=usage,
-                )
             recorder.emit({"type": "error", "error": model_turn.error})
             recorder.emit({"type": "turn_end", "message": None, "toolResults": []})
             recorder.emit({"type": "agent_end", "status": "failed"})
@@ -362,18 +345,6 @@ async def _drive_loop(
 
         tool_calls = [block for block in assistant.content if isinstance(block, ToolCall)]
         if not tool_calls:
-            if plan_summary_pending and _is_pending_plan(plan_state):
-                _mark_plan_summary_message(assistant, plan_state)
-                return _plan_approval_pause_outcome(
-                    input=input,
-                    recorder=recorder,
-                    assistant=assistant,
-                    new_messages=new_messages,
-                    run_state=run_state,
-                    plan_state=plan_state,
-                    observations=observations,
-                    usage=usage,
-                )
             outcome = _finish_or_steer(
                 input=input,
                 recorder=recorder,
@@ -388,6 +359,9 @@ async def _drive_loop(
                 max_model_turns=max_model_turns,
             )
             if outcome is not None:
+                if isinstance(outcome, _RuntimeDirective):
+                    runtime_directive = outcome
+                    continue
                 return outcome
             continue
 
@@ -467,20 +441,19 @@ async def _drive_loop(
             objective=_objective_for_plan(input, messages),
         )
 
-        if input.mode == "plan" and _is_pending_plan(plan_state) and any(
+        plan_ready_for_approval = input.mode == "plan" and _is_pending_plan(plan_state) and any(
             message.tool_name == "update_plan"
             and message.status == "success"
             and isinstance(message.metadata.get("plan_update"), dict)
             for message in visible_tool_messages
-        ):
-            plan_summary_pending = True
+        )
 
         recovery_instruction = run_state.truncated_read_recovery_instruction(visible_tool_messages)
         if recovery_instruction:
-            steering = UserMessage(content=recovery_instruction)
-            messages.append(steering)
-            new_messages.append(steering)
-            _emit_message(recorder, steering)
+            runtime_directive = _RuntimeDirective(
+                recovery_instruction,
+                reason="repeated_truncated_read",
+            )
 
         interruption = _interruption_after_tool_results(
             input=input,
@@ -495,6 +468,23 @@ async def _drive_loop(
         )
         if interruption is not None:
             return interruption
+
+        if plan_ready_for_approval and plan_state is not None:
+            approval_message = _plan_approval_message(plan_state)
+            messages.append(approval_message)
+            new_messages.append(approval_message)
+            _emit_message(recorder, approval_message)
+            return _plan_approval_pause_outcome(
+                input=input,
+                recorder=recorder,
+                assistant=approval_message,
+                new_messages=new_messages,
+                run_state=run_state,
+                plan_state=plan_state,
+                observations=observations,
+                usage=usage,
+                tool_results=visible_tool_messages,
+            )
 
         continuation_outcome = _tool_continuation_limit_outcome(
             input=input,
@@ -584,7 +574,7 @@ def _finish_or_steer(
     usage: Any,
     turn_index: int,
     max_model_turns: int,
-) -> AgentLoopOutcome | None:
+) -> AgentLoopOutcome | _RuntimeDirective | None:
     if input.mode == "plan":
         recorder.emit(
             {
@@ -629,6 +619,42 @@ def _finish_or_steer(
         }
     )
     if decision.action == "completed":
+        plan_guard = _plan_closeout_guard(
+            input=input,
+            plan_state=plan_state,
+            run_state=run_state,
+            new_messages=new_messages,
+        )
+        if plan_guard is not None:
+            reason, instruction = plan_guard
+            recorder.emit(
+                {
+                    "type": "run_guard_checked",
+                    "decision": {
+                        "action": "continue_with_instruction",
+                        "reason": reason,
+                        "instruction": instruction,
+                    },
+                    "signals": run_state.summary(),
+                }
+            )
+            if turn_index + 1 < max_model_turns:
+                recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+                return _RuntimeDirective(instruction, reason=reason)
+            recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+            recorder.emit({"type": "agent_end", "status": "waiting_user"})
+            return _outcome(
+                input=input,
+                status="waiting_user",
+                stop_reason="run_guard",
+                new_messages=new_messages,
+                final_message=assistant,
+                run_state=run_state,
+                plan_state=plan_state,
+                observations=observations,
+                events=recorder.events,
+                usage=usage,
+            )
         recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
         recorder.emit({"type": "agent_end", "status": "completed"})
         return _outcome(
@@ -644,12 +670,8 @@ def _finish_or_steer(
             usage=usage,
         )
     if decision.action == "continue_with_instruction" and turn_index + 1 < max_model_turns:
-        steering = UserMessage(content=decision.instruction)
-        messages.append(steering)
-        new_messages.append(steering)
-        _emit_message(recorder, steering)
         recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
-        return None
+        return _RuntimeDirective(decision.instruction, reason=decision.reason)
     status: AgentRunStatus = "failed" if decision.action == "stopped" else "waiting_user"
     recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
     recorder.emit({"type": "agent_end", "status": status})
@@ -665,6 +687,62 @@ def _finish_or_steer(
         events=recorder.events,
         usage=usage,
     )
+
+
+def _plan_closeout_guard(
+    *,
+    input: AgentLoopInput,
+    plan_state: PlanState | None,
+    run_state: RunState,
+    new_messages: list[Message],
+) -> tuple[str, str] | None:
+    if input.mode == "plan":
+        return None
+    if plan_state is None or plan_state.status != "active":
+        return None
+    if _has_explicit_plan_closeout(new_messages):
+        return None
+    if (
+        plan_state.approval_state == "approved"
+        and plan_state.origin_mode == "plan"
+        and run_state.counters.tool_calls == 0
+    ):
+        step = _first_unfinished_plan_step(plan_state)
+        return (
+            "plan_execution_not_started",
+            (
+                "当前有已批准的 active Task Plan，但本轮还没有执行任何计划步骤。"
+                "不要复述方案或给最终答复；请直接从第一个未完成步骤开始读取、修改和验证。"
+                + (f" 第一个未完成步骤：{step}。" if step else "")
+            ),
+        )
+    return (
+        "plan_closeout_missing",
+        (
+            "当前 active Task Plan 还没有终态收尾。请先基于实际工具结果做一次简短检查，"
+            "然后调用 update_plan：如果用户任务已经完成，设置 plan_status=\"completed\"；"
+            "如果存在明显未完成事项，设置 plan_status=\"active\" 并保留/更新未完成步骤。"
+            "不要因为部分步骤仍是 pending 就拒绝完成；步骤状态是软进度，plan_status 才是终态。"
+        ),
+    )
+
+
+def _first_unfinished_plan_step(plan_state: PlanState) -> str:
+    for item in plan_state.items:
+        if item.status != "completed":
+            return item.step
+    return ""
+
+
+def _has_explicit_plan_closeout(messages: list[Message]) -> bool:
+    for message in reversed(messages):
+        if not isinstance(message, ToolResultMessage):
+            continue
+        if message.tool_name != "update_plan":
+            continue
+        if message.metadata.get("plan_status") in {"active", "completed"}:
+            return True
+    return False
 
 
 def _tool_limit_outcome(
@@ -901,6 +979,7 @@ def _plan_approval_pause_outcome(
     plan_state: PlanState | None,
     observations: list[ToolObservation],
     usage: Any,
+    tool_results: list[ToolResultMessage] | None = None,
 ) -> AgentLoopOutcome:
     _mark_plan_summary_message(assistant, plan_state)
     recorder.emit(
@@ -914,7 +993,7 @@ def _plan_approval_pause_outcome(
         {
             "type": "turn_end",
             "message": assistant,
-            "toolResults": [],
+            "toolResults": list(tool_results or []),
         }
     )
     recorder.emit(
@@ -956,25 +1035,27 @@ def _mark_plan_summary_message(
         message.metadata["plan_revision"] = plan_state.revision
 
 
-def _plan_summary_fallback_message(plan_state: PlanState) -> AssistantMessage:
+def _plan_approval_message(plan_state: PlanState) -> AssistantMessage:
     lines = [
-        f"计划：{plan_state.objective}",
-        plan_state.summary,
+        "已根据仓库探索生成待审批的代码修改方案。",
+        f"目标：{plan_state.objective}",
+        f"摘要：{plan_state.summary}",
+        "执行步骤（批准后由 build 模式执行，当前均未开始）：",
         *[
             (
                 f"{index}. {item.step}\n"
-                f"   动作：{item.details}\n"
+                f"   修改：{item.details}\n"
                 f"   验证：{item.verification}"
             )
             for index, item in enumerate(plan_state.items, start=1)
         ],
-        "请使用 /approve 批准，使用 /reject 拒绝，或直接说明需要修改的内容。",
+        "请使用 /plan approve 批准后交给 build 模式执行，使用 /plan reject 拒绝，或直接说明需要调整的内容。",
     ]
     message = AssistantMessage(
         content=[TextContent(text="\n".join(line for line in lines if line))],
         stop_reason="stop",
     )
-    message.metadata["summary_fallback"] = True
+    message.metadata["generated_by"] = "runner"
     _mark_plan_summary_message(message, plan_state)
     return message
 
@@ -1018,6 +1099,7 @@ def _outcome(
         events=list(events),
         plan=_plan_summary_for_outcome(plan_state),
         signals=run_state.summary(),
+        run_state=run_state.to_dict(),
         error=error,
     )
 
@@ -1081,6 +1163,21 @@ def _tool_messages_from_observations(
     return messages
 
 
+def _with_runtime_directive(
+    input: AgentLoopInput,
+    instruction: str,
+    *,
+    reason: str = "",
+) -> AgentLoopInput:
+    values = {
+        **dict(input.context),
+        "runtime_directive": instruction,
+    }
+    if reason:
+        values["runtime_directive_reason"] = reason
+    return replace(input, context=PreparedContext(values))
+
+
 def _with_runtime_context(
     input: AgentLoopInput,
     plan_state: PlanState | None,
@@ -1093,28 +1190,6 @@ def _with_runtime_context(
     if plan_state is not None:
         values["plan_state"] = plan_state.to_dict()
     return replace(input, context=PreparedContext(values), plan_state=plan_state.to_dict() if plan_state else None)
-
-
-def _with_plan_summary_context(
-    input: AgentLoopInput,
-    plan_state: PlanState | None,
-) -> AgentLoopInput:
-    values = {
-        **dict(input.context),
-        "checkpoint_phase": "plan_summary",
-        "suppress_tools": True,
-        "runtime_directive": (
-            "The structured plan has been published. Summarize the canonical "
-            "PlanState for the user without changing it, calling tools, or starting implementation."
-        ),
-    }
-    if plan_state is not None:
-        values["plan_state"] = plan_state.to_dict()
-    return replace(
-        input,
-        context=PreparedContext(values),
-        plan_state=plan_state.to_dict() if plan_state else None,
-    )
 
 
 def _run_signal_payload(run_state: RunState) -> dict[str, Any]:

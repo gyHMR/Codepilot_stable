@@ -360,7 +360,11 @@ def create_shell_tools(
         ToolDefinition(
             name="bash",
             label="Run Command",
-            description="在工作区内执行受限 shell 命令，危险命令会被拒绝。",
+            description=(
+                "在工作区内执行受限 shell 命令，危险命令会被拒绝。"
+                "代码定位和文件阅读优先使用 read/grep/find；shell 主要用于运行测试、构建、"
+                "项目命令或内置工具无法覆盖的检查。Windows 环境不要默认使用 Unix grep/head/file。"
+            ),
             parameters={
                 "type": "object",
                 "properties": {

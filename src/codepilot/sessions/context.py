@@ -50,15 +50,15 @@ ContextEvidenceKind = Literal["tool_result", "verification", "observation"]
 _LAYER_ORDER = ("system", "task_plan", "working_set", "memory", "conversation")
 _LAYER_BUDGET_RATIOS = {
     "system": 0.10,
-    "task_plan": 0.10,
-    "working_set": 0.32,
+    "task_plan": 0.05,
+    "working_set": 0.37,
     "memory": 0.08,
     "conversation": 0.40,
 }
 _KEEP_COUNTS = {
-    "normal": {"task_plan": 32, "working_set": 18, "memory": 5, "conversation": 20},
-    "tight": {"task_plan": 32, "working_set": 12, "memory": 4, "conversation": 12},
-    "critical": {"task_plan": 32, "working_set": 8, "memory": 2, "conversation": 8},
+    "normal": {"task_plan": 24, "working_set": 18, "memory": 5, "conversation": 20},
+    "tight": {"task_plan": 16, "working_set": 12, "memory": 4, "conversation": 12},
+    "critical": {"task_plan": 10, "working_set": 8, "memory": 2, "conversation": 8},
 }
 _CONTEXT_FILE_ROLES = {"target", "test", "dependency", "config", "reference"}
 _CONTEXT_EVIDENCE_KINDS = {"tool_result", "verification", "observation"}
@@ -1052,7 +1052,7 @@ def _plan_items(
             "Approved Execution Contract: execute this canonical plan; do not replace it "
             "with a newly invented plan."
             if approved
-            else "Task Plan: canonical runtime state for the current task."
+            else "Current Workflow Plan: pending proposal or soft progress for the current task."
         ),
         f"Objective: {_plan_objective(plan_state)}",
         f"Summary: {_plan_string(plan_state, 'summary') or '(none)'}",
@@ -1066,6 +1066,7 @@ def _plan_items(
         lines.append(f"Last error: {last_error}")
     items = plan_state.get("items") if isinstance(plan_state, Mapping) else None
     if isinstance(items, list):
+        proposed = _plan_string(plan_state, "status") == "proposed"
         active_items = [
             item
             for item in items[:MAX_PLAN_ITEMS]
@@ -1079,8 +1080,9 @@ def _plan_items(
         ]
         for item in active_items:
             if isinstance(item, Mapping):
+                prefix = "Proposed build step" if proposed else "Step"
                 lines.append(
-                    "Step "
+                    f"{prefix} "
                     f"{item.get('id')}: {item.get('step')} [{item.get('status')}] "
                     f"details={item.get('details') or '(none)'} "
                     f"verification={item.get('verification') or '(none)'}"
@@ -1336,8 +1338,16 @@ def _plan_state_from_context(
     plan_state_store: PlanStateStore,
 ) -> Mapping[str, object] | None:
     if isinstance(context.plan_state, Mapping):
-        return context.plan_state
-    return plan_state_store.current()
+        return _workflow_plan_state(context.plan_state)
+    return _workflow_plan_state(plan_state_store.current())
+
+
+def _workflow_plan_state(state: Mapping[str, object] | None) -> Mapping[str, object] | None:
+    if not isinstance(state, Mapping):
+        return None
+    if state.get("status") not in {"proposed", "active"}:
+        return None
+    return state
 
 
 def _run_signals_from_context(context: AgentContext) -> Mapping[str, object] | None:

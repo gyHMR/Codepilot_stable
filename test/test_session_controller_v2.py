@@ -225,6 +225,98 @@ def test_session_commit_keeps_plan_approval_checkpoint(tmp_path) -> None:
     asyncio.run(run_case())
 
 
+def test_session_checkpoint_carries_cumulative_run_state_into_resume(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import AgentLoopOutcome
+        from codepilot.protocols import Model
+        from codepilot.sessions.contracts import (
+            SessionOptions,
+            SessionResumeIntent,
+            SessionRunIntent,
+        )
+        from codepilot.sessions.controller import _bind_session_runtime
+        from codepilot.sessions.runtime import SessionRuntime
+
+        session = SessionRuntime(
+            SessionOptions(
+                model=Model(
+                    id="session-v2",
+                    name="Session V2",
+                    api="unit-test",
+                    provider="unit-test",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=4000,
+                    max_tokens=500,
+                ),
+                workspace_dir=tmp_path,
+                session_id="s_run_state",
+                memory_enabled=False,
+            )
+        )
+        controller = _bind_session_runtime(session)
+        prepared = await controller.prepare_run(
+            SessionRunIntent(text="修改文件", run_id="run_stateful")
+        )
+        session.store.set_checkpoint(
+            {
+                "phase": "tool_approval",
+                "run_id": prepared.run_id,
+                "pending_tool_call_ids": ["call_edit"],
+                "pending_tool_calls": [
+                    {
+                        "id": "call_edit",
+                        "name": "edit",
+                        "arguments": {"path": "app.py"},
+                        "approval_id": "approval_edit",
+                    }
+                ],
+            }
+        )
+        snapshot = {
+            "counters": {
+                "model_attempts": 2,
+                "tool_iterations": 1,
+                "tool_calls": 1,
+            },
+            "workspace_changed": False,
+            "affected_paths": [],
+            "verification": [],
+            "verification_status": "unknown",
+            "approval_required": True,
+            "seen_tool_call_ids": ["call_edit"],
+            "pending_approval_tool_call_ids": ["call_edit"],
+        }
+
+        await controller.commit_run(
+            prepared,
+            AgentLoopOutcome(
+                run_id=prepared.run_id,
+                status="waiting_approval",
+                stop_reason="approval_required",
+                run_state=snapshot,
+            ),
+        )
+
+        checkpoint = session.runtime_checkpoint()
+        assert checkpoint is not None
+        assert checkpoint["run_state"] == snapshot
+        resumed = await controller.prepare_resume(
+            SessionResumeIntent(
+                approval_id="approval_edit",
+                decision="approve",
+                run_id=prepared.run_id,
+            )
+        )
+        assert resumed.resume_input is not None
+        assert resumed.resume_input.run_state == snapshot
+        assert resumed.loop_input.run_state == snapshot
+        session.close()
+
+    asyncio.run(run_case())
+
+
 def test_streamed_plan_event_is_immediately_visible_to_plan_command(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.protocols import Model

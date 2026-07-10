@@ -351,6 +351,66 @@ class TestTerminalRenderer:
         rendered = [call.args[0] for call in output.call_args_list]
         assert rendered == ["[tool] running bash  head -5 agent-test/chatbot.py"]
 
+    def test_paused_tool_turn_does_not_repeat_streamed_assistant_text(self, monkeypatch):
+        rendered: list[str] = []
+        streamed = io.StringIO()
+        monkeypatch.setattr("sys.stdout", streamed)
+        renderer = TerminalRenderer(use_rich=False, output=rendered.append)
+        text = "没有测试文件。我们直接运行一些模块，测试基本功能："
+
+        renderer.render_progress_event(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "text_delta",
+                    "delta": text,
+                },
+            }
+        )
+        renderer.render_progress_event(
+            {
+                "type": "tool_started",
+                "toolCallId": "bash-1",
+                "toolName": "bash",
+                "args": {"command": "python smoke_test.py"},
+            }
+        )
+        renderer.render_final(
+            SimpleNamespace(
+                run_id="run_1",
+                status="waiting_approval",
+                outcome=SimpleNamespace(
+                    final_message=AssistantMessage(
+                        content=[TextContent(text=text)]
+                    )
+                ),
+            )
+        )
+
+        assert streamed.getvalue() == text
+        assert text not in rendered
+        assert rendered.count("CP // ASSISTANT") == 1
+
+    def test_input_ready_is_rendered_by_framework_not_final_message(self):
+        rendered: list[str] = []
+        renderer = TerminalRenderer(use_rich=False, output=rendered.append)
+
+        renderer.render_final(
+            SimpleNamespace(
+                run_id="run_123456789",
+                status="completed",
+                outcome=SimpleNamespace(
+                    final_message=AssistantMessage(
+                        content=[TextContent(text="修改和验证已经完成。")]
+                    )
+                ),
+            )
+        )
+        assert not any("本次执行完毕" in line for line in rendered)
+
+        renderer.render_input_ready()
+        assert any("本次执行完毕，请输入新的需求" in line for line in rendered)
+
     def test_plain_approval_prompt_is_structured(self):
         output = MagicMock()
         renderer = TerminalRenderer(use_rich=False, output=output)
@@ -486,6 +546,41 @@ def test_render_dispatch_surfaces_approval_required_frame_directly():
 
     assert renderer.approvals == [interruption]
     assert renderer.final is None
+
+
+def test_render_dispatch_marks_input_ready_only_for_run_finished():
+    from codepilot.interfaces.cli.interactive import render_dispatch
+    from codepilot.runtime.actions import RunFinishedFrame, RunPausedFrame
+
+    class FakeRenderer:
+        def __init__(self):
+            self.final = None
+            self.ready = 0
+
+        def render_final(self, record):
+            self.final = record
+
+        def render_input_ready(self):
+            self.ready += 1
+
+    finished_record = SimpleNamespace(run_id="run_1", status="completed")
+    paused_record = SimpleNamespace(run_id="run_2", status="waiting_user")
+
+    async def finished_frames():
+        yield RunFinishedFrame(record=finished_record)
+
+    async def paused_frames():
+        yield RunPausedFrame(record=paused_record, checkpoint={"phase": "plan_approval"})
+
+    finished_renderer = FakeRenderer()
+    paused_renderer = FakeRenderer()
+    asyncio.run(render_dispatch(finished_frames(), finished_renderer))
+    asyncio.run(render_dispatch(paused_frames(), paused_renderer))
+
+    assert finished_renderer.final is finished_record
+    assert finished_renderer.ready == 1
+    assert paused_renderer.final is paused_record
+    assert paused_renderer.ready == 0
 
 
 def test_cli_approval_text_builds_runtime_decision():

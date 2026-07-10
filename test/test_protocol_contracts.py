@@ -353,25 +353,25 @@ def test_run_result_models_normalize_and_validate_run_facts() -> None:
     with pytest.raises(TypeError, match="exit_code"):
         RunVerification(tool_call_id="call-1", tool_name="shell", status="passed", exit_code=False)  # type: ignore[arg-type]
 
-        plan = PlanSummary(
-            schema_version=2,
-            plan_id=" plan-1 ",
-            owner_run_id=" run-1 ",
-            status=" active ",
-            approval_state=" approved ",
-            origin_mode=" build ",
-            objective=" Refactor run model. ",
-            summary=" Read the code and implement the refactor. ",
-            items=[
-                {
-                    "id": " item-1 ",
-                    "step": " Read code. ",
-                    "details": " Inspect the implementation. ",
-                    "verification": " Confirm the call path. ",
-                    "status": " completed ",
-                }
-            ],
-            revision=1,
+    plan = PlanSummary(
+        schema_version=2,
+        plan_id=" plan-1 ",
+        owner_run_id=" run-1 ",
+        status=" active ",
+        approval_state=" approved ",
+        origin_mode=" build ",
+        objective=" Refactor run model. ",
+        summary=" Read the code and implement the refactor. ",
+        items=[
+            {
+                "id": " item-1 ",
+                "step": " Read code. ",
+                "details": " Inspect the implementation. ",
+                "verification": " Confirm the call path. ",
+                "status": " completed ",
+            }
+        ],
+        revision=1,
         explanation=" Write tests. ",
         created_at="2026-01-01T00:00:00+00:00",
         updated_at="2026-01-01T00:00:00+00:00",
@@ -386,18 +386,28 @@ def test_run_result_models_normalize_and_validate_run_facts() -> None:
 
     assert plan.plan_id == "plan-1"
     assert plan.status == "active"
-    assert plan.items == [{"id": "item-1", "step": "Read code.", "status": "completed"}]
+    assert plan.items == [
+        {
+            "id": "item-1",
+            "step": "Read code.",
+            "details": "Inspect the implementation.",
+            "verification": "Confirm the call path.",
+            "status": "completed",
+        }
+    ]
     assert signals.affected_paths == ["src/a.py"]
     assert signals.verification_status == "stale"
 
     with pytest.raises(ValueError, match="plan_id"):
         PlanSummary(
-            schema_version=1,
+            schema_version=2,
             plan_id="",
+            owner_run_id="run-1",
             status="active",
             approval_state="approved",
             origin_mode="build",
             objective="Goal",
+            summary="Summary",
         )
 
     with pytest.raises(ValueError, match="run signal verification"):

@@ -131,6 +131,10 @@ async def build_model_request(
             prepared = await prepared
         if isinstance(prepared, dict):
             request_data.update(prepared)
+    request_data["system_prompt"] = _append_runtime_directive(
+        str(request_data.get("system_prompt", "")),
+        request_data.get("context"),
+    )
     preflight = prepare_messages_for_model(
         list(request_data.get("messages", messages)),
         tool_result_max_chars=TOOL_RESULT_MAX_CHARS,
@@ -155,6 +159,23 @@ async def build_model_request(
             session_id=input.correlation.session_id or "",
         ),
     )
+
+
+def _append_runtime_directive(
+    system_prompt: str,
+    context: object,
+) -> str:
+    if not isinstance(context, dict):
+        return system_prompt
+    directive = context.get("runtime_directive")
+    if not isinstance(directive, str) or not directive.strip():
+        return system_prompt
+    if directive in system_prompt:
+        return system_prompt
+    section = f"## Runtime Directive\n{directive.strip()}"
+    if system_prompt.strip():
+        return f"{system_prompt.rstrip()}\n\n{section}"
+    return section
 
 
 def tool_catalog_for_request(input: AgentLoopInput, ports: AgentLoopPorts) -> list[Tool]:

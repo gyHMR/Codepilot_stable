@@ -338,6 +338,7 @@ class TerminalRenderer:
         self.verbose = verbose
         self.use_rich = use_rich
         self._stream_started = False
+        self._streamed_assistant_text = ""
         self._activity_started = False
         self._current_tool: str | None = None
         self._tool_start_time: float = 0
@@ -528,19 +529,25 @@ class TerminalRenderer:
         则从最终记录中提取完整助手文本并显示。
         """
         message = _final_message_from_record(record)
+        text = _assistant_text(message) if message is not None else ""
+        already_streamed = bool(
+            text
+            and self._streamed_assistant_text
+            and text.strip() == self._streamed_assistant_text.strip()
+        )
         if not self._stream_started and message is not None:
-            text = _assistant_text(message)
             if text:
-                self._activity_started = False
-                if self._console:
-                    from rich.text import Text
+                if not already_streamed:
+                    self._activity_started = False
+                    if self._console:
+                        from rich.text import Text
 
-                    self._console.print()
-                    self._console.print(Text("CP // ASSISTANT", style="brand.dim"))
-                else:
-                    self._print()
-                    self._print("CP // ASSISTANT")
-                self._print(text)
+                        self._console.print()
+                        self._console.print(Text("CP // ASSISTANT", style="brand.dim"))
+                    else:
+                        self._print()
+                        self._print("CP // ASSISTANT")
+                    self._print(text)
             elif self.verbose:
                 self._print("(empty response)")
 
@@ -548,6 +555,7 @@ class TerminalRenderer:
             self._print()
             self._stream_started = False
         self._activity_started = False
+        self._streamed_assistant_text = ""
 
         if self.verbose and message is not None:
             stop_reason = getattr(message, "stop_reason", None)
@@ -557,12 +565,17 @@ class TerminalRenderer:
             if error_message:
                 self._print(f"error: {error_message}")
 
+    def render_input_ready(self) -> None:
+        """提示当前 run 已结束，CLI 可以接收新的用户需求。"""
+        self.render_status("本次执行完毕，请输入新的需求", kind="success")
+
     def reset(self) -> None:
         """重置一次用户输入相关的渲染状态。
 
         新的 prompt、审批恢复或命令执行开始前调用，避免上一轮的流式输出和工具计时影响本轮。
         """
         self._stream_started = False
+        self._streamed_assistant_text = ""
         self._activity_started = False
         self._current_tool = None
         self._tool_start_time = 0
@@ -700,6 +713,7 @@ class TerminalRenderer:
             return
         if not self._stream_started:
             self._activity_started = False
+            self._streamed_assistant_text = ""
             if self._console:
                 from rich.text import Text
 
@@ -709,6 +723,7 @@ class TerminalRenderer:
                 self._print()
                 self._print("CP // ASSISTANT")
             self._stream_started = True
+        self._streamed_assistant_text += delta
         if self._console:
             self._console.print(delta, end="")
         else:
@@ -1078,12 +1093,14 @@ class SimpleRenderer:
         message = _final_message_from_record(record)
         if self._stream_started:
             self.output()
-            return
-        if message is None:
-            return
-        text = _assistant_text(message)
-        if text:
-            self.output(text)
+            self._stream_started = False
+        elif message is not None:
+            text = _assistant_text(message)
+            if text:
+                self.output(text)
+    def render_input_ready(self) -> None:
+        """单次模式没有后续交互输入，不额外输出提示。"""
+        return None
 
     def render_status(self, message: str, *, kind: str = "info") -> None:
         """输出一条普通状态消息。``kind`` 在简化模式下不影响样式。"""

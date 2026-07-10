@@ -121,6 +121,47 @@ def test_skill_loader_tool_loads_discovered_skill_content(tmp_path: Path) -> Non
     assert observation.metadata["details"]["command"] == "demo"
 
 
+def test_grep_searches_when_path_is_specific_file(tmp_path: Path) -> None:
+    from codepilot.tools.builtins.search import create_search_tools
+    from codepilot.tools.contracts import ToolCallRequest
+    from codepilot.tools.sandbox import WorkspaceSandbox
+
+    source = tmp_path / "src" / "register.py"
+    source.parent.mkdir()
+    source.write_text(
+        "class UserRegister:\n    pass\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    tools = {
+        tool.name: tool
+        for tool in create_search_tools(
+            WorkspaceSandbox(tmp_path),
+            allow=lambda name: name in {"grep", "find"},
+        )
+    }
+
+    result = asyncio.run(
+        tools["grep"].execute(
+            ToolCallRequest(
+                run_id="run1",
+                tool_call_id="grep1",
+                name="grep",
+                arguments={
+                    "path": "src/register.py",
+                    "pattern": "class UserRegister",
+                },
+                current_mode="build",
+            )
+        )
+    )
+
+    assert result.status == "success"
+    assert "src/register.py:1:class UserRegister:" in result.content[0].text
+    assert result.details["scanned_files"] == 1
+    assert result.metadata["matches"] == 1
+
+
 def test_tools_json_limits_enabled_builtin_tools(tmp_path: Path) -> None:
     from codepilot.runtime import SessionOpenIntent
     from codepilot.runtime.config import load_runtime_config

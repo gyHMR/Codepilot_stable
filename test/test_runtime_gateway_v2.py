@@ -62,7 +62,31 @@ class _PlanLifecycleModelPort:
         if self.calls == 2:
             yield LLMCompleted(
                 message=AssistantMessage(
-                    content=[TextContent(text="计划已整理，请审批。")]
+                    content=[
+                        ToolCall(
+                            id="plan_closeout",
+                            name="update_plan",
+                            arguments={
+                                "summary": "登录逻辑修改和验证已完成。",
+                                "plan_status": "completed",
+                                "plan": [
+                                    {
+                                        "step": "阅读实现",
+                                        "details": "确认注册逻辑和调用入口。",
+                                        "verification": "列出受影响文件和行为。",
+                                        "status": "completed",
+                                    },
+                                    {
+                                        "step": "修改登录逻辑",
+                                        "details": "按现有风格实施修改。",
+                                        "verification": "运行注册相关测试。",
+                                        "status": "completed",
+                                    },
+                                ],
+                            },
+                        )
+                    ],
+                    stop_reason="toolUse",
                 )
             )
             return
@@ -214,13 +238,15 @@ def test_runtime_gateway_plan_approval_resumes_same_task_run(tmp_path) -> None:
             if getattr(message, "role", "") == "user"
         ]
         assert stored_user_texts == ["优化登录逻辑"]
-        assert model.requests[-1].correlation.run_id == run_id
-        assert "## Mode Policy" in model.requests[-1].system_prompt
-        assert "Approved Execution Contract" in model.requests[-1].system_prompt
-        assert "重新制定" in model.requests[-1].system_prompt
+        build_request = model.requests[-2]
+        assert build_request.correlation.run_id == run_id
+        assert "## Mode Policy" in build_request.system_prompt
+        assert "Approved Execution Contract" in build_request.system_prompt
+        assert "重新制定" in build_request.system_prompt
+        assert "Approved Execution Contract" not in model.requests[-1].system_prompt
         assert not any(
             getattr(message, "metadata", {}).get("message_kind") == "plan_summary"
-            for message in model.requests[-1].messages
+            for message in build_request.messages
         )
 
         events = session.store.run_store.load_events(run_id)
@@ -234,8 +260,8 @@ def test_runtime_gateway_plan_approval_resumes_same_task_run(tmp_path) -> None:
         assert len(event_ids) == len(set(event_ids))
         assert turn_ids == sorted(turn_ids)
         assert stored_run["resume_count"] == 1
-        assert stored_run["model_attempts"] == 3
-        assert stored_run["tool_calls"] == 1
+        assert stored_run["model_attempts"] == 4
+        assert stored_run["tool_calls"] == 2
         assert stored_run["phase"] == "terminal"
 
     asyncio.run(run_case())
@@ -249,12 +275,12 @@ def test_runtime_gateway_natural_language_is_plan_feedback_not_approval(tmp_path
         class FeedbackModel(_PlanLifecycleModelPort):
             async def stream(self, request):
                 from codepilot.llm.ports import LLMCompleted
-                from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+                from codepilot.protocols import AssistantMessage, ToolCall
 
                 self.calls += 1
                 self.requests.append(request)
-                if self.calls in {1, 3}:
-                    suffix = "并先补测试" if self.calls == 3 else ""
+                if self.calls in {1, 2}:
+                    suffix = "并先补测试" if self.calls == 2 else ""
                     yield LLMCompleted(
                         message=AssistantMessage(
                             content=[
@@ -278,13 +304,10 @@ def test_runtime_gateway_natural_language_is_plan_feedback_not_approval(tmp_path
                         )
                     )
                     return
-                yield LLMCompleted(
-                    message=AssistantMessage(
-                        content=[TextContent(text="计划已整理，请审批。")]
-                    )
-                )
+                raise AssertionError("plan feedback should revise the proposed plan directly")
 
-        gateway = RuntimeGateway(model_port=FeedbackModel())
+        model = FeedbackModel()
+        gateway = RuntimeGateway(model_port=model)
         ref = _open_test_session(gateway, tmp_path)
         session = _persistent_session(gateway, ref.session_id)
         session.set_current_mode("plan")
@@ -315,6 +338,7 @@ def test_runtime_gateway_natural_language_is_plan_feedback_not_approval(tmp_path
         assert current_plan["status"] == "proposed"
         assert current_plan["approval_state"] == "pending"
         assert current_plan["revision"] == 2
+        assert model.calls == 2
         assert session.current_mode == "plan"
 
     asyncio.run(run_case())

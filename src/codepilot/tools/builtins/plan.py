@@ -11,10 +11,13 @@ from __future__ import annotations
   - details: 具体动作、边界和实现意图
   - verification: 该步骤的验证方式
   - status: 步骤状态（pending / in_progress / completed）
+  - plan_status: 可选的 build/read 模式收尾信号（active / completed）
 
 关键约束：
   - build 模式同时最多只有一个 in_progress 项
-  - plan 模式只提交待审批提案，模型给出的进度状态会被归一化为 pending
+  - plan 模式只提交待审批的代码修改提案，计划项应是批准后 build 要执行的修改与验证
+  - plan 模式不能把自己的分析、撰写方案、输出回复或等待审批写成步骤，模型给出的进度状态会被归一化为 pending
+  - build/read 模式最终答复前可用 plan_status 显式确认完成或保留未完成计划
   - 计划项总数受 PLAN_ITEM_LIMIT 限制
 """
 
@@ -27,6 +30,7 @@ from codepilot.tools.registry import get_builtin_tool_metadata
 
 # 有效的计划项状态集合，用于合法性校验
 _ITEM_STATUSES = {"pending", "in_progress", "completed"}
+_PLAN_CLOSEOUT_STATUSES = {"active", "completed"}
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +71,9 @@ def create_plan_tools(*, allow: Callable[[str], bool]) -> list[ToolDefinition]:
             label="Update plan",
             description=(
                 "Update the visible soft plan board. This communicates progress "
-                "or a proposed plan, but never completes the run."
+                "or a proposed build-execution plan, but never completes the run. "
+                "In plan mode, items must describe code changes and verification "
+                "for build mode after approval, not the act of writing a proposal."
             ),
             # 参数 JSON Schema 定义
             parameters={
@@ -75,10 +81,18 @@ def create_plan_tools(*, allow: Callable[[str], bool]) -> list[ToolDefinition]:
                 "properties": {
                     "summary": {
                         "type": "string",
-                        "description": "整体实现思路、关键决策和范围约束。",
+                        "description": "整体代码修改思路、关键决策和范围约束。",
                     },
                     # explanation: 可选的人类可读说明文本，描述本次更新的意图
                     "explanation": {"type": "string"},
+                    "plan_status": {
+                        "type": "string",
+                        "enum": ["active", "completed"],
+                        "description": (
+                            "build/read 模式的计划终态确认。任务确已完成且准备 final answer 前设为 "
+                            "completed；明显未完成且需要下轮继续时设为 active。plan 模式不要设置。"
+                        ),
+                    },
                     # plan: 计划项数组，必须包含至少 1 项、至多 PLAN_ITEM_LIMIT 项
                     "plan": {
                         "type": "array",
@@ -91,11 +105,11 @@ def create_plan_tools(*, allow: Callable[[str], bool]) -> list[ToolDefinition]:
                                 "step": {"type": "string"},
                                 "details": {
                                     "type": "string",
-                                    "description": "该步骤的具体动作、边界和实现意图。",
+                                    "description": "该步骤批准后在 build 模式中的具体代码修改动作、边界和实现意图。",
                                 },
                                 "verification": {
                                     "type": "string",
-                                    "description": "完成该步骤后应执行的验证。",
+                                    "description": "build 模式完成该修改步骤后应执行的验证。",
                                 },
                                 # status: 步骤状态（必填），只能是三种预定义状态之一
                                 "status": {
@@ -152,7 +166,7 @@ async def _execute_update_plan(
 
     try:
         is_proposal = request.current_mode == "plan"
-        plan_update, original_statuses = _validated_plan_update(
+        plan_update, original_statuses, plan_status = _validated_plan_update(
             request.arguments,
             proposal=is_proposal,
         )
@@ -167,10 +181,14 @@ async def _execute_update_plan(
         )
 
     metadata: dict[str, Any] = {"plan_update": plan_update}
+    if plan_status is not None:
+        metadata["plan_status"] = plan_status
     if is_proposal and any(status != "pending" for status in original_statuses):
         metadata["plan_normalized"] = True
         metadata["original_plan_statuses"] = original_statuses
         message = "Plan proposed. Item statuses were normalized to pending for approval."
+    elif plan_status == "completed":
+        message = "Plan updated and marked completed."
     else:
         message = "Plan updated."
 
@@ -197,7 +215,7 @@ def _validated_plan_update(
     params: dict[str, Any],
     *,
     proposal: bool = False,
-) -> tuple[dict[str, Any], list[str]]:
+) -> tuple[dict[str, Any], list[str], str | None]:
     """
     验证并清洗计划更新参数。
 
@@ -232,6 +250,11 @@ def _validated_plan_update(
     # ---- 清洗 explanation 字段 ----
     # _clean_text 会去除首尾空白并将内部连续空白合并为单个空格
     explanation = _clean_text(params.get("explanation")) or ""
+    plan_status = _clean_text(params.get("plan_status"))
+    if plan_status and plan_status not in _PLAN_CLOSEOUT_STATUSES:
+        raise ValueError("plan_status is invalid")
+    if proposal and plan_status:
+        raise ValueError("plan mode cannot set plan_status")
 
     # ---- 逐项校验 plan 中的每个条目 ----
     items: list[dict[str, str]] = []
@@ -283,7 +306,7 @@ def _validated_plan_update(
         "summary": summary,
         "explanation": explanation,
         "plan": items,
-    }, original_statuses
+    }, original_statuses, plan_status or None
 
 
 # ---------------------------------------------------------------------------

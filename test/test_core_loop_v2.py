@@ -86,6 +86,48 @@ def test_core_loop_uses_model_port_and_returns_outcome() -> None:
     asyncio.run(run_case())
 
 
+def test_run_guard_steering_is_an_ephemeral_runtime_directive() -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import (
+            AgentLoopInput,
+            AgentLoopLimits,
+            AgentLoopPorts,
+            RunCorrelation,
+        )
+        from codepilot.core.runner import run_agent_loop
+        from codepilot.llm.ports import LLMCompleted, ModelDescriptor
+        from codepilot.protocols import AssistantMessage, TextContent, UserMessage
+
+        class FakeModel:
+            def __init__(self) -> None:
+                self.requests = []
+
+            async def stream(self, request):
+                self.requests.append(request)
+                text = "" if len(self.requests) == 1 else "现在给出完整答复。"
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text=text)])
+                )
+
+        model = FakeModel()
+        outcome = await run_agent_loop(
+            AgentLoopInput(
+                run_id="run_guard_directive",
+                correlation=RunCorrelation(session_id="s1"),
+                user_prompt="回答问题",
+                model=ModelDescriptor(provider="fake", model_id="unit"),
+                limits=AgentLoopLimits(max_model_turns=2),
+            ),
+            AgentLoopPorts(model=model, tools=None),
+        )
+
+        assert outcome.status == "completed"
+        assert "没有给出用户可见的最终答复" in model.requests[1].system_prompt
+        assert not any(isinstance(message, UserMessage) for message in outcome.new_messages)
+
+    asyncio.run(run_case())
+
+
 def test_core_loop_emits_model_text_deltas_as_message_updates() -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import (
@@ -692,17 +734,71 @@ def test_core_loop_injects_plan_context_and_returns_plan_summary() -> None:
         )
         from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
-        from codepilot.protocols import AssistantMessage, TextContent
+        from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+        from codepilot.tools.contracts import ToolObservation
         from codepilot.core.plan import PlanState, PlanUpdate, PlanUpdateItem
 
         class FakeModel:
             def __init__(self) -> None:
                 self.system_prompts: list[str] = []
+                self.calls = 0
 
             async def stream(self, request):
+                self.calls += 1
                 self.system_prompts.append(request.system_prompt)
+                if self.calls == 1:
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[
+                                ToolCall(
+                                    id="plan_closeout",
+                                    name="update_plan",
+                                    arguments={
+                                        "summary": "Read and migrate the plan code.",
+                                        "plan_status": "completed",
+                                        "plan": [
+                                            {
+                                                "step": "Read code",
+                                                "details": "Inspect the current implementation.",
+                                                "verification": "Confirm the relevant symbols.",
+                                                "status": "completed",
+                                            }
+                                        ],
+                                    },
+                                )
+                            ],
+                            stop_reason="toolUse",
+                        )
+                    )
+                    return
                 yield LLMCompleted(
                     message=AssistantMessage(content=[TextContent(text="done")])
+                )
+
+        class FakeTools:
+            def catalog(self, current_mode: str = "build"):
+                return {"tools": ["update_plan"]}
+
+            async def execute(self, invocation):
+                return ToolObservation(
+                    tool_call_id=invocation.tool_call_id,
+                    name=invocation.name,
+                    status="success",
+                    content=(TextContent(text="Plan updated and marked completed."),),
+                    metadata={
+                        "plan_update": {
+                            "summary": "Read and migrate the plan code.",
+                            "plan": [
+                                {
+                                    "step": "Read code",
+                                    "details": "Inspect the current implementation.",
+                                    "verification": "Confirm the relevant symbols.",
+                                    "status": "completed",
+                                }
+                            ],
+                        },
+                        "plan_status": "completed",
+                    },
                 )
 
         plan = PlanState.new(
@@ -734,14 +830,15 @@ def test_core_loop_injects_plan_context_and_returns_plan_summary() -> None:
                 context={"system_prompt": "base rules"},
                 model=ModelDescriptor(provider="fake", model_id="unit"),
                 plan_state=plan.to_dict(),
-                limits=AgentLoopLimits(max_model_turns=1),
+                limits=AgentLoopLimits(max_model_turns=2),
             ),
-            AgentLoopPorts(model=model, tools=None, context=_PlanPromptPort()),
+            AgentLoopPorts(model=model, tools=FakeTools(), context=_PlanPromptPort()),
         )
 
         assert outcome.status == "completed"
         assert outcome.plan is not None
         assert outcome.plan.objective == "ship the plan migration"
+        assert outcome.plan.status == "completed"
         assert "base rules" in model.system_prompts[0]
         assert "Plan Brief:" in model.system_prompts[0]
         event_types = [event["type"] for event in outcome.events]
@@ -919,31 +1016,27 @@ def test_core_loop_steers_repeated_truncated_reads_before_retrying() -> None:
         )
         from codepilot.core.runner import run_agent_loop
         from codepilot.llm.ports import LLMCompleted, ModelDescriptor
-        from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+        from codepilot.protocols import AssistantMessage, TextContent, ToolCall, UserMessage
         from codepilot.tools.contracts import ToolObservation
 
         class FakeModel:
             def __init__(self) -> None:
-                self.prompts: list[str] = []
+                self.system_prompts: list[str] = []
 
             async def stream(self, request):
-                self.prompts.append(
-                    getattr(request.messages[-1], "content", "")
-                    if request.messages
-                    else ""
-                )
-                if len(self.prompts) <= 2:
+                self.system_prompts.append(request.system_prompt)
+                if len(self.system_prompts) <= 2:
                     yield LLMCompleted(
                         message=AssistantMessage(
                             content=[
                                 ToolCall(
-                                    id=f"read_{len(self.prompts)}",
+                                    id=f"read_{len(self.system_prompts)}",
                                     name="read",
                                     arguments={
                                         "path": "big.py",
                                         "offset": 1,
                                         "limit": 200,
-                                        "max_chars": 4000 + len(self.prompts),
+                                        "max_chars": 4000 + len(self.system_prompts),
                                     },
                                 )
                             ]
@@ -989,8 +1082,13 @@ def test_core_loop_steers_repeated_truncated_reads_before_retrying() -> None:
 
         assert outcome.status == "completed"
         assert outcome.final_text == "used pagination guidance"
-        assert any("offset/limit" in str(prompt) for prompt in model.prompts)
-        assert any("next_offset=21" in str(prompt) for prompt in model.prompts)
+        assert any("offset/limit" in prompt for prompt in model.system_prompts)
+        assert any("next_offset=21" in prompt for prompt in model.system_prompts)
+        assert not any(
+            isinstance(message, UserMessage)
+            and "Do not repeat truncated reads" in str(message.content)
+            for message in outcome.new_messages
+        )
 
     asyncio.run(run_case())
 
@@ -1070,6 +1168,21 @@ def test_resume_agent_loop_uses_tool_port_resume_before_continuing_model() -> No
                 decision="approve",
                 reason="ok",
                 event_start_seq=10,
+                turn_start_seq=7,
+                run_state={
+                    "counters": {
+                        "model_attempts": 2,
+                        "tool_iterations": 1,
+                        "tool_calls": 1,
+                    },
+                    "workspace_changed": True,
+                    "affected_paths": ["existing.txt"],
+                    "verification": [],
+                    "verification_status": "stale",
+                    "approval_required": True,
+                    "seen_tool_call_ids": ["call1"],
+                    "pending_approval_tool_call_ids": ["call1"],
+                },
             ),
             AgentLoopPorts(model=FakeModel(), tools=tools),
         )
@@ -1078,12 +1191,21 @@ def test_resume_agent_loop_uses_tool_port_resume_before_continuing_model() -> No
         assert outcome.status == "completed"
         assert outcome.final_text == "continued"
         assert outcome.workspace_effects.changed is True
-        assert outcome.workspace_effects.affected_paths == ("created.txt",)
+        assert outcome.workspace_effects.affected_paths == ("created.txt", "existing.txt")
+        assert outcome.counters.model_attempts == 3
+        assert outcome.counters.tool_iterations == 2
+        assert outcome.counters.tool_calls == 1
+        assert outcome.signals.approval_required is False
+        assert outcome.run_state["verification_status"] == "passed"
+        assert outcome.run_state["seen_tool_call_ids"] == ["call1"]
+        assert outcome.run_state["pending_approval_tool_call_ids"] == []
         event_types = [event["type"] for event in outcome.events]
         assert event_types[:2] == ["agent_start", "turn_start"]
         assert "tool_started" in event_types
         assert "tool_completed" in event_types
         assert outcome.events[0]["eventId"] == "run1:11"
+        assert outcome.events[0]["turnId"] == 7
+        assert outcome.events[1]["turnId"] == 8
         tool_end = next(event for event in outcome.events if event["type"] == "tool_completed")
         assert tool_end["approvalId"] == "approval1"
         assert tool_end["toolCallId"] == "call1"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, cast
 
 from codepilot.protocols import (
@@ -46,6 +46,8 @@ class RunState:
     last_truncated_read_fingerprint: str | None = None
     repeated_truncated_reads: int = 0
     truncated_read_recovery_sent: bool = False
+    seen_tool_call_ids: set[str] = field(default_factory=set)
+    pending_approval_tool_call_ids: set[str] = field(default_factory=set)
 
     def has_repeated_call(
         self,
@@ -96,14 +98,23 @@ class RunState:
         )
 
     def collect_tool_results(self, results: list[ToolResultMessage]) -> None:
-        self.counters.tool_calls += len(results)
         for result in results:
+            tool_call_id = result.tool_call_id.strip()
+            if tool_call_id:
+                if tool_call_id not in self.seen_tool_call_ids:
+                    self.counters.tool_calls += 1
+                    self.seen_tool_call_ids.add(tool_call_id)
+            else:
+                self.counters.tool_calls += 1
             self.affected_paths.update(result.affected_paths)
             if result.workspace_changed:
                 self.workspace_changed = True
                 self.verification_status = "stale"
             if result.status == "approval_required":
-                self.approval_required = True
+                if tool_call_id:
+                    self.pending_approval_tool_call_ids.add(tool_call_id)
+            elif tool_call_id:
+                self.pending_approval_tool_call_ids.discard(tool_call_id)
             if result.status == "cancelled":
                 self.cancelled = True
                 self.verification_status = "cancelled"
@@ -124,6 +135,7 @@ class RunState:
                     )
                 )
                 self.verification_status = _signal_verification_status(status)
+        self.approval_required = bool(self.pending_approval_tool_call_ids)
 
     def summary(self) -> RunSignalsSummary:
         return RunSignalsSummary(
@@ -140,6 +152,79 @@ class RunState:
                 tool_calls=self.counters.tool_calls,
             ),
         )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "counters": {
+                "model_attempts": self.counters.model_attempts,
+                "tool_iterations": self.counters.tool_iterations,
+                "tool_calls": self.counters.tool_calls,
+            },
+            "workspace_changed": self.workspace_changed,
+            "affected_paths": sorted(self.affected_paths),
+            "verification": [asdict(item) for item in self.verification],
+            "verification_status": self.verification_status,
+            "last_error": dict(self.last_error) if isinstance(self.last_error, dict) else None,
+            "approval_required": self.approval_required,
+            "tool_unavailable": self.tool_unavailable,
+            "cancelled": self.cancelled,
+            "last_tool_fingerprint": self.last_tool_fingerprint,
+            "repeated_tool_calls": self.repeated_tool_calls,
+            "last_truncated_read_fingerprint": self.last_truncated_read_fingerprint,
+            "repeated_truncated_reads": self.repeated_truncated_reads,
+            "truncated_read_recovery_sent": self.truncated_read_recovery_sent,
+            "seen_tool_call_ids": sorted(self.seen_tool_call_ids),
+            "pending_approval_tool_call_ids": sorted(self.pending_approval_tool_call_ids),
+        }
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: object,
+        *,
+        run_id: str,
+        session_id: str | None,
+    ) -> "RunState":
+        if not isinstance(value, dict):
+            return cls(run_id=run_id, session_id=session_id)
+        counters = value.get("counters")
+        counter_data = counters if isinstance(counters, dict) else {}
+        state = cls(
+            run_id=run_id,
+            session_id=session_id,
+            counters=AgentRunCounters(
+                model_attempts=_non_negative_int(counter_data.get("model_attempts")),
+                tool_iterations=_non_negative_int(counter_data.get("tool_iterations")),
+                tool_calls=_non_negative_int(counter_data.get("tool_calls")),
+            ),
+            workspace_changed=bool(value.get("workspace_changed")),
+            affected_paths=set(_string_list(value.get("affected_paths"))),
+            verification=_verification_list(value.get("verification")),
+            verification_status=_signal_status(value.get("verification_status")),
+            last_error=(
+                dict(value.get("last_error"))
+                if isinstance(value.get("last_error"), dict)
+                else None
+            ),
+            approval_required=bool(value.get("approval_required")),
+            tool_unavailable=bool(value.get("tool_unavailable")),
+            cancelled=bool(value.get("cancelled")),
+            last_tool_fingerprint=_optional_text(value.get("last_tool_fingerprint")),
+            repeated_tool_calls=_non_negative_int(value.get("repeated_tool_calls")),
+            last_truncated_read_fingerprint=_optional_text(
+                value.get("last_truncated_read_fingerprint")
+            ),
+            repeated_truncated_reads=_non_negative_int(value.get("repeated_truncated_reads")),
+            truncated_read_recovery_sent=bool(value.get("truncated_read_recovery_sent")),
+            seen_tool_call_ids=set(_string_list(value.get("seen_tool_call_ids"))),
+            pending_approval_tool_call_ids=set(
+                _string_list(value.get("pending_approval_tool_call_ids"))
+            ),
+        )
+        state.approval_required = state.approval_required or bool(
+            state.pending_approval_tool_call_ids
+        )
+        return state
 
 
 def _tool_error(result: ToolResultMessage) -> dict[str, Any]:
@@ -202,6 +287,49 @@ def _optional_text(value: object) -> str | None:
 
 def _optional_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _non_negative_int(value: object) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return 0
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = _optional_text(item)
+        if text is not None:
+            result.append(text)
+    return result
+
+
+def _verification_list(value: object) -> list[RunVerification]:
+    if not isinstance(value, list):
+        return []
+    result: list[RunVerification] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            RunVerification(
+                tool_call_id=_optional_text(item.get("tool_call_id")) or "",
+                tool_name=_optional_text(item.get("tool_name")) or "",
+                status=_verification_status(item.get("status")),
+                command=_optional_str(item.get("command")),
+                exit_code=_optional_int(item.get("exit_code")),
+                summary=str(item.get("summary") or ""),
+            )
+        )
+    return result
+
+
+def _signal_status(value: object) -> RunSignalsVerificationStatus:
+    if value in {"unknown", "passed", "failed", "cancelled", "stale"}:
+        return cast(RunSignalsVerificationStatus, value)
+    return "unknown"
 
 
 __all__ = ["RunState", "new_run_id"]

@@ -103,8 +103,8 @@ def create_search_tools(
 
         参数（通过 request.arguments 传入）:
             pattern:       必填，正则表达式模式字符串。
-            path:          搜索起始路径，相对于工作区根目录，默认为 "."（整个工作区）。
-            glob:          文件筛选的 glob 模式，默认为 "**/*"（匹配所有文件）。
+            path:          搜索起始路径或具体文件，相对于工作区根目录，默认为 "."（整个工作区）。
+            glob:          path 为目录时使用的文件筛选 glob 模式，默认为 "**/*"。
             max_matches:   返回的最大匹配行数，默认 200。达到上限后提前终止扫描。
             case_sensitive: 是否区分大小写，默认 True。
 
@@ -144,12 +144,18 @@ def create_search_tools(
             return _error_result(f"Invalid regex: {exc}", "invalid_regex")
 
         # ----- 收集候选文件列表 -----
-        # 使用 glob 模式匹配，过滤掉非文件和被忽略目录中的路径，
-        # 按 POSIX 路径排序以保证结果的可重复性。
-        files = sorted(
-            (path for path in root.glob(glob_pattern) if path.is_file() and not _is_ignored(path, root)),
-            key=lambda path: path.as_posix(),
-        )
+        # path 可以是具体文件；目录路径才使用 glob 展开。
+        if root.is_file():
+            files = [root] if not _is_ignored(root, workspace) else []
+        else:
+            files = sorted(
+                (
+                    path
+                    for path in root.glob(glob_pattern)
+                    if path.is_file() and not _is_ignored(path, workspace)
+                ),
+                key=lambda path: path.as_posix(),
+            )
 
         # ----- 逐文件搜索 -----
         matches: list[str] = []
@@ -233,7 +239,7 @@ def create_search_tools(
         # 收集候选路径：按 glob 匹配并排除忽略目录，
         # 按 POSIX 路径排序以保证结果的可重复性。
         candidates = sorted(
-            (path for path in root.glob(pattern) if not _is_ignored(path, root)),
+            (path for path in root.glob(pattern) if not _is_ignored(path, workspace)),
             key=lambda path: path.as_posix(),
         )
 
@@ -263,7 +269,7 @@ def create_search_tools(
 
     # 仅当 allow 回调返回 True 时才创建对应的工具定义
     if allow("grep"):
-        tools.append(_tool("grep", "Search Content", "在文件内容里按正则搜索。", _grep_schema(), grep_tool))
+        tools.append(_tool("grep", "Search Content", "在文件或目录内容里按正则搜索。", _grep_schema(), grep_tool))
     if allow("find"):
         tools.append(_tool("find", "Find Files", "按 glob 查找文件/目录路径。", _find_schema(), find_tool))
     return tools
@@ -429,8 +435,8 @@ def _grep_schema() -> dict[str, Any]:
 
     参数说明:
         pattern:       正则表达式模式（必填）。
-        path:          搜索起始路径（可选，默认 "."）。
-        glob:          文件筛选 glob 模式（可选，默认 "**/*"）。
+        path:          搜索起始路径或具体文件（可选，默认 "."）。
+        glob:          path 为目录时的文件筛选 glob 模式（可选，默认 "**/*"）。
         max_matches:   最大匹配行数（可选，默认 200）。
         case_sensitive: 是否区分大小写（可选，默认 true）。
 
@@ -440,8 +446,8 @@ def _grep_schema() -> dict[str, Any]:
         "type": "object",
         "properties": {
             "pattern": {"type": "string"},
-            "path": {"type": "string"},
-            "glob": {"type": "string"},
+            "path": {"type": "string", "description": "搜索起始目录或具体文件路径。"},
+            "glob": {"type": "string", "description": "path 为目录时使用的文件筛选 glob。"},
             "max_matches": {"type": "integer"},
             "case_sensitive": {"type": "boolean"},
         },

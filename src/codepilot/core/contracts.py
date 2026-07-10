@@ -175,11 +175,17 @@ class AgentLoopInput:
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     event_start_seq: int = 0
     turn_start_seq: int = 0
+    run_state: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "context", _prepared_context(self.context))
         object.__setattr__(self, "mode", ensure_run_mode(self.mode))
         object.__setattr__(self, "plan_state", plan_state_to_dict(self.plan_state))
+        object.__setattr__(
+            self,
+            "run_state",
+            _copy_optional_dict(self.run_state, field_name="run_state"),
+        )
         object.__setattr__(
             self,
             "event_start_seq",
@@ -212,11 +218,17 @@ class AgentResumeInput:
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     event_start_seq: int = 0
     turn_start_seq: int = 0
+    run_state: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "context", _prepared_context(self.context))
         object.__setattr__(self, "mode", ensure_run_mode(self.mode))
         object.__setattr__(self, "plan_state", plan_state_to_dict(self.plan_state))
+        object.__setattr__(
+            self,
+            "run_state",
+            _copy_optional_dict(self.run_state, field_name="run_state"),
+        )
         object.__setattr__(self, "tool_call_id", _optional_text(self.tool_call_id))
         object.__setattr__(self, "tool_name", _optional_text(self.tool_name))
         if not isinstance(self.arguments, dict):
@@ -263,6 +275,7 @@ class AgentLoopOutcome:
     events: list[AgentEvent] = field(default_factory=list)
     plan: PlanSummary | None = None
     signals: RunSignalsSummary = field(default_factory=RunSignalsSummary)
+    run_state: dict[str, object] = field(default_factory=dict)
     error: Any = None
 
     @property

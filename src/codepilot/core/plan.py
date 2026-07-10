@@ -18,12 +18,14 @@ from codepilot.protocols import PLAN_ITEM_LIMIT, PlanSummary
 RunMode = Literal["read", "plan", "build"]
 PlanningBudgetProfile = Literal["conservative", "balanced", "wide"]
 PlanStatus = Literal["proposed", "active", "completed", "rejected", "abandoned"]
+PlanCloseoutStatus = Literal["active", "completed"]
 PlanApprovalState = Literal["pending", "approved", "not_required", "rejected"]
 PlanItemStatus = Literal["pending", "in_progress", "completed"]
 
 _RUN_MODES = frozenset({"read", "plan", "build"})
 _PLANNING_BUDGET_PROFILES = frozenset({"conservative", "balanced", "wide"})
 _PLAN_STATUSES = frozenset({"proposed", "active", "completed", "rejected", "abandoned"})
+_PLAN_CLOSEOUT_STATUSES = frozenset({"active", "completed"})
 _APPROVAL_STATES = frozenset({"pending", "approved", "not_required", "rejected"})
 _ITEM_STATUSES = frozenset({"pending", "in_progress", "completed"})
 _PLAN_KEYS = frozenset(
@@ -450,7 +452,13 @@ def apply_plan_update_metadata(
     ):
         current = None
     current = current or PlanState.new(objective=objective, origin_mode=run_mode, run_id=run_id)
-    return current.apply_update(update, mode=run_mode, run_id=run_id)
+    current = current.apply_update(update, mode=run_mode, run_id=run_id)
+    closeout = ensure_plan_closeout_status(metadata.get("plan_status"))
+    if closeout == "completed":
+        if run_mode == "plan":
+            raise PlanValidationError("plan mode cannot complete a plan")
+        return current.complete(source="model_closeout")
+    return current
 
 
 def ensure_run_mode(value: object) -> RunMode:
@@ -486,6 +494,15 @@ def ensure_plan_item_status(value: object) -> PlanItemStatus:
     if text not in _ITEM_STATUSES:
         raise PlanValidationError(f"Unknown plan item status: {value}")
     return cast(PlanItemStatus, text)
+
+
+def ensure_plan_closeout_status(value: object) -> PlanCloseoutStatus | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text not in _PLAN_CLOSEOUT_STATUSES:
+        raise PlanValidationError(f"Unknown plan closeout status: {value}")
+    return cast(PlanCloseoutStatus, text)
 
 
 def _items_from_update(
@@ -550,6 +567,7 @@ __all__ = [
     "MAX_PLAN_ITEMS",
     "PLAN_STATE_SCHEMA_VERSION",
     "PlanApprovalState",
+    "PlanCloseoutStatus",
     "PlanItem",
     "PlanItemStatus",
     "PlanState",
@@ -561,6 +579,7 @@ __all__ = [
     "RunMode",
     "apply_plan_update_metadata",
     "ensure_plan_approval_state",
+    "ensure_plan_closeout_status",
     "ensure_plan_item_status",
     "ensure_plan_status",
     "ensure_planning_budget_profile",

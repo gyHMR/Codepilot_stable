@@ -41,6 +41,7 @@ from .contracts import (
 )
 from .permissions import PermissionPolicy, ToolDecision, ToolPermissionMode
 from .registry import ToolRegistry, get_builtin_tool_metadata
+from .restricted import RestrictedToolPort
 from .runtime import ToolRuntime
 
 __all__ = [
@@ -68,6 +69,7 @@ __all__ = [
     "ToolResumeDecision",
     "ToolRiskView",
     "ToolRuntime",
+    "RestrictedToolPort",
     "create_builtin_tools",
     "get_builtin_tool_metadata",
 ]

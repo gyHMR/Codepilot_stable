@@ -260,6 +260,7 @@ class SessionRuntime:
         pending_approval = self.pending_approval(intent.approval_id)
         messages = self._messages_for_loop()
         event_start_seq, turn_start_seq = self._run_sequence_offsets(run_id)
+        run_state = self._checkpoint_run_state(run_id)
         resume_input = AgentResumeInput(
             run_id=run_id,
             correlation=RunCorrelation(session_id=self.session_id),
@@ -292,6 +293,7 @@ class SessionRuntime:
             retry_policy=self.retry_policy(),
             event_start_seq=event_start_seq,
             turn_start_seq=turn_start_seq,
+            run_state=run_state,
         )
         return PreparedAgentRun(
             run_id=run_id,
@@ -309,6 +311,7 @@ class SessionRuntime:
                 retry_policy=self.retry_policy(),
                 event_start_seq=event_start_seq,
                 turn_start_seq=turn_start_seq,
+                run_state=run_state,
             ),
             resume_input=resume_input,
             context_port=RuntimeSessionContextPort(self),
@@ -338,6 +341,7 @@ class SessionRuntime:
         checkpoint = self.runtime_checkpoint()
         if checkpoint is None or _optional_text(checkpoint.get("run_id")) != run_id:
             raise ValueError(f"No resumable checkpoint for run: {run_id}")
+        run_state = self._checkpoint_run_state(run_id)
 
         input_messages: list[Message] = []
         if intent.text:
@@ -370,6 +374,7 @@ class SessionRuntime:
             retry_policy=self.retry_policy(),
             event_start_seq=event_start_seq,
             turn_start_seq=turn_start_seq,
+            run_state=run_state,
         )
         return PreparedAgentRun(
             run_id=run_id,
@@ -427,6 +432,7 @@ class SessionRuntime:
             self._save_plan_clarification_checkpoint(outcome)
         else:
             self.store.set_checkpoint(None)
+        self._save_run_state_checkpoint(outcome)
         await self._run_lifecycle_hooks(
             text=_prompt_text(prepared),
             is_continue=_is_continue_text(_prompt_text(prepared)),
@@ -539,6 +545,31 @@ class SessionRuntime:
     def runtime_checkpoint(self) -> dict[str, Any] | None:
         checkpoint = self._runtime_checkpoint()
         return dict(checkpoint) if checkpoint is not None else None
+
+    def _checkpoint_run_state(self, run_id: str) -> dict[str, object] | None:
+        checkpoint = self.runtime_checkpoint()
+        if checkpoint is None or _optional_text(checkpoint.get("run_id")) != run_id:
+            return None
+        run_state = checkpoint.get("run_state")
+        if not isinstance(run_state, dict):
+            return None
+        return dict(run_state)
+
+    def _save_run_state_checkpoint(self, outcome: AgentLoopOutcome) -> None:
+        if _is_terminal_outcome(outcome) or not outcome.run_state:
+            return
+        checkpoint = self.runtime_checkpoint()
+        if checkpoint is None:
+            checkpoint = {
+                "phase": outcome.stop_reason,
+                "run_id": outcome.run_id,
+            }
+        checkpoint_run_id = _optional_text(checkpoint.get("run_id"))
+        if checkpoint_run_id is not None and checkpoint_run_id != outcome.run_id:
+            return
+        checkpoint["run_id"] = outcome.run_id
+        checkpoint["run_state"] = dict(outcome.run_state)
+        self.store.set_checkpoint(checkpoint)
 
     def continuation_run_id(self) -> str:
         checkpoint = self.runtime_checkpoint()
@@ -910,43 +941,8 @@ class SessionRuntime:
             )
 
     def _close_plan_for_terminal_outcome(self, outcome: AgentLoopOutcome) -> None:
-        state = self.current_plan_state()
-        if not isinstance(state, dict) or state.get("status") != "active":
-            return
-        if state.get("owner_run_id") != outcome.run_id:
-            return
-        try:
-            if outcome.status == "completed":
-                finalized = self.plan_state.complete_current(
-                    run_id=outcome.run_id,
-                    source="run_finalized",
-                )
-                event_type = "plan_completed"
-            elif outcome.status in {"failed", "cancelled", "aborted"}:
-                finalized = self.plan_state.abandon_current(
-                    run_id=outcome.run_id,
-                    source=f"run_{outcome.status}",
-                )
-                event_type = "plan_abandoned"
-            else:
-                return
-            if finalized is not None:
-                self._record_plan_event(
-                    event_type,
-                    finalized,
-                    run_id=outcome.run_id,
-                )
-        except Exception as exc:
-            logger.warning("failed to close plan for terminal run: %s", exc)
-            self.store.append_event(
-                {
-                    "type": "plan_state_warning",
-                    "sessionId": self.session_id,
-                    "runId": outcome.run_id,
-                    "operation": "plan_terminal_transition",
-                    "message": str(exc),
-                }
-            )
+        _ = outcome
+        return
 
     def _calibrate_context_usage(self, result: AgentRunResult) -> None:
         try:
@@ -1557,20 +1553,29 @@ def _continuation_directive(kind: str) -> str:
 def _mode_policy(mode: str) -> str:
     if mode == "plan":
         return (
-            "只使用只读工具调查仓库和澄清约束。方案完整后必须调用 update_plan "
-            "发布详细 proposed plan；所有条目保持 pending。发布后只总结计划并等待显式审批，"
-            "不得执行实现、写文件或自行切换模式。自然语言反馈用于修订同一个计划。"
+            "只使用只读工具调查仓库、阅读代码和澄清约束，然后生成一份可交给 build 模式执行的"
+            "代码修改方案。必须用 update_plan 发布详细 proposed plan，计划项只能描述批准后 build "
+            "要执行的代码修改与验证步骤，不要把 plan 模式自己的分析、撰写方案、输出回复或等待审批写成步骤。"
+            "复杂任务可先用 list_exploration_agents 查询本会话探索缓存，再用 dispatch_exploration "
+            "并行派发只读 Subagent 收集结构化事实；Subagent 结果只是证据输入，最终计划仍由主 Agent 决定。"
+            "所有条目必须保持 pending；发布后等待显式审批，不得执行实现、写文件、自行切换模式或推进步骤状态。"
+            "自然语言反馈仅用于修订同一个 proposed plan。"
         )
     if mode == "read":
         return (
             "只做阅读、定位、解释和验证，不改变工作区。复杂任务可自行调用 update_plan "
             "维护 active soft plan；已有 active plan 时继续同一计划，不创建替代计划。"
+            "代码定位优先用 read/grep/find。最终答复前若仍有 active plan，必须调用 update_plan "
+            "做收尾：完成则 plan_status=\"completed\"，明显未完成则 plan_status=\"active\"。"
         )
     return (
         "可以读取、修改并验证代码。已有 approved active plan 时，它是本次任务的执行契约，"
         "必须直接推进而不是重新制定方案；仅在事实变化或持续失败时用 update_plan 修订同一计划。"
         "没有计划时，仅对复杂任务按需创建 active soft plan。精确修改优先 apply_patch，"
-        "单点替换用 edit，新建或整体重写才用 write。"
+        "单点替换用 edit，新建或整体重写才用 write。代码定位优先用 read/grep/find，"
+        "shell 主要用于测试和项目命令。执行 active plan 时尽量每完成一个主要步骤就更新状态；"
+        "最终答复前必须调用 update_plan 做一次收尾：任务完成则 plan_status=\"completed\"，"
+        "明显未完成则 plan_status=\"active\" 并保留下轮要继续的步骤。"
     )
 
 
