@@ -160,7 +160,7 @@ class ToolSpec:
     name: str
     description: str
     input_schema: Mapping[str, object]
-    output_schema: Mapping[str, object]
+    output_schema: Mapping[str, object] | None
     schema_version: int = 1
 ```
 
@@ -169,7 +169,8 @@ class ToolSpec:
 - `name` 全局唯一，格式为 `[A-Za-z][A-Za-z0-9_-]{0,63}`。
 - `description` 仅描述模型应如何使用工具。
 - `input_schema` 在 handler 启动前验证。
-- `output_schema` 验证工具的结构化领域输出。
+- `output_schema` 验证工具的结构化领域输出；仅无法提供可信 Schema 的外部适配器允许为 `None`。
+- Schema 以 input/output codec 为唯一真值，Registry 从 codec 生成 ToolSpec 投影，禁止调用方分别提交两份可能不一致的 Schema。
 - Spec 是不可变快照。
 - description、Schema 或 Policy 的变化都会改变 registration identity。
 
@@ -184,7 +185,7 @@ class ToolExecutionRequest:
     tool_name: str
     arguments: Mapping[str, object]
     mode: ToolMode
-    registration_id: str | None = None
+    registration_id: str
     idempotency_key: str | None = None
     deadline_at_ms: int | None = None
 ```
@@ -200,7 +201,7 @@ Request 不得携带：
 - SessionRuntime。
 - 可直接执行的 handler。
 
-业务 handler 需要的状态通过构造时注入的窄接口获得，不能把完整 runtime 当作 service locator 塞进 request。
+业务 handler 需要的状态通过构造时注入的窄接口获得，不能把完整 runtime 当作 service locator 塞进 request。`registration_id` 必须来自产生本次模型请求的 Catalog snapshot，不能由模型或外部调用方自行提供。
 
 ## 7. 注册协议
 
@@ -209,8 +210,8 @@ Request 不得携带：
 ```python
 @dataclass(frozen=True)
 class ToolRegistration:
-    registration_id: str
     version: str
+    implementation_version: str
     spec: ToolSpec
     category: ToolCategory
     source: ToolSource
@@ -222,6 +223,16 @@ class ToolRegistration:
     renderer: ToolOutputRenderer
     access_resolver: ToolAccessResolver
 ```
+
+`ToolRegistration` 是待注册定义，不携带可信 registration ID。Registry 校验定义后生成内部 `MaterializedTool`，并为其分配 registration ID。
+
+registration identity 至少绑定：
+
+- owner、tool name、显式 version 和 implementation_version。
+- description、input/output Schema、category、source 和完整 Policy。
+- codec、renderer、resolver 与 handler 的显式实现版本。
+
+不能 hash Python callable、对象地址或 `repr()`。替换、卸载后恢复、Extension/MCP 重连都会产生新的 revision 和 registration ID。
 
 `owner` 示例：
 
@@ -237,7 +248,7 @@ caller:<client-id>
 
 ### 7.2 Opaque handler
 
-完整 Registration 只允许 Registry 和 ToolRuntime 持有。公共目录只能返回：
+包含 handler 的 MaterializedTool 只允许 Registry 和 ToolRuntime 持有。公共目录只能返回：
 
 ```python
 @dataclass(frozen=True)
@@ -297,7 +308,7 @@ T = TypeVar("T")
 
 class ToolCodec(Protocol, Generic[T]):
     @property
-    def json_schema(self) -> Mapping[str, object]:
+    def json_schema(self) -> Mapping[str, object] | None:
         ...
 
     def decode(self, value: object) -> T:
@@ -313,13 +324,16 @@ class ToolCodec(Protocol, Generic[T]):
 raw arguments
   -> input_codec.decode
   -> typed input
+  -> access_resolver.resolve
+  -> resolved typed input
   -> handler
   -> domain output
   -> output_codec.encode
-  -> JSON-safe data
-  -> output schema validation
+  -> validated JSON-safe data
   -> renderer
 ```
+
+`ToolResult.data` 必须是 output codec 编码并验证后的结构化数据。Renderer 接收这份已验证数据，不直接接收未经编码的领域对象。
 
 ### 8.2 第一版 Codec
 
@@ -327,8 +341,9 @@ raw arguments
 
 - `JsonObjectCodec`
 - `DataclassCodec`
+- `UnverifiedJsonCodec`，仅供缺少可信 output Schema 的 MCP/外部工具使用。
 
-`JsonObjectCodec` 用于 MCP、动态扩展和迁移期工具；`DataclassCodec` 用于内置工具。
+`JsonObjectCodec` 用于 MCP、动态扩展和迁移期工具；`DataclassCodec` 用于内置工具。`UnverifiedJsonCodec` 仍必须执行 JSON-safe、类型白名单、深度、大小和敏感内容防护，只是不声称完成 Schema 级语义验证。
 
 第一版不绑定 Pydantic。以后可以增加 Pydantic、TypedDict 或 MCP codec adapter，而不改变 ToolRuntime。
 
@@ -405,11 +420,11 @@ Handler 返回领域输出，不能构造最终 `ToolResult`，不能设置：
 
 ```python
 class ToolOutputRenderer(Protocol, Generic[TOutput]):
-    def render(self, output: TOutput) -> tuple[ToolContent, ...]:
+    def render(self, data: Mapping[str, object]) -> tuple[ToolContent, ...]:
         ...
 ```
 
-Handler 返回完整、可验证的领域数据；Renderer 生成模型可见内容。UI、审计和持久化不依赖脆弱的文本输出。
+Handler 返回完整的领域对象；output codec 将其编码为可验证的 `ToolResult.data`；Renderer 再从已验证数据生成模型可见内容。UI、审计和持久化不依赖脆弱的文本输出。
 
 支持的模型内容：
 
@@ -420,6 +435,8 @@ Handler 返回完整、可验证的领域数据；Renderer 生成模型可见内
 大文件使用 opaque ArtifactRef，不能直接暴露本机路径或长期保存 data URL。
 
 ## 10. 唯一标准结果
+
+`ToolResult` 是 ToolRuntime 向 Core 返回的唯一 settlement envelope，既可表达终态，也可表达等待审批或输入的暂停态。暂停态不是模型对话中的最终工具结果。
 
 ### 10.1 ToolStatus
 
