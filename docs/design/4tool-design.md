@@ -226,6 +226,8 @@ class ToolRegistration:
 
 `ToolRegistration` 是待注册定义，不携带可信 registration ID。Registry 校验定义后生成内部 `MaterializedTool`，并为其分配 registration ID。
 
+外部 owner 通过受控 builder 创建 Registration：builder 从 codec 生成 ToolSpec 中的 Schema；Registry 再做深度一致性校验，不一致时拒绝注册。调用方不能独立维护 Spec Schema 与 codec Schema。
+
 registration identity 至少绑定：
 
 - owner、tool name、显式 version 和 implementation_version。
@@ -351,7 +353,7 @@ raw arguments
 
 注册阶段：
 
-1. Schema 必须是合法 JSON Schema。
+1. Schema 使用 JSON Schema Draft 2020-12，并且必须合法。
 2. 顶层输入必须为 object。
 3. Schema 必须可以 JSON 序列化。
 4. 不支持的关键字不得静默忽略。
@@ -368,6 +370,8 @@ output encode 或验证失败
   -> 不能返回 success
   -> tool.output.invalid
 ```
+
+output Schema 只校验 handler 成功产生的领域输出。denied、approval、interaction、timeout、cancelled、interrupted 等控制结果不套用工具 output Schema，但始终经过 ToolResult 协议校验和 final guard。
 
 内置工具默认 `additionalProperties=false`。MCP 和动态扩展遵循其声明的 Schema。
 
@@ -419,7 +423,7 @@ Handler 返回领域输出，不能构造最终 `ToolResult`，不能设置：
 ### 9.3 ToolOutputRenderer
 
 ```python
-class ToolOutputRenderer(Protocol, Generic[TOutput]):
+class ToolOutputRenderer(Protocol):
     def render(self, data: Mapping[str, object]) -> tuple[ToolContent, ...]:
         ...
 ```
@@ -449,6 +453,7 @@ ToolStatus = Literal[
     "user_input_required",
     "cancelled",
     "timed_out",
+    "interrupted",
 ]
 ```
 
@@ -469,6 +474,8 @@ class ToolResult:
     interaction: InteractionRequest | None = None
     timing: ToolTiming = field(default_factory=ToolTiming)
     registration_id: str = ""
+    output_validation: Literal["schema_validated", "structurally_validated"] = "schema_validated"
+    content_trust: Literal["trusted", "untrusted"] = "trusted"
 ```
 
 删除重复真值字段：
@@ -490,7 +497,7 @@ success
   -> approval=None
   -> interaction=None
 
-error/denied/cancelled/timed_out
+error/denied/cancelled/timed_out/interrupted
   -> error 必须存在
 
 approval_required
@@ -502,6 +509,8 @@ user_input_required
 ```
 
 所有结果必须携带非空 call ID、tool name 和 registration ID，并经过输出验证、大小限制和结果防护。
+
+终态集合为 success、error、denied、cancelled、timed_out 和 interrupted。approval_required、user_input_required 只是同一 attempt 的暂停快照，不写入 final result 槽位，也不投影为模型 ToolResultMessage。
 
 ## 11. ToolPolicy 与副作用模型
 
@@ -537,19 +546,36 @@ class ToolPolicy:
     timeout: TimeoutPolicy
     concurrency: ConcurrencyPolicy
     output_limits: OutputLimits
+    output_trust: OutputTrustPolicy
 ```
+
+基础类型第一版固定为：
+
+```text
+ToolMode = plan | execute | unrestricted
+RiskLevel = low < medium < high < critical
+ApprovalPolicy = never | on_risk | always
+RuleSource = hard_constraint | configuration | approval_grant | runtime_default
+```
+
+`OutputLimits` 至少限制结构化数据字节数、模型内容字节数、artifact 数量和单 artifact 大小。`OutputTrustPolicy` 声明默认 content trust 以及是否允许 structurally validated 输出。`required_permissions` 是工具启用所需的静态 capability 集合，不能替代每次调用的 action/resource/effect 决策。
 
 ### 11.3 ToolAccessResolver
 
-静态 Policy 不能描述具体调用。输入校验后，Runtime 调用无副作用的 resolver：
+静态 Policy 不能描述具体调用。输入校验后，Runtime 调用无副作用的 resolver。Resolver 接收 input codec 生成的 typed input，并同时返回 handler 必须使用的 resolved input 与访问请求：
 
 ```python
-class ToolAccessResolver(Protocol):
+@dataclass(frozen=True)
+class ToolAccessResolution(Generic[TInput]):
+    input: TInput
+    access: ToolAccessRequest
+
+class ToolAccessResolver(Protocol, Generic[TInput]):
     def resolve(
         self,
-        arguments: Mapping[str, object],
+        input: TInput,
         context: ToolAccessContext,
-    ) -> ToolAccessRequest:
+    ) -> ToolAccessResolution[TInput]:
         ...
 ```
 
@@ -563,6 +589,8 @@ Resolver 可以：
 - 生成安全预览。
 
 Resolver 不能执行副作用、修改计划、启动进程、访问网络或请求 UI 审批。
+
+Handler 只能接收 `ToolAccessResolution.input`，不能重新从 raw arguments 解析路径或命令。这样权限判断和实际执行使用同一份规范化输入；文件句柄、符号链接与 TOCTOU 防护仍由 sandbox/资源层负责。
 
 ### 11.4 ToolAccessRequest
 
@@ -615,6 +643,8 @@ class PermissionRule:
 5. 默认策略。
 
 硬约束不能被审批绕过，包括路径逃逸、禁用能力、Schema 非法、自授权参数和不可恢复危险操作。
+
+空 `modes` 表示适用于全部 mode。同一规则层内依次按 priority、更具体的 action/resource pattern 和 `deny > ask > allow` 决定；不得依赖注册顺序得到结果。
 
 Catalog 可见性不能代替执行授权。
 
@@ -687,9 +717,11 @@ class ApprovalGrant:
 2. Core 计划审批：是否接受计划作为执行合同。
 3. Interaction 输入暂停：缺少用户选择或信息。
 
-Plan 工具成功返回计划数据后，由 Core 更新 PlanState 并发出计划审批。不能使用 ToolRuntime 的安全 ApprovalChallenge 表达计划批准。
+Core-owned Plan adapter 必须先通过窄 PlanService 原子提交计划操作，才能向 ToolRuntime 返回成功领域输出；随后由 Core 单独发出计划业务审批。不能使用 ToolRuntime 的安全 ApprovalChallenge 表达计划批准。
 
-Interaction 工具只能返回受控 InteractionRequest，由 Runtime 路由给 Interface。
+Interaction 工具只能返回受控 InteractionRequest。ToolRuntime 只持久化暂停状态并返回 `user_input_required`；外层 application runtime 负责把请求路由给 Interface，避免 tools 反向依赖 interfaces。
+
+InteractionResponse 必须携带 interaction ID、request fingerprint、session/tool call ID 和结构化答案。恢复时 ToolRuntime 使用 compare-and-set 消费 response，核对 fingerprint 与 attempt 状态，然后直接结算同一 attempt 的 success ToolResult；Interaction handler 不重复执行。
 
 ## 13. timeout、取消、清理与基础并发
 
@@ -754,14 +786,16 @@ class ToolRuntimeLimits:
 
 ### 13.5 execute_batch
 
-ToolRuntime 按模型 ToolCall 顺序构建连续兼容批次：
+ToolRuntime 先按模型 ToolCall 顺序执行无副作用 preflight：materialize、decode、access resolve、permission/approval 和 queue admission。遇到第一个 ask、input、deny 或 admission failure 时停止接纳后续调用，再从已经接纳的调用构建连续兼容批次：
 
 - 结果顺序与输入顺序一致。
 - 只并发连续、兼容的 parallel 工具。
-- serial 工具单独或按 group 排队。
-- approval/input 暂停后，后续调用不启动。
+- serial 工具始终形成执行 fence，并按 group 排队；serial 注册的 group 不得为空。
+- approval/input 暂停后，后续调用不会通过 preflight，也不会启动。
 - 已启动批次必须收集全部结果。
 - deny 默认阻止后续批次。
+- pending 超过上限返回 `tool.queue.full`。
+- 排队时间计入 request deadline；超时返回 queue timeout，不启动 handler。
 
 ## 14. Progress 与副作用
 
@@ -837,7 +871,7 @@ interrupted
 
 ### 15.2 暂停不是终态
 
-`approval_required` 和 `user_input_required` 不作为最终 ToolResultMessage 写入模型对话。
+`approval_required` 和 `user_input_required` 是 ToolResult 的暂停态，但不作为最终 ToolResultMessage 写入模型对话。
 
 - 它们进入事件、checkpoint 和 RuntimeFrame。
 - resume 继续同一 attempt。
@@ -867,6 +901,8 @@ Store 保存：
 - mutation 工具不自动重试。
 - 只有显式 retry-safe 工具可以自动重试。
 
+无法自动恢复的 interrupted attempt 必须结算为 status=interrupted、error.code=tool.execution.interrupted，并保留已观察到的 effects；不能只停留在内部状态机中。
+
 第一版 RecoveryMode：not_resumable、retry_safe、checkpointed。
 
 ## 16. 错误模型
@@ -883,6 +919,7 @@ interaction
 queue_timeout
 execution_timeout
 cancelled
+interrupted
 execution
 output_validation
 policy_violation
@@ -914,6 +951,7 @@ tool.permission.denied
 tool.approval.expired
 tool.execution.timeout
 tool.execution.cancelled
+tool.execution.interrupted
 tool.execution.handler_error
 tool.output.invalid
 tool.effect.policy_violation
@@ -954,8 +992,10 @@ Returns:
 - 非空且不超过约 1,200 字符。
 - 第一段能独立说明核心行为。
 - 非显然参数必须有 Schema description。
+- Description 中引用参数时必须使用真实 Schema 参数名。
 - 不重复完整 Schema。
 - 不堆积大量示例。
+- 不承诺并发顺序、完成时机或其他 Runtime 无法保证的动态行为。
 - 不描述尚未实现的安全保证。
 - Description 与 Schema、Policy 一起进入 registration version hash。
 
@@ -966,10 +1006,12 @@ Extension API 只能注册 canonical ToolRegistration，不能直接执行工具
 Hook 收敛为：
 
 - `ToolObserver`：只读观察生命周期，不能修改结果和权限。
-- `ToolOutputTransformer`：若修改领域输出，必须在 output codec、renderer 和最终防护之前运行，修改后重新验证。
+- `ToolOutputTransformer`：若修改领域输出，必须在 output codec 之前运行；固定顺序为 `domain output -> transformer -> output codec -> ToolResult.data -> renderer -> final guard`。Transformer 不能修改权限、状态或副作用。
 - 权限扩展使用独立 PermissionRuleProvider，不能通过普通 before hook 临时放行。
 
 所有来源最终进入相同 Registry 和 ToolRuntime。
+
+Extension/Skill/MCP 按 owner 进行原子批量注册：整批校验成功后才发布新 Catalog snapshot；任一注册失败则整批回滚。卸载或重连按 owner 撤销对应 revision，不影响其他 owner，也不能留下部分可见工具。
 
 ## 19. MCP 适配
 
@@ -989,14 +1031,16 @@ MCP Definition
 - 名称为 `mcp__<server>__<tool>`，保留原始 server/tool 名用于审计。
 - inputSchema 转 input codec。
 - outputSchema 转 output codec。
-- 无 outputSchema 时标记为 unverified，而不是假装完成强校验。
-- 默认声明 network_access 和 external_state_read。
-- 无法确认是否写远端状态时默认 medium risk + ask。
+- 无 outputSchema 时使用受限 `UnverifiedJsonCodec` 并标记为 unverified，而不是假装完成强校验。
+- 明确只读的 MCP 工具至少声明 network_access 和 external_state_read。
+- 无法确认是否写远端状态时，保守声明 external_state_write，默认 medium risk + ask；如果适配器无法安全界定资源或副作用，则拒绝启用。
 - server 配置 timeout、并发上限、凭据绑定和 allowlist。
 - MCP 文本默认 untrusted。
 - 图片和 blob 经过类型、大小和 artifact 控制。
 - 不支持内容返回明确 omission。
 - 不暴露本机路径。
+
+缺少 outputSchema 的结果记录 `output_validation=structurally_validated`；MCP 文本和外部资源默认记录 `content_trust=untrusted`。这两个字段分别表达“结构验证强度”和“内容信任级别”，不能混用。
 
 ## 20. Plan、Interaction 与 Subagent
 
@@ -1005,7 +1049,8 @@ MCP Definition
 - category=plan，source=builtin。
 - handler 由 Core 提供并注册。
 - ToolRuntime 只做通用校验、权限、串行调度和结果返回。
-- PlanState 读写和计划业务审批由 Core 负责。
+- Plan adapter 通过 Core 提供的窄 PlanService 完成业务校验和 PlanState 原子提交后，才能返回成功领域输出。
+- ToolResult success 表示本次计划操作已提交，不表示计划已获用户批准；计划业务审批仍由 Core 负责。
 - Plan 工具使用 `task_plan` 串行组。
 
 ### 20.2 Interaction
@@ -1013,7 +1058,8 @@ MCP Definition
 - handler 由 Core 提供。
 - 只能返回受控 InteractionRequest。
 - ToolRuntime 转成 user_input_required 暂停结果。
-- Runtime 路由到 Interface，Interface 不参与工具策略。
+- 外层 application runtime 路由到 Interface，Interface 不参与工具策略。
+- InteractionResponse 由 ToolRuntime 校验并单次消费，恢复同一 attempt；不重新运行 handler。
 
 ### 20.3 Subagent
 
@@ -1021,6 +1067,8 @@ MCP Definition
 - 通过 Session semaphore 限制并发。
 - 支持 cancellation、progress 和 checkpointed recovery。
 - 子代理结果仍通过统一 ToolResult 返回。
+
+Plan、Interaction、Subagent、Extension 和 MCP registrations 都由顶层 composition root 注入 ToolRuntime。tools 不导入 Core、Runtime adapter 或 Interface 的具体实现。
 
 ## 21. 可观测性
 
@@ -1064,6 +1112,11 @@ src/codepilot/
 │   ├── progress.py
 │   ├── effects.py
 │   ├── results.py
+│   ├── errors.py
+│   ├── rendering.py
+│   ├── guards.py
+│   ├── resources.py
+│   ├── artifacts.py
 │   ├── state.py
 │   ├── sandbox.py
 │   └── builtins/
@@ -1076,8 +1129,11 @@ src/codepilot/
 │       ├── plan.py
 │       └── interaction.py
 ├── runtime/
+│   ├── composition.py
 │   └── tool_adapters/
 │       └── subagents.py
+├── sessions/
+│   └── tool_state_store.py
 └── extensions/
     ├── tool_api.py
     └── mcp/
@@ -1085,6 +1141,8 @@ src/codepilot/
         ├── codec.py
         └── renderer.py
 ```
+
+主要类型归属：contracts 放 Spec、Registration、Request 和 Context；codecs 放 codec；results/errors 放结算协议；resources/effects 放访问与副作用类型；rendering/guards/artifacts 放输出链；state 只定义 Store Port，sessions 实现持久化，runtime/composition.py 负责依赖装配。
 
 ## 23. 测试规范
 
