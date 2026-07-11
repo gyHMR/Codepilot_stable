@@ -16,7 +16,8 @@ def test_runtime_tools_catalog_is_filtered_by_current_mode(tmp_path: Path) -> No
     loaded = build_runtime_tools(tmp_path, SessionOpenIntent(workspace_dir=tmp_path), config)
 
     names = {tool.name for tool in loaded.specs}
-    assert {"ls", "read", "grep", "find", "workspace_status", "update_plan"} <= names
+    assert {"ls", "read", "grep", "find", "workspace_status"} <= names
+    assert {"propose_plan", "create_build_plan", "update_plan_progress", "close_plan"}.isdisjoint(names)
     assert "write" not in names
     assert "bash" not in names
 
@@ -170,7 +171,7 @@ def test_tools_json_limits_enabled_builtin_tools(tmp_path: Path) -> None:
     config_dir = tmp_path / ".codepilot"
     config_dir.mkdir()
     (config_dir / "tools.json").write_text(
-        json.dumps({"enabled": ["read", "workspace_status", "update_plan"]}),
+        json.dumps({"enabled": ["read", "workspace_status", "create_build_plan", "close_plan"]}),
         encoding="utf-8",
     )
 
@@ -180,5 +181,6 @@ def test_tools_json_limits_enabled_builtin_tools(tmp_path: Path) -> None:
     assert {tool.name for tool in loaded.specs} == {
         "read",
         "workspace_status",
-        "update_plan",
+        "create_build_plan",
+        "close_plan",
     }

@@ -354,16 +354,16 @@ class SessionRuntime:
         event_start_seq, turn_start_seq = self._run_sequence_offsets(run_id)
         mode = ensure_run_mode(intent.target_mode or self.current_mode)
         plan = self.context_plan_state_for_mode(mode)
-        directive = _continuation_directive(intent.kind)
+        synthetic_control = _continuation_control(intent.kind)
         messages = self._messages_for_loop()
         loop_input = AgentLoopInput(
             run_id=run_id,
             correlation=RunCorrelation(session_id=self.session_id),
             messages=messages,
-            user_prompt=intent.text or _plan_objective(plan) or "",
+            user_prompt=intent.text or _plan_goal(plan) or "",
             context=self._loop_context(
                 mode,
-                runtime_directive=directive,
+                synthetic_control=synthetic_control,
                 checkpoint_phase=str(checkpoint.get("phase") or intent.kind),
             ),
             model=model,
@@ -508,7 +508,7 @@ class SessionRuntime:
         return {
             "plan_id": state.get("plan_id"),
             "status": state.get("status"),
-            "objective_preview": _short_text(state.get("objective"), limit=72),
+            "goal_preview": _short_text(state.get("interpreted_goal"), limit=72),
             "total_items": total,
             "done_items": done,
             "active_item_preview": _short_text(active, limit=72),
@@ -616,9 +616,6 @@ class SessionRuntime:
             return None
         if state.get("status") != "active":
             return None
-        active_plan_id = (self.store.read_meta() or {}).get("active_plan_id")
-        if active_plan_id != state.get("plan_id"):
-            return None
         return dict(state)
 
     def context_plan_state(self) -> dict[str, Any] | None:
@@ -703,6 +700,7 @@ class SessionRuntime:
             source="mode_switch",
         )
         if state is not None:
+            self._sync_current_plan_meta(state)
             self._record_plan_event("plan_abandoned", state, run_id=run_id)
         return state
 
@@ -714,7 +712,7 @@ class SessionRuntime:
         state = self.plan_state.approve_current(run_id=run_id)
         if state is None:
             return None
-        self.store.update_meta({"active_plan_id": state.get("plan_id")})
+        self._sync_current_plan_meta(state)
         self._record_plan_event("plan_approved", state, run_id=run_id)
         if switch_to_build:
             self.set_current_mode("build")
@@ -728,8 +726,9 @@ class SessionRuntime:
         state = self.plan_state.reject_current(run_id=run_id)
         if state is None:
             return None
-        self.store.update_meta({"active_plan_id": None})
+        self._sync_current_plan_meta(state)
         self._record_plan_event("plan_rejected", state, run_id=run_id)
+        self.store.set_checkpoint(None)
         self.set_current_mode("plan")
         return state
 
@@ -740,7 +739,7 @@ class SessionRuntime:
         state = self.plan_state.abandon_current(source="user_abandoned")
         if state is None:
             return None
-        self.store.update_meta({"active_plan_id": None})
+        self._sync_current_plan_meta(state)
         self._record_plan_event("plan_abandoned", state, run_id=None)
         self.store.set_checkpoint(None)
         return state
@@ -901,9 +900,7 @@ class SessionRuntime:
                 return
             previous = self.current_plan_state()
             state = self.plan_state.save(payload)
-            self.store.update_meta(
-                {"active_plan_id": state.get("plan_id") if state.get("status") == "active" else None}
-            )
+            self._sync_current_plan_meta(state)
             if previous == state:
                 return
             self._record_plan_event(
@@ -933,7 +930,7 @@ class SessionRuntime:
             source=f"run_{outcome.status}",
         )
         if abandoned is not None:
-            self.store.update_meta({"active_plan_id": None})
+            self._sync_current_plan_meta(abandoned)
             self._record_plan_event("plan_abandoned", abandoned, run_id=outcome.run_id)
 
     def _calibrate_context_usage(self, result: AgentRunResult) -> None:
@@ -1026,9 +1023,7 @@ class SessionRuntime:
                 }
             )
             return None
-        self.store.update_meta(
-            {"active_plan_id": state.get("plan_id") if state.get("status") == "active" else None}
-        )
+        self._sync_current_plan_meta(state)
         event["plan"] = state
         return state
 
@@ -1321,7 +1316,7 @@ class SessionRuntime:
         self,
         mode: str | None = None,
         *,
-        runtime_directive: str = "",
+        synthetic_control: dict[str, object] | None = None,
         checkpoint_phase: str = "",
     ) -> PreparedContext:
         normalized = ensure_run_mode(mode or self.current_mode)
@@ -1330,8 +1325,8 @@ class SessionRuntime:
             "session_id": self.session_id,
             "mode": normalized,
         }
-        if runtime_directive:
-            values["runtime_directive"] = runtime_directive
+        if synthetic_control:
+            values["synthetic_control"] = dict(synthetic_control)
         if checkpoint_phase:
             values["checkpoint_phase"] = checkpoint_phase
         return PreparedContext(values)
@@ -1351,6 +1346,14 @@ class SessionRuntime:
             return str(fallback or "")
         return str(self._system_prompt_builder(ensure_run_mode(mode)) or "")
 
+    def _sync_current_plan_meta(self, state: dict[str, Any] | None) -> None:
+        active_plan_id = (
+            state.get("plan_id")
+            if isinstance(state, dict) and state.get("status") in {"proposed", "active"}
+            else None
+        )
+        self.store.update_meta({"active_plan_id": active_plan_id})
+
     def _approve_proposed_plan(self) -> None:
         before = self.workflow_plan_state()
         if not isinstance(before, dict) or before.get("status") != "proposed":
@@ -1358,7 +1361,7 @@ class SessionRuntime:
         state = self.plan_state.approve_current()
         if state is None:
             return
-        self.store.update_meta({"active_plan_id": state.get("plan_id")})
+        self._sync_current_plan_meta(state)
         self._record_plan_event("plan_approved", state, run_id=None)
 
     def _record_plan_event(
@@ -1453,9 +1456,9 @@ class RuntimeSessionContextPort:
             ),
             "mode_policy": _mode_policy(mode),
         }
-        runtime_directive = _optional_text(request_context.get("runtime_directive"))
-        if runtime_directive:
-            runtime_state["directive"] = runtime_directive
+        synthetic_control = request_context.get("synthetic_control")
+        if isinstance(synthetic_control, dict):
+            runtime_state["synthetic_control"] = dict(synthetic_control)
         if isinstance(plan_state, dict):
             runtime_state["plan_state_status"] = str(plan_state.get("status") or "")
         if isinstance(run_signals, dict):
@@ -1531,11 +1534,16 @@ def new_run_id() -> str:
     return f"run_{uuid4().hex[:12]}"
 
 
-def _continuation_directive(kind: str) -> str:
-    return {
+def _continuation_control(kind: str) -> dict[str, object] | None:
+    instruction = {
         "plan_approved": (
-            "The user approved the canonical plan. Continue execution in build mode "
-            "from the first unfinished plan item without redesigning or restating the plan."
+            "The canonical Task Plan has been approved and is active. Continue the same task "
+            "in build mode from the first unfinished plan item. Execute the approved plan "
+            "directly: do not restate it, redesign it, or create another Task Plan, and do not "
+            "call create_build_plan while this active plan exists. Use update_plan_progress only "
+            "to record progress on the existing plan and close_plan for final closeout. Every "
+            "active-plan update must preserve the canonical item IDs exactly as supplied in the "
+            "current plan. Preserve the approved goal, scope, constraints, and completion criteria."
         ),
         "plan_rejected": (
             "The user rejected the proposed plan. Ask one concise question about what "
@@ -1543,56 +1551,86 @@ def _continuation_directive(kind: str) -> str:
         ),
         "plan_feedback": (
             "The latest user message is feedback on the proposed plan. Revise the same "
-            "plan with update_plan, then summarize the canonical revision."
+            "plan with propose_plan, then summarize the canonical revision."
         ),
         "plan_clarification": (
             "Continue planning from the user's clarification. Publish a decision-complete "
-            "plan with update_plan when enough information is available."
+            "plan with propose_plan when enough information is available."
         ),
         "mode_changed": "Continue the same task using the current mode policy.",
         "automatic_continuation": "Continue the same task from the saved checkpoint.",
     }.get(kind, "")
+    if not instruction:
+        return None
+    scope = {
+        "plan_feedback": "plan_revision_only",
+        "plan_clarification": "plan_revision_only",
+        "plan_approved": "approved_plan_execution_only",
+        "plan_rejected": "final_answer_only",
+    }.get(kind, "current_mode_only")
+    return {
+        "id": f"synthetic_continuation_{kind}",
+        "kind": kind,
+        "scope": scope,
+        "source": "runner",
+        "instruction": instruction,
+        "reason": kind,
+        "expires_after_turns": 1,
+    }
 
 
 def _mode_policy(mode: str) -> str:
     if mode == "plan":
         return (
             "当前 mode=plan。你仍是同一个 Coding Agent，处理同一个用户任务，但本轮只允许只读调查和方案设计，禁止修改工作区。"
-            "Plan 的职责是根据用户原始请求探索仓库事实，生成可交给 Build 直接执行的代码修改方案；"
-            "不是规划如何写方案，也不是执行方案。先分离对象级任务和控制级指令：代码、行为、测试和配置目标属于对象级；"
-            "“给方案”“先分析”“不要修改”等只决定当前交付方式与权限，不能成为 execution_objective 或计划步骤。"
-            "先探索相关实现、调用方、配置和测试边界；发布计划前必须已有成功的仓库探索证据，信息不足时先只读调查或追问。"
-            "遇到多文件改动、长文件（数百行以上）或跨模块调用链与测试边界时，应优先用 "
-            "list_exploration_agents 复用缓存；缓存不足时用 dispatch_exploration 并行派发只读 Subagent。"
-            "用 update_plan 发布或修订 proposed plan：execution_objective 必须描述 Build 要完成的软件工作；"
-            "summary 应概括任务理解、当前实现依据、目标设计、影响范围、风险和验证思路；"
+            "Plan 是固定的宏观工作流：接收并保持用户的软件目标 → 派发只读 Subagent 探索仓库 → 主 Agent 汇总报告并做必要的定点核查 "
+            "→ 形成可执行、可验证的方案 → 用 propose_plan 发布 canonical plan → 等待运行时处理用户审批或修改反馈。"
+            "框架负责模式、工具边界、canonical plan 状态、审批状态和 Plan 到 Build 的切换；主 Agent 负责理解目标、拆分探索任务、"
+            "决定 Subagent 的关注范围、综合证据、识别真正阻塞的问题，并设计最终方案。不得自行假设计划已获批准或切换模式。"
+            "首先分离对象级任务和控制级指令：代码、行为、测试和配置目标属于对象级；“给方案”“先分析”“不要修改”等只约束交付方式，"
+            "不能成为 interpreted_goal 或计划步骤。"
+            "探索阶段默认使用 dispatch_exploration，让不同只读 Subagent 调查相关实现、调用方、依赖、风险和验证边界；"
+            "主 Agent 不应先用大量 ls/read/grep/find 顺序扫描仓库，这些工具用于 Subagent 报告后的局部确认和缺口补充。"
+            "dispatch_exploration 的 reuse=auto 会自动复用未过期报告；只有需要查看、筛选或比较已有报告时才使用 list_exploration_agents。"
+            "综合阶段必须基于成功的仓库探索证据；若缺少会实质改变实现范围或设计的必要信息，提出一个具体澄清问题，不要执行修改。"
+            "发布阶段用 propose_plan 发布或修订 proposed plan：raw_user_request 保存用户原始请求，interpreted_goal 必须描述 Build 要完成的软件工作；"
+            "task_understanding、current_implementation、target_design、impact_scope、risks_and_open_questions、verification_plan "
+            "必须分别记录任务理解、仓库证据、目标设计、影响范围、风险待确认项和验证方案；"
+            "summary 只做压缩概括，不能替代这些结构化字段。"
             "items 只能描述批准后实际要执行的代码修改与验证，不能写分析需求、查看代码、撰写方案、回复用户或等待审批。"
-            "所有条目保持 pending，发布后等待显式审批；不得执行实现、自行切换到 Build 或推进步骤状态。"
-            "自然语言反馈仅用于修订同一个 proposed plan。"
+            "当证据充分且方案已可交给 Build 执行时，必须在当前回合直接调用 propose_plan；普通文本方案不是可审批的 Task Plan。"
+            "不要先完整展示文本草案、询问用户方向是否合适，或等待用户认可文本草案后才调用 propose_plan；"
+            "运行时会在 propose_plan 成功后统一展示 canonical plan 并发起审批。"
+            "审批阶段所有条目保持 pending；发布后等待用户审查、拒绝、批准或提出修改。未经运行时确认批准，不得执行实现、推进步骤、"
+            "声称已经开始实现，或承诺下一步立即修改代码。"
+            "用户反馈只能用于继续规划、修改同一个 proposed plan、拒绝或等待批准。只有高置信审批命令会由运行时转换为状态变化。"
         )
     if mode == "read":
         return (
             "当前 mode=read。你仍是同一个 Coding Agent，处理同一个用户任务，但本轮只做只读探索、定位、解释、审查和状态说明。"
             "目标是回答用户当前问题，并区分代码事实、合理推断和建议；不要默认生成实施计划。"
             "不得修改工作区、运行会产生副作用的命令，不得创建、推进或完成 Task Plan，也不得继续执行未完成步骤。"
-            "可以引用当前 Task Plan 作为背景，但它不改变 read 模式的只读边界。代码定位优先用 read/grep/find。"
+            "可以引用当前 Task Plan 作为背景并说明其状态，但它不改变 read 模式的只读边界。代码定位优先用 read/grep/find。"
         )
     return (
         "当前 mode=build。你仍是同一个 Coding Agent，处理同一个用户任务，本轮可以在权限允许范围内读取、修改、运行命令并验证。"
+        "没有 current Task Plan 且任务复杂时，可以用 create_build_plan 创建简要 active 执行计划；简单任务可直接实现和验证。"
         "已有 active plan 时，其中的执行目标、完成标准和步骤是本次任务的执行契约，必须直接推进而不是重新制定方案；"
+        "如果该 plan 来自 Plan 模式批准，Build 暂时不得重新构建或替换它，只能更新状态、记录执行偏差，或在明显无法继续时请求用户确认。"
         "用户的“给方案”等控制级表达不能替换执行目标。只有用户明确要求修改，或当前步骤已发生"
-        "五次有效实现/验证失败，或实际代码与计划基础明显不一致时，才可用 update_plan 修订同一计划。"
-        "没有计划时，仅对复杂任务按需创建 active soft plan；简单任务可直接实现和验证。精确修改优先 apply_patch，"
+        "五次有效实现/验证失败，或实际代码与计划基础明显不一致时，才可用 update_plan_progress 修订同一计划。"
+        "精确修改优先 apply_patch，"
         "单点替换用 edit，新建或整体重写才用 write。代码定位优先用 read/grep/find，shell 主要用于测试和项目命令。"
-        "执行 active plan 时尽量每完成一个主要步骤就更新状态；如果发现范围超出、风险升高或计划不再适用，先修订计划或请求用户确认。"
-        "最终答复前必须依据 completion criteria、实际改动和最新验证结果调用 update_plan 收尾，完成时将 snapshot.status 设为 completed。"
+        "执行 active plan 时尽量每完成一个主要步骤就更新状态，但中间状态更新是软约束。"
+        "最终答复前必须检查当前 Task Plan 是否完成，并依据 completion criteria、实际改动和最新验证结果调用 close_plan 收尾；"
+        "完成时将 status 设为 completed，明显未完成时设为 active 并保留剩余步骤，避免下一轮误读状态。"
     )
 
 
-def _plan_objective(plan: object) -> str:
+def _plan_goal(plan: object) -> str:
     if not isinstance(plan, dict):
         return ""
-    return _optional_text(plan.get("objective")) or ""
+    return _optional_text(plan.get("interpreted_goal")) or ""
 
 
 def runtime_retry_policy(session: Any) -> RetryPolicy:

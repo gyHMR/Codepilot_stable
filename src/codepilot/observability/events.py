@@ -386,7 +386,8 @@ def _plan_event(raw: dict[str, Any], event_type: str) -> dict[str, Any]:
         "plan_id": str(plan.get("plan_id") or raw.get("plan_id") or ""),
         "status": str(plan.get("status") or raw.get("status") or ""),
         "origin_mode": str(plan.get("origin_mode") or raw.get("origin_mode") or ""),
-        "objective": str(plan.get("objective") or raw.get("objective") or ""),
+        "raw_user_request": str(plan.get("raw_user_request") or raw.get("raw_user_request") or ""),
+        "interpreted_goal": str(plan.get("interpreted_goal") or raw.get("interpreted_goal") or ""),
         "items": _list_of_dicts(plan.get("items")),
     }
 

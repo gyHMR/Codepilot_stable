@@ -50,26 +50,29 @@ class _PlanLifecycleModelPort:
                     content=[
                         ToolCall(
                             id="plan_done",
-                            name="update_plan",
+                            name="propose_plan",
                             arguments={
-                                "execution_objective": "优化登录逻辑并验证注册行为",
+                                "raw_user_request": "优化登录逻辑",
+                                "interpreted_goal": "优化登录逻辑并验证注册行为",
+                                "task_understanding": "用户希望先审批登录逻辑修改方案，再执行实现和验证。",
+                                "current_implementation": "已通过只读探索确认登录入口、注册边界和相关测试。",
+                                "target_design": "保持现有接口，收敛登录逻辑并补充注册回归验证。",
+                                "impact_scope": "影响登录逻辑实现、注册调用路径和相关测试。",
+                                "risks_and_open_questions": ["暂无需要用户确认的阻塞项。"],
+                                "verification_plan": "运行注册相关测试并检查登录路径。",
                                 "summary": "先确认注册边界，再实施并验证。",
-                                "explanation": "执行完成",
+                                "explanation": "等待用户审批",
                                 "completion_criteria": ["注册测试通过"],
                                 "items": [
                                     {
-                                        "id": "item_1",
-                                        "step": "阅读实现",
-                                        "details": "确认注册逻辑和调用入口。",
-                                        "verification": "列出受影响文件和行为。",
-                                        "status": "completed",
+                                        "step": "调整登录逻辑实现",
+                                        "details": "按现有职责边界修改登录服务和调用路径。",
+                                        "verification": "运行注册相关测试前检查受影响文件。",
                                     },
                                     {
-                                        "id": "item_2",
-                                        "step": "修改登录逻辑",
-                                        "details": "按现有风格实施修改。",
+                                        "step": "补充并运行注册回归验证",
+                                        "details": "覆盖登录调整影响到的注册行为。",
                                         "verification": "运行注册相关测试。",
-                                        "status": "in_progress",
                                     },
                                 ],
                             },
@@ -85,7 +88,7 @@ class _PlanLifecycleModelPort:
                     content=[
                         ToolCall(
                             id="plan_closeout",
-                            name="update_plan",
+                            name="close_plan",
                             arguments={
                                 "summary": "登录逻辑修改和验证已完成。",
                                 "completion_criteria": ["注册测试通过"],
@@ -93,15 +96,15 @@ class _PlanLifecycleModelPort:
                                 "items": [
                                     {
                                         "id": "item_1",
-                                        "step": "阅读实现",
-                                        "details": "确认注册逻辑和调用入口。",
-                                        "verification": "列出受影响文件和行为。",
+                                        "step": "调整登录逻辑实现",
+                                        "details": "按现有职责边界修改登录服务和调用路径。",
+                                        "verification": "运行注册相关测试前检查受影响文件。",
                                         "status": "completed",
                                     },
                                     {
                                         "id": "item_2",
-                                        "step": "修改登录逻辑",
-                                        "details": "按现有风格实施修改。",
+                                        "step": "补充并运行注册回归验证",
+                                        "details": "覆盖登录调整影响到的注册行为。",
                                         "verification": "运行注册相关测试。",
                                         "status": "completed",
                                     },
@@ -251,7 +254,7 @@ def test_runtime_gateway_plan_approval_resumes_same_task_run(tmp_path) -> None:
         assert finished[-1].record.status == "completed"
         assert session.current_mode == "build"
         assert current_plan["status"] == "completed"
-        assert current_plan["objective"] == "优化登录逻辑并验证注册行为"
+        assert current_plan["interpreted_goal"] == "优化登录逻辑并验证注册行为"
         assert session.store.read_meta()["active_plan_id"] is None
         assert session.store.read_meta()["runtime_checkpoint"] is None
         assert len(list((tmp_path / ".codepilot" / "runs").iterdir())) == 1
@@ -290,7 +293,59 @@ def test_runtime_gateway_plan_approval_resumes_same_task_run(tmp_path) -> None:
     asyncio.run(run_case())
 
 
-def test_runtime_gateway_natural_language_is_plan_feedback_not_approval(tmp_path) -> None:
+def test_runtime_gateway_high_confidence_natural_language_approves_plan(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.runtime.actions import (
+            CommandFinishedFrame,
+            PromptSubmitted,
+            RunFinishedFrame,
+            RunPausedFrame,
+        )
+        from codepilot.runtime.gateway import RuntimeGateway
+
+        model = _PlanLifecycleModelPort()
+        gateway = RuntimeGateway(model_port=model)
+        ref = _open_test_session(gateway, tmp_path)
+        session = _persistent_session(gateway, ref.session_id)
+        session.set_current_mode("plan")
+
+        plan_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                PromptSubmitted(text="优化登录逻辑"),
+            )
+        ]
+        paused = next(frame for frame in plan_frames if isinstance(frame, RunPausedFrame))
+
+        frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                PromptSubmitted(text="批准"),
+            )
+        ]
+
+        command = next(frame for frame in frames if isinstance(frame, CommandFinishedFrame))
+        finished = [frame for frame in frames if isinstance(frame, RunFinishedFrame)]
+        stored_user_texts = [
+            message.content
+            for message in session.store.load_session_messages()
+            if getattr(message, "role", "") == "user"
+        ]
+
+        assert command.record.command == "/plan approve"
+        assert command.record.data["continuation_kind"] == "plan_approved"
+        assert finished
+        assert finished[-1].record.run_id == paused.record.run_id
+        assert session.current_mode == "build"
+        assert session.plan_state.current()["status"] == "completed"
+        assert stored_user_texts == ["优化登录逻辑"]
+
+    asyncio.run(run_case())
+
+
+def test_runtime_gateway_fuzzy_natural_language_is_plan_feedback_not_approval(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.runtime.actions import PromptSubmitted, RunPausedFrame
         from codepilot.runtime.gateway import RuntimeGateway
@@ -318,19 +373,24 @@ def test_runtime_gateway_natural_language_is_plan_feedback_not_approval(tmp_path
                     return
                 if self.calls in {2, 3}:
                     suffix = "并先补测试" if self.calls == 3 else ""
-                    objective = (
-                        {"execution_objective": "优化登录逻辑并验证注册行为"}
-                        if self.calls == 2
-                        else {}
-                    )
+                    goal = {
+                        "raw_user_request": "优化登录逻辑",
+                        "interpreted_goal": "优化登录逻辑并验证注册行为",
+                    }
                     yield LLMCompleted(
                         message=AssistantMessage(
                             content=[
                                 ToolCall(
                                     id=f"plan_{self.calls}",
-                                    name="update_plan",
+                                    name="propose_plan",
                                     arguments={
-                                        **objective,
+                                        **goal,
+                                        "task_understanding": f"用户希望优化登录逻辑{suffix}，并继续审查方案。",
+                                        "current_implementation": "已确认登录服务和注册测试边界。",
+                                        "target_design": f"按反馈调整登录逻辑方案{suffix}。",
+                                        "impact_scope": "影响登录逻辑和注册测试。",
+                                        "risks_and_open_questions": ["暂无新的待确认项。"],
+                                        "verification_plan": "运行注册测试。",
                                         "summary": f"优化登录逻辑{suffix}。",
                                         "completion_criteria": ["注册测试通过"],
                                         "items": [
@@ -338,7 +398,6 @@ def test_runtime_gateway_natural_language_is_plan_feedback_not_approval(tmp_path
                                                 "step": "修改登录逻辑",
                                                 "details": f"实施目标内调整{suffix}。",
                                                 "verification": "运行注册测试。",
-                                                "status": "pending",
                                             }
                                         ],
                                     },
@@ -387,7 +446,89 @@ def test_runtime_gateway_natural_language_is_plan_feedback_not_approval(tmp_path
     asyncio.run(run_case())
 
 
-def test_runtime_gateway_plan_reject_waits_for_feedback_in_same_run(tmp_path) -> None:
+def test_runtime_gateway_conditional_approval_is_plan_feedback(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.runtime.actions import PromptSubmitted, RunPausedFrame
+        from codepilot.runtime.gateway import RuntimeGateway
+
+        class FeedbackModel(_PlanLifecycleModelPort):
+            async def stream(self, request):
+                from codepilot.llm.ports import LLMCompleted
+                from codepilot.protocols import AssistantMessage, ToolCall
+
+                self.calls += 1
+                self.requests.append(request)
+                if self.calls == 1:
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[ToolCall(id="inspect_workspace", name="ls", arguments={"path": "."})],
+                            stop_reason="toolUse",
+                        )
+                    )
+                    return
+                goal = {
+                    "raw_user_request": "优化登录逻辑",
+                    "interpreted_goal": "优化登录逻辑并验证注册行为",
+                }
+                yield LLMCompleted(
+                    message=AssistantMessage(
+                        content=[
+                            ToolCall(
+                                id=f"plan_{self.calls}",
+                                name="propose_plan",
+                                arguments={
+                                    **goal,
+                                    "task_understanding": "用户要求审批前调整第二步。",
+                                    "current_implementation": "已确认登录服务和注册测试边界。",
+                                    "target_design": "按用户反馈修订执行步骤。",
+                                    "impact_scope": "影响登录逻辑和注册测试。",
+                                    "risks_and_open_questions": ["暂无新的待确认项。"],
+                                    "verification_plan": "运行注册测试。",
+                                    "summary": "根据反馈修订登录逻辑方案。",
+                                    "completion_criteria": ["注册测试通过"],
+                                    "items": [
+                                        {
+                                            "step": "按反馈修改登录逻辑",
+                                            "details": "先调整第二步涉及的实现边界。",
+                                            "verification": "运行注册测试。",
+                                        }
+                                    ],
+                                },
+                            )
+                        ],
+                        stop_reason="toolUse",
+                    )
+                )
+
+        model = FeedbackModel()
+        gateway = RuntimeGateway(model_port=model)
+        ref = _open_test_session(gateway, tmp_path)
+        session = _persistent_session(gateway, ref.session_id)
+        session.set_current_mode("plan")
+
+        first_frames = [
+            frame
+            async for frame in gateway.dispatch(ref.session_id, PromptSubmitted(text="优化登录逻辑"))
+        ]
+        first_pause = next(frame for frame in first_frames if isinstance(frame, RunPausedFrame))
+
+        frames = [
+            frame
+            async for frame in gateway.dispatch(ref.session_id, PromptSubmitted(text="批准，但先改第二步"))
+        ]
+
+        second_pause = next(frame for frame in frames if isinstance(frame, RunPausedFrame))
+        current_plan = session.plan_state.current()
+
+        assert second_pause.record.run_id == first_pause.record.run_id
+        assert current_plan["status"] == "proposed"
+        assert current_plan["revision"] == 2
+        assert session.current_mode == "plan"
+
+    asyncio.run(run_case())
+
+
+def test_runtime_gateway_plan_reject_archives_without_model_followup(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.runtime.actions import (
             CommandFinishedFrame,
@@ -423,16 +564,13 @@ def test_runtime_gateway_plan_reject_waits_for_feedback_in_same_run(tmp_path) ->
         command = next(
             frame for frame in reject_frames if isinstance(frame, CommandFinishedFrame)
         )
-        second_pause = next(
-            frame for frame in reject_frames if isinstance(frame, RunPausedFrame)
-        )
         plan = session.plan_state.current()
 
         assert command.record.command == "/plan reject"
-        assert second_pause.record.run_id == first_pause.record.run_id
-        assert second_pause.record.stop_reason == "plan_clarification_required"
+        assert not any(isinstance(frame, RunPausedFrame) for frame in reject_frames)
+        assert first_pause.record.run_id
         assert plan["status"] == "rejected"
-        assert session.store.read_meta()["runtime_checkpoint"]["phase"] == "plan_clarification"
+        assert session.store.read_meta()["runtime_checkpoint"] is None
 
     asyncio.run(run_case())
 
@@ -1710,11 +1848,12 @@ def test_plan_incomplete_commits_as_a_resumable_pause(tmp_path) -> None:
         plan = apply_plan_snapshot(
             None,
             PlanSnapshot.from_mapping(
-                {
-                    "execution_objective": "完成注册逻辑",
-                    "summary": "完成注册逻辑并验证。",
-                    "completion_criteria": ["注册测试通过"],
-                    "items": [
+                    {
+                        "raw_user_request": "完成注册逻辑",
+                        "interpreted_goal": "完成注册逻辑",
+                        "summary": "完成注册逻辑并验证。",
+                        "completion_criteria": ["注册测试通过"],
+                        "items": [
                         {
                             "step": "完成注册逻辑",
                             "details": "实现尚未完成的目标修改。",

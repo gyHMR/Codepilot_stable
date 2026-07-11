@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Canonical task-plan state and the single snapshot update protocol."""
+"""Canonical Task Plan state and semantic snapshot update protocol."""
 
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -16,8 +16,14 @@ PlanningBudgetProfile = Literal["conservative", "balanced", "wide"]
 PlanStatus = Literal["proposed", "active", "completed", "rejected", "abandoned"]
 PlanItemStatus = Literal["pending", "in_progress", "completed"]
 PlanChangeReason = Literal["user_request", "repeated_execution_failure"]
+PlanOperation = Literal[
+    "propose_plan",
+    "create_build_plan",
+    "update_plan_progress",
+    "close_plan",
+]
 
-PLAN_STATE_SCHEMA_VERSION = 4
+PLAN_STATE_SCHEMA_VERSION = 6
 MAX_PLAN_ITEMS = PLAN_ITEM_LIMIT
 QUALIFIED_FAILURES_FOR_REVISION = 5
 
@@ -26,6 +32,9 @@ _PLANNING_BUDGET_PROFILES = frozenset({"conservative", "balanced", "wide"})
 _PLAN_STATUSES = frozenset({"proposed", "active", "completed", "rejected", "abandoned"})
 _ITEM_STATUSES = frozenset({"pending", "in_progress", "completed"})
 _CHANGE_REASONS = frozenset({"user_request", "repeated_execution_failure"})
+_PLAN_OPERATIONS = frozenset(
+    {"propose_plan", "create_build_plan", "update_plan_progress", "close_plan"}
+)
 _PLAN_KEYS = frozenset(
     {
         "schema_version",
@@ -33,7 +42,14 @@ _PLAN_KEYS = frozenset(
         "owner_run_id",
         "status",
         "origin_mode",
-        "objective",
+        "raw_user_request",
+        "interpreted_goal",
+        "task_understanding",
+        "current_implementation",
+        "target_design",
+        "impact_scope",
+        "risks_and_open_questions",
+        "verification_plan",
         "summary",
         "completion_criteria",
         "items",
@@ -48,7 +64,14 @@ _PLAN_KEYS = frozenset(
 _ITEM_KEYS = frozenset({"id", "step", "details", "verification", "status"})
 _SNAPSHOT_KEYS = frozenset(
     {
-        "execution_objective",
+        "raw_user_request",
+        "interpreted_goal",
+        "task_understanding",
+        "current_implementation",
+        "target_design",
+        "impact_scope",
+        "risks_and_open_questions",
+        "verification_plan",
         "summary",
         "completion_criteria",
         "items",
@@ -107,16 +130,34 @@ class PlanSnapshotItem:
 
 @dataclass(frozen=True)
 class PlanSnapshot:
-    execution_objective: str | None
+    raw_user_request: str | None
+    interpreted_goal: str | None
     summary: str
     completion_criteria: tuple[str, ...]
     items: tuple[PlanSnapshotItem, ...]
+    task_understanding: str | None = None
+    current_implementation: str | None = None
+    target_design: str | None = None
+    impact_scope: str | None = None
+    risks_and_open_questions: tuple[str, ...] = field(default_factory=tuple)
+    verification_plan: str | None = None
     status: Literal["active", "completed"] | None = None
     change_reason: PlanChangeReason | None = None
     explanation: str = ""
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "execution_objective", _optional_text(self.execution_objective))
+        object.__setattr__(self, "raw_user_request", _optional_text(self.raw_user_request))
+        object.__setattr__(self, "interpreted_goal", _optional_text(self.interpreted_goal))
+        object.__setattr__(self, "task_understanding", _optional_text(self.task_understanding))
+        object.__setattr__(self, "current_implementation", _optional_text(self.current_implementation))
+        object.__setattr__(self, "target_design", _optional_text(self.target_design))
+        object.__setattr__(self, "impact_scope", _optional_text(self.impact_scope))
+        object.__setattr__(
+            self,
+            "risks_and_open_questions",
+            _normalize_text_tuple(self.risks_and_open_questions, "risks_and_open_questions", max_items=8),
+        )
+        object.__setattr__(self, "verification_plan", _optional_text(self.verification_plan))
         object.__setattr__(self, "summary", _required_text(self.summary, "plan summary"))
         criteria = tuple(_required_text(value, "completion criterion") for value in self.completion_criteria)
         if not criteria or len(criteria) > 5:
@@ -147,6 +188,9 @@ class PlanSnapshot:
         criteria = raw.get("completion_criteria")
         if not isinstance(criteria, list):
             raise PlanValidationError("completion_criteria must be a list")
+        risks = raw.get("risks_and_open_questions", [])
+        if not isinstance(risks, list):
+            raise PlanValidationError("risks_and_open_questions must be a list")
         items_raw = raw.get("items")
         if not isinstance(items_raw, list):
             raise PlanValidationError("items must be a list")
@@ -170,10 +214,17 @@ class PlanSnapshot:
                 )
             )
         return cls(
-            execution_objective=_optional_text(raw.get("execution_objective")),
+            raw_user_request=_optional_text(raw.get("raw_user_request")),
+            interpreted_goal=_optional_text(raw.get("interpreted_goal")),
             summary=_required_text(raw.get("summary"), "plan summary"),
             completion_criteria=tuple(criteria),
             items=tuple(items),
+            task_understanding=_optional_text(raw.get("task_understanding")),
+            current_implementation=_optional_text(raw.get("current_implementation")),
+            target_design=_optional_text(raw.get("target_design")),
+            impact_scope=_optional_text(raw.get("impact_scope")),
+            risks_and_open_questions=tuple(risks),
+            verification_plan=_optional_text(raw.get("verification_plan")),
             status=cast(Any, raw.get("status")),
             change_reason=ensure_plan_change_reason(raw.get("change_reason")),
             explanation=_optional_text(raw.get("explanation")) or "",
@@ -194,7 +245,14 @@ class PlanState:
     owner_run_id: str = ""
     status: PlanStatus = "active"
     origin_mode: RunMode = "build"
-    objective: str = ""
+    raw_user_request: str = ""
+    interpreted_goal: str = ""
+    task_understanding: str = ""
+    current_implementation: str = ""
+    target_design: str = ""
+    impact_scope: str = ""
+    risks_and_open_questions: tuple[str, ...] = field(default_factory=tuple)
+    verification_plan: str = ""
     summary: str = ""
     completion_criteria: tuple[str, ...] = field(default_factory=tuple)
     items: tuple[PlanItem, ...] = field(default_factory=tuple)
@@ -212,7 +270,18 @@ class PlanState:
         object.__setattr__(self, "owner_run_id", _required_text(self.owner_run_id, "owner_run_id"))
         object.__setattr__(self, "status", ensure_plan_status(self.status))
         object.__setattr__(self, "origin_mode", ensure_run_mode(self.origin_mode))
-        object.__setattr__(self, "objective", _required_text(self.objective, "objective"))
+        object.__setattr__(self, "raw_user_request", _required_text(self.raw_user_request, "raw_user_request"))
+        object.__setattr__(self, "interpreted_goal", _required_text(self.interpreted_goal, "interpreted_goal"))
+        object.__setattr__(self, "task_understanding", _optional_text(self.task_understanding) or "")
+        object.__setattr__(self, "current_implementation", _optional_text(self.current_implementation) or "")
+        object.__setattr__(self, "target_design", _optional_text(self.target_design) or "")
+        object.__setattr__(self, "impact_scope", _optional_text(self.impact_scope) or "")
+        object.__setattr__(
+            self,
+            "risks_and_open_questions",
+            _normalize_text_tuple(self.risks_and_open_questions, "risks_and_open_questions", max_items=8),
+        )
+        object.__setattr__(self, "verification_plan", _optional_text(self.verification_plan) or "")
         object.__setattr__(self, "summary", _optional_text(self.summary) or "")
         criteria = tuple(_required_text(value, "completion criterion") for value in self.completion_criteria)
         if not criteria or len(criteria) > 5:
@@ -264,13 +333,23 @@ class PlanState:
         criteria = raw.get("completion_criteria")
         if not isinstance(criteria, list):
             raise PlanValidationError("completion_criteria must be a list")
+        risks = raw.get("risks_and_open_questions")
+        if not isinstance(risks, list):
+            raise PlanValidationError("risks_and_open_questions must be a list")
         return cls(
             schema_version=PLAN_STATE_SCHEMA_VERSION,
             plan_id=_required_text(raw.get("plan_id"), "plan_id"),
             owner_run_id=_required_text(raw.get("owner_run_id"), "owner_run_id"),
             status=ensure_plan_status(raw.get("status")),
             origin_mode=ensure_run_mode(raw.get("origin_mode")),
-            objective=_required_text(raw.get("objective"), "objective"),
+            raw_user_request=_required_text(raw.get("raw_user_request"), "raw_user_request"),
+            interpreted_goal=_required_text(raw.get("interpreted_goal"), "interpreted_goal"),
+            task_understanding=_optional_text(raw.get("task_understanding")) or "",
+            current_implementation=_optional_text(raw.get("current_implementation")) or "",
+            target_design=_optional_text(raw.get("target_design")) or "",
+            impact_scope=_optional_text(raw.get("impact_scope")) or "",
+            risks_and_open_questions=tuple(risks),
+            verification_plan=_optional_text(raw.get("verification_plan")) or "",
             summary=_required_text(raw.get("summary"), "summary"),
             completion_criteria=tuple(criteria),
             items=items,
@@ -305,7 +384,14 @@ class PlanState:
             "owner_run_id": self.owner_run_id,
             "status": self.status,
             "origin_mode": self.origin_mode,
-            "objective": self.objective,
+            "raw_user_request": self.raw_user_request,
+            "interpreted_goal": self.interpreted_goal,
+            "task_understanding": self.task_understanding,
+            "current_implementation": self.current_implementation,
+            "target_design": self.target_design,
+            "impact_scope": self.impact_scope,
+            "risks_and_open_questions": list(self.risks_and_open_questions),
+            "verification_plan": self.verification_plan,
             "summary": self.summary,
             "completion_criteria": list(self.completion_criteria),
             "items": [item.to_dict() for item in self.items],
@@ -324,7 +410,14 @@ class PlanState:
             owner_run_id=self.owner_run_id,
             status=self.status,
             origin_mode=self.origin_mode,
-            objective=self.objective,
+            raw_user_request=self.raw_user_request,
+            interpreted_goal=self.interpreted_goal,
+            task_understanding=self.task_understanding,
+            current_implementation=self.current_implementation,
+            target_design=self.target_design,
+            impact_scope=self.impact_scope,
+            risks_and_open_questions=list(self.risks_and_open_questions),
+            verification_plan=self.verification_plan,
             summary=self.summary,
             completion_criteria=list(self.completion_criteria),
             items=[item.to_dict() for item in self.items],
@@ -343,24 +436,35 @@ def apply_plan_snapshot(
     *,
     mode: RunMode,
     run_id: str,
+    operation: PlanOperation | str | None = None,
     qualified_failure_count: int = 0,
 ) -> PlanState:
     run_mode = ensure_run_mode(mode)
+    plan_operation = ensure_plan_operation(operation or _default_plan_operation(run_mode, state))
     if run_mode == "read":
         raise PlanValidationError("read mode cannot update a plan")
     if state is None:
-        return _create_plan(snapshot, mode=run_mode, run_id=run_id)
-    if state.owner_run_id != _required_text(run_id, "run_id"):
-        raise PlanValidationError("plan belongs to a different run")
+        if plan_operation == "propose_plan" and run_mode == "plan":
+            return _create_plan(snapshot, mode=run_mode, run_id=run_id)
+        if plan_operation == "create_build_plan" and run_mode == "build":
+            return _create_plan(snapshot, mode=run_mode, run_id=run_id)
+        raise PlanValidationError(f"{plan_operation} cannot create a plan in {run_mode} mode")
+    if plan_operation == "create_build_plan":
+        raise PlanValidationError("cannot create a build plan while a current Task Plan exists")
     if state.status in {"completed", "rejected", "abandoned"}:
         raise PlanValidationError(f"{state.status} plan cannot be changed by the model")
     if state.status == "proposed":
-        if run_mode != "plan":
+        if run_mode != "plan" or plan_operation != "propose_plan":
             raise PlanValidationError("proposed plan must be approved before execution")
         return _revise_proposal(state, snapshot)
-    if run_mode != "build":
+    if run_mode != "build" or plan_operation not in {"update_plan_progress", "close_plan"}:
         raise PlanValidationError("active plan can only be updated in build mode")
-    return _update_active_plan(state, snapshot, qualified_failure_count=qualified_failure_count)
+    return _update_active_plan(
+        state,
+        snapshot,
+        operation=plan_operation,
+        qualified_failure_count=qualified_failure_count,
+    )
 
 
 def apply_plan_snapshot_metadata(
@@ -374,11 +478,13 @@ def apply_plan_snapshot_metadata(
     raw_snapshot = metadata.get("plan_snapshot")
     if not isinstance(raw_snapshot, Mapping):
         return state
+    operation = metadata.get("plan_operation")
     return apply_plan_snapshot(
         state,
         PlanSnapshot.from_mapping(raw_snapshot),
         mode=mode,
         run_id=run_id,
+        operation=operation if isinstance(operation, str) else None,
         qualified_failure_count=qualified_failure_count,
     )
 
@@ -440,10 +546,27 @@ def ensure_plan_change_reason(value: object) -> PlanChangeReason | None:
     return cast(PlanChangeReason, text)
 
 
+def ensure_plan_operation(value: object) -> PlanOperation:
+    text = str(value).strip() if value is not None else ""
+    if text not in _PLAN_OPERATIONS:
+        raise PlanValidationError(f"Unknown plan operation: {value}")
+    return cast(PlanOperation, text)
+
+
+def _default_plan_operation(run_mode: RunMode, state: PlanState | None) -> PlanOperation:
+    if run_mode == "plan":
+        return "propose_plan"
+    if state is None:
+        return "create_build_plan"
+    return "update_plan_progress"
+
+
 def _create_plan(snapshot: PlanSnapshot, *, mode: RunMode, run_id: str) -> PlanState:
-    objective = _required_text(snapshot.execution_objective, "execution_objective")
+    raw_user_request = _required_text(snapshot.raw_user_request, "raw_user_request")
+    interpreted_goal = _required_text(snapshot.interpreted_goal, "interpreted_goal")
     if mode == "plan":
         snapshot = snapshot.as_proposal()
+        _require_proposal_details(snapshot)
         status: PlanStatus = "proposed"
     else:
         if snapshot.status == "completed":
@@ -455,7 +578,14 @@ def _create_plan(snapshot: PlanSnapshot, *, mode: RunMode, run_id: str) -> PlanS
         owner_run_id=_required_text(run_id, "run_id"),
         status=status,
         origin_mode=mode,
-        objective=objective,
+        raw_user_request=raw_user_request,
+        interpreted_goal=interpreted_goal,
+        task_understanding=snapshot.task_understanding or "",
+        current_implementation=snapshot.current_implementation or "",
+        target_design=snapshot.target_design or "",
+        impact_scope=snapshot.impact_scope or "",
+        risks_and_open_questions=snapshot.risks_and_open_questions,
+        verification_plan=snapshot.verification_plan or "",
         summary=snapshot.summary,
         completion_criteria=snapshot.completion_criteria,
         items=tuple(_materialize_items(snapshot.items)),
@@ -470,9 +600,17 @@ def _revise_proposal(state: PlanState, snapshot: PlanSnapshot) -> PlanState:
     if snapshot.status is not None:
         raise PlanValidationError("plan proposal cannot set status")
     proposal = snapshot.as_proposal()
+    _require_proposal_details(proposal)
     return replace(
         state,
-        objective=proposal.execution_objective or state.objective,
+        raw_user_request=proposal.raw_user_request or state.raw_user_request,
+        interpreted_goal=proposal.interpreted_goal or state.interpreted_goal,
+        task_understanding=proposal.task_understanding or state.task_understanding,
+        current_implementation=proposal.current_implementation or state.current_implementation,
+        target_design=proposal.target_design or state.target_design,
+        impact_scope=proposal.impact_scope or state.impact_scope,
+        risks_and_open_questions=proposal.risks_and_open_questions,
+        verification_plan=proposal.verification_plan or state.verification_plan,
         summary=proposal.summary,
         completion_criteria=proposal.completion_criteria,
         items=tuple(_materialize_items(proposal.items, existing=state.items)),
@@ -486,16 +624,21 @@ def _update_active_plan(
     state: PlanState,
     snapshot: PlanSnapshot,
     *,
+    operation: PlanOperation,
     qualified_failure_count: int,
 ) -> PlanState:
-    if snapshot.execution_objective is not None:
-        raise PlanValidationError("active plan updates cannot set execution_objective")
+    if snapshot.raw_user_request is not None:
+        raise PlanValidationError("active plan updates cannot set raw_user_request")
+    if snapshot.interpreted_goal is not None:
+        raise PlanValidationError("active plan updates cannot set interpreted_goal")
     missing_ids = any(item.id is None for item in snapshot.items)
     if missing_ids and snapshot.change_reason is None:
         raise PlanValidationError("active plan snapshots must include canonical item ids")
     candidate = tuple(_materialize_items(snapshot.items, existing=state.items))
     structure_changed = _structure_changed(state, snapshot, candidate)
     if structure_changed:
+        if state.origin_mode == "plan":
+            raise PlanValidationError("Plan-mode approved active plan cannot be structurally replaced by Build")
         if snapshot.change_reason is None:
             raise PlanValidationError("active plan structure changed without a change reason")
         if snapshot.change_reason == "repeated_execution_failure" and qualified_failure_count < QUALIFIED_FAILURES_FOR_REVISION:
@@ -504,6 +647,10 @@ def _update_active_plan(
         raise PlanValidationError("change_reason requires a structural plan change")
     if snapshot.status not in {None, "active", "completed"}:
         raise PlanValidationError("invalid active plan status")
+    if operation == "update_plan_progress" and snapshot.status == "completed":
+        raise PlanValidationError("use close_plan to complete the current Task Plan")
+    if operation == "close_plan" and snapshot.status is None:
+        raise PlanValidationError("close_plan must set status to active or completed")
     now = _utc_now_iso()
     next_state = replace(
         state,
@@ -574,10 +721,36 @@ def _structure_changed(state: PlanState, snapshot: PlanSnapshot, items: tuple[Pl
     return False
 
 
+def _require_proposal_details(snapshot: PlanSnapshot) -> None:
+    required = {
+        "task_understanding": snapshot.task_understanding,
+        "current_implementation": snapshot.current_implementation,
+        "target_design": snapshot.target_design,
+        "impact_scope": snapshot.impact_scope,
+        "verification_plan": snapshot.verification_plan,
+    }
+    for field_name, value in required.items():
+        _required_text(value, field_name)
+    if not snapshot.risks_and_open_questions:
+        raise PlanValidationError("risks_and_open_questions must contain at least 1 item")
+
+
 def _ensure_non_negative_int(value: object, field_name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise PlanValidationError(f"{field_name} must be a non-negative integer")
     return value
+
+
+def _normalize_text_tuple(
+    values: tuple[str, ...] | list[str],
+    field_name: str,
+    *,
+    max_items: int,
+) -> tuple[str, ...]:
+    items = tuple(_required_text(value, f"{field_name}[{index}]") for index, value in enumerate(values))
+    if len(items) > max_items:
+        raise PlanValidationError(f"{field_name} cannot contain more than {max_items} items")
+    return items
 
 
 def _required_text(value: object, field_name: str) -> str:
@@ -605,6 +778,7 @@ __all__ = [
     "PlanChangeReason",
     "PlanItem",
     "PlanItemStatus",
+    "PlanOperation",
     "PlanSnapshot",
     "PlanSnapshotItem",
     "PlanState",
@@ -616,6 +790,7 @@ __all__ = [
     "apply_plan_snapshot_metadata",
     "ensure_plan_change_reason",
     "ensure_plan_item_status",
+    "ensure_plan_operation",
     "ensure_plan_status",
     "ensure_planning_budget_profile",
     "ensure_run_mode",

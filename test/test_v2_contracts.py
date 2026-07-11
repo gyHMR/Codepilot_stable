@@ -192,7 +192,7 @@ def test_agent_loop_mode_and_plan_state_are_explicit_contracts() -> None:
 
     input_hints = get_type_hints(AgentLoopInput)
     resume_hints = get_type_hints(AgentResumeInput)
-    plan_state = {"plan_id": "plan_1", "objective": "ship it"}
+    plan_state = {"plan_id": "plan_1", "interpreted_goal": "ship it"}
 
     assert input_hints["mode"].__args__ == ("read", "plan", "build")
     assert resume_hints["mode"].__args__ == ("read", "plan", "build")
@@ -205,9 +205,9 @@ def test_agent_loop_mode_and_plan_state_are_explicit_contracts() -> None:
         mode="plan",
         plan_state=plan_state,
     )
-    plan_state["objective"] = "mutated"
+    plan_state["interpreted_goal"] = "mutated"
     assert loop_input.mode == "plan"
-    assert loop_input.plan_state == {"plan_id": "plan_1", "objective": "ship it"}
+    assert loop_input.plan_state == {"plan_id": "plan_1", "interpreted_goal": "ship it"}
 
 
 def test_agent_loop_context_is_named_prepared_context_contract() -> None:

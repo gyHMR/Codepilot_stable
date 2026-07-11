@@ -122,8 +122,90 @@ def test_run_guard_steering_is_an_ephemeral_runtime_directive() -> None:
         )
 
         assert outcome.status == "completed"
-        assert "没有给出用户可见的最终答复" in model.requests[1].system_prompt
+        prompt = model.requests[1].system_prompt
+        assert "## Synthetic Control" in prompt
+        assert "Source: runner" in prompt
+        assert "Scope: final_answer_only" in prompt
+        assert "This is not a user request" in prompt
+        assert "没有给出用户可见的最终答复" in prompt
+        assert "Raw request: 没有给出用户可见的最终答复" not in prompt
         assert not any(isinstance(message, UserMessage) for message in outcome.new_messages)
+
+    asyncio.run(run_case())
+
+
+def test_verification_missing_does_not_drive_continuation_after_final_answer() -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import (
+            AgentLoopInput,
+            AgentLoopLimits,
+            AgentLoopPorts,
+            RunCorrelation,
+        )
+        from codepilot.core.runner import run_agent_loop
+        from codepilot.llm.ports import LLMCompleted, ModelDescriptor
+        from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+        from codepilot.tools.contracts import ToolObservation
+
+        class FakeModel:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def stream(self, _request):
+                self.calls += 1
+                if self.calls == 1:
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[
+                                ToolCall(
+                                    id="write_script",
+                                    name="write",
+                                    arguments={"path": "agent-test/random_sentence_generator.py"},
+                                )
+                            ]
+                        )
+                    )
+                    return
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text="已创建并运行验证。")])
+                )
+
+        class FakeTools:
+            def catalog(self, current_mode: str = "build"):
+                return {"tools": ["write"]}
+
+            async def execute(self, invocation):
+                return ToolObservation(
+                    tool_call_id=invocation.tool_call_id,
+                    name=invocation.name,
+                    status="success",
+                    content=(TextContent(text="Wrote file"),),
+                    affected_paths=("agent-test/random_sentence_generator.py",),
+                    workspace_changed=True,
+                )
+
+        model = FakeModel()
+        outcome = await run_agent_loop(
+            AgentLoopInput(
+                run_id="run_verification_missing",
+                correlation=RunCorrelation(session_id="s1"),
+                user_prompt="写一个随机句子生成器",
+                model=ModelDescriptor(provider="fake", model_id="unit"),
+                limits=AgentLoopLimits(max_model_turns=4),
+            ),
+            AgentLoopPorts(model=model, tools=FakeTools()),
+        )
+
+        assert outcome.status == "completed"
+        assert outcome.stop_reason == "final_answer"
+        assert model.calls == 2
+        assert outcome.signals.verification_status == "stale"
+        guard_events = [event for event in outcome.events if event["type"] == "run_guard_checked"]
+        assert guard_events[-1]["decision"]["action"] == "completed"
+        assert not any(
+            event.get("decision", {}).get("reason") == "verification_missing"
+            for event in guard_events
+        )
 
     asyncio.run(run_case())
 
@@ -752,7 +834,7 @@ def test_core_loop_injects_plan_context_and_returns_plan_summary() -> None:
                             content=[
                                 ToolCall(
                                     id="plan_closeout",
-                                    name="update_plan",
+                                    name="close_plan",
                                     arguments={
                                         "summary": "Read and migrate the plan code.",
                                         "completion_criteria": ["相关验证通过"],
@@ -779,7 +861,7 @@ def test_core_loop_injects_plan_context_and_returns_plan_summary() -> None:
 
         class FakeTools:
             def catalog(self, current_mode: str = "build"):
-                return {"tools": ["update_plan"]}
+                return {"tools": ["close_plan"]}
 
             async def execute(self, invocation):
                 return ToolObservation(
@@ -788,6 +870,7 @@ def test_core_loop_injects_plan_context_and_returns_plan_summary() -> None:
                     status="success",
                     content=(TextContent(text="Plan updated and marked completed."),),
                     metadata={
+                        "plan_operation": "close_plan",
                         "plan_snapshot": {
                             "summary": "Read and migrate the plan code.",
                             "completion_criteria": ["相关验证通过"],
@@ -809,7 +892,8 @@ def test_core_loop_injects_plan_context_and_returns_plan_summary() -> None:
             None,
             PlanSnapshot.from_mapping(
                 {
-                    "execution_objective": "ship the plan migration",
+                    "raw_user_request": "ship the plan migration",
+                    "interpreted_goal": "ship the plan migration",
                     "summary": "Read and migrate the plan code.",
                     "completion_criteria": ["相关验证通过"],
                     "items": [
@@ -841,7 +925,7 @@ def test_core_loop_injects_plan_context_and_returns_plan_summary() -> None:
 
         assert outcome.status == "completed"
         assert outcome.plan is not None
-        assert outcome.plan.objective == "ship the plan migration"
+        assert outcome.plan.interpreted_goal == "ship the plan migration"
         assert outcome.plan.status == "completed"
         assert "base rules" in model.system_prompts[0]
         assert "Plan Brief:" in model.system_prompts[0]
@@ -868,14 +952,21 @@ def test_core_loop_plan_mode_keeps_soft_plan_proposed() -> None:
             None,
             PlanSnapshot.from_mapping(
                 {
-                    "execution_objective": "refactor by plan",
+                    "raw_user_request": "refactor by plan",
+                    "interpreted_goal": "refactor by plan",
+                    "task_understanding": "User wants a refactor plan that Build can execute.",
+                    "current_implementation": "The target files and behavior have been inspected.",
+                    "target_design": "Apply a focused refactor while preserving behavior.",
+                    "impact_scope": "Target implementation files and focused tests.",
+                    "risks_and_open_questions": ["No blocker."],
+                    "verification_plan": "Run focused tests.",
                     "summary": "Inspect the target and apply a focused refactor.",
                     "completion_criteria": ["Focused tests pass"],
                     "items": [
                         {
-                            "step": "Inspect target files",
-                            "details": "Read the files that own the behavior.",
-                            "verification": "Identify the exact edit points.",
+                            "step": "Update the target implementation",
+                            "details": "Apply the agreed focused refactor in the owning files.",
+                            "verification": "Review the resulting diff for the expected behavior.",
                             "status": "pending",
                         },
                         {
@@ -893,7 +984,7 @@ def test_core_loop_plan_mode_keeps_soft_plan_proposed() -> None:
 
         class FakeModel:
             async def stream(self, request):
-                assert "- [pending] Inspect target files" in request.system_prompt
+                assert "- [pending] Update the target implementation" in request.system_prompt
                 assert "- [pending] Apply focused refactor" in request.system_prompt
                 yield LLMCompleted(
                     message=AssistantMessage(content=[TextContent(text="done")])
@@ -937,7 +1028,8 @@ def test_core_loop_preserves_plan_summary_when_waiting_for_approval() -> None:
             None,
             PlanSnapshot.from_mapping(
                 {
-                    "execution_objective": "edit the file",
+                    "raw_user_request": "edit the file",
+                    "interpreted_goal": "edit the file",
                     "summary": "Edit and verify the target file.",
                     "completion_criteria": ["Diff is correct"],
                     "items": [
@@ -999,12 +1091,12 @@ def test_core_loop_preserves_plan_summary_when_waiting_for_approval() -> None:
                 plan_state=plan.to_dict(),
                 limits=AgentLoopLimits(max_model_turns=1),
             ),
-                AgentLoopPorts(model=FakeModel(), tools=FakeTools(), context=_PlanPromptPort()),
+            AgentLoopPorts(model=FakeModel(), tools=FakeTools(), context=_PlanPromptPort()),
         )
 
         assert outcome.status == "waiting_approval"
         assert outcome.plan is not None
-        assert outcome.plan.objective == "edit the file"
+        assert outcome.plan.interpreted_goal == "edit the file"
         assert outcome.signals.approval_required is True
 
     asyncio.run(run_case())
@@ -1027,7 +1119,8 @@ def test_active_plan_closeout_stops_after_model_reports_incomplete() -> None:
             None,
             PlanSnapshot.from_mapping(
                 {
-                    "execution_objective": "完成目标修改",
+                    "raw_user_request": "完成目标修改",
+                    "interpreted_goal": "完成目标修改",
                     "summary": "完成并验证目标修改。",
                     "completion_criteria": ["相关测试通过"],
                     "items": [
@@ -1101,17 +1194,23 @@ def test_plan_mode_rejects_proposal_before_repository_exploration() -> None:
                             content=[
                                 ToolCall(
                                     id="premature_plan",
-                                    name="update_plan",
-                                    arguments={
-                                        "execution_objective": "完善注册逻辑",
-                                        "summary": "修改注册流程并补充测试。",
+                                    name="propose_plan",
+                                            arguments={
+                                                "raw_user_request": "完善注册逻辑，给我方案",
+                                                "interpreted_goal": "完善注册逻辑",
+                                                "task_understanding": "用户希望先审批完善注册逻辑的方案。",
+                                                "current_implementation": "尚未完成探索，应被 runner 拒绝。",
+                                                "target_design": "完善注册逻辑并保持兼容。",
+                                                "impact_scope": "影响注册逻辑和注册测试。",
+                                                "risks_and_open_questions": ["暂无阻塞待确认项。"],
+                                                "verification_plan": "运行注册测试。",
+                                                "summary": "修改注册流程并补充测试。",
                                         "completion_criteria": ["注册测试通过"],
                                         "items": [
                                             {
                                                 "step": "修改注册逻辑",
                                                 "details": "调整注册实现。",
                                                 "verification": "运行注册测试。",
-                                                "status": "pending",
                                             }
                                         ],
                                     },
@@ -1128,15 +1227,20 @@ def test_plan_mode_rejects_proposal_before_repository_exploration() -> None:
 
         class Tools:
             def catalog(self, current_mode: str = "plan"):
-                return {"tools": ["update_plan"]}
+                return {"tools": ["propose_plan"]}
 
             async def execute(self, invocation):
+                snapshot = dict(invocation.arguments)
+                snapshot["items"] = [
+                    {**item, "status": "pending"}
+                    for item in invocation.arguments.get("items", [])
+                ]
                 return ToolObservation(
                     tool_call_id=invocation.tool_call_id,
                     name=invocation.name,
                     status="success",
                     content=(TextContent(text="Plan snapshot submitted."),),
-                    metadata={"plan_snapshot": dict(invocation.arguments)},
+                    metadata={"plan_operation": "propose_plan", "plan_snapshot": snapshot},
                 )
 
         outcome = await run_agent_loop(
@@ -1159,6 +1263,208 @@ def test_plan_mode_rejects_proposal_before_repository_exploration() -> None:
         )
         assert result.error_code == "plan_exploration_required"
         assert result.status == "error"
+
+    asyncio.run(run_case())
+
+
+def test_plan_mode_steers_prose_draft_to_canonical_proposal_before_waiting() -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import (
+            AgentLoopInput,
+            AgentLoopLimits,
+            AgentLoopPorts,
+            RunCorrelation,
+        )
+        from codepilot.core.runner import run_agent_loop
+        from codepilot.llm.ports import LLMCompleted, ModelDescriptor
+        from codepilot.protocols import AssistantMessage, TextContent, ToolCall, UserMessage
+        from codepilot.tools.contracts import ToolObservation
+
+        class Context:
+            def __init__(self) -> None:
+                self.requests = []
+
+            def prepare(self, request):
+                self.requests.append(request)
+                control = request.get("context", {}).get("synthetic_control")
+                instruction = control.get("instruction", "") if isinstance(control, dict) else ""
+                return {
+                    "system_prompt": f"{request.get('system_prompt', '')}\n{instruction}",
+                    "messages": request["messages"],
+                    "tools": request["tools"],
+                }
+
+        class Model:
+            def __init__(self) -> None:
+                self.requests = []
+
+            async def stream(self, request):
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[ToolCall(id="inspect", name="read", arguments={"path": "app.py"})]
+                        )
+                    )
+                    return
+                if len(self.requests) == 2:
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[TextContent(text="方案已经整理完成，你觉得这个方向怎么样？")]
+                        )
+                    )
+                    return
+                yield LLMCompleted(
+                    message=AssistantMessage(
+                        content=[
+                            ToolCall(
+                                id="publish",
+                                name="propose_plan",
+                                arguments={
+                                    "raw_user_request": "为现有应用增加界面",
+                                    "interpreted_goal": "为现有应用增加可验证的轻量界面",
+                                    "task_understanding": "用户要求先形成方案，再由 Build 实现界面。",
+                                    "current_implementation": "已读取 app.py 并确认当前应用入口。",
+                                    "target_design": "在现有入口上增加轻量界面并保持现有行为。",
+                                    "impact_scope": "影响 app.py 和对应界面测试。",
+                                    "risks_and_open_questions": ["暂无阻塞性待确认项。"],
+                                    "verification_plan": "运行界面相关测试并检查启动结果。",
+                                    "summary": "增加轻量界面并完成验证。",
+                                    "completion_criteria": ["界面可以正常启动"],
+                                    "items": [
+                                        {
+                                            "step": "实现轻量界面",
+                                            "details": "在现有应用入口增加界面。",
+                                            "verification": "运行界面测试。",
+                                        }
+                                    ],
+                                },
+                            )
+                        ]
+                    )
+                )
+
+        class Tools:
+            def catalog(self, current_mode: str = "plan"):
+                return {"tools": ["read", "propose_plan"]}
+
+            async def execute(self, invocation):
+                metadata = {}
+                if invocation.name == "propose_plan":
+                    snapshot = dict(invocation.arguments)
+                    snapshot["items"] = [
+                        {**item, "status": "pending"}
+                        for item in invocation.arguments.get("items", [])
+                    ]
+                    metadata = {
+                        "plan_operation": "propose_plan",
+                        "plan_snapshot": snapshot,
+                    }
+                return ToolObservation(
+                    tool_call_id=invocation.tool_call_id,
+                    name=invocation.name,
+                    status="success",
+                    content=(TextContent(text="ok"),),
+                    metadata=metadata,
+                )
+
+        context = Context()
+        model = Model()
+        outcome = await run_agent_loop(
+            AgentLoopInput(
+                run_id="run_plan_publish_steering",
+                correlation=RunCorrelation(session_id="s1"),
+                messages=[UserMessage(content="为现有应用增加界面，先给方案")],
+                user_prompt="为现有应用增加界面，先给方案",
+                mode="plan",
+                model=ModelDescriptor(provider="fake", model_id="unit"),
+                limits=AgentLoopLimits(max_model_turns=3),
+            ),
+            AgentLoopPorts(model=model, tools=Tools(), context=context),
+        )
+
+        assert outcome.status == "waiting_user"
+        assert outcome.stop_reason == "plan_approval_required"
+        assert outcome.plan is not None
+        assert outcome.plan.status == "proposed"
+        assert len(model.requests) == 3
+        control = context.requests[2]["context"]["synthetic_control"]
+        assert control["kind"] == "plan_publish_required"
+        assert control["scope"] == "plan_protocol_only"
+        assert "No user approval has occurred" in control["instruction"]
+        assert "publishing a plan is not approval" in control["instruction"]
+        assert "Do not state or imply that the user accepted the plan" in control["instruction"]
+        assert "Preserve the user's original request" in control["instruction"]
+        assert not any(isinstance(message, UserMessage) for message in outcome.new_messages)
+        assert "请回复“批准”开始执行" in outcome.final_text
+        assert sum(event["type"] == "plan_approval_required" for event in outcome.events) == 1
+        assert not any(event["type"] == "plan_clarification_required" for event in outcome.events)
+
+    asyncio.run(run_case())
+
+
+def test_plan_mode_allows_clarification_after_one_protocol_steering_turn() -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import (
+            AgentLoopInput,
+            AgentLoopLimits,
+            AgentLoopPorts,
+            RunCorrelation,
+        )
+        from codepilot.core.runner import run_agent_loop
+        from codepilot.llm.ports import LLMCompleted, ModelDescriptor
+        from codepilot.protocols import AssistantMessage, TextContent, UserMessage
+
+        class Context:
+            def __init__(self) -> None:
+                self.controls = []
+
+            def prepare(self, request):
+                control = request.get("context", {}).get("synthetic_control")
+                self.controls.append(control)
+                return {
+                    "system_prompt": request.get("system_prompt", ""),
+                    "messages": request["messages"],
+                    "tools": request["tools"],
+                }
+
+        class Model:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def stream(self, _request):
+                self.calls += 1
+                text = (
+                    "需要确认界面是否必须兼容移动端。"
+                    if self.calls == 1
+                    else "请确认：这个界面是否必须兼容移动端？"
+                )
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text=text)])
+                )
+
+        context = Context()
+        model = Model()
+        outcome = await run_agent_loop(
+            AgentLoopInput(
+                run_id="run_plan_clarification_after_steering",
+                correlation=RunCorrelation(session_id="s1"),
+                messages=[UserMessage(content="为应用设计一个界面方案")],
+                user_prompt="为应用设计一个界面方案",
+                mode="plan",
+                model=ModelDescriptor(provider="fake", model_id="unit"),
+                limits=AgentLoopLimits(max_model_turns=2),
+            ),
+            AgentLoopPorts(model=model, tools=None, context=context),
+        )
+
+        assert outcome.status == "waiting_user"
+        assert outcome.stop_reason == "plan_clarification_required"
+        assert outcome.final_text == "请确认：这个界面是否必须兼容移动端？"
+        assert model.calls == 2
+        assert context.controls[0] is None
+        assert context.controls[1]["kind"] == "plan_publish_required"
+        assert not any(isinstance(message, UserMessage) for message in outcome.new_messages)
 
     asyncio.run(run_case())
 
@@ -1371,7 +1677,7 @@ def test_resume_agent_loop_uses_tool_port_resume_before_continuing_model() -> No
     asyncio.run(run_case())
 
 
-def test_core_loop_waits_for_user_when_final_answer_lacks_required_verification() -> None:
+def test_core_loop_records_stale_verification_without_blocking_final_answer() -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import (
             AgentLoopInput,
@@ -1426,8 +1732,8 @@ def test_core_loop_waits_for_user_when_final_answer_lacks_required_verification(
             AgentLoopPorts(model=FakeModel(), tools=FakeTools()),
         )
 
-        assert outcome.status == "waiting_user"
-        assert outcome.stop_reason == "run_guard"
+        assert outcome.status == "completed"
+        assert outcome.stop_reason == "final_answer"
         assert outcome.signals.workspace_changed is True
         assert outcome.signals.verification_status == "stale"
 

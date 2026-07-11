@@ -27,8 +27,19 @@ _TOOL_RESULT_STATUSES = frozenset(
     {"success", "error", "denied", "approval_required", "cancelled"}
 )
 
-# Soft plan update tool name shared by tools execution and core plan state.
-UPDATE_PLAN_TOOL = "update_plan"
+# Task Plan tool names shared by tools execution and core plan state.
+PROPOSE_PLAN_TOOL = "propose_plan"
+CREATE_BUILD_PLAN_TOOL = "create_build_plan"
+UPDATE_PLAN_PROGRESS_TOOL = "update_plan_progress"
+CLOSE_PLAN_TOOL = "close_plan"
+PLAN_TOOL_NAMES = frozenset(
+    {
+        PROPOSE_PLAN_TOOL,
+        CREATE_BUILD_PLAN_TOOL,
+        UPDATE_PLAN_PROGRESS_TOOL,
+        CLOSE_PLAN_TOOL,
+    }
+)
 PLAN_ITEM_LIMIT = 20
 
 
@@ -135,6 +146,10 @@ __all__ = [
     "ToolResultBlock",
     "ToolResultStatus",
     "ToolRiskLevel",
-    "UPDATE_PLAN_TOOL",
+    "CLOSE_PLAN_TOOL",
+    "CREATE_BUILD_PLAN_TOOL",
+    "PLAN_TOOL_NAMES",
+    "PROPOSE_PLAN_TOOL",
+    "UPDATE_PLAN_PROGRESS_TOOL",
     "ensure_tool_result_status",
 ]

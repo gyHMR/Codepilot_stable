@@ -288,8 +288,10 @@ def create_exploration_tools(
             name=LIST_EXPLORATION_AGENTS_TOOL,
             label="List exploration agents",
             description=(
-                "List session-scoped read-only exploration subagents and their latest reports. "
-                "Use this in plan mode before re-dispatching similar repository exploration."
+                "This tool does not explore the repository and does not create or run subagents. "
+                "Use it only to inspect reports already produced by dispatch_exploration. "
+                "Do not call it as the first exploration action. Normal Plan mode exploration "
+                "should start with dispatch_exploration using reuse=auto."
             ),
             parameters={
                 "type": "object",
@@ -310,8 +312,13 @@ def create_exploration_tools(
             name=DISPATCH_EXPLORATION_TOOL,
             label="Dispatch exploration",
             description=(
-                "Run up to four read-only exploration subagents in parallel and return "
-                "structured evidence for plan generation. Child agents cannot edit files, "
+                "Plan mode: use subagents to explore the repository and gather information before "
+                "producing the final plan. Dispatch up to four focused read-only subagents with "
+                "distinct investigation scopes and request concrete files, symbols, call paths, "
+                "risks, open questions, and verification evidence. The main agent must integrate "
+                "their reports, use direct read/grep/find only for focused confirmation or missing "
+                "details, and publish the final canonical plan with propose_plan. reuse=auto "
+                "automatically reuses relevant non-stale reports. Child agents cannot edit files, "
                 "update plans, run shell, or dispatch more subagents."
             ),
             parameters={
@@ -363,12 +370,18 @@ async def _execute_list_agents(
     _ = request
     session = session_provider()
     store = SubagentStore(workspace, session.session_id)
-    result = {
-        "agents": store.list_agents(
-            query=_optional_text(request.arguments.get("query")),
-            focus_paths=_string_list(request.arguments.get("focus_paths")),
-        )
+    agents = store.list_agents(
+        query=_optional_text(request.arguments.get("query")),
+        focus_paths=_string_list(request.arguments.get("focus_paths")),
+    )
+    result: dict[str, Any] = {
+        "agents": agents,
+        "has_reports": bool(agents),
     }
+    if not agents:
+        result["next_action"] = (
+            "Call dispatch_exploration to create read-only exploration subagents."
+        )
     return _json_tool_result(result, metadata={"exploration_agents": result})
 
 
@@ -438,7 +451,7 @@ def _subagent_system_prompt(workspace: Path) -> str:
 
 硬性边界：
 1. 只能使用这些只读工具：{allowed}。
-2. 不要修改文件、不要运行 shell、不要调用 update_plan、不要派发其他 subagent。
+2. 不要修改文件、不要运行 shell、不要调用任何 Task Plan 工具、不要派发其他 subagent。
 3. 不要给最终实施方案下结论；只给证据、风险、开放问题和计划提示。
 4. 当前工作目录：{cwd}
 

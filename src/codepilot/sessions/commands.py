@@ -405,7 +405,7 @@ def _status_record(session_id: str, text: str, session: Any) -> SessionCommandRe
         output_lines.append(
             f"  Plan       : {plan.get('status')} "
             f"{plan.get('done_items', 0)}/{plan.get('total_items', 0)} "
-            f"{plan.get('objective_preview', '')}".rstrip()
+            f"{plan.get('goal_preview', '')}".rstrip()
         )
     return _record(
         session_id,
@@ -563,8 +563,6 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
             output_lines=["Plan rejected.", *_format_plan_lines(state)],
             data={
                 "status": state.get("status") if isinstance(state, dict) else None,
-                "continuation_kind": "plan_rejected",
-                "continuation_run_id": continuation_run_id,
                 "current_mode": session.current_mode,
             },
         )
@@ -888,11 +886,26 @@ def _format_plan_lines(state: Any) -> list[str]:
         f"  Plan ID    : {state.get('plan_id', '')}",
         f"  Status     : {state.get('status', '')}",
         f"  Mode       : {state.get('origin_mode', '')}",
-        f"  Objective  : {state.get('objective', '')}",
+        f"  User Input : {state.get('raw_user_request', '')}",
+        f"  Goal       : {state.get('interpreted_goal', '')}",
     ]
     explanation = str(state.get("explanation") or "").strip()
     if explanation:
         lines.append(f"  Note       : {explanation}")
+    for label, key in [
+        ("Understanding", "task_understanding"),
+        ("Current Impl", "current_implementation"),
+        ("Target", "target_design"),
+        ("Impact", "impact_scope"),
+        ("Verification", "verification_plan"),
+    ]:
+        value = str(state.get(key) or "").strip()
+        if value:
+            lines.append(f"  {label:<11}: {value}")
+    risks = state.get("risks_and_open_questions")
+    if isinstance(risks, list) and risks:
+        lines.append("  Risks / questions:")
+        lines.extend(f"    - {item}" for item in risks if str(item).strip())
     criteria = state.get("completion_criteria")
     if isinstance(criteria, list) and criteria:
         lines.append("  Completion criteria:")

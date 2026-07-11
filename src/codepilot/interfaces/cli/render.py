@@ -940,9 +940,9 @@ class TerminalRenderer:
                 "=== Plan Approval Required ===",
                 *_format_plan_payload_lines(event.get("plan")),
                 "",
-                "Use /plan approve to execute this plan.",
-                "Use /plan reject to discard it.",
-                "Type feedback to revise the plan.",
+                "回复“批准”开始执行，回复“拒绝”放弃该方案。",
+                "也可以直接说明需要调整的内容。",
+                "命令方式：/plan approve 或 /plan reject。",
             ]
         )
         self._stream_started = True
@@ -1183,9 +1183,9 @@ def _format_plan_summary(value: dict[str, object] | None) -> str:
     progress = ""
     if isinstance(done, int) and isinstance(total, int) and total > 0:
         progress = f" {done}/{total}"
-    objective = str(value.get("objective_preview") or "").strip()
-    objective = f" {objective}" if objective else ""
-    return f"plan {status}{progress}{objective}".strip()
+    goal = str(value.get("goal_preview") or "").strip()
+    goal = f" {goal}" if goal else ""
+    return f"plan {status}{progress}{goal}".strip()
 
 
 def _format_plan_payload_lines(value: object) -> list[str]:
@@ -1196,7 +1196,8 @@ def _format_plan_payload_lines(value: object) -> list[str]:
         f"  Plan ID    : {value.get('plan_id', '')}",
         f"  Status     : {value.get('status', '')}",
         f"  Mode       : {value.get('origin_mode', '')}",
-        f"  Objective  : {value.get('objective', '')}",
+        f"  User Input : {value.get('raw_user_request', '')}",
+        f"  Goal       : {value.get('interpreted_goal', '')}",
     ]
     explanation = str(value.get("explanation") or "").strip()
     if explanation:

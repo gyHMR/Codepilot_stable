@@ -51,22 +51,13 @@ class RunGuard:
                 action="stopped",
                 reason="read_mode_workspace_changed",
             )
-        if signals.workspace_changed and signals.verification_status in {"unknown", "stale"}:
-            return RunGuardDecision(
-                action="continue_with_instruction",
-                reason="verification_missing",
-                instruction=(
-                    "你已经修改了工作区，但还没有看到 fresh verification。"
-                    "请运行相关测试或检查命令；如果无法验证，请说明原因和风险。"
-                ),
-            )
         if signals.verification_status == "failed":
             return RunGuardDecision(
                 action="continue_with_instruction",
                 reason="verification_failed",
                 instruction=(
-                    "刚才的验证失败了。请根据失败输出继续修复，"
-                    "然后重新验证；不要直接给最终完成答复。"
+                    "刚才的验证结果明确失败。请只总结已经完成的工作、失败证据和剩余任务，"
+                    "不要继续调用工具、不要扩大任务范围，也不要声明任务已经完成。"
                 ),
             )
         return RunGuardDecision(action="completed", reason="final_answer")

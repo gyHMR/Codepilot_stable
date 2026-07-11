@@ -64,7 +64,8 @@ class PlanTrace:
     plan_id: str = ""
     status: str = ""
     origin_mode: str = ""
-    objective: str = ""
+    raw_user_request: str = ""
+    interpreted_goal: str = ""
     items: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -473,7 +474,8 @@ def _plan(event: dict[str, Any]) -> PlanTrace:
         plan_id=str(event.get("plan_id", "")),
         status=str(event.get("status", "")),
         origin_mode=str(event.get("origin_mode", "")),
-        objective=str(event.get("objective", "")),
+        raw_user_request=str(event.get("raw_user_request", "")),
+        interpreted_goal=str(event.get("interpreted_goal", "")),
         items=_list_of_dicts(event.get("items")),
     )
 

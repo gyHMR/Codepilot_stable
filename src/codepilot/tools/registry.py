@@ -34,7 +34,14 @@ from dataclasses import dataclass, field
 from difflib import get_close_matches
 from typing import Any, Iterable
 
-from codepilot.protocols import TextContent
+from codepilot.protocols import (
+    CLOSE_PLAN_TOOL,
+    CREATE_BUILD_PLAN_TOOL,
+    PLAN_TOOL_NAMES,
+    PROPOSE_PLAN_TOOL,
+    TextContent,
+    UPDATE_PLAN_PROGRESS_TOOL,
+)
 
 from .contracts import (
     PreparedToolCall,
@@ -50,7 +57,7 @@ from .contracts import (
 # 工具名称分类常量
 # ---------------------------------------------------------------------------
 # 只读工具名称集合：这些工具不会修改文件系统或执行副作用操作。
-READ_ONLY_TOOL_NAMES = {"ls", "read", "grep", "find", "workspace_status", "update_plan"}
+READ_ONLY_TOOL_NAMES = {"ls", "read", "grep", "find", "workspace_status", *PLAN_TOOL_NAMES}
 
 # 可变工具名称集合：这些工具会修改文件系统或执行 shell 命令等副作用操作。
 MUTATING_TOOL_NAMES = {"write", "edit", "apply_patch", "bash"}
@@ -778,7 +785,7 @@ def get_builtin_tool_metadata(name: str) -> ToolMetadata | None:
 # - find:      文件查找（只读搜索操作）
 # - bash:      执行 Shell 命令（可变操作，有副作用）
 # - workspace_status: 工作区状态查询（只读工作区操作）
-# - update_plan: 更新计划（只读计划操作）
+# - propose_plan/create_build_plan/update_plan_progress/close_plan: 管理 Task Plan 状态
 
 _BUILTIN_METADATA: dict[str, ToolMetadata] = {
     # ---- 文件系统工具 ----
@@ -853,12 +860,33 @@ _BUILTIN_METADATA: dict[str, ToolMetadata] = {
     ),
 
     # ---- 计划工具 ----
-    "update_plan": builtin_metadata(
-        "update_plan",
+    PROPOSE_PLAN_TOOL: builtin_metadata(
+        PROPOSE_PLAN_TOOL,
         category="plan",
         read_only=True,
         risk_level="low",
-        scopes=("read", "plan", "build"),
+        scopes=("plan",),
+    ),
+    CREATE_BUILD_PLAN_TOOL: builtin_metadata(
+        CREATE_BUILD_PLAN_TOOL,
+        category="plan",
+        read_only=True,
+        risk_level="low",
+        scopes=("build",),
+    ),
+    UPDATE_PLAN_PROGRESS_TOOL: builtin_metadata(
+        UPDATE_PLAN_PROGRESS_TOOL,
+        category="plan",
+        read_only=True,
+        risk_level="low",
+        scopes=("build",),
+    ),
+    CLOSE_PLAN_TOOL: builtin_metadata(
+        CLOSE_PLAN_TOOL,
+        category="plan",
+        read_only=True,
+        risk_level="low",
+        scopes=("build",),
     ),
 }
 

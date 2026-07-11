@@ -654,8 +654,8 @@ class ContextGovernor:
             return MemoryRecall()
         query = MemoryQuery(
             latest_user_message=_latest_user_text(context.messages),
-            raw_user_request=_plan_objective(plan_state),
-            goal=_plan_objective(plan_state),
+            raw_user_request=_plan_raw_user_request(plan_state),
+            goal=_plan_interpreted_goal(plan_state),
             current_mode=_plan_string(plan_state, "origin_mode") or _context_mode(context),
             verification_status=_signal_text(run_signals, "verification_status"),
             blocked_reason=_signal_error_text(run_signals),
@@ -1044,25 +1044,47 @@ def _plan_items(
     if plan_state is None and run_signals is None:
         return []
     approved = _plan_string(plan_state, "status") == "active"
+    status = _plan_string(plan_state, "status") or "none"
+    origin = _plan_string(plan_state, "origin_mode") or "build"
+    verification = _signal_text(run_signals, "verification_status") or "unknown"
     lines = [
         (
-            "Approved Execution Contract: execute this canonical plan; do not replace it "
-            "with a newly invented plan."
+            "Approved Execution Contract: execute this canonical plan; do not replace it."
             if approved
-            else "Current Workflow Plan: pending proposal or soft progress for the current task."
+            else "Current Workflow Plan: proposed or soft progress for the current task."
         ),
-        f"Objective: {_plan_objective(plan_state)}",
-        f"Summary: {_plan_string(plan_state, 'summary') or '(none)'}",
-        f"Plan status: {_plan_string(plan_state, 'status') or 'none'}",
-        f"Origin mode: {_plan_string(plan_state, 'origin_mode') or 'build'}",
-        f"Verification: {_signal_text(run_signals, 'verification_status') or 'unknown'}",
+        f"Plan meta: status={status}; origin={origin}; verification={verification}",
+        f"Request: {_short_plan_text(_plan_raw_user_request(plan_state), 220)}",
+        f"Goal: {_short_plan_text(_plan_interpreted_goal(plan_state), 220)}",
+        f"Summary: {_short_plan_text(_plan_string(plan_state, 'summary') or '(none)', 220)}",
     ]
+    for label, key in [
+        ("Understand", "task_understanding"),
+        ("Evidence", "current_implementation"),
+        ("Design", "target_design"),
+        ("Impact", "impact_scope"),
+        ("Verify", "verification_plan"),
+    ]:
+        value = _plan_string(plan_state, key)
+        if value:
+            lines.append(f"{label}: {_short_plan_text(value, 260)}")
+    risks = plan_state.get("risks_and_open_questions") if isinstance(plan_state, Mapping) else None
+    if isinstance(risks, list):
+        lines.extend(
+            f"Risk/question: {_short_plan_text(item, 180)}"
+            for item in risks
+            if str(item).strip()
+        )
     last_error = _signal_error_text(run_signals)
     if last_error:
         lines.append(f"Last error: {last_error}")
     criteria = plan_state.get("completion_criteria") if isinstance(plan_state, Mapping) else None
     if isinstance(criteria, list):
-        lines.extend(f"Completion criterion: {criterion}" for criterion in criteria if str(criterion).strip())
+        lines.extend(
+            f"Criterion: {_short_plan_text(criterion, 180)}"
+            for criterion in criteria
+            if str(criterion).strip()
+        )
     items = plan_state.get("items") if isinstance(plan_state, Mapping) else None
     if isinstance(items, list):
         proposed = _plan_string(plan_state, "status") == "proposed"
@@ -1081,10 +1103,10 @@ def _plan_items(
             if isinstance(item, Mapping):
                 prefix = "Proposed build step" if proposed else "Step"
                 lines.append(
-                    f"{prefix} "
-                    f"{item.get('id')}: {item.get('step')} [{item.get('status')}] "
-                    f"details={item.get('details') or '(none)'} "
-                    f"verification={item.get('verification') or '(none)'}"
+                    f"{prefix} {item.get('id')}: "
+                    f"[{item.get('status')}] {_short_plan_text(item.get('step'), 160)}; "
+                    f"do={_short_plan_text(item.get('details') or '(none)', 220)}; "
+                    f"check={_short_plan_text(item.get('verification') or '(none)', 180)}"
                 )
         if completed_items:
             lines.append(
@@ -1099,6 +1121,13 @@ def _plan_items(
         for index, line in enumerate(lines)
         if line.strip()
     ]
+
+
+def _short_plan_text(value: object, limit: int) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
 
 
 def _memory_items(recall: MemoryRecall) -> list[ContextItem]:
@@ -1227,6 +1256,7 @@ def _compose_system_prompt(context: AgentContext, view: ContextView) -> str:
     sections = [
         ("Mode Policy", [_mapping_text(runtime_state, "mode_policy")]),
         ("Runtime State", _runtime_state_lines(runtime_state)),
+        ("Synthetic Control", _synthetic_control_lines(runtime_state)),
         ("Current User Request", _current_user_request_lines(context.messages)),
         ("Task Plan", view.task_plan),
         ("Working Set", view.working_set),
@@ -1259,12 +1289,28 @@ def _runtime_state_lines(runtime_state: Mapping[str, object]) -> list[str]:
         ("checkpoint_phase", "Checkpoint"),
         ("plan_state_status", "Plan status"),
         ("verification_status", "Verification"),
-        ("directive", "Continuation directive"),
     )
     return [
         f"{label}: {value}"
         for key, label in labels
         if (value := _mapping_text(runtime_state, key))
+    ]
+
+
+def _synthetic_control_lines(runtime_state: Mapping[str, object]) -> list[str]:
+    control = runtime_state.get("synthetic_control")
+    if not isinstance(control, Mapping):
+        return []
+    instruction = _mapping_text(control, "instruction")
+    if not instruction:
+        return []
+    return [
+        f"Source: {_mapping_text(control, 'source') or 'runner'}",
+        f"Kind: {_mapping_text(control, 'kind') or 'runner_control'}",
+        f"Scope: {_mapping_text(control, 'scope') or 'summary_only'}",
+        "Lifetime: this model call only",
+        "This is not a user request. Do not expand task scope from it.",
+        f"Instruction: {instruction}",
     ]
 
 
@@ -1360,10 +1406,17 @@ def _run_signals_from_context(context: AgentContext) -> Mapping[str, object] | N
     return context.run_signals if isinstance(context.run_signals, Mapping) else None
 
 
-def _plan_objective(plan_state: Mapping[str, object] | None) -> str:
+def _plan_raw_user_request(plan_state: Mapping[str, object] | None) -> str:
     if plan_state is None:
         return ""
-    value = plan_state.get("objective")
+    value = plan_state.get("raw_user_request")
+    return value if isinstance(value, str) else ""
+
+
+def _plan_interpreted_goal(plan_state: Mapping[str, object] | None) -> str:
+    if plan_state is None:
+        return ""
+    value = plan_state.get("interpreted_goal")
     return value if isinstance(value, str) else ""
 
 

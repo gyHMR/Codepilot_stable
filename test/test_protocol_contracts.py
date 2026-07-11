@@ -368,12 +368,19 @@ def test_run_result_models_normalize_and_validate_run_facts() -> None:
         RunVerification(tool_call_id="call-1", tool_name="shell", status="passed", exit_code=False)  # type: ignore[arg-type]
 
     plan = PlanSummary(
-        schema_version=4,
+        schema_version=6,
         plan_id=" plan-1 ",
         owner_run_id=" run-1 ",
         status=" active ",
         origin_mode=" build ",
-        objective=" Refactor run model. ",
+        raw_user_request=" Please refactor the run model. ",
+        interpreted_goal=" Refactor run model. ",
+        task_understanding=" User wants a focused run model refactor. ",
+        current_implementation=" Current run model mixes protocol and execution details. ",
+        target_design=" Keep public behavior while separating responsibilities. ",
+        impact_scope=" Runtime model and focused tests. ",
+        risks_and_open_questions=[" No blocker. "],
+        verification_plan=" Run focused protocol tests. ",
         summary=" Read the code and implement the refactor. ",
         completion_criteria=[" Focused tests pass. "],
         items=[
@@ -400,6 +407,14 @@ def test_run_result_models_normalize_and_validate_run_facts() -> None:
 
     assert plan.plan_id == "plan-1"
     assert plan.status == "active"
+    assert plan.raw_user_request == "Please refactor the run model."
+    assert plan.interpreted_goal == "Refactor run model."
+    assert plan.task_understanding == "User wants a focused run model refactor."
+    assert plan.current_implementation == "Current run model mixes protocol and execution details."
+    assert plan.target_design == "Keep public behavior while separating responsibilities."
+    assert plan.impact_scope == "Runtime model and focused tests."
+    assert plan.risks_and_open_questions == ["No blocker."]
+    assert plan.verification_plan == "Run focused protocol tests."
     assert plan.completion_criteria == ["Focused tests pass."]
     assert plan.items == [
         {
@@ -415,12 +430,13 @@ def test_run_result_models_normalize_and_validate_run_facts() -> None:
 
     with pytest.raises(ValueError, match="plan_id"):
         PlanSummary(
-            schema_version=4,
+            schema_version=6,
             plan_id="",
             owner_run_id="run-1",
             status="active",
             origin_mode="build",
-            objective="Goal",
+            raw_user_request="Request",
+            interpreted_goal="Goal",
             summary="Summary",
             completion_criteria=["Verify outcome"],
         )

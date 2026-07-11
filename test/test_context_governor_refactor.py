@@ -71,12 +71,19 @@ def test_context_governor_prepares_linear_context_with_memory_and_artifacts(
                 ],
                 mode="build",
                 plan_state={
-                    "schema_version": 4,
+                    "schema_version": 6,
                     "plan_id": "plan_1",
                     "owner_run_id": "run_1",
                     "status": "active",
                     "origin_mode": "build",
-                    "objective": "Fix failing tests.",
+                    "raw_user_request": "Fix failing tests.",
+                    "interpreted_goal": "Fix failing tests.",
+                    "task_understanding": "Fix the failing tests with a focused implementation change.",
+                    "current_implementation": "pytest currently fails and points at test/test_app.py.",
+                    "target_design": "Repair the implementation while keeping the current API.",
+                    "impact_scope": "Implementation and focused tests for the failing path.",
+                    "risks_and_open_questions": ["No open blocker."],
+                    "verification_plan": "Run pytest from the repo root.",
                     "summary": "Fix the failing test suite with a focused change.",
                     "completion_criteria": ["Focused tests pass"],
                     "items": [
@@ -135,12 +142,19 @@ def test_context_governor_filters_archived_plan_from_store(tmp_path: Path) -> No
     session_store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
     PlanStateStore(session_store).save(
         {
-            "schema_version": 4,
+                "schema_version": 6,
             "plan_id": "plan_done",
             "owner_run_id": "run_done",
             "status": "completed",
             "origin_mode": "plan",
-            "objective": "旧任务",
+                "raw_user_request": "旧任务",
+                "interpreted_goal": "旧任务",
+            "task_understanding": "旧任务已经完成。",
+            "current_implementation": "旧任务完成时的实现证据。",
+            "target_design": "旧任务目标设计。",
+            "impact_scope": "旧任务影响范围。",
+            "risks_and_open_questions": ["旧任务无待确认项。"],
+            "verification_plan": "旧任务验证方案。",
             "summary": "旧计划已经完成。",
             "completion_criteria": ["旧任务完成"],
             "items": [
@@ -184,6 +198,48 @@ def test_context_governor_filters_archived_plan_from_store(tmp_path: Path) -> No
     assert "## Task Plan" not in prepared.system_prompt
     assert prepared.report.context_view is not None
     assert prepared.report.context_view.task_plan == []
+
+
+def test_context_governor_renders_synthetic_control_separately(tmp_path: Path) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import UserMessage
+    from codepilot.sessions.context import ContextGovernor
+
+    governor = ContextGovernor(workspace_dir=tmp_path, session_id="session_synthetic_control")
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(
+                system_prompt="System rules.",
+                messages=[UserMessage(content="回答问题")],
+                mode="build",
+                runtime_state={
+                    "run_id": "run_1",
+                    "mode": "build",
+                    "checkpoint_phase": "running",
+                    "mode_policy": "Execute the task.",
+                    "synthetic_control": {
+                        "source": "runner",
+                        "kind": "empty_final_answer",
+                        "scope": "final_answer_only",
+                        "instruction": "你刚才没有给出用户可见的最终答复。",
+                        "expires_after_turns": 1,
+                    },
+                },
+            ),
+            ContextPreparationRequest(
+                session_id="session_synthetic_control",
+                model_context_window=4000,
+                model_max_output_tokens=500,
+            ),
+        )
+    )
+
+    assert "## Synthetic Control" in prepared.system_prompt
+    assert "Scope: final_answer_only" in prepared.system_prompt
+    assert "This is not a user request" in prepared.system_prompt
+    assert "Raw request: 回答问题" in prepared.system_prompt
+    assert "Raw request: 你刚才没有给出用户可见的最终答复" not in prepared.system_prompt
 
 
 def test_context_governor_surfaces_recent_read_paths_in_working_set(

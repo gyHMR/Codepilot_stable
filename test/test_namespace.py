@@ -389,18 +389,19 @@ def test_removed_builtin_file_tool_aliases_are_gone(tmp_path: Path) -> None:
     tool_names = {tool.name for tool in create_builtin_tools(tmp_path)}
 
     assert tool_names.isdisjoint(removed_aliases)
-    assert "update_plan" in tool_names
+    assert {"propose_plan", "create_build_plan", "update_plan_progress", "close_plan"} <= tool_names
     assert "complete_task_step" not in tool_names
     assert "task_update" not in tool_names
     assert READ_ONLY_TOOL_NAMES.isdisjoint(removed_aliases)
     assert MUTATING_TOOL_NAMES.isdisjoint(removed_aliases)
     assert all(get_builtin_tool_metadata(name) is None for name in removed_aliases)
 
-    plan_metadata = get_builtin_tool_metadata("update_plan")
-    assert plan_metadata is not None
-    assert plan_metadata.category == "plan"
-    assert plan_metadata.read_only is True
-    assert plan_metadata.risk_level == "low"
+    for plan_tool in ("propose_plan", "create_build_plan", "update_plan_progress", "close_plan"):
+        plan_metadata = get_builtin_tool_metadata(plan_tool)
+        assert plan_metadata is not None
+        assert plan_metadata.category == "plan"
+        assert plan_metadata.read_only is True
+        assert plan_metadata.risk_level == "low"
     assert get_builtin_tool_metadata("complete_task_step") is None
     assert get_builtin_tool_metadata("task_update") is None
 

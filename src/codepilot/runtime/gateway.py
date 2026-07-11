@@ -107,6 +107,16 @@ class RuntimeGateway:
         if isinstance(action, PromptSubmitted):
             checkpoint = session.controller.runtime_checkpoint()
             if _is_plan_wait_checkpoint(checkpoint):
+                plan_command = _explicit_plan_command(session, action.text)
+                if plan_command is not None:
+                    record = await self._run_command(
+                        session,
+                        CommandSubmitted(plan_command),
+                    )
+                    yield CommandFinishedFrame(record=record)
+                    async for frame in self._follow_up_from_command(session, record):
+                        yield frame
+                    return
                 phase = _optional_text(checkpoint.get("phase"))
                 async for frame in self._run_continuation(
                     session,
@@ -536,15 +546,23 @@ def _is_plan_wait_checkpoint(checkpoint: object) -> bool:
 
 
 def _explicit_plan_command(session: RuntimeSession, text: str) -> str | None:
-    normalized = text.strip().lower()
-    if normalized not in {"/approve", "/reject"}:
-        return None
+    normalized = _normalize_plan_command_text(text)
     plan = (session.controller.describe().context or {}).get("plan_summary")
     if not isinstance(plan, dict):
         return None
     if plan.get("status") != "proposed":
         return None
-    return "/plan approve" if normalized == "/approve" else "/plan reject"
+    if normalized in {"/approve", "批准", "同意执行", "执行这个方案"}:
+        return "/plan approve"
+    if normalized in {"/reject", "拒绝", "不要这个方案"}:
+        return "/plan reject"
+    if normalized in {"清除计划", "取消计划"}:
+        return "/plan clear"
+    return None
+
+
+def _normalize_plan_command_text(text: str) -> str:
+    return " ".join(text.strip().lower().strip("。.!！?？").split())
 
 
 def _plan_summary_from_view(view: SessionView) -> dict[str, object] | None:

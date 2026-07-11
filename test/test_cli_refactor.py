@@ -85,7 +85,8 @@ class TestTerminalRenderer:
                     "plan_id": "plan_1",
                     "status": "proposed",
                     "origin_mode": "plan",
-                    "objective": "优化登录逻辑",
+                    "raw_user_request": "优化登录逻辑",
+                    "interpreted_goal": "优化登录逻辑",
                     "items": [
                         {"id": "item_1", "step": "阅读实现", "status": "pending"},
                     ],
@@ -97,7 +98,10 @@ class TestTerminalRenderer:
         assert "Plan Approval Required" in rendered
         assert "优化登录逻辑" in rendered
         assert "/plan approve" in rendered
-        assert "Type feedback" in rendered
+        assert "回复“批准”开始执行" in rendered
+        assert "直接说明需要调整的内容" in rendered
+        assert "Use /plan approve" not in rendered
+        assert "Type feedback" not in rendered
 
     def test_handle_tool_start(self):
         """测试处理工具开始事件。"""
@@ -1029,7 +1033,7 @@ class TestCliStartupState:
                 "status": "proposed",
                 "done_items": 1,
                 "total_items": 3,
-                "objective_preview": "fix cli",
+                "goal_preview": "fix cli",
             },
         )
 
@@ -1045,7 +1049,7 @@ class TestCliStartupState:
             "status": "proposed",
             "done_items": 1,
             "total_items": 3,
-            "objective_preview": "fix cli",
+            "goal_preview": "fix cli",
         }
         assert state.warnings == ("Test warning",)
 

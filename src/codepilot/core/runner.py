@@ -14,7 +14,9 @@ from codepilot.protocols import (
     AgentRunStatus,
     AgentRunStopReason,
     AssistantMessage,
+    CLOSE_PLAN_TOOL,
     Message,
+    PROPOSE_PLAN_TOOL,
     TextContent,
     ToolCall,
     ToolResultMessage,
@@ -61,9 +63,25 @@ async def maybe_await(value: Any) -> Any:
 
 
 @dataclass(frozen=True)
-class _RuntimeDirective:
+class _SyntheticControlFrame:
+    id: str
+    kind: str
+    scope: str
     instruction: str
     reason: str = ""
+    source: str = "runner"
+    expires_after_turns: int = 1
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "scope": self.scope,
+            "instruction": self.instruction,
+            "reason": self.reason,
+            "source": self.source,
+            "expires_after_turns": self.expires_after_turns,
+        }
 
 
 class AgentEventEmitter:
@@ -300,7 +318,8 @@ async def _drive_loop(
 ) -> AgentLoopOutcome:
     usage = None
     max_model_turns = max(1, input.limits.max_model_turns)
-    runtime_directive: _RuntimeDirective | None = None
+    synthetic_control: _SyntheticControlFrame | None = None
+    plan_publish_attempted = False
     plan_closeout_attempted = False
 
     for turn_index in range(max_model_turns):
@@ -308,13 +327,12 @@ async def _drive_loop(
             recorder.emit({"type": "turn_start"})
 
         turn_input = input
-        if runtime_directive is not None:
-            turn_input = _with_runtime_directive(
+        if synthetic_control is not None:
+            turn_input = _with_synthetic_control(
                 input,
-                runtime_directive.instruction,
-                reason=runtime_directive.reason,
+                synthetic_control,
             )
-            runtime_directive = None
+            synthetic_control = None
         model_turn = await _model_turn_with_retries(
             input=turn_input,
             ports=ports,
@@ -361,12 +379,15 @@ async def _drive_loop(
                 usage=usage,
                 turn_index=turn_index,
                 max_model_turns=max_model_turns,
+                plan_publish_attempted=plan_publish_attempted,
                 plan_closeout_attempted=plan_closeout_attempted,
             )
             if outcome is not None:
-                if isinstance(outcome, _RuntimeDirective):
-                    runtime_directive = outcome
-                    if outcome.reason.startswith("plan_"):
+                if isinstance(outcome, _SyntheticControlFrame):
+                    synthetic_control = outcome
+                    if outcome.kind == "plan_publish_required":
+                        plan_publish_attempted = True
+                    elif outcome.kind == "plan_closeout":
                         plan_closeout_attempted = True
                     continue
                 return outcome
@@ -422,6 +443,7 @@ async def _drive_loop(
             metadata={
                 "model_provider": input.model.provider,
                 "model_id": input.model.model_id,
+                "plan_state": plan_state.to_dict() if plan_state is not None else None,
             },
             tools=ports.tools,
             tool_calls=tool_calls,
@@ -465,16 +487,19 @@ async def _drive_loop(
         )
 
         plan_ready_for_approval = input.mode == "plan" and _is_pending_plan(plan_state) and any(
-            message.tool_name == "update_plan"
+            message.tool_name == PROPOSE_PLAN_TOOL
             and message.status == "success"
             and isinstance(message.metadata.get("plan_snapshot"), dict)
+            and message.metadata.get("plan_operation") == "propose_plan"
             for message in visible_tool_messages
         )
 
         recovery_instruction = run_state.truncated_read_recovery_instruction(visible_tool_messages)
         if recovery_instruction:
-            runtime_directive = _RuntimeDirective(
-                recovery_instruction,
+            synthetic_control = _synthetic_control(
+                kind="truncated_read_recovery",
+                scope="tool_recovery_only",
+                instruction=recovery_instruction,
                 reason="repeated_truncated_read",
             )
 
@@ -597,9 +622,28 @@ def _finish_or_steer(
     usage: Any,
     turn_index: int,
     max_model_turns: int,
+    plan_publish_attempted: bool,
     plan_closeout_attempted: bool,
-) -> AgentLoopOutcome | _RuntimeDirective | None:
+) -> AgentLoopOutcome | _SyntheticControlFrame | None:
     if input.mode == "plan":
+        if not plan_publish_attempted and turn_index + 1 < max_model_turns:
+            recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+            return _synthetic_control(
+                kind="plan_publish_required",
+                scope="plan_protocol_only",
+                instruction=(
+                    "Runtime protocol state: the current mode is plan and no canonical Task Plan "
+                    "has been published. No user approval has occurred, and publishing a plan is "
+                    "not approval. Preserve the user's original request and every confirmed "
+                    "constraint. If repository evidence is sufficient and the implementation plan "
+                    "is ready, publish it now with propose_plan instead of presenting or seeking "
+                    "approval for a prose draft. If a material user decision is still missing, ask "
+                    "one concrete clarification question. Do not state or imply that the user "
+                    "accepted the plan, do not claim that implementation has started, do not modify "
+                    "the workspace, and do not change modes."
+                ),
+                reason="plan_mode_finished_without_published_plan",
+            )
         recorder.emit(
             {
                 "type": "plan_clarification_required",
@@ -679,7 +723,12 @@ def _finish_or_steer(
             )
             if turn_index + 1 < max_model_turns:
                 recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
-                return _RuntimeDirective(instruction, reason=reason)
+                return _synthetic_control(
+                    kind="plan_closeout",
+                    scope="plan_closeout_only",
+                    instruction=instruction,
+                    reason=reason,
+                )
             recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
             recorder.emit({"type": "agent_end", "status": "waiting_user"})
             return _outcome(
@@ -710,7 +759,7 @@ def _finish_or_steer(
         )
     if decision.action == "continue_with_instruction" and turn_index + 1 < max_model_turns:
         recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
-        return _RuntimeDirective(decision.instruction, reason=decision.reason)
+        return _synthetic_control_for_guard(decision.reason, decision.instruction)
     status: AgentRunStatus = "failed" if decision.action == "stopped" else "waiting_user"
     recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
     recorder.emit({"type": "agent_end", "status": status})
@@ -748,7 +797,7 @@ def _plan_closeout_guard(
             "plan_execution_not_started",
             (
                 "当前有已批准的 active Task Plan，但本轮还没有执行任何计划步骤。"
-                "不要复述方案或给最终答复；请直接从第一个未完成步骤开始读取、修改和验证。"
+                "不要继续读取、修改或运行命令；只用最终答复说明尚未开始执行、当前计划状态和下一步需要用户确认。"
                 + (f" 第一个未完成步骤：{step}。" if step else "")
             ),
         )
@@ -756,8 +805,8 @@ def _plan_closeout_guard(
         "plan_closeout_missing",
         (
             "当前 active Task Plan 需要收尾确认。请依据 completion criteria、步骤验证和实际工具结果"
-            "检查任务是否完成；完成时调用 update_plan 并将 snapshot.status 设为 completed。"
-            "若尚未完成，请明确说明阻塞，保留 active plan，等待用户下一步指示。"
+            f"只调用 {CLOSE_PLAN_TOOL} 做状态收尾，不要读取、修改、运行命令或扩大任务。"
+            "完成时将 status 设为 completed；明显尚未完成时将 status 设为 active，保留剩余步骤并说明阻塞。"
         ),
     )
 
@@ -1067,7 +1116,15 @@ def _mark_plan_summary_message(
 def _plan_approval_message(plan_state: PlanState) -> AssistantMessage:
     lines = [
         "已根据仓库探索生成待审批的代码修改方案。",
-        f"目标：{plan_state.objective}",
+        f"用户原始请求：{plan_state.raw_user_request}",
+        f"Build 执行目标：{plan_state.interpreted_goal}",
+        f"任务理解：{plan_state.task_understanding}",
+        f"当前实现与证据：{plan_state.current_implementation}",
+        f"目标设计：{plan_state.target_design}",
+        f"影响范围：{plan_state.impact_scope}",
+        "风险与待确认项：",
+        *[f"- {item}" for item in plan_state.risks_and_open_questions],
+        f"验证方案：{plan_state.verification_plan}",
         f"摘要：{plan_state.summary}",
         "执行步骤（批准后由 build 模式执行，当前均未开始）：",
         *[
@@ -1080,7 +1137,8 @@ def _plan_approval_message(plan_state: PlanState) -> AssistantMessage:
         ],
         "完成标准：",
         *[f"- {criterion}" for criterion in plan_state.completion_criteria],
-        "请使用 /plan approve 批准后交给 build 模式执行，使用 /plan reject 拒绝，或直接说明需要调整的内容。",
+        "请回复“批准”开始执行，回复“拒绝”放弃该方案；也可以直接说明需要调整的内容。"
+        "命令方式同样可用：/plan approve 或 /plan reject。",
     ]
     message = AssistantMessage(
         content=[TextContent(text="\n".join(line for line in lines if line))],
@@ -1194,18 +1252,53 @@ def _tool_messages_from_observations(
     return messages
 
 
-def _with_runtime_directive(
-    input: AgentLoopInput,
-    instruction: str,
+def _synthetic_control(
     *,
+    kind: str,
+    scope: str,
+    instruction: str,
     reason: str = "",
+) -> _SyntheticControlFrame:
+    return _SyntheticControlFrame(
+        id=f"synthetic_{now_ms()}",
+        kind=kind,
+        scope=scope,
+        instruction=instruction,
+        reason=reason or kind,
+    )
+
+
+def _synthetic_control_for_guard(reason: str, instruction: str) -> _SyntheticControlFrame:
+    if reason == "empty_final_answer":
+        return _synthetic_control(
+            kind="empty_final_answer",
+            scope="final_answer_only",
+            instruction=instruction,
+            reason=reason,
+        )
+    if reason == "verification_failed":
+        return _synthetic_control(
+            kind="verification_failed_summary",
+            scope="summary_only",
+            instruction=instruction,
+            reason=reason,
+        )
+    return _synthetic_control(
+        kind=reason or "runner_control",
+        scope="summary_only",
+        instruction=instruction,
+        reason=reason,
+    )
+
+
+def _with_synthetic_control(
+    input: AgentLoopInput,
+    control: _SyntheticControlFrame,
 ) -> AgentLoopInput:
     values = {
         **dict(input.context),
-        "runtime_directive": instruction,
+        "synthetic_control": control.to_dict(),
     }
-    if reason:
-        values["runtime_directive_reason"] = reason
     return replace(input, context=PreparedContext(values))
 
 
@@ -1300,9 +1393,10 @@ def _reject_premature_plan_submissions(
     rejected: list[ToolResultMessage] = []
     for message in messages:
         if (
-            message.tool_name == "update_plan"
+            message.tool_name == PROPOSE_PLAN_TOOL
             and message.status == "success"
             and isinstance(message.metadata.get("plan_snapshot"), dict)
+            and message.metadata.get("plan_operation") == "propose_plan"
         ):
             rejected.append(
                 replace(

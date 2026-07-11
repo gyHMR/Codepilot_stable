@@ -193,8 +193,15 @@ class PlanSummary:
     owner_run_id: str
     status: str
     origin_mode: str
-    objective: str
+    raw_user_request: str
+    interpreted_goal: str
     summary: str
+    task_understanding: str = ""
+    current_implementation: str = ""
+    target_design: str = ""
+    impact_scope: str = ""
+    risks_and_open_questions: list[str] = field(default_factory=list)
+    verification_plan: str = ""
     completion_criteria: list[str] = field(default_factory=list)
     items: list[dict[str, str]] = field(default_factory=list)
     revision: int = 0
@@ -222,7 +229,21 @@ class PlanSummary:
             "origin_mode",
             _require_text(self.origin_mode, field_name="origin_mode"),
         )
-        object.__setattr__(self, "objective", _clean_text(self.objective))
+        object.__setattr__(self, "raw_user_request", _clean_text(self.raw_user_request))
+        object.__setattr__(self, "interpreted_goal", _clean_text(self.interpreted_goal))
+        object.__setattr__(self, "task_understanding", _clean_text(self.task_understanding))
+        object.__setattr__(self, "current_implementation", _clean_text(self.current_implementation))
+        object.__setattr__(self, "target_design", _clean_text(self.target_design))
+        object.__setattr__(self, "impact_scope", _clean_text(self.impact_scope))
+        object.__setattr__(
+            self,
+            "risks_and_open_questions",
+            _clean_text_list(
+                self.risks_and_open_questions,
+                field_name="risks_and_open_questions",
+            ),
+        )
+        object.__setattr__(self, "verification_plan", _clean_text(self.verification_plan))
         object.__setattr__(self, "summary", _clean_text(self.summary))
         object.__setattr__(self, "completion_criteria", _copy_completion_criteria(self.completion_criteria))
         object.__setattr__(self, "items", _copy_plan_items(self.items))

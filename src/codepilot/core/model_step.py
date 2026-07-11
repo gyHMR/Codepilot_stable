@@ -131,7 +131,7 @@ async def build_model_request(
             prepared = await prepared
         if isinstance(prepared, dict):
             request_data.update(prepared)
-    request_data["system_prompt"] = _append_runtime_directive(
+    request_data["system_prompt"] = _append_synthetic_control(
         str(request_data.get("system_prompt", "")),
         request_data.get("context"),
     )
@@ -161,21 +161,39 @@ async def build_model_request(
     )
 
 
-def _append_runtime_directive(
+def _append_synthetic_control(
     system_prompt: str,
     context: object,
 ) -> str:
     if not isinstance(context, dict):
         return system_prompt
-    directive = context.get("runtime_directive")
-    if not isinstance(directive, str) or not directive.strip():
+    control = context.get("synthetic_control")
+    if not isinstance(control, dict):
         return system_prompt
-    if directive in system_prompt:
+    instruction = _control_text(control, "instruction")
+    if not instruction:
         return system_prompt
-    section = f"## Runtime Directive\n{directive.strip()}"
+    section = "\n".join(
+        [
+            "## Synthetic Control",
+            f"Source: {_control_text(control, 'source') or 'runner'}",
+            f"Kind: {_control_text(control, 'kind') or 'runner_control'}",
+            f"Scope: {_control_text(control, 'scope') or 'summary_only'}",
+            "Lifetime: this model call only",
+            "This is not a user request. Do not expand task scope from it.",
+            f"Instruction: {instruction}",
+        ]
+    )
+    if section in system_prompt:
+        return system_prompt
     if system_prompt.strip():
         return f"{system_prompt.rstrip()}\n\n{section}"
     return section
+
+
+def _control_text(control: dict[str, object], key: str) -> str:
+    value = control.get(key)
+    return value.strip() if isinstance(value, str) else ""
 
 
 def tool_catalog_for_request(input: AgentLoopInput, ports: AgentLoopPorts) -> list[Tool]:

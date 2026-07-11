@@ -34,21 +34,19 @@ class PlanStateStore:
         return payload
 
     def approve_current(self, *, run_id: str | None = None) -> dict[str, Any] | None:
+        _ = run_id
         current = load_plan_state(self.current())
         if current is None or current.status != "proposed":
             return current.to_dict() if current is not None else None
-        if run_id is not None and current.owner_run_id != run_id:
-            raise PlanValidationError("plan belongs to a different run")
         return self.save(current.approve())
 
     def reject_current(self, *, run_id: str | None = None) -> dict[str, Any] | None:
+        _ = run_id
         current = load_plan_state(self.current())
         if current is None:
             return None
         if current.status != "proposed":
             return current.to_dict()
-        if run_id is not None and current.owner_run_id != run_id:
-            raise PlanValidationError("plan belongs to a different run")
         return self.save(current.reject())
 
     def abandon_current(
@@ -57,13 +55,12 @@ class PlanStateStore:
         run_id: str | None = None,
         source: str = "user_abandoned",
     ) -> dict[str, Any] | None:
+        _ = run_id
         current = load_plan_state(self.current())
         if current is None:
             return None
         if current.status == "abandoned":
             return current.to_dict()
-        if run_id is not None and current.owner_run_id != run_id:
-            raise PlanValidationError("plan belongs to a different run")
         return self.save(current.abandon(source=source))
 
 def validate_plan_state_payload(raw: object) -> dict[str, Any]:

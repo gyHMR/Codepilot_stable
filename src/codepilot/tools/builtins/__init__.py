@@ -80,7 +80,7 @@ def create_builtin_tools(
     tools.extend(create_workspace_tools(sandbox, allow=allow))
     # 4. Shell 执行工具: bash
     tools.extend(create_shell_tools(sandbox, allow=allow, policy=shell_policy))
-    # 5. 计划管理工具: update_plan
+    # 5. 计划管理工具: propose_plan/create_build_plan/update_plan_progress/close_plan
     tools.extend(create_plan_tools(allow=allow))
 
     return tools

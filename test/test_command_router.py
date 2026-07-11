@@ -184,12 +184,19 @@ async def _run_mode_build_plan_warning_case(tmp_path: Path) -> None:
         session.set_current_mode("plan")
         session.plan_state.save(
             {
-                "schema_version": 4,
+                "schema_version": 6,
                 "plan_id": "plan_cli_warning",
                 "owner_run_id": "run_plan",
                 "status": "proposed",
                 "origin_mode": "plan",
-                "objective": "先制定方案",
+                "raw_user_request": "先制定方案",
+                "interpreted_goal": "执行聚焦修改",
+                "task_understanding": "用户希望先审批方案，再执行聚焦修改。",
+                "current_implementation": "已确认相关代码和测试边界。",
+                "target_design": "按现有结构执行聚焦修改。",
+                "impact_scope": "影响当前任务相关模块和验证。",
+                "risks_and_open_questions": ["暂无阻塞待确认项。"],
+                "verification_plan": "运行相关测试。",
                 "summary": "阅读当前实现后执行聚焦修改。",
                 "completion_criteria": ["相关测试通过"],
                 "items": [
@@ -226,12 +233,19 @@ async def _run_plan_approve_command_case(tmp_path: Path) -> None:
         session.set_current_mode("plan")
         session.plan_state.save(
             {
-                "schema_version": 4,
+                "schema_version": 6,
                 "plan_id": "plan_cli_approve",
                 "owner_run_id": "run_plan",
                 "status": "proposed",
                 "origin_mode": "plan",
-                "objective": "优化登录逻辑",
+                "raw_user_request": "优化登录逻辑",
+                "interpreted_goal": "优化登录逻辑",
+                "task_understanding": "用户希望先审批方案，再优化登录逻辑。",
+                "current_implementation": "已确认登录流程和相关测试边界。",
+                "target_design": "按现有结构优化登录逻辑。",
+                "impact_scope": "影响登录流程和登录测试。",
+                "risks_and_open_questions": ["暂无阻塞待确认项。"],
+                "verification_plan": "运行登录测试。",
                 "summary": "阅读实现并修改登录逻辑。",
                 "completion_criteria": ["登录测试通过"],
                 "items": [

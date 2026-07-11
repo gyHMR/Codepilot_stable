@@ -107,12 +107,16 @@ from .llm import (
     Usage,
 )
 from .tools import (
+    CLOSE_PLAN_TOOL,
+    CREATE_BUILD_PLAN_TOOL,
     PLAN_ITEM_LIMIT,
+    PLAN_TOOL_NAMES,
+    PROPOSE_PLAN_TOOL,
     Tool,
     ToolResult,
     ToolResultStatus,
     ToolRiskLevel,
-    UPDATE_PLAN_TOOL,
+    UPDATE_PLAN_PROGRESS_TOOL,
 )
 
 
@@ -160,7 +164,11 @@ __all__ = [
     "ToolResult",
     "ToolResultStatus",
     "ToolRiskLevel",
-    "UPDATE_PLAN_TOOL",
+    "CLOSE_PLAN_TOOL",
+    "CREATE_BUILD_PLAN_TOOL",
+    "PLAN_TOOL_NAMES",
+    "PROPOSE_PLAN_TOOL",
+    "UPDATE_PLAN_PROGRESS_TOOL",
     "PLAN_ITEM_LIMIT",
     "AfterToolCallContext",
     "AfterToolCallResult",

@@ -9,7 +9,7 @@ def _plan_state(
     owner_run_id: str = "run_plan",
     status: str = "proposed",
     origin_mode: str = "plan",
-    objective: str = "先制定方案",
+    goal: str = "先制定方案",
     summary: str = "阅读当前实现并执行聚焦修改。",
     items: list[dict[str, str]] | None = None,
     explanation: str = "",
@@ -25,12 +25,19 @@ def _plan_state(
     ]
     completed = status == "completed"
     return {
-        "schema_version": 4,
+        "schema_version": 6,
         "plan_id": plan_id,
         "owner_run_id": owner_run_id,
         "status": status,
         "origin_mode": origin_mode,
-        "objective": objective,
+        "raw_user_request": goal,
+        "interpreted_goal": goal,
+        "task_understanding": f"用户希望完成：{goal}",
+        "current_implementation": "已确认相关实现和测试边界。",
+        "target_design": "按现有结构完成聚焦修改。",
+        "impact_scope": "影响当前任务相关模块和验证。",
+        "risks_and_open_questions": ["暂无阻塞待确认项。"],
+        "verification_plan": "运行相关验证。",
         "summary": summary,
         "completion_criteria": ["相关验证通过。"],
         "items": resolved_items,
@@ -172,14 +179,21 @@ def test_session_commit_keeps_plan_approval_checkpoint(tmp_path) -> None:
         controller = _bind_session_runtime(session)
         prepared = await controller.prepare_run(SessionRunIntent(text="先给计划"))
         plan = PlanSummary(
-                schema_version=4,
+            schema_version=6,
             plan_id="plan_wait",
             owner_run_id=prepared.run_id,
             status="proposed",
             origin_mode="plan",
-            objective="先给计划",
-                summary="阅读当前实现并形成执行方案。",
-                completion_criteria=["确认修改方案可执行。"],
+            raw_user_request="先给计划",
+            interpreted_goal="形成可执行代码修改方案",
+            task_understanding="用户希望先审批方案。",
+            current_implementation="已确认相关代码边界。",
+            target_design="形成可执行代码修改方案。",
+            impact_scope="影响当前任务相关模块。",
+            risks_and_open_questions=["暂无阻塞待确认项。"],
+            verification_plan="运行相关验证。",
+            summary="阅读当前实现并形成执行方案。",
+            completion_criteria=["确认修改方案可执行。"],
             items=[
                 {
                     "id": "item_1",
@@ -343,7 +357,7 @@ def test_streamed_plan_event_is_immediately_visible_to_plan_command(tmp_path) ->
         plan = _plan_state(
             "plan_streamed",
             owner_run_id="run_streamed",
-            objective="优化登录逻辑",
+            goal="优化登录逻辑",
             explanation="等待用户确认",
         )
 
@@ -408,7 +422,7 @@ def test_pending_plan_feedback_forces_plan_mode(tmp_path) -> None:
             )
         )
         session.plan_state.save(
-            _plan_state("plan_feedback", objective="优化登录")
+            _plan_state("plan_feedback", goal="优化登录")
         )
         session.store.set_checkpoint(
             {
@@ -461,7 +475,7 @@ def test_plan_mode_replanning_uses_fresh_seed_instead_of_active_plan(tmp_path) -
                     owner_run_id="run_old",
                     status="active",
                     origin_mode="build",
-                    objective="旧执行计划",
+                    goal="旧执行计划",
                 )
             )
             session.set_current_mode("plan")
@@ -517,7 +531,7 @@ def test_mode_hint_plan_archives_active_plan_before_context(tmp_path) -> None:
                     owner_run_id="run_old",
                     status="active",
                     origin_mode="build",
-                    objective="旧执行计划",
+                    goal="旧执行计划",
                 )
             )
             controller = _bind_session_runtime(session)
@@ -751,7 +765,7 @@ def test_session_continue_reuses_existing_plan_objective(tmp_path) -> None:
                     owner_run_id="run_seed",
                     status="active",
                     origin_mode="build",
-                    objective="帮我完善修复登录注册功能",
+                    goal="帮我完善修复登录注册功能",
                 )
             )
 
@@ -762,7 +776,7 @@ def test_session_continue_reuses_existing_plan_objective(tmp_path) -> None:
 
             state = prepared.loop_input.plan_state
             assert state is not None
-            assert state["objective"] == "帮我完善修复登录注册功能"
+            assert state["interpreted_goal"] == "帮我完善修复登录注册功能"
             assert state["plan_id"] == "plan_existing"
             assert prepared.loop_input.user_prompt == "继续"
         finally:
@@ -804,7 +818,7 @@ def test_session_continue_ignores_completed_plan_as_archived_context(tmp_path) -
                     owner_run_id="run_bad",
                     status="completed",
                     origin_mode="build",
-                    objective="帮我完善修复登录注册功能",
+                    goal="帮我完善修复登录注册功能",
                     explanation="已完成上轮计划",
                     items=[
                         {
@@ -1084,7 +1098,7 @@ def test_session_commit_does_not_change_plan_when_failed_outcome_has_no_plan(tmp
             owner_run_id="run_start",
             status="active",
             origin_mode="build",
-            objective="modify register module",
+            goal="modify register module",
         )
         outcome = AgentLoopOutcome(
             run_id="run_failed",
@@ -1388,4 +1402,3 @@ def test_session_runtime_records_streamed_checkpoint_phases(tmp_path) -> None:
             session.close()
 
     asyncio.run(run_case())
-

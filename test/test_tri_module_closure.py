@@ -23,12 +23,19 @@ def test_session_store_persists_plan_state_in_dedicated_file(tmp_path: Path) -> 
     store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
 
     plan_state = {
-        "schema_version": 4,
+        "schema_version": 6,
         "plan_id": "plan_1",
         "owner_run_id": "run_1",
         "status": "proposed",
         "origin_mode": "plan",
-        "objective": "先规划再执行",
+        "raw_user_request": "先规划再执行",
+        "interpreted_goal": "执行聚焦修改",
+        "task_understanding": "用户希望先审批方案，再执行聚焦修改。",
+        "current_implementation": "已确认相关代码和测试边界。",
+        "target_design": "按现有结构执行聚焦修改。",
+        "impact_scope": "影响当前任务相关模块。",
+        "risks_and_open_questions": ["暂无阻塞待确认项。"],
+        "verification_plan": "运行相关验证。",
         "summary": "阅读实现后给出可执行方案。",
         "completion_criteria": ["确认方案可执行"],
         "items": [
@@ -54,7 +61,33 @@ def test_session_store_persists_plan_state_in_dedicated_file(tmp_path: Path) -> 
     assert forked.load_plan_state() == plan_state
 
 
-def test_repeated_build_verification_failure_keeps_model_in_control() -> None:
+def test_build_verification_missing_is_audit_only() -> None:
+    from codepilot.core.run_guard import RunGuard
+    from codepilot.core.state import RunState
+    from codepilot.protocols import AssistantMessage, TextContent, ToolResultMessage
+
+    run = RunState(run_id="run_1", session_id="session_1")
+    write_result = ToolResultMessage(
+        tool_call_id="write_1",
+        tool_name="write",
+        status="success",
+        workspace_changed=True,
+        affected_paths=["agent-test/random_sentence_generator.py"],
+    )
+
+    run.collect_tool_results([write_result])
+    decision = RunGuard().check(
+        assistant=AssistantMessage(content=[TextContent(text="已完成")]),
+        signals=run.summary(),
+        mode="build",
+    )
+
+    assert decision.action == "completed"
+    assert decision.reason == "final_answer"
+    assert run.summary().verification_status == "stale"
+
+
+def test_repeated_build_verification_failure_requests_summary_not_more_work() -> None:
     from codepilot.core.run_guard import RunGuard
     from codepilot.core.state import RunState
     from codepilot.protocols import AssistantMessage, TextContent, ToolResultMessage
@@ -88,8 +121,10 @@ def test_repeated_build_verification_failure_keeps_model_in_control() -> None:
 
     assert first.action == "continue_with_instruction"
     assert first.reason == "verification_failed"
+    assert "只总结" in first.instruction
     assert second.action == "continue_with_instruction"
     assert second.reason == "verification_failed"
+    assert "不要继续调用工具" in second.instruction
     assert run.summary().verification_status == "failed"
 
 
@@ -100,7 +135,8 @@ def test_update_plan_is_soft_progress_without_evidence_requirements() -> None:
         None,
         PlanSnapshot.from_mapping(
                 {
-                    "execution_objective": "按步骤执行",
+                    "raw_user_request": "按步骤执行",
+                    "interpreted_goal": "按步骤执行",
                     "summary": "阅读代码后修改实现。",
                 "completion_criteria": ["相关测试通过"],
                 "explanation": "阅读完成，继续修改",
@@ -152,7 +188,8 @@ def test_plan_state_store_begins_authoritative_plan_shape(tmp_path: Path) -> Non
         None,
         PlanSnapshot.from_mapping(
                 {
-                    "execution_objective": "修复运行编排链路",
+                    "raw_user_request": "修复运行编排链路",
+                    "interpreted_goal": "修复运行编排链路",
                     "summary": "修复运行编排链路。",
                 "completion_criteria": ["相关测试通过"],
                 "items": [
@@ -172,8 +209,8 @@ def test_plan_state_store_begins_authoritative_plan_shape(tmp_path: Path) -> Non
     stored = store.load_plan_state()
 
     assert stored == state
-    assert state["schema_version"] == 4
-    assert state["objective"] == "修复运行编排链路"
+    assert state["schema_version"] == 6
+    assert state["interpreted_goal"] == "修复运行编排链路"
     assert state["origin_mode"] == "build"
     assert state["status"] == "active"
     assert state["completion_criteria"] == ["相关测试通过"]
