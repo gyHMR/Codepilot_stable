@@ -34,6 +34,7 @@ class ContextTrace:
     budget_tokens: int = 0
     tokens_before: int = 0
     tokens_after: int = 0
+    sections: list[dict[str, Any]] = field(default_factory=list)
     selected_items: list[dict[str, Any]] = field(default_factory=list)
     stale_items: list[str] = field(default_factory=list)
     dropped_counts: dict[str, int] = field(default_factory=dict)
@@ -59,18 +60,21 @@ class ToolCallTrace:
 
 
 @dataclass(frozen=True)
-class TaskTrace:
-    task_id: str = ""
-    mode: str = ""
-    phase: str = ""
-    step_id: str = ""
-    step_title: str = ""
-    step_status: str = ""
-    decision: str = ""
+class PlanTrace:
+    plan_id: str = ""
+    status: str = ""
+    origin_mode: str = ""
+    raw_user_request: str = ""
+    interpreted_goal: str = ""
+    items: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RunGuardTrace:
+    action: str = ""
     reason: str = ""
-    evidence_refs: list[str] = field(default_factory=list)
-    completion_satisfied: bool | None = None
-    completion_reason: str | None = None
+    verification_status: str = ""
+    workspace_changed: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,7 +95,8 @@ class RunTrace:
     model_calls: list[ModelCallTrace] = field(default_factory=list)
     contexts: list[ContextTrace] = field(default_factory=list)
     tool_calls: list[ToolCallTrace] = field(default_factory=list)
-    tasks: list[TaskTrace] = field(default_factory=list)
+    plans: list[PlanTrace] = field(default_factory=list)
+    run_guards: list[RunGuardTrace] = field(default_factory=list)
     memories: list[MemoryTrace] = field(default_factory=list)
     affected_paths: list[str] = field(default_factory=list)
     workspace_changed: bool = False
@@ -134,7 +139,8 @@ def build_run_trace(
     model_calls: list[ModelCallTrace] = []
     contexts: list[ContextTrace] = []
     tool_calls: list[ToolCallTrace] = []
-    tasks: list[TaskTrace] = []
+    plans: list[PlanTrace] = []
+    run_guards: list[RunGuardTrace] = []
     memories: list[MemoryTrace] = []
     errors: list[dict[str, Any]] = []
     pending_tool_args: dict[str, dict[str, Any]] = {}
@@ -173,12 +179,17 @@ def build_run_trace(
                 )
             tool_calls.append(tool_call)
         elif event_type in {
-            "task_plan_created",
-            "task_step_updated",
-            "task_decision_made",
-            "completion_checked",
+            "plan_proposed",
+            "plan_approval_required",
+            "plan_approved",
+            "plan_rejected",
+            "plan_updated",
+            "plan_completed",
+            "plan_abandoned",
         }:
-            tasks.append(_task(event))
+            plans.append(_plan(event))
+        elif event_type == "run_guard_checked":
+            run_guards.append(_run_guard(event))
         elif event_type in {"memory_retrieved", "memory_written"}:
             memories.append(_memory(event))
         elif event_type == "error":
@@ -217,7 +228,8 @@ def build_run_trace(
         model_calls=model_calls,
         contexts=contexts,
         tool_calls=tool_calls,
-        tasks=tasks,
+        plans=plans,
+        run_guards=run_guards,
         memories=memories,
         affected_paths=affected,
         workspace_changed=workspace_changed,
@@ -332,16 +344,26 @@ def load_run_trace(path: str | Path) -> RunTrace:
             for item in _list_of_dicts(payload.get("model_calls"))
         ],
         contexts=[
-            ContextTrace(**item)
+            ContextTrace(
+                **{
+                    key: value
+                    for key, value in item.items()
+                    if key in _CONTEXT_TRACE_KEYS
+                }
+            )
             for item in _list_of_dicts(payload.get("contexts"))
         ],
         tool_calls=[
             ToolCallTrace(**item)
             for item in _list_of_dicts(payload.get("tool_calls"))
         ],
-        tasks=[
-            TaskTrace(**item)
-            for item in _list_of_dicts(payload.get("tasks"))
+        plans=[
+            PlanTrace(**item)
+            for item in _list_of_dicts(payload.get("plans"))
+        ],
+        run_guards=[
+            RunGuardTrace(**item)
+            for item in _list_of_dicts(payload.get("run_guards"))
         ],
         memories=[
             MemoryTrace(**item)
@@ -406,6 +428,7 @@ def _context(event: dict[str, Any]) -> ContextTrace:
         budget_tokens=_int(event.get("budget_tokens")),
         tokens_before=_int(event.get("tokens_before")),
         tokens_after=_int(event.get("tokens_after")),
+        sections=_list_of_dicts(event.get("sections")),
         selected_items=_list_of_dicts(event.get("selected_items")),
         stale_items=[str(item) for item in event.get("stale_items", []) if isinstance(item, str)],
         dropped_counts={
@@ -446,23 +469,23 @@ def _tool_call(event: dict[str, Any]) -> ToolCallTrace:
     )
 
 
-def _task(event: dict[str, Any]) -> TaskTrace:
-    return TaskTrace(
-        task_id=str(event.get("task_id", "")),
-        mode=str(event.get("mode", "")),
-        phase=str(event.get("phase", "")),
-        step_id=str(event.get("step_id", "")),
-        step_title=str(event.get("step_title", "")),
-        step_status=str(event.get("step_status", "")),
-        decision=str(event.get("decision", "")),
+def _plan(event: dict[str, Any]) -> PlanTrace:
+    return PlanTrace(
+        plan_id=str(event.get("plan_id", "")),
+        status=str(event.get("status", "")),
+        origin_mode=str(event.get("origin_mode", "")),
+        raw_user_request=str(event.get("raw_user_request", "")),
+        interpreted_goal=str(event.get("interpreted_goal", "")),
+        items=_list_of_dicts(event.get("items")),
+    )
+
+
+def _run_guard(event: dict[str, Any]) -> RunGuardTrace:
+    return RunGuardTrace(
+        action=str(event.get("action", "")),
         reason=str(event.get("reason", "")),
-        evidence_refs=[
-            str(item)
-            for item in event.get("evidence_refs", [])
-            if isinstance(item, str)
-        ],
-        completion_satisfied=_optional_bool(event.get("completion_satisfied")),
-        completion_reason=_optional_str(event.get("completion_reason")),
+        verification_status=str(event.get("verification_status", "")),
+        workspace_changed=bool(event.get("workspace_changed", False)),
     )
 
 
@@ -530,6 +553,21 @@ def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)]
 
 
+_CONTEXT_TRACE_KEYS = {
+    "context_id",
+    "mode",
+    "budget_tokens",
+    "tokens_before",
+    "tokens_after",
+    "sections",
+    "selected_items",
+    "stale_items",
+    "dropped_counts",
+    "tokens_by_layer",
+    "memory_ids",
+}
+
+
 def _int(value: Any) -> int:
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
 
@@ -556,7 +594,8 @@ __all__ = [
     "MemoryTrace",
     "ModelCallTrace",
     "RunTrace",
-    "TaskTrace",
+    "PlanTrace",
+    "RunGuardTrace",
     "ToolCallTrace",
     "build_run_trace",
     "load_audit_bundle",

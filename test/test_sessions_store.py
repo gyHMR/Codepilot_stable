@@ -14,8 +14,7 @@ if str(SRC) not in sys.path:
 
 def test_session_store_persists_messages_forks_and_summarizes_events(tmp_path: Path) -> None:
     from codepilot.protocols import AssistantMessage, Cost, TextContent, Usage, UserMessage
-    from codepilot.sessions.persistence.store import SessionStore
-    from codepilot.tools import AgentToolResult
+    from codepilot.sessions.store import SessionStore
 
     store = SessionStore(tmp_path, "session_test")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
@@ -29,7 +28,7 @@ def test_session_store_persists_messages_forks_and_summarizes_events(tmp_path: P
     store.append_message(assistant)
     store.append_event(
         {
-            "type": "tool_execution_end",
+            "type": "tool_completed",
             "runId": "run_1",
             "turnId": 1,
             "eventId": "run_1:1",
@@ -37,7 +36,7 @@ def test_session_store_persists_messages_forks_and_summarizes_events(tmp_path: P
             "sessionId": "session_test",
             "toolCallId": "call_1",
             "toolName": "echo",
-            "result": AgentToolResult(content=[TextContent(text="ok")], details={"ok": True}),
+            "result": {"content": [{"type": "text", "text": "ok"}], "metadata": {"ok": True}},
             "isError": False,
         }
     )
@@ -64,23 +63,24 @@ def test_session_store_persists_messages_forks_and_summarizes_events(tmp_path: P
     assert len(forked.load_session_messages()) == 2
 
     events = store.load_events()
-    assert events[0]["type"] == "tool_call_finished"
-    assert events[0]["tool_name"] == "echo"
+    assert events[0]["type"] == "tool_completed"
+    assert events[0]["toolName"] == "echo"
     summary = store.summarize_events()
-    assert summary["total_events"] == 2
-    assert summary["event_counts"]["tool_call_finished"] == 1
-    assert summary["event_counts"]["model_call_finished"] == 1
+    assert summary["tool_completed"] == 1
+    assert summary["message_end"] == 1
 
 
 def test_session_store_uses_slim_layout_and_lazy_files(tmp_path: Path) -> None:
     from codepilot.protocols import UserMessage
-    from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.sessions.store import SessionStore
 
     store = SessionStore(tmp_path, "session_layout")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
 
     session_dir = tmp_path / ".codepilot" / "sessions" / "session_layout"
     assert sorted(path.name for path in session_dir.iterdir()) == [
+        "context_ledger.jsonl",
+        "events.jsonl",
         "messages.jsonl",
         "session.json",
     ]
@@ -88,11 +88,13 @@ def test_session_store_uses_slim_layout_and_lazy_files(tmp_path: Path) -> None:
     assert not (session_dir / "session.jsonl").exists()
     assert not (session_dir / "context.jsonl").exists()
     assert not (session_dir / "runs.jsonl").exists()
-    assert not (session_dir / "task_recovery.json").exists()
+    assert not (session_dir / "task_state_legacy.json").exists()
 
     store.append_message(UserMessage(content="hello"))
 
     assert sorted(path.name for path in session_dir.iterdir()) == [
+        "context_ledger.jsonl",
+        "events.jsonl",
         "messages.jsonl",
         "session.json",
     ]
@@ -109,7 +111,7 @@ def test_event_recorder_builds_trace_and_summary(tmp_path: Path) -> None:
     recorder = EventRecorder(tmp_path / "events.jsonl")
     recorder.append(
         {
-            "type": "tool_execution_start",
+            "type": "tool_started",
             "runId": "run_1",
             "turnId": 1,
             "eventId": "run_1:1",
@@ -122,7 +124,7 @@ def test_event_recorder_builds_trace_and_summary(tmp_path: Path) -> None:
     )
     recorder.append(
         {
-            "type": "tool_execution_end",
+            "type": "tool_failed",
             "runId": "run_1",
             "turnId": 1,
             "eventId": "run_1:2",
@@ -146,7 +148,7 @@ def test_event_recorder_builds_trace_and_summary(tmp_path: Path) -> None:
 
 def test_session_store_restores_assistant_error_info(tmp_path: Path) -> None:
     from codepilot.protocols import AssistantMessage, LLMErrorInfo
-    from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.sessions.store import SessionStore
 
     store = SessionStore(tmp_path, "session_error")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="")
@@ -187,8 +189,8 @@ def test_session_store_persists_run_results(tmp_path: Path) -> None:
         TextContent,
         ToolResultMessage,
     )
-    from codepilot.sessions.persistence.run_store import RunStore
-    from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.sessions.store import RunStore
+    from codepilot.sessions.store import SessionStore
 
     store = SessionStore(tmp_path, "session_run")
     store.ensure_initialized(model_id="m", provider="p", system_prompt="")
@@ -242,7 +244,7 @@ def test_session_store_persists_run_results(tmp_path: Path) -> None:
 
 
 def test_freshness_result_names_event_and_steering_policy() -> None:
-    from codepilot.sessions.persistence import FreshnessResult
+    from codepilot.sessions.store import FreshnessResult
 
     no_tracked_files = FreshnessResult(status="valid")
     checked_and_valid = FreshnessResult(status="valid", checked_paths=["src/a.py"])
@@ -257,33 +259,30 @@ def test_freshness_result_names_event_and_steering_policy() -> None:
 
 
 def test_freshness_result_rejects_unknown_status() -> None:
-    from codepilot.sessions.persistence import FreshnessResult
+    from codepilot.sessions.store import FreshnessResult
 
     with pytest.raises(ValueError, match="Unknown freshness status"):
         FreshnessResult(status="unknown")
 
 
-def test_tool_result_message_rejects_unknown_status_but_serde_coerces_legacy() -> None:
+def test_tool_result_message_and_serde_reject_unknown_status() -> None:
     from codepilot.protocols import ToolResultMessage
-    from codepilot.sessions.persistence.serde import message_from_dict
+    from codepilot.sessions.serde import message_from_dict
 
     with pytest.raises(ValueError, match="Unknown tool result status"):
         ToolResultMessage(status="interrupted")
 
-    restored = message_from_dict(
-        {
-            "role": "toolResult",
-            "tool_call_id": "tool_1",
-            "tool_name": "legacy",
-            "content": [],
-            "status": "interrupted",
-            "is_error": True,
-        }
-    )
-
-    assert isinstance(restored, ToolResultMessage)
-    assert restored.status == "error"
-    assert restored.is_error is True
+    with pytest.raises(ValueError, match="Unknown tool result status"):
+        message_from_dict(
+            {
+                "role": "toolResult",
+                "tool_call_id": "tool_1",
+                "tool_name": "tool",
+                "content": [],
+                "status": "interrupted",
+                "is_error": True,
+            }
+        )
 
 
 def test_tool_result_message_keeps_status_and_error_flag_consistent() -> None:

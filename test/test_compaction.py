@@ -4,18 +4,18 @@ from pathlib import Path
 
 
 def test_context_compaction_module_is_removed() -> None:
-    from importlib.util import find_spec
+    import codepilot.sessions.context as context
 
-    assert find_spec("codepilot.sessions.context.compaction") is None
+    assert not hasattr(context, "__path__")
 
 
-def test_agent_session_uses_governor_and_slim_layout(tmp_path: Path) -> None:
+def test_session_runtime_uses_governor_and_slim_layout(tmp_path: Path) -> None:
     from codepilot.protocols import Model
-    from codepilot.sessions import AgentSession
-    from codepilot.sessions.types import AgentSessionOptions
+    from codepilot.sessions.contracts import SessionOptions
+    from codepilot.sessions.runtime import SessionRuntime
 
-    session = AgentSession(
-        AgentSessionOptions(
+    session = SessionRuntime(
+        SessionOptions(
             model=Model(
                 id="test",
                 name="Test",

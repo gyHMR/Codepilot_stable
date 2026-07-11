@@ -1,23 +1,22 @@
 from __future__ import annotations
 
 # 新手导读：extensions/types.py 描述扩展加载后的统一能力集合。
-# 关注点：命令和生命周期契约已经下沉到 sessions.types，避免 sessions 依赖 extensions。
+# 关注点：命令和生命周期契约位于 protocols.commands，extensions 只生产能力描述。
 
 """扩展层类型定义：钩子、命令、技能规格和加载结果。"""
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
-from codepilot.core.types import (
+from codepilot.protocols.commands import (
     AfterToolCallContext,
     AfterToolCallResult,
     BeforeToolCallContext,
     BeforeToolCallResult,
+    LifecycleHook,
+    RegisteredCommand,
 )
-from codepilot.tools import AgentTool
-
-if TYPE_CHECKING:
-    from codepilot.sessions.types import LifecycleHook, RegisteredCommand
+from codepilot.tools import ToolDefinition
 
 # 工具调用前钩子类型
 BeforeHook = Callable[[BeforeToolCallContext, Any | None], BeforeToolCallResult | None | Awaitable[BeforeToolCallResult | None]]
@@ -46,14 +45,14 @@ class LoadedExtensions:
     - 钩子 → 进入生命周期或工具调用管道
     """
 
-    tools: list[AgentTool] = field(default_factory=list)
+    tools: list[ToolDefinition] = field(default_factory=list)
     before_tool_hooks: list[BeforeHook] = field(default_factory=list)
     after_tool_hooks: list[AfterHook] = field(default_factory=list)
     prompt_guidelines: list[str] = field(default_factory=list)
     append_prompts: list[str] = field(default_factory=list)
-    commands: dict[str, "RegisteredCommand"] = field(default_factory=dict)
-    before_prompt_hooks: list["LifecycleHook"] = field(default_factory=list)
-    after_prompt_hooks: list["LifecycleHook"] = field(default_factory=list)
+    commands: dict[str, RegisteredCommand] = field(default_factory=dict)
+    before_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
+    after_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
     skills: list[SkillSpec] = field(default_factory=list)
     diagnostics: list[str] = field(default_factory=list)
     loaded_paths: list[str] = field(default_factory=list)

@@ -11,12 +11,14 @@
 from .api import ExtensionAPI
 from .loader import discover_extension_paths, load_extensions
 from .skills import discover_skill_paths, load_skills
-from codepilot.sessions.types import (
+from codepilot.protocols.commands import (
     CommandHandler,
     LifecycleHook,
     RegisteredCommand,
     SessionCommandContext,
+    SessionCommandView,
     SessionLifecycleContext,
+    SessionLifecycleView,
 )
 from .types import (
     AfterToolCallContext,
@@ -39,7 +41,9 @@ __all__ = [
     "CommandHandler",
     "RegisteredCommand",
     "SessionCommandContext",
+    "SessionCommandView",
     "SessionLifecycleContext",
+    "SessionLifecycleView",
     "LifecycleHook",
     "SkillSpec",
     "LoadedExtensions",

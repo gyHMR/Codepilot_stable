@@ -13,6 +13,11 @@ from .evidence import (
 )
 from .experiments import experiment_variants, run_context_ab, run_security_ab
 from .loader import EvalCaseValidationError, load_eval_case, load_eval_suite
+from .memory_retrieval import (
+    load_memory_corpus,
+    load_memory_retrieval_cases,
+    run_memory_retrieval_benchmark,
+)
 from .reports import build_summary, render_markdown
 from .runner import EvaluationRunner
 from .schema import (
@@ -26,7 +31,6 @@ from .schema import (
     MetricScore,
 )
 from .scorers import score_metrics
-from .service import EvaluationService
 
 __all__ = [
     "CheckResult",
@@ -41,7 +45,6 @@ __all__ = [
     "EvalSuiteResult",
     "EvaluationArtifacts",
     "EvaluationRunner",
-    "EvaluationService",
     "MetricScore",
     "TaskStepEvidence",
     "ToolCallEvidence",
@@ -50,8 +53,11 @@ __all__ = [
     "experiment_variants",
     "load_eval_case",
     "load_eval_suite",
+    "load_memory_corpus",
+    "load_memory_retrieval_cases",
     "render_markdown",
     "run_context_ab",
+    "run_memory_retrieval_benchmark",
     "run_security_ab",
     "score_metrics",
 ]

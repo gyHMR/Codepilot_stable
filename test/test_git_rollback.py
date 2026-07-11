@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from codepilot.sessions.commands import preview_last_run_rollback, revert_last_run
+
 
 def _git(root: Path, *args: str) -> str:
     result = subprocess.run(
@@ -43,11 +45,11 @@ def _model():
 
 
 def _session(root: Path):
-    from codepilot.sessions import AgentSession
-    from codepilot.sessions.types import AgentSessionOptions
+    from codepilot.sessions.contracts import SessionOptions
+    from codepilot.sessions.runtime import SessionRuntime
 
-    return AgentSession(
-        AgentSessionOptions(
+    return SessionRuntime(
+        SessionOptions(
             model=_model(),
             workspace_dir=root,
             session_id="session_git",
@@ -87,7 +89,7 @@ def _append_run_with_rollback(
     affected_paths: list[str],
     workspace_changed: bool = True,
 ) -> None:
-    from codepilot.sessions.history.git_rollback import build_rollback_metadata
+    from codepilot.sessions.rollback import build_rollback_metadata
 
     _append_run(session, run_id, affected_paths)
     session.store.write_rollback_metadata(
@@ -101,14 +103,14 @@ def _append_run_with_rollback(
 
 
 def test_git_rollback_result_rejects_unknown_status() -> None:
-    from codepilot.sessions.history.git_rollback import GitRollbackResult
+    from codepilot.sessions.rollback import GitRollbackResult
 
     with pytest.raises(ValueError, match="Unknown rollback status"):
         GitRollbackResult(status="partial", run_id="run_1")  # type: ignore[arg-type]
 
 
 def test_git_rollback_reverts_tracked_file_and_removes_new_file(tmp_path: Path) -> None:
-    from codepilot.sessions.history.git_rollback import (
+    from codepilot.sessions.rollback import (
         build_rollback_metadata,
         capture_git_baseline,
     )
@@ -136,7 +138,7 @@ def test_git_rollback_reverts_tracked_file_and_removes_new_file(tmp_path: Path) 
         ),
     )
 
-    result = session.revert_last_run()
+    result = revert_last_run(session)
 
     assert result.status == "reverted"
     assert result.restored_paths == ["app.py"]
@@ -146,7 +148,7 @@ def test_git_rollback_reverts_tracked_file_and_removes_new_file(tmp_path: Path) 
 
 
 def test_git_rollback_preview_tracked_restore_and_untracked_remove_without_mutation(tmp_path: Path) -> None:
-    from codepilot.sessions.history.git_rollback import capture_git_baseline
+    from codepilot.sessions.rollback import capture_git_baseline
 
     _init_repo(tmp_path)
     tracked = tmp_path / "app.py"
@@ -166,7 +168,7 @@ def test_git_rollback_preview_tracked_restore_and_untracked_remove_without_mutat
         affected_paths=["app.py", "generated.txt"],
     )
 
-    plan = session.preview_last_run_rollback()
+    plan = preview_last_run_rollback(session)
 
     assert plan.status == "ready"
     assert [(item.path, item.action) for item in plan.actions] == [
@@ -178,7 +180,7 @@ def test_git_rollback_preview_tracked_restore_and_untracked_remove_without_mutat
 
 
 def test_git_rollback_allows_unrelated_dirty_file(tmp_path: Path) -> None:
-    from codepilot.sessions.history.git_rollback import capture_git_baseline
+    from codepilot.sessions.rollback import capture_git_baseline
 
     _init_repo(tmp_path)
     tracked = tmp_path / "app.py"
@@ -199,8 +201,8 @@ def test_git_rollback_allows_unrelated_dirty_file(tmp_path: Path) -> None:
     )
     unrelated.write_text("manual notes\n", encoding="utf-8")
 
-    plan = session.preview_last_run_rollback()
-    result = session.revert_last_run()
+    plan = preview_last_run_rollback(session)
+    result = revert_last_run(session)
 
     assert plan.status == "ready"
     assert plan.ignored_paths == ["notes.txt"]
@@ -211,7 +213,7 @@ def test_git_rollback_allows_unrelated_dirty_file(tmp_path: Path) -> None:
 
 
 def test_git_rollback_allows_unrelated_staged_file(tmp_path: Path) -> None:
-    from codepilot.sessions.history.git_rollback import capture_git_baseline
+    from codepilot.sessions.rollback import capture_git_baseline
 
     _init_repo(tmp_path)
     tracked = tmp_path / "app.py"
@@ -233,7 +235,7 @@ def test_git_rollback_allows_unrelated_staged_file(tmp_path: Path) -> None:
     unrelated.write_text("manual notes\n", encoding="utf-8")
     _git(tmp_path, "add", "notes.txt")
 
-    result = session.revert_last_run()
+    result = revert_last_run(session)
 
     assert result.status == "reverted"
     assert result.restored_paths == ["app.py"]
@@ -242,7 +244,7 @@ def test_git_rollback_allows_unrelated_staged_file(tmp_path: Path) -> None:
 
 
 def test_git_rollback_blocks_affected_staged_file(tmp_path: Path) -> None:
-    from codepilot.sessions.history.git_rollback import capture_git_baseline
+    from codepilot.sessions.rollback import capture_git_baseline
 
     _init_repo(tmp_path)
     tracked = tmp_path / "app.py"
@@ -261,8 +263,8 @@ def test_git_rollback_blocks_affected_staged_file(tmp_path: Path) -> None:
     )
     _git(tmp_path, "add", "app.py")
 
-    plan = session.preview_last_run_rollback()
-    result = session.revert_last_run()
+    plan = preview_last_run_rollback(session)
+    result = revert_last_run(session)
 
     assert plan.status == "blocked"
     assert [(item.path, item.action, item.reason) for item in plan.actions] == [
@@ -275,7 +277,7 @@ def test_git_rollback_blocks_affected_staged_file(tmp_path: Path) -> None:
 
 
 def test_git_rollback_blocks_changed_generated_file(tmp_path: Path) -> None:
-    from codepilot.sessions.history.git_rollback import capture_git_baseline
+    from codepilot.sessions.rollback import capture_git_baseline
 
     _init_repo(tmp_path)
     tracked = tmp_path / "app.py"
@@ -295,7 +297,7 @@ def test_git_rollback_blocks_changed_generated_file(tmp_path: Path) -> None:
     )
     generated.write_text("manual generated\n", encoding="utf-8")
 
-    result = session.revert_last_run()
+    result = revert_last_run(session)
 
     assert result.status == "conflict"
     assert result.reason == "affected_file_changed_after_run"
@@ -304,7 +306,7 @@ def test_git_rollback_blocks_changed_generated_file(tmp_path: Path) -> None:
 
 
 def test_git_rollback_skips_generated_file_already_deleted(tmp_path: Path) -> None:
-    from codepilot.sessions.history.git_rollback import capture_git_baseline
+    from codepilot.sessions.rollback import capture_git_baseline
 
     _init_repo(tmp_path)
     tracked = tmp_path / "app.py"
@@ -324,8 +326,8 @@ def test_git_rollback_skips_generated_file_already_deleted(tmp_path: Path) -> No
     )
     generated.unlink()
 
-    plan = session.preview_last_run_rollback()
-    result = session.revert_last_run()
+    plan = preview_last_run_rollback(session)
+    result = revert_last_run(session)
 
     assert plan.status == "noop"
     assert [(item.path, item.action, item.reason) for item in plan.actions] == [
@@ -336,7 +338,7 @@ def test_git_rollback_skips_generated_file_already_deleted(tmp_path: Path) -> No
 
 
 def test_git_rollback_marks_dirty_baseline_not_eligible(tmp_path: Path) -> None:
-    from codepilot.sessions.history.git_rollback import capture_git_baseline
+    from codepilot.sessions.rollback import capture_git_baseline
 
     _init_repo(tmp_path)
     tracked = tmp_path / "app.py"
@@ -352,7 +354,7 @@ def test_git_rollback_marks_dirty_baseline_not_eligible(tmp_path: Path) -> None:
 
 
 def test_git_rollback_rejects_affected_file_changed_after_run(tmp_path: Path) -> None:
-    from codepilot.sessions.history.git_rollback import (
+    from codepilot.sessions.rollback import (
         build_rollback_metadata,
         capture_git_baseline,
     )
@@ -377,7 +379,7 @@ def test_git_rollback_rejects_affected_file_changed_after_run(tmp_path: Path) ->
     )
     tracked.write_text("print('manual change')\n", encoding="utf-8")
 
-    result = session.revert_last_run()
+    result = revert_last_run(session)
 
     assert result.status == "conflict"
     assert result.reason == "affected_file_changed_after_run"

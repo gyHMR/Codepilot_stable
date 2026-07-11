@@ -18,8 +18,8 @@ from .redact import redact_artifact
 class EventRecorder:
     """Append-only event recorder.
 
-    Unknown or low-value legacy events normalize to ``{}`` and are skipped; this
-    keeps observability from interrupting normal agent execution.
+    Unknown or low-value internal progress events normalize to ``{}`` and are
+    skipped; this keeps observability from interrupting normal agent execution.
     """
 
     path: Path

@@ -1,63 +1,75 @@
-# 新手导读：包门面文件：集中导出本层最常用的类型和入口，降低学习时的导入成本。
-# 关注点：tools 层是工具执行安全边界，统一处理契约、权限、校验、审批和结果防护。
+from __future__ import annotations
 
 """
-Codepilot 工具层。
+Codepilot 工具层（Tools Layer）公共接口。
 
-工具位于本包之下，使 runtime 和 interfaces 共享统一的安全模型，
-而非在各入口点分散嵌入文件系统和 shell 检查逻辑。
+本模块是工具层的统一入口，导出所有核心类型和函数。
+工具层负责：
+  - 工具定义与注册（ToolDefinition、ToolRegistry）
+  - 权限决策与安全策略（PermissionPolicy）
+  - 审批流程管理（ApprovalProvider）
+  - 统一执行管线（ToolRuntime）
+  - 结果规范化与脱敏（ToolResultPolicy）
+
+层级位置：protocols → tools → core → sessions → runtime → interfaces
+工具层只依赖 protocols 层，不依赖 core/sessions/runtime。
 """
 
-from .approval import (
+from .approvals import (
     ApprovalDecision,
     ApprovalProvider,
     ApprovalRequest,
     DeferredApprovalProvider,
 )
 from .builtins import create_builtin_tools
-from .metadata import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES
-from .policy import PermissionPolicy, ToolDecision, ToolPermissionMode, ToolRequest
-from .registry import ToolRegistry
-from .result_safety import ToolResultGuard, apply_result_guard
-from .execution import ToolRuntime
-from .workspace_safety import WorkspaceSandbox
-from .argument_schema import SchemaValidationResult, SchemaValidator, validate_tool_arguments
 from .contracts import (
-    AgentTool,
-    AgentToolResult,
-    AgentToolUpdateCallback,
+    PreparedToolCall,
+    PreparedToolCallResult,
+    ToolCallRequest,
+    ToolCatalogItem,
+    ToolCatalogView,
+    ToolDefinition,
+    ToolInterruption,
+    ToolInvocation,
     ToolMetadata,
-    ToolResultStatus,
-    ToolRuntimeRequest,
-    ToolRuntimeResult,
+    ToolObservation,
+    ToolPolicyContext,
+    ToolPort,
+    ToolResult,
+    ToolResumeDecision,
+    ToolRiskView,
 )
-
+from .permissions import PermissionPolicy, ToolDecision, ToolPermissionMode
+from .registry import ToolRegistry, get_builtin_tool_metadata
+from .restricted import RestrictedToolPort
+from .runtime import ToolRuntime
 
 __all__ = [
-    "AgentTool",
-    "AgentToolResult",
-    "AgentToolUpdateCallback",
     "ApprovalDecision",
     "ApprovalProvider",
     "ApprovalRequest",
     "DeferredApprovalProvider",
-    "MUTATING_TOOL_NAMES",
     "PermissionPolicy",
-    "READ_ONLY_TOOL_NAMES",
+    "PreparedToolCall",
+    "PreparedToolCallResult",
+    "ToolCallRequest",
+    "ToolCatalogItem",
+    "ToolCatalogView",
     "ToolDecision",
-    "ToolPermissionMode",
+    "ToolDefinition",
+    "ToolInterruption",
+    "ToolInvocation",
     "ToolMetadata",
+    "ToolObservation",
+    "ToolPermissionMode",
+    "ToolPolicyContext",
+    "ToolPort",
     "ToolRegistry",
-    "ToolRequest",
-    "ToolResultStatus",
+    "ToolResult",
+    "ToolResumeDecision",
+    "ToolRiskView",
     "ToolRuntime",
-    "ToolRuntimeRequest",
-    "ToolRuntimeResult",
-    "WorkspaceSandbox",
-    "SchemaValidationResult",
-    "SchemaValidator",
-    "ToolResultGuard",
-    "apply_result_guard",
+    "RestrictedToolPort",
     "create_builtin_tools",
-    "validate_tool_arguments",
+    "get_builtin_tool_metadata",
 ]

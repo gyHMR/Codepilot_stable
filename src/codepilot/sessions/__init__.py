@@ -5,66 +5,51 @@ from __future__ import annotations
 
 """Session orchestration package.
 
-The sessions layer owns four small domains:
+The sessions layer owns three facts:
 
-- persistence: session/run facts and filesystem layout
-- context: per-turn ContextGovernor prompt projection
-- memory: durable project/session memory
-- history: task recovery, branching, and lightweight git rollback
+- Session: recoverable transcript, events, runs, and artifacts
+- Context: per-turn model input projection
+- Memory: durable cross-session project facts
 """
 
-from .context import ContextGovernor, RepositoryBootstrap, RepositoryTracker
-from .history import GitRollbackAction, GitRollbackPlan, GitRollbackResult, SessionCheckpoint
-from .layout import SessionLayout
-from .memory import (
-    MemoryQuery,
-    MemoryRecord,
-    MemoryRetriever,
-    MemoryStore,
-    MemoryWriter,
-    RetrievedMemory,
-    load_global_memory,
-    save_global_memory,
+from .controller import SessionController
+from .contracts import (
+    CancelRunIntent,
+    PreparedAgentRun,
+    RollbackBaselineRef,
+    SessionCommandIntent,
+    SessionCommandRecord,
+    SessionIntent,
+    SessionResumeIntent,
+    SessionRunIntent,
+    SessionRunRecord,
+    SessionOptions,
+    SessionView,
 )
-from .persistence import FreshnessResult, RunStore, SessionStore, new_session_id
-from .session import AgentSession
-from .types import (
-    AgentSessionOptions,
-    CommandHandler,
-    ConvertToLlmFn,
-    LifecycleHook,
-    RegisteredCommand,
-    SessionCommandContext,
-    SessionLifecycleContext,
+from .store import (
+    RepositoryBootstrap,
+    SessionOpenMetadata,
+    build_repository_bootstrap,
+    load_session_open_metadata,
+    new_session_id,
 )
 
 __all__ = [
-    "AgentSession",
-    "AgentSessionOptions",
-    "CommandHandler",
-    "ConvertToLlmFn",
-    "LifecycleHook",
-    "RegisteredCommand",
-    "SessionCommandContext",
-    "SessionLifecycleContext",
-    "ContextGovernor",
-    "SessionCheckpoint",
-    "GitRollbackAction",
-    "GitRollbackPlan",
-    "GitRollbackResult",
-    "SessionLayout",
-    "SessionStore",
-    "FreshnessResult",
-    "RunStore",
+    "SessionController",
+    "SessionRunIntent",
+    "SessionResumeIntent",
+    "SessionCommandIntent",
+    "CancelRunIntent",
+    "SessionIntent",
+    "PreparedAgentRun",
+    "RollbackBaselineRef",
+    "SessionRunRecord",
+    "SessionCommandRecord",
+    "SessionView",
+    "SessionOpenMetadata",
+    "load_session_open_metadata",
     "RepositoryBootstrap",
-    "RepositoryTracker",
+    "build_repository_bootstrap",
+    "SessionOptions",
     "new_session_id",
-    "load_global_memory",
-    "save_global_memory",
-    "MemoryQuery",
-    "MemoryRecord",
-    "MemoryRetriever",
-    "MemoryStore",
-    "MemoryWriter",
-    "RetrievedMemory",
 ]

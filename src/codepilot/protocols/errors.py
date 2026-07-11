@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # 新手导读：errors.py 定义跨层可共享的错误信息结构。
-# 关注点：稳定错误结构能帮助 CLI/Web/RPC 用一致方式展示失败。
+# 关注点：稳定错误结构能帮助 CLI/钉钉/RPC 用一致方式展示失败。
 
 """
 错误信息类型定义。

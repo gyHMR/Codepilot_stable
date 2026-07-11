@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # 新手导读：Anthropic provider 把内部消息和工具规范转换为 Anthropic Messages API 请求。
-# 关注点：对照 openai_compatible.py 可以学习不同 API 适配方式。
+# 关注点：对照 openai.py 可以学习不同 API 适配方式。
 
 """
 Anthropic Messages API 流式 provider。
@@ -17,19 +17,22 @@ from typing import Any
 
 import httpx
 
-from ..env_api_keys import get_env_api_key
-from ..errors import classify_llm_error
-from ..event_stream import AssistantMessageEventStream, llm_event
+from ..catalog import get_env_api_key
+from ..stream import (
+    AssistantMessageEventStream,
+    SimpleStreamOptions,
+    StreamOptions,
+    classify_llm_error,
+    llm_event,
+)
 from codepilot.protocols import (
     Context,
     Model,
-    SimpleStreamOptions,
-    StreamOptions,
     TextContent,
     ThinkingContent,
     ToolCall,
 )
-from ._common import empty_assistant_message, normalize_usage, parse_partial_json, to_anthropic_messages, to_anthropic_tools
+from .common import empty_assistant_message, normalize_usage, parse_partial_json, to_anthropic_messages, to_anthropic_tools
 
 
 def _map_stop_reason(reason: str | None) -> str:

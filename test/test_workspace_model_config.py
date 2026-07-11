@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -10,10 +11,10 @@ from codepilot.interfaces.cli.main import (
     _init_model_config,
     build_parser,
 )
-from codepilot.runtime.assembly import create_agent_session
-from codepilot.runtime.bootstrap.model_resolver import resolve_model
-from codepilot.runtime.bootstrap.resources import WorkspaceResourceLoader
-from codepilot.runtime.contracts import CreateAgentSessionOptions
+from codepilot.runtime.builder import build_runtime_session
+from codepilot.runtime.config import WorkspaceResourceLoader, load_runtime_config
+from codepilot.runtime.model import resolve_runtime_model
+from codepilot.runtime import SessionOpenIntent
 
 
 def _write_model_config(workspace, *, api_key: str = "local-key") -> None:
@@ -60,10 +61,8 @@ def test_environment_key_overrides_local_key(tmp_path, monkeypatch) -> None:
 
 def test_runtime_resolves_workspace_model_and_key(tmp_path) -> None:
     _write_model_config(tmp_path)
-    resolved = resolve_model(
-        CreateAgentSessionOptions(workspace_dir=tmp_path),
-        inputs=_runtime_inputs(tmp_path),
-    )
+    intent = SessionOpenIntent(workspace_dir=tmp_path)
+    resolved = resolve_runtime_model(intent, load_runtime_config(intent))
 
     assert resolved.model.provider == "deepseek"
     assert resolved.get_api_key is not None
@@ -72,13 +71,22 @@ def test_runtime_resolves_workspace_model_and_key(tmp_path) -> None:
 
 def test_factory_does_not_persist_api_key(tmp_path) -> None:
     _write_model_config(tmp_path, api_key="secret-value")
-    session = create_agent_session(CreateAgentSessionOptions(workspace_dir=tmp_path))
+    intent = SessionOpenIntent(workspace_dir=tmp_path)
+    session = build_runtime_session(intent)
+    resolved = resolve_runtime_model(intent, load_runtime_config(intent))
     try:
-        assert session.get_api_key is not None
-        assert session.get_api_key("deepseek") == "secret-value"
-        assert "secret-value" not in session.store.session_file.read_text(encoding="utf-8")
+        assert resolved.get_api_key is not None
+        assert resolved.get_api_key("deepseek") == "secret-value"
+        session_file = (
+            tmp_path
+            / ".codepilot"
+            / "sessions"
+            / session.session_id
+            / "session.json"
+        )
+        assert "secret-value" not in session_file.read_text(encoding="utf-8")
     finally:
-        session.close()
+        session.controller.close()
 
 
 def test_init_config_creates_editable_template(tmp_path) -> None:
@@ -104,7 +112,40 @@ def test_cli_defaults_leave_runtime_config_unspecified() -> None:
     assert args.prompt == "hello"
     assert args.model is None
     assert args.permission_mode is None
-    assert args.task_mode is None
+    assert args.current_mode is None
+
+
+def test_cli_interactive_uses_runtime_deferred_approval_path(tmp_path, monkeypatch) -> None:
+    from codepilot.interfaces.cli import main as cli_main
+
+    captured = {}
+
+    class FakeRuntime:
+        def open_session(self, intent):
+            captured["intent"] = intent
+
+            class Handle:
+                session_id = "session_1"
+
+            return Handle()
+
+        async def close_all(self):
+            captured["closed"] = True
+
+    async def fake_run_repl(runtime, session_id, **kwargs):
+        captured["run_mode"] = "repl"
+        captured["session_id"] = session_id
+
+    monkeypatch.setattr(cli_main, "RuntimeGateway", FakeRuntime)
+    monkeypatch.setattr(cli_main, "run_repl", fake_run_repl)
+
+    args = build_parser().parse_args(["--cwd", str(tmp_path)])
+
+    assert asyncio.run(cli_main._run_from_args(args)) == 0
+    assert captured["run_mode"] == "repl"
+    assert captured["session_id"] == "session_1"
+    assert captured["intent"].approval_provider is None
+    assert captured["closed"] is True
 
 
 def test_cli_rejects_removed_legacy_options() -> None:
@@ -150,8 +191,8 @@ def test_config_check_and_show_use_sanitized_human_output(tmp_path, capsys) -> N
 
 
 def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import read_restored_session_meta, resolve_runtime_config
-    from codepilot.sessions.persistence.store import SessionStore
+    from codepilot.sessions.store import load_session_open_metadata
+    from codepilot.sessions.store import SessionStore
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -168,28 +209,25 @@ def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> Non
     store = SessionStore(tmp_path, "session_restore")
     store.ensure_initialized(model_id="deepseek-v4-pro", provider="deepseek", system_prompt="restored prompt")
 
-    options = CreateAgentSessionOptions(workspace_dir=tmp_path, session_id="session_restore")
-    inputs = _runtime_inputs(tmp_path, session_id="session_restore")
-    resolved = resolve_model(options, inputs=inputs)
-    config = resolve_runtime_config(options, inputs=inputs)
+    intent = SessionOpenIntent(workspace_dir=tmp_path, session_id="session_restore")
+    config = load_runtime_config(intent)
+    resolved = resolve_runtime_model(intent, config)
 
-    assert read_restored_session_meta(tmp_path, "session_restore") is not None
+    assert load_session_open_metadata(tmp_path, "session_restore") is not None
     assert resolved.model.provider == "deepseek"
     assert resolved.model.id == "deepseek-v4-pro"
-    assert config.system_prompt == "restored prompt"
-    assert config.sources["system_prompt"] == "restored_session"
+    assert config.system_prompt == "workspace prompt"
+    assert config.sources["system_prompt"].kind == "project"
 
 
 def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import resolve_runtime_config
-
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
     (root / "settings.json").write_text(
         json.dumps(
             {
                 "retry_enabled": True,
-                "read_only_mode": True,
+                "tool_permission_mode": "ask",
                 "block_dangerous_bash": True,
                 "prompt_debug_sources": True,
                 "bash_allow_patterns": ["pytest"],
@@ -199,32 +237,29 @@ def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> 
         encoding="utf-8",
     )
 
-    config = resolve_runtime_config(
-        CreateAgentSessionOptions(
+    config = load_runtime_config(
+        SessionOpenIntent(
             workspace_dir=tmp_path,
             retry_enabled=False,
-            read_only_mode=False,
+            tool_permission_mode="workspace-write",
             block_dangerous_bash=False,
             prompt_debug_sources=False,
             bash_allow_patterns=[],
             extension_paths=[],
         ),
-        inputs=_runtime_inputs(tmp_path),
     )
 
     assert config.retry_enabled is False
-    assert config.read_only_mode is False
+    assert config.tool_permission_mode == "workspace-write"
     assert config.block_dangerous_bash is False
     assert config.prompt_debug_sources is False
     assert config.bash_allow_patterns == []
     assert config.extension_paths == []
-    assert config.sources["retry_enabled"] == "options"
-    assert config.sources["bash_allow_patterns"] == "options"
+    assert config.sources["retry_enabled"].kind == "cli"
+    assert config.sources["bash_allow_patterns"].kind == "cli"
 
 
 def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import resolve_runtime_config
-
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
     (root / "settings.json").write_text(
@@ -232,41 +267,31 @@ def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    config = resolve_runtime_config(
-        CreateAgentSessionOptions(workspace_dir=tmp_path),
-        inputs=_runtime_inputs(tmp_path),
-    )
+    config = load_runtime_config(SessionOpenIntent(workspace_dir=tmp_path))
 
     assert config.max_tool_calls_per_turn == 3
     assert config.tool_execution == "sequential"
     assert config.max_retries == 2
-    assert config.sources["max_tool_calls_per_turn"] == "workspace"
-    assert config.sources["tool_execution"] == "workspace"
-    assert config.sources["max_retries"] == "default"
+    assert config.sources["max_tool_calls_per_turn"].kind == "project"
+    assert config.sources["tool_execution"].kind == "project"
+    assert config.sources["max_retries"].kind == "default"
 
 
-def test_workspace_settings_can_select_task_mode(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import resolve_runtime_config
-
+def test_workspace_settings_can_select_current_mode(tmp_path) -> None:
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
     (root / "settings.json").write_text(
-        json.dumps({"task_mode": "plan"}),
+        json.dumps({"current_mode": "plan"}),
         encoding="utf-8",
     )
 
-    config = resolve_runtime_config(
-        CreateAgentSessionOptions(workspace_dir=tmp_path),
-        inputs=_runtime_inputs(tmp_path),
-    )
+    config = load_runtime_config(SessionOpenIntent(workspace_dir=tmp_path))
 
-    assert config.task_mode == "plan"
-    assert config.sources["task_mode"] == "workspace"
+    assert config.current_mode == "plan"
+    assert config.sources["current_mode"].kind == "project"
 
 
 def test_workspace_settings_can_select_planning_budget_profile(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import resolve_runtime_config
-
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
     (root / "settings.json").write_text(
@@ -274,54 +299,52 @@ def test_workspace_settings_can_select_planning_budget_profile(tmp_path) -> None
         encoding="utf-8",
     )
 
-    config = resolve_runtime_config(
-        CreateAgentSessionOptions(workspace_dir=tmp_path),
-        inputs=_runtime_inputs(tmp_path),
-    )
+    config = load_runtime_config(SessionOpenIntent(workspace_dir=tmp_path))
 
-    assert config.task_mode == "edit"
+    assert config.current_mode == "build"
     assert config.planning_budget_profile == "wide"
-    assert config.sources["planning_budget_profile"] == "workspace"
+    assert config.sources["planning_budget_profile"].kind == "project"
 
 
-def test_read_task_mode_forces_read_only_permission(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import resolve_runtime_config
-
-    config = resolve_runtime_config(
-        CreateAgentSessionOptions(workspace_dir=tmp_path, task_mode="read"),
-        inputs=_runtime_inputs(tmp_path),
+def test_read_current_mode_forces_read_only_permission(tmp_path) -> None:
+    config = load_runtime_config(
+        SessionOpenIntent(workspace_dir=tmp_path, current_mode="read")
     )
 
-    assert config.task_mode == "read"
-    assert config.read_only_mode is True
+    assert config.current_mode == "read"
     assert config.tool_permission_mode == "read-only"
 
 
-def test_read_task_mode_rejects_workspace_write_override(tmp_path) -> None:
-    from codepilot.runtime.bootstrap.config import resolve_runtime_config
-
-    with pytest.raises(ValueError, match="task_mode=read"):
-        resolve_runtime_config(
-            CreateAgentSessionOptions(
-                workspace_dir=tmp_path,
-                task_mode="read",
-                tool_permission_mode="workspace-write",
-            ),
-            inputs=_runtime_inputs(tmp_path),
-        )
-
-
-def _runtime_inputs(tmp_path, *, session_id: str | None = None):
-    from codepilot.runtime.bootstrap.config import RuntimeInputs
-
-    return RuntimeInputs(
-        workspace=tmp_path,
-        resources=WorkspaceResourceLoader(tmp_path).load(),
-        restored_meta=(
-            __import__("codepilot.sessions.persistence.store", fromlist=["SessionStore"])
-            .SessionStore(tmp_path, session_id)
-            .read_meta()
-            if session_id
-            else None
+def test_read_current_mode_forces_workspace_write_override_to_read_only(tmp_path) -> None:
+    config = load_runtime_config(
+        SessionOpenIntent(
+            workspace_dir=tmp_path,
+            current_mode="read",
+            tool_permission_mode="workspace-write",
         ),
     )
+
+    assert config.current_mode == "read"
+    assert config.tool_permission_mode == "read-only"
+
+
+def test_plan_current_mode_forces_read_only_permission(tmp_path) -> None:
+    config = load_runtime_config(
+        SessionOpenIntent(workspace_dir=tmp_path, current_mode="plan")
+    )
+
+    assert config.current_mode == "plan"
+    assert config.tool_permission_mode == "read-only"
+
+
+def test_plan_current_mode_forces_workspace_write_override_to_read_only(tmp_path) -> None:
+    config = load_runtime_config(
+        SessionOpenIntent(
+            workspace_dir=tmp_path,
+            current_mode="plan",
+            tool_permission_mode="workspace-write",
+        ),
+    )
+
+    assert config.current_mode == "plan"
+    assert config.tool_permission_mode == "read-only"

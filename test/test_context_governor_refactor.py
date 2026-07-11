@@ -1,269 +1,452 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
 from pathlib import Path
 
 
-def test_pressure_policy_uses_effective_budget_and_three_levels() -> None:
-    from codepilot.core import ContextPreparationRequest
-    from codepilot.sessions.context.policy import ContextPressurePolicy
-
-    policy = ContextPressurePolicy(
-        safety_margin_tokens=100,
-        tight_ratio=0.70,
-        critical_ratio=0.90,
-    )
-    request = ContextPreparationRequest(
-        session_id="session_1",
-        model_context_window=1000,
-        model_max_output_tokens=100,
-    )
-
-    normal = policy.evaluate(
-        request,
-        estimated_tokens=500,
-        tool_output_tokens=50,
-        history_tokens=200,
-    )
-    tight = policy.evaluate(
-        request,
-        estimated_tokens=610,
-        tool_output_tokens=260,
-        history_tokens=300,
-    )
-    critical = policy.evaluate(
-        request,
-        estimated_tokens=730,
-        tool_output_tokens=260,
-        history_tokens=430,
-    )
-
-    assert normal.effective_budget == 800
-    assert normal.level == "normal"
-    assert tight.level == "tight"
-    assert "tool_output_pressure" in tight.reasons
-    assert critical.level == "critical"
-    assert "critical_budget_pressure" in critical.reasons
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 
-def test_context_protocols_describe_view_checkpoint_and_artifacts() -> None:
-    import pytest
-    from codepilot.protocols import (
-        ContextArtifactRef,
-        ContextCheckpoint,
-        ContextPressure,
-        ContextReport,
-        ContextView,
-    )
-
-    pressure = ContextPressure(
-        level="tight",
-        effective_budget=800,
-        estimated_tokens=720,
-        reasons=["tool_output_pressure"],
-    )
-    artifact = ContextArtifactRef(
-        kind="tool_output",
-        path=".codepilot/sessions/s1/artifacts/tool.txt",
-        source_hash="abc123",
-        summary="pytest failed with one assertion",
-        original_tokens=1200,
-        visible_tokens=40,
-    )
-    checkpoint = ContextCheckpoint(
-        goal="fix failing tests",
-        active_files=["src/app.py"],
-        changed_files=["src/app.py"],
-        key_evidence=["pytest failed before fix"],
-        verification_state="stale",
-        open_questions=[],
-        next_actions=["rerun pytest"],
-        source_refs=[artifact.path],
-    )
-    view = ContextView(
-        stable_rules=["AGENTS.md: keep UTF-8"],
-        working_state=["goal: fix failing tests"],
-        recalled_memory=["previous pytest failure required cwd setup"],
-        evidence=["pytest failed before fix"],
-        recent_messages=["user: fix tests"],
-        tools=["read", "shell"],
-    )
-    report = ContextReport(
-        context_id="ctx_1",
-        repository_fingerprint="repo",
-        total_budget_tokens=800,
-        estimated_tokens_before=1500,
-        estimated_tokens_after=620,
-        pressure=pressure,
-        context_view=view,
-        checkpoint_created=checkpoint,
-        artifact_refs=[artifact],
-        tokens_by_layer={"stable_rules": 20, "evidence": 40},
-        prefix_hash="prefix",
-        dynamic_hash="dynamic",
-    )
-
-    payload = report.to_dict()
-
-    assert payload["pressure"]["level"] == "tight"
-    assert payload["context_view"]["stable_rules"] == ["AGENTS.md: keep UTF-8"]
-    assert payload["checkpoint_created"]["goal"] == "fix failing tests"
-    assert payload["artifact_refs"][0]["visible_tokens"] == 40
-    assert payload["prefix_hash"] == "prefix"
-
-    with pytest.raises(ValueError, match="Unknown context pressure level"):
-        ContextPressure(level="panic", effective_budget=1, estimated_tokens=2)
-
-
-def test_tool_artifact_ledger_persists_large_outputs_and_projects_light_messages(
+def test_context_governor_prepares_linear_context_with_memory_and_artifacts(
     tmp_path: Path,
 ) -> None:
-    from codepilot.protocols import TextContent, ToolResultMessage
-    from codepilot.sessions.context.ledger import ToolArtifactLedger
-
-    ledger = ToolArtifactLedger(
-        workspace_dir=tmp_path,
-        session_id="session_1",
-    )
-    large_output = "failure line\n" * 500
-    message = ToolResultMessage(
-        tool_call_id="call_1",
-        tool_name="shell",
-        content=[TextContent(text=large_output)],
-        status="error",
-        affected_paths=["src/app.py"],
-        verification={"status": "failed"},
-        metadata={"file_state": {"path": "src/app.py", "sha256": "abc"}},
-    )
-
-    entry = ledger.record_tool_result(run_id="run_1", message=message)
-    projected = ledger.project_tool_result(message, preserve_full=False)
-
-    artifact_path = tmp_path / entry.artifact.path
-    assert artifact_path.is_file()
-    assert artifact_path.read_text(encoding="utf-8") == large_output
-    assert entry.artifact.original_tokens > entry.artifact.visible_tokens
-    assert entry.affected_paths == ["src/app.py"]
-    assert "failure line" not in projected.content[0].text * 20
-    assert entry.artifact.path in projected.content[0].text
-    assert ledger.load_entries()[0].tool_call_id == "call_1"
-    session_dir = tmp_path / ".codepilot" / "sessions" / "session_1"
-    assert (session_dir / "context_ledger.jsonl").exists()
-    assert not (session_dir / "tool_ledger.jsonl").exists()
-
-
-def test_context_governor_projects_decision_view_with_checkpoint_and_memory(
-    tmp_path: Path,
-) -> None:
-    from codepilot.core import AgentContext, ContextPreparationRequest
-    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage, UserMessage
-    from codepilot.sessions.context.governor import ContextGovernor
-    from codepilot.sessions.context.policy import ContextPressurePolicy
-    from codepilot.sessions.context.state import SessionContextState
-    from codepilot.sessions.memory.records import MemoryRecall, MemoryRecord, RetrievedMemory
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
+    from codepilot.sessions.context import ContextGovernor
+    from codepilot.sessions.context import SessionContextState
+    from codepilot.sessions.memory import MemoryRecall, MemoryRecord, RetrievedMemory
 
     class FakeMemoryRetriever:
-        def validate_freshness(self) -> list[object]:
-            return []
-
         def recall(self, _query) -> MemoryRecall:
             return MemoryRecall(
-                pinned_text="Pinned: use UTF-8 and LF.",
-                selected=[
+                retrieved=[
                     RetrievedMemory(
                         record=MemoryRecord(
                             id="mem_1",
-                            kind="experience",
-                            scope="session",
-                            key="experience:verification:cwd_setup",
-                            text="Previous pytest failure required cwd setup.",
-                            triggers=["error:verification_failed", "intent:debug_failure"],
-                            source="run",
+                            type="experience",
+                            scope="project",
+                            subject="experience:pytest",
+                            predicate="is",
+                            value="Run pytest from the repo root.",
+                            content="Run pytest from the repo root.",
+                            keywords=["pytest"],
+                            status="active",
+                            source="task_experience",
+                            confidence="observed",
+                            created_by_session_id="session_1",
+                            evidence_refs=["session:session_1"],
                         ),
                         score=90,
-                        reasons=["recent_error"],
+                        reasons=["test"],
                     )
-                ],
+                ]
             )
 
-    state = SessionContextState(workspace_dir=tmp_path)
     governor = ContextGovernor(
         workspace_dir=tmp_path,
         session_id="session_1",
-        state=state,
+        state=SessionContextState(workspace_dir=tmp_path),
         memory_retriever=FakeMemoryRetriever(),
+    )
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(
+                system_prompt="System rules.",
+                messages=[
+                    UserMessage(content="Fix failing tests."),
+                    ToolResultMessage(
+                        tool_call_id="call_1",
+                        tool_name="shell",
+                        content=[TextContent(text="pytest failed\n" * 600)],
+                        status="error",
+                        affected_paths=["test/test_app.py"],
+                        verification={"status": "failed"},
+                    ),
+                ],
+                mode="build",
+                plan_state={
+                    "schema_version": 6,
+                    "plan_id": "plan_1",
+                    "owner_run_id": "run_1",
+                    "status": "active",
+                    "origin_mode": "build",
+                    "raw_user_request": "Fix failing tests.",
+                    "interpreted_goal": "Fix failing tests.",
+                    "task_understanding": "Fix the failing tests with a focused implementation change.",
+                    "current_implementation": "pytest currently fails and points at test/test_app.py.",
+                    "target_design": "Repair the implementation while keeping the current API.",
+                    "impact_scope": "Implementation and focused tests for the failing path.",
+                    "risks_and_open_questions": ["No open blocker."],
+                    "verification_plan": "Run pytest from the repo root.",
+                    "summary": "Fix the failing test suite with a focused change.",
+                    "completion_criteria": ["Focused tests pass"],
+                    "items": [
+                        {
+                            "id": "item_1",
+                            "step": "Fix failing tests.",
+                            "details": "Locate and repair the failing implementation.",
+                            "verification": "Run the focused tests.",
+                            "status": "in_progress",
+                        }
+                    ],
+                    "revision": 1,
+                    "explanation": "",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "completed_at": None,
+                    "completion_source": None,
+                },
+                run_signals={"verification_status": "failed"},
+                runtime_state={
+                    "run_id": "run_1",
+                    "mode": "build",
+                    "checkpoint_phase": "running",
+                    "mode_policy": "Execute the approved plan.",
+                },
+            ),
+            ContextPreparationRequest(
+                session_id="session_1",
+                model_context_window=4000,
+                model_max_output_tokens=500,
+            ),
+        )
+    )
+
+    assert "## Mode Policy" in prepared.system_prompt
+    assert "## Runtime State" in prepared.system_prompt
+    assert "## Current User Request" in prepared.system_prompt
+    assert "## Task Plan" in prepared.system_prompt
+    assert "Approved Execution Contract" in prepared.system_prompt
+    assert "Fix failing tests." in prepared.system_prompt
+    assert "Run pytest from the repo root." in prepared.system_prompt
+    assert prepared.report.context_view is not None
+    assert prepared.report.retrieved_memory_ids == ["mem_1"]
+    assert any(ref.path.endswith(".txt") for ref in prepared.report.artifact_refs)
+    assert (tmp_path / ".codepilot" / "sessions" / "session_1" / "context_ledger.jsonl").exists()
+
+
+def test_context_governor_filters_archived_plan_from_store(tmp_path: Path) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import UserMessage
+    from codepilot.sessions.context import ContextGovernor
+    from codepilot.sessions.plan_state import PlanStateStore
+    from codepilot.sessions.store import SessionStore
+
+    session_store = SessionStore(tmp_path, "session_archived_plan")
+    session_store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
+    PlanStateStore(session_store).save(
+        {
+                "schema_version": 6,
+            "plan_id": "plan_done",
+            "owner_run_id": "run_done",
+            "status": "completed",
+            "origin_mode": "plan",
+                "raw_user_request": "旧任务",
+                "interpreted_goal": "旧任务",
+            "task_understanding": "旧任务已经完成。",
+            "current_implementation": "旧任务完成时的实现证据。",
+            "target_design": "旧任务目标设计。",
+            "impact_scope": "旧任务影响范围。",
+            "risks_and_open_questions": ["旧任务无待确认项。"],
+            "verification_plan": "旧任务验证方案。",
+            "summary": "旧计划已经完成。",
+            "completion_criteria": ["旧任务完成"],
+            "items": [
+                {
+                    "id": "item_1",
+                    "step": "旧步骤",
+                    "details": "旧步骤详情。",
+                    "verification": "旧验证。",
+                    "status": "pending",
+                }
+            ],
+            "revision": 1,
+            "explanation": "",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T01:00:00+00:00",
+            "completed_at": "2026-01-01T01:00:00+00:00",
+            "completion_source": "model_closeout",
+        }
+    )
+    governor = ContextGovernor(
+        workspace_dir=tmp_path,
+        session_id="session_archived_plan",
+        store=session_store,
+    )
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(
+                system_prompt="System rules.",
+                messages=[UserMessage(content="开始新任务。")],
+                mode="build",
+            ),
+            ContextPreparationRequest(
+                session_id="session_archived_plan",
+                model_context_window=4000,
+                model_max_output_tokens=500,
+            ),
+        )
+    )
+
+    assert "## Task Plan" not in prepared.system_prompt
+    assert prepared.report.context_view is not None
+    assert prepared.report.context_view.task_plan == []
+
+
+def test_context_governor_renders_synthetic_control_separately(tmp_path: Path) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import UserMessage
+    from codepilot.sessions.context import ContextGovernor
+
+    governor = ContextGovernor(workspace_dir=tmp_path, session_id="session_synthetic_control")
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(
+                system_prompt="System rules.",
+                messages=[UserMessage(content="回答问题")],
+                mode="build",
+                runtime_state={
+                    "run_id": "run_1",
+                    "mode": "build",
+                    "checkpoint_phase": "running",
+                    "mode_policy": "Execute the task.",
+                    "synthetic_control": {
+                        "source": "runner",
+                        "kind": "empty_final_answer",
+                        "scope": "final_answer_only",
+                        "instruction": "你刚才没有给出用户可见的最终答复。",
+                        "expires_after_turns": 1,
+                    },
+                },
+            ),
+            ContextPreparationRequest(
+                session_id="session_synthetic_control",
+                model_context_window=4000,
+                model_max_output_tokens=500,
+            ),
+        )
+    )
+
+    assert "## Synthetic Control" in prepared.system_prompt
+    assert "Scope: final_answer_only" in prepared.system_prompt
+    assert "This is not a user request" in prepared.system_prompt
+    assert "Raw request: 回答问题" in prepared.system_prompt
+    assert "Raw request: 你刚才没有给出用户可见的最终答复" not in prepared.system_prompt
+
+
+def test_context_governor_surfaces_recent_read_paths_in_working_set(
+    tmp_path: Path,
+) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
+    from codepilot.sessions.context import ContextGovernor
+    from codepilot.sessions.context import SessionContextState
+
+    governor = ContextGovernor(
+        workspace_dir=tmp_path,
+        session_id="session_read_working_set",
+        state=SessionContextState(workspace_dir=tmp_path),
+    )
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(
+                system_prompt="System rules.",
+                messages=[
+                    UserMessage(content="Review src/app.py."),
+                    ToolResultMessage(
+                        tool_call_id="read_1",
+                        tool_name="read",
+                        content=[TextContent(text="1\tprint('hello')")],
+                        status="success",
+                        metadata={
+                            "read_paths": ["src/app.py"],
+                            "file_state": {"path": "src/app.py", "sha256": "abc"},
+                        },
+                    ),
+                ],
+            ),
+            ContextPreparationRequest(
+                session_id="session_read_working_set",
+                model_context_window=4000,
+                model_max_output_tokens=500,
+            ),
+        )
+    )
+
+    assert prepared.report.context_view is not None
+    assert any(
+        "Active file: src/app.py role=target" in line
+        for line in prepared.report.context_view.working_set
+    )
+
+
+def test_context_governor_counts_tool_schemas_in_budget_estimates(
+    tmp_path: Path,
+) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import Tool, UserMessage
+    from codepilot.sessions.context import ContextGovernor
+    from codepilot.sessions.context import ContextPressurePolicy
+    from codepilot.sessions.context import SessionContextState
+
+    tools = [
+        Tool(
+            name=f"tool_{index}",
+            description="A model-visible tool with schema budget.",
+            parameters={"type": "object", "properties": {"value": {"type": "string"}}},
+        )
+        for index in range(4)
+    ]
+    governor = ContextGovernor(
+        workspace_dir=tmp_path,
+        session_id="session_tool_budget",
+        state=SessionContextState(workspace_dir=tmp_path),
         pressure_policy=ContextPressurePolicy(
-            safety_margin_tokens=50,
-            tight_ratio=0.45,
-            critical_ratio=0.60,
+            safety_margin_tokens=0,
+            tight_ratio=0.72,
+            critical_ratio=0.90,
         ),
     )
-    tool_call = ToolCall(id="call_1", name="shell", arguments={"command": "pytest -q"})
-    large_output = "long pytest failure output\n" * 500
-    context = AgentContext(
-        system_prompt="System rules.\n\nAGENTS.md: project files use UTF-8.",
-        messages=[
-            UserMessage(content="Please fix the failing tests."),
-            AssistantMessage(content=[tool_call], stop_reason="toolUse"),
-            ToolResultMessage(
-                tool_call_id="call_1",
-                tool_name="shell",
-                content=[TextContent(text=large_output)],
-                status="error",
-                affected_paths=["test/test_app.py"],
-                verification={"status": "failed"},
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(
+                system_prompt="System rules.",
+                messages=[UserMessage(content="Use the available tools.")],
+                tools=tools,
             ),
-            UserMessage(content="Continue from the failure."),
-        ],
-        current_task="Goal: fix failing tests.",
-        task_signal={
-            "phase": "acting",
-            "action_intent": "debug_failure",
-            "recent_error_code": "verification_failed",
-        },
-    )
-    request = ContextPreparationRequest(
-        session_id="session_1",
-        model_context_window=900,
-        model_max_output_tokens=200,
+            ContextPreparationRequest(
+                session_id="session_tool_budget",
+                model_context_window=1100,
+                model_max_output_tokens=100,
+            ),
+        )
     )
 
-    prepared = asyncio.run(governor.prepare(context, request))
-    rendered = prepared.system_prompt + "\n".join(
-        getattr(block, "text", "")
-        for message in prepared.messages
-        if isinstance(message, ToolResultMessage)
-        for block in message.content
+    assert prepared.report.tokens_by_layer["tools"] >= 800
+    assert "json_schema" in prepared.report.estimation["by_type"]
+
+
+def test_context_ledger_records_simple_projection(tmp_path: Path) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import UserMessage
+    from codepilot.sessions.context import ContextGovernor
+
+    governor = ContextGovernor(workspace_dir=tmp_path, session_id="session_ledger")
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(
+                system_prompt="System rules.",
+                messages=[UserMessage(content="hello")],
+            ),
+            ContextPreparationRequest(
+                session_id="session_ledger",
+                model_context_window=4000,
+                model_max_output_tokens=500,
+            ),
+        )
     )
 
-    assert "AGENTS.md: project files use UTF-8." in prepared.system_prompt
-    assert "Previous pytest failure required cwd setup." in prepared.system_prompt
-    assert "long pytest failure output" not in rendered
-    assert prepared.report.pressure.level == "critical"
-    assert prepared.report.checkpoint_created is not None
-    assert prepared.report.artifact_refs
-    assert prepared.report.context_view is not None
-    assert prepared.report.context_view.recalled_memory
-    assert any(
-        item.get("path") == "test/test_app.py"
-        for item in prepared.report.selected_items
+    ledger_path = tmp_path / ".codepilot" / "sessions" / "session_ledger" / "context_ledger.jsonl"
+    payload = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[-1])
+
+    assert payload["type"] == "context_projection"
+    assert payload["context_id"] == prepared.report.context_id
+    assert "tokens_by_layer" in payload
+    assert "task_plan" in payload["tokens_by_layer"]
+    assert "runtime" in payload["tokens_by_layer"]
+    assert "memory_retrieval_reasons" in payload
+    assert "dropped_memory_reasons" in payload
+    assert "runner_preflight" in payload
+
+
+def test_context_governor_compacts_old_conversation_on_critical_pressure(
+    tmp_path: Path,
+) -> None:
+    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.protocols import UserMessage
+    from codepilot.sessions.context import ContextGovernor
+
+    messages = [
+        UserMessage(
+            content=f"old request {index} " + ("details " * 80),
+            metadata={"session_message_id": f"msg_{index:03d}"},
+        )
+        for index in range(18)
+    ]
+    governor = ContextGovernor(workspace_dir=tmp_path, session_id="session_compact")
+
+    prepared = asyncio.run(
+        governor.prepare(
+            AgentContext(system_prompt="System rules.", messages=messages),
+            ContextPreparationRequest(
+                session_id="session_compact",
+                model_context_window=900,
+                model_max_output_tokens=100,
+            ),
+        )
     )
-    assert any(
-        item.get("kind") == "memory" and item.get("id") == "mem_1"
-        for item in prepared.report.selected_items
+
+    meta = governor.store.read_meta()
+    context_meta = meta["context"]
+    ledger_path = tmp_path / ".codepilot" / "sessions" / "session_compact" / "context_ledger.jsonl"
+    rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+
+    assert context_meta["compacted_until_message_id"] == "msg_011"
+    assert context_meta["last_compact_summary"]
+    assert any(row["type"] == "context_compaction" for row in rows)
+    assert [message.metadata.get("session_message_id") for message in prepared.messages] == [
+        "msg_012",
+        "msg_013",
+        "msg_014",
+        "msg_015",
+        "msg_016",
+        "msg_017",
+    ]
+
+
+def test_token_estimator_classifies_content_types_and_calibrates_usage(
+    tmp_path: Path,
+) -> None:
+    from codepilot.llm.estimation import (
+        ContextUsageCalibrator,
+        classify_content_type,
+        estimate_text_tokens,
     )
-    assert governor.checkpoints.load_latest() is not None
-    session_dir = tmp_path / ".codepilot" / "sessions" / "session_1"
-    assert (session_dir / "context_ledger.jsonl").exists()
-    assert not (session_dir / "context_views.jsonl").exists()
-    assert not (session_dir / "checkpoints.jsonl").exists()
 
+    assert classify_content_type("请按照上下文设计进行完全重构") == "chinese_text"
+    assert classify_content_type('{"type":"object","properties":{"x":{"type":"string"}}}') == "json_schema"
+    assert classify_content_type("def run():\n    return {'ok': True}\n") == "code_text"
+    assert classify_content_type("Plain English sentence for estimation.") == "english_text"
 
-def test_context_compiler_is_not_public_sessions_api() -> None:
-    import codepilot.sessions as sessions
-    import codepilot.sessions.context as context
+    raw = estimate_text_tokens("hello world", content_type="english_text").total
+    adjusted = estimate_text_tokens(
+        "hello world",
+        content_type="english_text",
+        correction_factors={"english_text": 1.8},
+    ).total
+    assert adjusted >= raw
 
-    assert not hasattr(sessions, "ContextCompiler")
-    assert not hasattr(sessions, "ContextPolicy")
-    assert not hasattr(context, "ContextCompiler")
-    assert not hasattr(context, "ContextPolicy")
+    calibrator = ContextUsageCalibrator(tmp_path)
+    calibrator.update(
+        provider="test",
+        model="model",
+        raw_estimate=100,
+        actual_input_tokens=1000,
+        breakdown={"english_text": 100},
+    )
+
+    payload = json.loads((tmp_path / ".codepilot" / "context_usage.json").read_text(encoding="utf-8"))
+    record = payload["test:model:english_text"]
+    assert record["correction_factor"] <= 1.8
+    assert record["sample_count"] == 1

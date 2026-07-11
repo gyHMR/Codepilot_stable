@@ -180,6 +180,83 @@ def _context_token_efficiency(evidence: EvalEvidence) -> MetricScore:
     return _ratio("context.token_efficiency", useful_tokens, total_tokens)
 
 
+def _context_compression_rate(evidence: EvalEvidence) -> MetricScore:
+    variant_score = _context_variant_compression_rate(evidence)
+    if variant_score is not None:
+        return variant_score
+
+    sections = [
+        section
+        for context in evidence.contexts
+        for section in context.sections
+        if _section_tokens_before(section) > _section_tokens_after(section)
+    ]
+    if sections:
+        before = sum(_section_tokens_before(section) for section in sections)
+        after = sum(_section_tokens_after(section) for section in sections)
+        return _ratio("context.compression_rate", before - after, before)
+
+    compressed_contexts = [
+        context
+        for context in evidence.contexts
+        if context.tokens_before > context.tokens_after
+    ]
+    before = sum(context.tokens_before for context in compressed_contexts)
+    after = sum(context.tokens_after for context in compressed_contexts)
+    return _ratio("context.compression_rate", before - after, before)
+
+
+def _context_variant_compression_rate(evidence: EvalEvidence) -> MetricScore | None:
+    raw = evidence.variant_context_tokens.get("raw")
+    compressed = evidence.variant_context_tokens.get("compressed")
+    if not raw or not compressed:
+        return None
+    raw_visible = int(raw.get("tokens_after") or raw.get("tokens_before") or 0)
+    compressed_visible = int(
+        compressed.get("tokens_after") or compressed.get("tokens_before") or 0
+    )
+    if raw_visible <= 0 or compressed_visible <= 0:
+        return _na("context.compression_rate", denominator=raw_visible)
+    reduction = max(0, raw_visible - compressed_visible)
+    return _ratio("context.compression_rate", reduction, raw_visible)
+
+
+def _context_raw_pass_rate(evidence: EvalEvidence) -> MetricScore:
+    if "raw" not in evidence.variant_passed:
+        return _na("context.raw_pass_rate")
+    return _ratio("context.raw_pass_rate", 1 if evidence.variant_passed["raw"] else 0, 1)
+
+
+def _context_compressed_pass_rate(evidence: EvalEvidence) -> MetricScore:
+    if "compressed" not in evidence.variant_passed:
+        return _na("context.compressed_pass_rate")
+    return _ratio(
+        "context.compressed_pass_rate",
+        1 if evidence.variant_passed["compressed"] else 0,
+        1,
+    )
+
+
+def _context_quality_retention_rate(evidence: EvalEvidence) -> MetricScore:
+    if "raw" not in evidence.variant_passed or "compressed" not in evidence.variant_passed:
+        return _na("context.quality_retention_rate")
+    if not evidence.variant_passed["raw"]:
+        return _na("context.quality_retention_rate")
+    return _ratio(
+        "context.quality_retention_rate",
+        1 if evidence.variant_passed["compressed"] else 0,
+        1,
+    )
+
+
+def _section_tokens_before(section: dict) -> int:
+    return int(section.get("estimated_tokens_before") or 0)
+
+
+def _section_tokens_after(section: dict) -> int:
+    return int(section.get("estimated_tokens_after") or 0)
+
+
 def _context_stale_context_rate(evidence: EvalEvidence) -> MetricScore:
     selected = _selected_items(evidence)
     stale = sum(
@@ -323,6 +400,10 @@ SCORERS: dict[str, Scorer] = {
     "planning.evidence_coverage_rate": _planning_evidence_coverage_rate,
     "context.key_context_hit_rate": _context_key_context_hit_rate,
     "context.token_efficiency": _context_token_efficiency,
+    "context.compression_rate": _context_compression_rate,
+    "context.raw_pass_rate": _context_raw_pass_rate,
+    "context.compressed_pass_rate": _context_compressed_pass_rate,
+    "context.quality_retention_rate": _context_quality_retention_rate,
     "context.stale_context_rate": _context_stale_context_rate,
     "context.noise_rate": _context_noise_rate,
     "memory.retrieval_hit_rate": _memory_retrieval_hit_rate,

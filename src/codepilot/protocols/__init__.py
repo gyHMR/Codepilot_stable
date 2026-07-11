@@ -8,12 +8,10 @@ Protocols 子包公共索引。
 这里不放业务逻辑、文件读写、模型调用、工具执行或持久化实现。
 
 子模块分工：
-- content.py: 内容块类型（文本、图片、思考）
-- messages.py: 消息类型（用户、助手、工具结果）和上下文
-- tools.py: 工具定义、工具调用、工具结果
-- llm.py: 模型配置、用量统计、流式事件
-- events.py: 运行时事件类型定义
-- runs.py: 运行结果和状态
+- conversation.py: 内容块、消息、上下文和模型工具调用意图
+- tools.py: 模型可见工具定义和工具结果
+- llm.py: 模型配置、能力和用量统计
+- runtime.py: 运行结果、运行状态和运行时事件
 - errors.py: 错误信息结构
 
 使用建议：
@@ -21,7 +19,21 @@ Protocols 子包公共索引。
 - 细分事件、上下文治理等较专门的类型，优先从对应子模块导入。
 """
 
-from .content import ContentBlock, ImageContent, TextContent, ThinkingContent
+from .conversation import (
+    AssistantBlock,
+    AssistantMessage,
+    ContentBlock,
+    Context,
+    ImageContent,
+    Message,
+    TextContent,
+    ThinkingContent,
+    ToolCall,
+    ToolResultBlock,
+    ToolResultMessage,
+    UserBlock,
+    UserMessage,
+)
 from .context import (
     ContextArtifactRef,
     ContextCheckpoint,
@@ -37,13 +49,33 @@ from .context import (
     DroppedContextReason,
     RepositoryDelta,
     RepositorySnapshot,
+    RunnerPreflightReport,
+)
+from .commands import (
+    AfterToolCallContext,
+    AfterToolCallResult,
+    BeforeToolCallContext,
+    BeforeToolCallResult,
+    CommandHandler,
+    CommandSource,
+    LifecycleHook,
+    RegisteredCommand,
+    SessionCommandContext,
+    SessionCommandView,
+    SessionLifecycleContext,
+    SessionLifecycleView,
+    ToolHookContextSnapshot,
 )
 from .errors import ErrorInfo, ErrorSource, LLMErrorInfo, LLMErrorKind
-from .events import (
+from .runtime import (
     AgentEndEvent,
     AgentEvent,
     AgentEventBase,
     AgentEventSink,
+    AgentRunCounters,
+    AgentRunResult,
+    AgentRunStatus,
+    AgentRunStopReason,
     AgentStartEvent,
     ErrorEvent,
     EventEnvelope,
@@ -52,54 +84,39 @@ from .events import (
     MessageStartEvent,
     MessageUpdateEvent,
     ModelRetryStartEvent,
+    PlanSummary,
     RuntimeEvent,
     RuntimeEventType,
-    ToolExecutionEndEvent,
-    ToolExecutionStartEvent,
-    ToolExecutionUpdateEvent,
+    RunSignalsSummary,
+    RunSignalsVerificationStatus,
+    RunVerification,
+    RunVerificationStatus,
+    ToolFinishedEvent,
+    ToolStartedEvent,
     TurnEndEvent,
     TurnStartEvent,
 )
 from .llm import (
     Api,
     Cost,
-    LLMStreamEvent,
-    LLMStreamEventType,
     Model,
     ModelCapabilities,
     Provider,
-    SimpleStreamOptions,
     StopReason,
-    StreamOptions,
     ThinkingLevel,
     Usage,
 )
-from .messages import (
-    AssistantBlock,
-    AssistantMessage,
-    Context,
-    Message,
-    ToolResultBlock,
-    ToolResultMessage,
-    UserBlock,
-    UserMessage,
-)
-from .runs import (
-    AgentRunCounters,
-    AgentRunResult,
-    AgentRunStatus,
-    AgentRunStopReason,
-    RunVerification,
-    RunVerificationStatus,
-    TaskSummary,
-)
 from .tools import (
+    CLOSE_PLAN_TOOL,
+    CREATE_BUILD_PLAN_TOOL,
+    PLAN_ITEM_LIMIT,
+    PLAN_TOOL_NAMES,
+    PROPOSE_PLAN_TOOL,
     Tool,
-    ToolCall,
-    ToolMetadata,
     ToolResult,
     ToolResultStatus,
     ToolRiskLevel,
+    UPDATE_PLAN_PROGRESS_TOOL,
 )
 
 
@@ -131,22 +148,40 @@ __all__ = [
     "DroppedContextReason",
     "RepositoryDelta",
     "RepositorySnapshot",
+    "RunnerPreflightReport",
+    # ── 命令与生命周期能力 ──
+    "CommandHandler",
+    "CommandSource",
+    "LifecycleHook",
+    "RegisteredCommand",
+    "SessionCommandContext",
+    "SessionCommandView",
+    "SessionLifecycleContext",
+    "SessionLifecycleView",
     # ── 工具 ──
     "Tool",
     "ToolCall",
-    "ToolMetadata",
     "ToolResult",
     "ToolResultStatus",
     "ToolRiskLevel",
+    "CLOSE_PLAN_TOOL",
+    "CREATE_BUILD_PLAN_TOOL",
+    "PLAN_TOOL_NAMES",
+    "PROPOSE_PLAN_TOOL",
+    "UPDATE_PLAN_PROGRESS_TOOL",
+    "PLAN_ITEM_LIMIT",
+    "AfterToolCallContext",
+    "AfterToolCallResult",
+    "BeforeToolCallContext",
+    "BeforeToolCallResult",
+    "ToolHookContextSnapshot",
     # ── LLM ──
     "Api",
     "Cost",
     "Model",
     "ModelCapabilities",
     "Provider",
-    "SimpleStreamOptions",
     "StopReason",
-    "StreamOptions",
     "ThinkingLevel",
     "Usage",
     # ── Run 结果 ──
@@ -154,9 +189,11 @@ __all__ = [
     "AgentRunResult",
     "AgentRunStatus",
     "AgentRunStopReason",
+    "PlanSummary",
+    "RunSignalsSummary",
+    "RunSignalsVerificationStatus",
     "RunVerification",
     "RunVerificationStatus",
-    "TaskSummary",
     # ── 通用事件入口 ──
     "AgentEvent",
     "AgentEventSink",
@@ -164,9 +201,6 @@ __all__ = [
     "ensure_runtime_event_type",
     "RuntimeEvent",
     "RuntimeEventType",
-    # ── LLM 流式事件 ──
-    "LLMStreamEvent",
-    "LLMStreamEventType",
     # ── 错误 ──
     "ErrorInfo",
     "LLMErrorInfo",

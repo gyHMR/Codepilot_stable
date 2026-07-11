@@ -180,12 +180,24 @@ class ContextCheckpoint:
 class ContextView:
     """本轮模型调用实际消费的分层上下文视图。"""
 
-    stable_rules: list[str] = field(default_factory=list)
-    working_state: list[str] = field(default_factory=list)
-    recalled_memory: list[str] = field(default_factory=list)
-    evidence: list[str] = field(default_factory=list)
-    recent_messages: list[str] = field(default_factory=list)
-    tools: list[str] = field(default_factory=list)
+    system: list[str] = field(default_factory=list)
+    task_plan: list[str] = field(default_factory=list)
+    working_set: list[str] = field(default_factory=list)
+    memory: list[str] = field(default_factory=list)
+    conversation: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RunnerPreflightReport:
+    """每次模型请求前对消息链做的机械修复和裁剪。"""
+
+    orphan_tool_results_dropped: int = 0
+    missing_tool_results_backfilled: int = 0
+    tool_outputs_snipped: int = 0
+    snipped_messages: int = 0
+
+    def to_dict(self) -> dict[str, int]:
+        return asdict(self)
 
 
 @dataclass
@@ -203,6 +215,9 @@ class ContextReport:
     repository_delta: RepositoryDelta = field(default_factory=RepositoryDelta)  # 仓库差异
     retrieved_memory_ids: list[str] = field(default_factory=list)        # 检索到的记忆 ID
     memory_retrieval_reasons: dict[str, list[str]] = field(default_factory=dict)  # 记忆检索原因
+    dropped_memory_ids: list[str] = field(default_factory=list)
+    dropped_memory_reasons: dict[str, str] = field(default_factory=dict)
+    memory_tokens: int = 0
     context_mode: str | None = None
     budget_profile: dict[str, float] = field(default_factory=dict)
     relevance_reasons: dict[str, list[str]] = field(default_factory=dict)
@@ -213,8 +228,11 @@ class ContextReport:
     checkpoint_created: ContextCheckpoint | None = None
     artifact_refs: list[ContextArtifactRef] = field(default_factory=list)
     tokens_by_layer: dict[str, int] = field(default_factory=dict)
+    compact_summary: str = ""
+    runner_preflight: RunnerPreflightReport = field(default_factory=RunnerPreflightReport)
     prefix_hash: str | None = None
     dynamic_hash: str | None = None
+    estimation: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -259,4 +277,5 @@ __all__ = [
     "DroppedContextReason",
     "RepositoryDelta",
     "RepositorySnapshot",
+    "RunnerPreflightReport",
 ]

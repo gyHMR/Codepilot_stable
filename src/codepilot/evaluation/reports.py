@@ -86,6 +86,10 @@ def render_markdown(results: list[EvalResult], summary: dict[str, Any]) -> str:
 
 
 def render_comparison_markdown(comparison: dict[str, Any]) -> str:
+    if comparison.get("kind") == "offline_context_selection_benchmark":
+        return _render_context_selection_markdown(comparison)
+    if comparison.get("kind") == "offline_memory_retrieval_benchmark":
+        return _render_memory_retrieval_markdown(comparison)
     lines = [
         "# Codepilot Experiment Comparison",
         "",
@@ -104,10 +108,125 @@ def render_comparison_markdown(comparison: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_memory_retrieval_markdown(comparison: dict[str, Any]) -> str:
+    lines = [
+        "# Codepilot Memory Retrieval Benchmark",
+        "",
+        "- Kind: offline memory retrieval benchmark",
+        f"- Cases: {comparison.get('case_count', len(comparison.get('cases', [])))}",
+        f"- Corpus size: {comparison.get('corpus_size', 'N/A')}",
+        "",
+        "## Aggregate Metrics",
+        "",
+        "| Metric | Average | Cases | Direction |",
+        "| --- | ---: | ---: | --- |",
+    ]
+    for name, info in comparison.get("metrics", {}).items():
+        item = _dict(info)
+        direction = "higher is better" if item.get("higher_is_better") else "lower is better"
+        lines.append(
+            f"| `{name}` | {_percent(item.get('avg'))} | {item.get('count', 0)} | {direction} |"
+        )
+    lines.extend(["", "## Cases", ""])
+    lines.append(
+        "| Case | Recall@3 | Precision@3 | MRR | Forbidden | Stale | Retrieved IDs |"
+    )
+    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | --- |")
+    for row in comparison.get("cases", []):
+        case = _dict(row)
+        metrics = _dict(case.get("metrics"))
+        retrieved = ", ".join(
+            str(_dict(item).get("id") or "")
+            for item in case.get("retrieved", [])
+            if isinstance(item, dict)
+        )
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    f"`{case.get('case_id', '')}`",
+                    _percent(metrics.get("memory.recall@3")),
+                    _percent(metrics.get("memory.precision@3")),
+                    _percent(metrics.get("memory.mrr")),
+                    _percent(metrics.get("memory.forbidden_retrieval_rate")),
+                    _percent(metrics.get("memory.stale_retrieval_rate")),
+                    retrieved or "(none)",
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _render_context_selection_markdown(comparison: dict[str, Any]) -> str:
+    strategies = [
+        str(item)
+        for item in comparison.get("strategies", [])
+        if str(item).strip()
+    ]
+    lines = [
+        "# Codepilot Context Selection Benchmark",
+        "",
+        "- Kind: offline context selection benchmark",
+        f"- Cases: {len(comparison.get('cases', []))}",
+        "",
+        "## Aggregate Metrics",
+        "",
+    ]
+    header = [
+        "Metric",
+        *strategies,
+        "Lift vs order_first",
+        "Lift vs best baseline",
+    ]
+    lines.append("| " + " | ".join(header) + " |")
+    lines.append("| " + " | ".join(["---", *[":---:" for _ in strategies], "---:", "---:"]) + " |")
+    for name, values in comparison.get("metrics", {}).items():
+        row = [
+            f"`{name}`",
+            *[_percent(_dict(values).get(strategy)) for strategy in strategies],
+            _percent(_dict(values).get("lift_vs_order_first")),
+            _percent(_dict(values).get("lift_vs_best_baseline")),
+        ]
+        lines.append("| " + " | ".join(row) + " |")
+    lines.extend(["", "## Cases", ""])
+    lines.append("| Case | order_first | codepilot_policy | oracle | Codepilot selected |")
+    lines.append("| --- | ---: | ---: | ---: | --- |")
+    for row in comparison.get("cases", []):
+        row_dict = _dict(row)
+        strategies_payload = _dict(row_dict.get("strategies"))
+        metric = "context.key_context_hit_rate"
+        def hit_rate(strategy: str) -> Any:
+            return _dict(_dict(strategies_payload.get(strategy)).get("metrics")).get(metric)
+
+        selected = ", ".join(
+            str(item)
+            for item in _dict(strategies_payload.get("codepilot_policy")).get("selected_ids", [])
+        )
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    f"`{row_dict.get('case_id', '')}`",
+                    _percent(hit_rate("order_first")),
+                    _percent(hit_rate("codepilot_policy")),
+                    _percent(hit_rate("oracle")),
+                    selected or "(none)",
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _percent(value: Any) -> str:
     if value is None:
         return "N/A"
     return f"{float(value):.1%}"
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 __all__ = ["build_summary", "render_comparison_markdown", "render_markdown"]

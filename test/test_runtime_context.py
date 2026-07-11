@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def test_repository_bootstrap_recognizes_python_project_without_reading_files(tmp_path: Path) -> None:
-    from codepilot.runtime.bootstrap.context import build_repository_bootstrap, render_repository_context
+    from codepilot.sessions.store import build_repository_bootstrap, render_repository_context
 
     (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
     (tmp_path / "src").mkdir()
@@ -25,7 +25,7 @@ def test_repository_bootstrap_recognizes_python_project_without_reading_files(tm
 
 
 def test_repository_bootstrap_limits_top_level_entries(tmp_path: Path) -> None:
-    from codepilot.runtime.bootstrap.context import build_repository_bootstrap
+    from codepilot.sessions.store import build_repository_bootstrap
 
     for index in range(40):
         (tmp_path / f"entry_{index:02d}.txt").write_text("x", encoding="utf-8")
@@ -36,22 +36,111 @@ def test_repository_bootstrap_limits_top_level_entries(tmp_path: Path) -> None:
 
 
 def test_runtime_prompt_keeps_repository_context_with_custom_prompt(tmp_path: Path) -> None:
-    from codepilot.runtime.bootstrap.context import RuntimeContext
-    from codepilot.runtime.bootstrap.prompt import build_runtime_system_prompt
+    from codepilot.runtime import SessionOpenIntent
+    from codepilot.runtime.config import load_runtime_config
+    from codepilot.runtime.prompt import build_system_prompt
+    from codepilot.runtime.tools import build_runtime_tools
 
-    prompt = build_runtime_system_prompt(
-        base_system_prompt="Custom system prompt",
-        tools=[],
-        runtime_context=RuntimeContext(
-            repository_context="## Repository Context\n- Project type: Python",
-            prompt_guidelines=[],
-            append_sections=[],
-            tool_snippets={},
-            memory_text="",
-        ),
-        workspace=tmp_path,
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+    intent = SessionOpenIntent(
+        workspace_dir=tmp_path,
+        system_prompt="Custom system prompt",
+        load_workspace_resources=False,
     )
+    config = load_runtime_config(intent)
+    tools = build_runtime_tools(tmp_path, intent, config)
+    prompt = build_system_prompt(workspace=tmp_path, config=config, tools=tools)
 
     assert prompt.startswith("Custom system prompt")
     assert "Repository Context" in prompt
     assert "Project type: Python" in prompt
+
+
+def test_runtime_prompt_includes_skill_index_without_skill_body(tmp_path: Path) -> None:
+    from codepilot.runtime import SessionOpenIntent
+    from codepilot.runtime.config import load_runtime_config
+    from codepilot.runtime.prompt import build_system_prompt
+    from codepilot.runtime.tools import build_runtime_tools
+
+    skill_file = tmp_path / "review.md"
+    skill_file.write_text(
+        "\n".join(
+            [
+                "---",
+                "name: Focused Review",
+                "command: focused-review",
+                "description: Use this when reviewing a focused code change.",
+                "---",
+                "# Focused Review",
+                "SECRET_SKILL_BODY_MARKER",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    intent = SessionOpenIntent(
+        workspace_dir=tmp_path,
+        skill_paths=[str(skill_file)],
+        load_workspace_resources=False,
+    )
+    config = load_runtime_config(intent)
+    tools = build_runtime_tools(tmp_path, intent, config)
+    prompt = build_system_prompt(workspace=tmp_path, config=config, tools=tools)
+
+    assert "Available Skills" in prompt
+    assert "/focused-review" in prompt
+    assert "Use this when reviewing a focused code change." in prompt
+    assert "SECRET_SKILL_BODY_MARKER" not in prompt
+
+
+def test_runtime_config_default_tool_call_batch_limit_supports_agent_batches(tmp_path: Path) -> None:
+    from codepilot.runtime import SessionOpenIntent
+    from codepilot.runtime.config import load_runtime_config
+
+    config = load_runtime_config(
+        SessionOpenIntent(workspace_dir=tmp_path, load_workspace_resources=False)
+    )
+
+    assert config.max_tool_calls_per_turn == 16
+
+
+def test_default_runtime_prompt_describes_coding_agent_workflow(tmp_path: Path) -> None:
+    from codepilot.runtime import SessionOpenIntent
+    from codepilot.runtime.config import load_runtime_config
+    from codepilot.runtime.prompt import build_system_prompt
+    from codepilot.runtime.tools import build_runtime_tools
+
+    intent = SessionOpenIntent(workspace_dir=tmp_path, load_workspace_resources=False)
+    config = load_runtime_config(intent)
+    tools = build_runtime_tools(tmp_path, intent, config)
+
+    prompt = build_system_prompt(workspace=tmp_path, config=config, tools=tools)
+
+    assert "本地仓库中工作的 coding agent" in prompt
+    assert "Task Plan" in prompt
+    assert "propose_plan" in prompt
+    assert "close_plan" in prompt
+    assert "验证" in prompt
+    assert "当前模式：" not in prompt
+
+
+def test_base_prompt_does_not_embed_plan_mode_policy(tmp_path: Path) -> None:
+    from codepilot.runtime import SessionOpenIntent
+    from codepilot.runtime.config import load_runtime_config
+    from codepilot.runtime.prompt import build_system_prompt
+    from codepilot.runtime.tools import build_runtime_tools
+
+    intent = SessionOpenIntent(
+        workspace_dir=tmp_path,
+        current_mode="plan",
+        load_workspace_resources=False,
+    )
+    config = load_runtime_config(intent)
+    tools = build_runtime_tools(tmp_path, intent, config)
+
+    prompt = build_system_prompt(workspace=tmp_path, config=config, tools=tools)
+
+    assert "当前模式：" not in prompt
+    assert "当前 mode=plan" not in prompt
+    assert "- write:" not in prompt
+    assert "- edit:" not in prompt
+    assert "- apply_patch:" not in prompt

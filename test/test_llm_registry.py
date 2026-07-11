@@ -13,8 +13,9 @@ if str(SRC) not in sys.path:
 
 
 def test_api_registry_registers_and_overwrites_provider() -> None:
-    from codepilot.llm import ApiProvider, AssistantMessage, AssistantMessageEventStream, get_api_provider
-    from codepilot.llm.api_registry import register_api_provider
+    from codepilot.llm.registry import ApiProvider, get_api_provider, register_api_provider
+    from codepilot.llm.stream import AssistantMessageEventStream
+    from codepilot.protocols import AssistantMessage
 
     def stream(*_args):
         event_stream = AssistantMessageEventStream()
@@ -31,18 +32,17 @@ def test_api_registry_registers_and_overwrites_provider() -> None:
     assert get_api_provider("unit-test-api") is second
 
 
-def test_llm_package_reexports_protocol_types() -> None:
-    from codepilot.llm import AssistantMessage as LlmAssistantMessage
-    from codepilot.llm import Model as LlmModel
-    from codepilot.protocols import AssistantMessage as ProtocolAssistantMessage
-    from codepilot.protocols import Model as ProtocolModel
+def test_llm_package_does_not_reexport_protocol_types() -> None:
+    import codepilot.llm as llm
 
-    assert LlmAssistantMessage is ProtocolAssistantMessage
-    assert LlmModel is ProtocolModel
+    assert "AssistantMessage" not in llm.__all__
+    assert "Model" not in llm.__all__
+    assert not hasattr(llm, "AssistantMessage")
+    assert not hasattr(llm, "Model")
 
 
 def test_model_provider_identity_and_capabilities() -> None:
-    from codepilot.llm.models import get_model, get_models, get_providers
+    from codepilot.llm.catalog import get_model, get_models, get_providers
 
     deepseek = get_model("deepseek", "deepseek-v4-pro")
     assert deepseek.api == "openai-compatible"
@@ -56,7 +56,7 @@ def test_model_provider_identity_and_capabilities() -> None:
 
 
 def test_deepseek_api_key_uses_deepseek_env(monkeypatch) -> None:
-    from codepilot.llm.env_api_keys import get_env_api_key
+    from codepilot.llm.catalog import get_env_api_key
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-key")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
@@ -66,8 +66,8 @@ def test_deepseek_api_key_uses_deepseek_env(monkeypatch) -> None:
 
 
 def test_old_openai_standard_alias_is_removed() -> None:
-    from codepilot.llm import get_api_provider, reset_api_providers
-    from codepilot.llm.models import get_model, get_models
+    from codepilot.llm.catalog import get_model, get_models
+    from codepilot.llm.registry import get_api_provider, reset_api_providers
 
     reset_api_providers()
 
@@ -76,3 +76,25 @@ def test_old_openai_standard_alias_is_removed() -> None:
     assert get_models("openai-standard") == []
     with pytest.raises(KeyError):
         get_model("openai-standard", "gpt-4o-mini")
+
+
+def test_runtime_assembly_explicitly_registers_builtin_providers(tmp_path) -> None:
+    from codepilot.llm.registry import clear_api_providers, get_api_provider
+    from codepilot.runtime import SessionOpenIntent
+    from codepilot.runtime.builder import build_runtime_session
+
+    clear_api_providers()
+    assert get_api_provider("openai-compatible") is None
+
+    session = build_runtime_session(
+        SessionOpenIntent(
+            workspace_dir=tmp_path,
+            provider="deepseek",
+            model_id="deepseek-v4-pro",
+            load_workspace_resources=False,
+            memory_enabled=False,
+        )
+    )
+    session.controller.close()
+
+    assert get_api_provider("openai-compatible") is not None

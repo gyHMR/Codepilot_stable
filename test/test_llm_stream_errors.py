@@ -5,8 +5,8 @@ import asyncio
 import httpx
 import pytest
 
-from codepilot.llm.errors import classify_llm_error
-from codepilot.llm.providers.openai_compatible import stream_openai_compatible
+from codepilot.llm.stream import classify_llm_error
+from codepilot.llm.providers.openai import stream_openai_compatible
 from codepilot.protocols import Context, Model
 
 
@@ -77,7 +77,7 @@ def test_openai_stream_reads_error_body_before_classification(monkeypatch) -> No
                 return _StreamContext()
 
         monkeypatch.setattr(
-            "codepilot.llm.providers.openai_compatible.httpx.AsyncClient",
+            "codepilot.llm.providers.openai.httpx.AsyncClient",
             _AsyncClient,
         )
 
@@ -95,7 +95,7 @@ def test_openai_stream_reads_error_body_before_classification(monkeypatch) -> No
 
 def test_background_provider_failure_is_attached_to_stream() -> None:
     async def run_case() -> None:
-        from codepilot.llm.event_stream import AssistantMessageEventStream
+        from codepilot.llm.stream import AssistantMessageEventStream
 
         event_stream = AssistantMessageEventStream()
 

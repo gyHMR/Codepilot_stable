@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from prompt_toolkit.document import Document
 
 from codepilot.interfaces.cli.shell import CODEPILOT_STYLE, InteractiveShell
-from codepilot.interfaces.cli.commands import builtin_commands
-from codepilot.runtime.contracts import SessionStatus
+from codepilot.runtime.views import builtin_commands
+from codepilot.runtime.views import SessionStatus
 
 
 def test_shell_uses_coding_agent_prompt_and_visual_styles() -> None:
@@ -36,11 +37,12 @@ def test_shell_command_completion_uses_runtime_command_registry(
             captured["completer"] = kwargs["completer"]
 
     monkeypatch.setattr(shell_module, "PromptSession", FakePromptSession)
-    InteractiveShell(history_dir=tmp_path)
+    commands = builtin_commands()
+    InteractiveShell(history_dir=tmp_path, commands=commands)
 
     completer = captured["completer"]
     completions = list(completer.get_completions(Document("/mem"), None))
-    runtime_memory = next(command for command in builtin_commands() if command.name == "memory")
+    runtime_memory = next(command for command in commands if command.name == "memory")
 
     assert [completion.text for completion in completions] == ["memory"]
     assert completions[0].display_meta_text == runtime_memory.description
@@ -86,7 +88,7 @@ def test_shell_ctrl_c_exits_prompt_and_keyboard_interrupt_is_not_swallowed(
 
 
 def test_interactive_runner_passes_dynamic_toolbar_and_prompt(monkeypatch) -> None:
-    from codepilot.interfaces.cli import runner
+    from codepilot.interfaces.cli import interactive
 
     calls: dict[str, object] = {}
 
@@ -107,38 +109,40 @@ def test_interactive_runner_passes_dynamic_toolbar_and_prompt(monkeypatch) -> No
             calls["toolbar_state"] = state
             return "<b>model</b> · permission"
 
+        def build_shell_prompt(self):
+            return "<prompt>╭─ YOU</prompt>\n<prompt>╰─› </prompt>"
+
         def render_status(self, message, *, kind="info"):
             calls["status"] = (message, kind)
 
     class FakeRuntime:
-        def get_session_status(self, session_id):
-            return SessionStatus(
-                session_id=session_id,
-                model_id="deepseek/deepseek-chat",
-                workspace="E:/workspace",
-                permission_mode="workspace-write",
-                message_count=0,
-                leaf_id="leaf",
+        def describe(self, session_id):
+            return SimpleNamespace(
+                status=SessionStatus(
+                    session_id=session_id,
+                    model_id="deepseek/deepseek-chat",
+                    workspace="E:/workspace",
+                    permission_mode="workspace-write",
+                    message_count=0,
+                    leaf_id="leaf",
+                )
             )
 
-        def get_workspace(self, _session_id):
-            return Path("E:/workspace")
-
-    monkeypatch.setattr(runner, "TerminalRenderer", FakeRenderer)
+    monkeypatch.setattr(interactive, "TerminalRenderer", FakeRenderer)
     monkeypatch.setattr("codepilot.interfaces.cli.shell.create_shell", lambda **_kwargs: FakeShell())
 
-    asyncio.run(runner.run_interactive(FakeRuntime(), "session-123"))
+    asyncio.run(interactive.run_repl(FakeRuntime(), "session-123"))
 
     assert calls["renderer_init"]["output"] is print
     assert calls["prompt"] == {
-        "prompt_text": "› ",
+        "prompt_text": "<prompt>╭─ YOU</prompt>\n<prompt>╰─› </prompt>",
         "bottom_toolbar": "<b>model</b> · permission",
     }
     assert calls["status"] == ("Bye.", "info")
 
 
 def test_interactive_runner_exits_when_shell_raises_keyboard_interrupt(monkeypatch) -> None:
-    from codepilot.interfaces.cli import runner
+    from codepilot.interfaces.cli import interactive
 
     calls: dict[str, object] = {}
 
@@ -156,26 +160,28 @@ def test_interactive_runner_exits_when_shell_raises_keyboard_interrupt(monkeypat
         def build_toolbar(self, _state):
             return "toolbar"
 
+        def build_shell_prompt(self):
+            return "prompt"
+
         def render_status(self, message, *, kind="info"):
             calls["status"] = (message, kind)
 
     class FakeRuntime:
-        def get_session_status(self, session_id):
-            return SessionStatus(
-                session_id=session_id,
-                model_id="deepseek/deepseek-chat",
-                workspace="E:/workspace",
-                permission_mode="workspace-write",
-                message_count=0,
-                leaf_id="leaf",
+        def describe(self, session_id):
+            return SimpleNamespace(
+                status=SessionStatus(
+                    session_id=session_id,
+                    model_id="deepseek/deepseek-chat",
+                    workspace="E:/workspace",
+                    permission_mode="workspace-write",
+                    message_count=0,
+                    leaf_id="leaf",
+                )
             )
 
-        def get_workspace(self, _session_id):
-            return Path("E:/workspace")
-
-    monkeypatch.setattr(runner, "TerminalRenderer", FakeRenderer)
+    monkeypatch.setattr(interactive, "TerminalRenderer", FakeRenderer)
     monkeypatch.setattr("codepilot.interfaces.cli.shell.create_shell", lambda **_kwargs: FakeShell())
 
-    asyncio.run(runner.run_interactive(FakeRuntime(), "session-123"))
+    asyncio.run(interactive.run_repl(FakeRuntime(), "session-123"))
 
     assert calls["status"] == ("Bye.", "info")

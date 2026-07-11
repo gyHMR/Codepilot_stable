@@ -1,572 +1,1287 @@
-# Codepilot 工具模块设计
+# Codepilot 统一工具系统设计
 
-本文按 Agent 的一次真实运行流程来解释工具模块。读完后，你应该能回答三个问题：
+## 1. 文档状态
 
-- 工具从哪里来，什么时候注册，模型为什么能看到它们？
-- 模型请求执行工具时，Codepilot 在执行前、执行中、执行后分别做了什么安全处理？
-- 工具结果怎样回到 Agent 主循环，并被任务控制、上下文治理、记忆和观测系统继续使用？
+- 状态：已确认设计，待分阶段实施
+- 适用范围：`protocols`、`tools`、`core`、`sessions`、`extensions`、`runtime`、`interfaces`
+- 核心原则：先稳定工具协议和单工具执行闭环，再逐步加入安全、审批、超时、取消、并发、恢复和扩展能力
 
-一句话概括：`codepilot.tools` 是 Coding Agent 的工具执行安全边界。它不决定 Agent 要做什么任务，也不管理会话历史；它负责把模型发出的 tool call 变成一次可校验、可审批、可审计的本地动作。
+本文定义 Codepilot 工具系统的目标边界、统一协议、执行状态机、安全策略和迁移方案。它描述的是目标架构，不代表当前代码已经全部实现。
 
----
+## 2. 设计目标
 
-## 1. 工具在整体架构中的位置
+工具系统是 Coding Agent 的本地行动边界。模型只能产生工具调用意图，任何工具实现都不能绕过 `ToolRuntime` 直接执行。
 
-Codepilot 的主依赖方向是：
+统一约束如下：
 
 ```text
-protocols -> llm/tools -> core -> sessions/observability -> extensions -> runtime -> interfaces
+Core 产生 ToolCall
+  -> ToolRuntime 统一处理
+  -> Registry materialize
+  -> 输入校验
+  -> 资源解析与权限判断
+  -> 审批、调度、超时与取消控制
+  -> ToolHandler 执行
+  -> 输出校验、副作用核验与结果防护
+  -> ToolResult 返回 Core
 ```
 
-工具模块在这条链上有两个角色：
+设计目标：
 
-1. 在 `runtime` 装配阶段，工具模块提供统一的工具契约、注册表、权限策略和执行运行时。
-2. 在 `core` 的 Agent 循环阶段，工具模块作为实际执行边界，接收模型生成的 tool call 并返回结构化结果。
+1. 所有内置、Plan、子代理、Interaction、Extension、Skill 和 MCP 工具进入同一条执行管线。
+2. 输入和输出都有明确 Schema/Codec，并在执行前后分别验证。
+3. 权限、审批、超时、取消、基础并发和恢复由 `ToolRuntime` 统一管理。
+4. 工具执行产生的副作用、错误、耗时和审计信息使用结构化协议表达。
+5. 工具定义、模型可见描述、执行实现和运行策略相互分离。
+6. 保持依赖方向：`protocols -> tools -> core -> sessions/observability -> extensions -> runtime -> interfaces`。
 
-关键边界是：
+## 3. 工具系统边界
 
-| 层 | 负责什么 | 和工具的关系 |
-|---|---|---|
-| `protocols/` | 跨层数据契约 | 定义模型可见的 `Tool`、`ToolCall`、`ToolResult` |
-| `tools/` | 工具安全边界 | 定义可执行 `AgentTool`、注册表、权限、schema、审批、结果防护 |
-| `core/` | Agent 推理循环 | 调度模型返回的一批 tool call，不直接写安全策略 |
-| `sessions/` | 会话事实源 | 保存工具结果消息，并把结果投影进上下文、记忆和任务恢复 |
-| `extensions/` | 外部能力接入 | 把 Python 扩展、skill、MCP 适配成 Codepilot 工具或命令 |
-| `runtime/` | 应用装配 | 把内置工具、外部工具和安全策略组装成一个可运行会话 |
-| `interfaces/` | CLI/Web 适配 | 展示工具事件、审批提示和工具输出 |
+### 3.1 工具系统负责
 
-所以，工具安全策略不是只在某一个点发生，而是贯穿整条链路：
+- 工具定义与注册。
+- 工具目录快照和版本身份管理。
+- 输入参数解析、Schema 校验和类型转换。
+- 工具调用 materialize 和 handler 调度。
+- 权限、风险和资源访问判断。
+- 安全审批状态管理。
+- timeout、取消、基础并发和资源清理。
+- 副作用预测、上报、核验和记录。
+- 输出 Schema 校验、结果脱敏、可信度标记和大小控制。
+- 返回唯一、标准化的 `ToolResult`。
 
-- Agent 决策前：runtime 先决定当前会话有哪些工具可以暴露给模型。
-- 工具执行前：`ToolRuntime` 做权限、参数、审批检查。
-- 工具执行中：具体工具做路径、shell、环境变量、超时和副作用控制。
-- 工具执行后：`ToolResultGuard` 做脱敏、prompt injection 标记和输出可信度标记。
+### 3.2 工具系统不负责
 
----
+- 决定 Agent 下一步任务。
+- 生成、修改或批准任务计划的业务语义。
+- 判断任务是否完成。
+- 选择哪些内容进入模型上下文。
+- 判断哪些信息写入长期记忆。
+- 管理完整会话历史。
+- 直接与 CLI、Web、钉钉或用户交互。
+- 决定 ToolResult 如何影响 Core 的后续推理。
 
-## 2. 一次工具调用的完整流程
+### 3.3 特殊工具的边界
 
-下面这张图是理解工具模块最重要的一张图：
+Plan、子代理和人机交互能力仍可以表现为模型可见工具，但其业务 handler 归所属模块所有：
 
-```mermaid
-flowchart TD
-    A["CLI/Web 创建 RuntimeService"] --> B["assemble_runtime()"]
-    B --> C["assemble_tools() 汇总内置/调用方/扩展/MCP 工具"]
-    C --> D["ToolRegistry + ToolRuntime"]
-    D --> E["ToolRuntime.as_agent_tools() 生成模型可用工具适配器"]
-    E --> F["AgentContext.tools"]
-    F --> G["LLMStreamRunner 把 AgentTool.to_spec() 发给模型"]
-    G --> H["模型返回 ToolCall"]
-    H --> I["ToolCallCoordinator 准备和调度工具调用"]
-    I --> J["AgentTool.execute 适配器"]
-    J --> K["ToolRuntime.execute()"]
-    K --> L["权限决策 PermissionPolicy"]
-    L --> M["参数校验 SchemaValidator"]
-    M --> N["审批 ApprovalProvider"]
-    N --> O["具体工具执行"]
-    O --> P["ToolResultGuard 结果防护"]
-    P --> Q["ToolResultMessage"]
-    Q --> R["Agent 下一轮消息 / TaskController / ContextGovernor / Observability"]
+- Plan handler 归 `core`。
+- Interaction workflow 归 `core`。
+- Subagent handler 归 `runtime`。
+- MCP adapter 归 `extensions`。
+
+这些 handler 只能通过注册协议进入 `ToolRuntime`。工具系统只理解通用 Spec、Policy、Codec、Handler 和 Result，不理解 PlanState、任务完成、记忆或 UI 语义。
+
+## 4. 工具分类模型
+
+工具采用“行为类别 + 来源 + 显式策略”的三轴模型。
+
+### 4.1 行为类别
+
+```text
+filesystem   文件读取、写入、编辑和补丁
+search       内容搜索和路径搜索
+command      Bash、PowerShell 和进程执行
+delegation   子代理派发、查询和取消
+plan         计划提议、更新和关闭
+interaction  请求用户提供选择、确认或补充信息
+external     网络服务、MCP 和外部系统操作
 ```
 
-新人阅读代码时，建议按这条链路走：
+### 4.2 工具来源
 
-1. `src/codepilot/runtime/assembly.py`
-2. `src/codepilot/runtime/bootstrap/tool_assembler.py`
-3. `src/codepilot/tools/execution.py`
-4. `src/codepilot/core/tool_coordinator.py`
-5. `src/codepilot/core/agent_loop.py`
-6. `src/codepilot/sessions/session.py`
+```text
+builtin
+caller
+skill
+extension
+mcp
+```
 
----
+来源和类别不能混为一谈。例如 MCP 搜索工具的类别是 `search`，来源是 `mcp`。
 
-## 3. 阶段一：runtime 组装工具目录
+### 4.3 显式策略
 
-用户启动 CLI 或 Web 会话时，接口层不会自己创建工具，而是调用 `RuntimeService.create_session()`。这里会进入 `assemble_runtime()`，再调用 `assemble_tools()`。
+类别只提供默认策略，单个工具必须声明精确策略：
 
-核心文件：`src/codepilot/runtime/bootstrap/tool_assembler.py`
+- `allowed_modes`
+- `declared_effects`
+- `required_permissions`
+- `base_risk`
+- `approval`
+- `timeout`
+- `concurrency`
+- `output_limits`
 
-`assemble_tools()` 做九件事：
+类别不能代替实际副作用、风险、审批或并发判断。
 
-1. 加载 Python 扩展：`load_extensions()`。
-2. 加载 Markdown skill：`load_skills()`。
-3. 根据 MCP 配置创建 MCP 代理工具：`create_mcp_proxy_tools()`。
-4. 创建内置工具：`create_builtin_tools()`，包括文件、搜索、shell、工作区状态。
-5. 按优先级合并工具：内置工具 -> 调用方工具 -> 扩展工具 -> MCP 工具。
-6. 校验每个工具定义：名称、描述、参数 schema、`execute` 是否可调用。
-7. 为每个工具绑定 `ToolMetadata`。
-8. 在 read-only 模式下过滤掉非只读工具。
-9. 创建 `ToolRuntime`，注入 `ToolRegistry`、`PermissionPolicy`、`ApprovalProvider`。
+## 5. 总体架构
 
-工具来源优先级很重要：
+```text
+Model Provider
+  -> ToolCall
+  -> Core
+  -> ToolExecutionRequest
+  -> ToolRuntime
+      -> ToolRegistry.materialize
+      -> input_codec.decode
+      -> access_resolver.resolve
+      -> PermissionEngine.decide
+      -> ApprovalStore / InteractionStore
+      -> Scheduler
+      -> ToolHandler
+      -> output_codec.encode
+      -> EffectAuditor
+      -> ToolOutputRenderer
+      -> ToolResultGuard
+      -> ToolStateStore
+  -> ToolResult
+  -> Core 投影为 ToolResultMessage
+```
 
-| 来源 | 示例 | 说明 |
-|---|---|---|
-| 内置工具 | `read`、`edit`、`bash` | 项目自带，名称是保留名 |
-| 调用方工具 | 测试或外部代码传入的 `options.tools` | 适合嵌入式使用 |
-| Python 扩展 | `.codepilot/extensions/*.py` | 通过 `ExtensionAPI.register_tool()` 注册 |
-| MCP 工具 | MCP server 暴露的 tool | 通过代理工具转成 `AgentTool` |
+跨层只保留以下稳定对象：
 
-内置工具名称是保留名。扩展或 MCP 不能覆盖 `read`、`edit`、`bash` 这些内置工具，否则会产生诊断并跳过注册。这是为了避免外部能力伪装成核心文件或 shell 工具。
+- `ToolSpec`
+- `ToolExecutionRequest`
+- `ToolResult`
+- `ToolProgressEvent`
+- `ApprovalChallenge/Decision`
+- `InteractionRequest/Response`
 
-装配后的结果是 `AssembledTools`：
+当前 `ToolCallRequest -> ToolResult -> ToolObservation -> ToolResultMessage` 的多层近重复结构应逐步收敛。
+
+## 6. 模型可见协议
+
+### 6.1 ToolSpec
 
 ```python
 @dataclass(frozen=True)
-class AssembledTools:
-    tools: list[AgentTool]
-    registered_tools: list[RegisteredTool]
-    tool_runtime: ToolRuntime
-    loaded_extensions: LoadedExtensions
-    loaded_skills: LoadedExtensions
-    diagnostics: list[RuntimeDiagnostic]
+class ToolSpec:
+    name: str
+    description: str
+    input_schema: Mapping[str, object]
+    output_schema: Mapping[str, object] | None
+    schema_version: int = 1
 ```
 
-其中：
+约束：
 
-- `tools` 是真正放进 Agent 的工具列表。
-- `registered_tools` 是 runtime 能力目录，用于状态展示和审批恢复。
-- `tool_runtime` 是后续工具执行必须经过的统一安全管线。
+- `name` 全局唯一，格式为 `[A-Za-z][A-Za-z0-9_-]{0,63}`。
+- `description` 仅描述模型应如何使用工具。
+- `input_schema` 在 handler 启动前验证。
+- `output_schema` 验证工具的结构化领域输出；仅无法提供可信 Schema 的外部适配器允许为 `None`。
+- Schema 以 input/output codec 为唯一真值，Registry 从 codec 生成 ToolSpec 投影，禁止调用方分别提交两份可能不一致的 Schema。
+- Spec 是不可变快照。
+- description、Schema 或 Policy 的变化都会改变 registration identity。
 
-read-only 模式下，`registry` 会过滤掉非只读工具，`registered_tools` 也会同步过滤。这保证“模型能看到的工具”和“runtime 认为有效的工具”一致，不会出现 UI 说有写工具、模型却不能用，或反过来的情况。
-
----
-
-## 4. 阶段二：模型看到的是工具规格，不是执行函数
-
-工具层有两个相近但不同的概念：
-
-| 类型 | 所在文件 | 含义 |
-|---|---|---|
-| `Tool` | `src/codepilot/protocols/tools.py` | 跨层协议，给模型看的工具描述 |
-| `AgentTool` | `src/codepilot/tools/contracts.py` | 工具层内部的可执行工具，包含 `execute` 函数 |
-
-`AgentTool` 里有一个关键方法：
+### 6.2 ToolExecutionRequest
 
 ```python
-def to_spec(self) -> Tool:
-    return Tool(
-        name=self.name,
-        description=self.description,
-        parameters=self.parameters,
-    )
+@dataclass(frozen=True)
+class ToolExecutionRequest:
+    run_id: str
+    session_id: str
+    tool_call_id: str
+    tool_name: str
+    arguments: Mapping[str, object]
+    mode: ToolMode
+    registration_id: str
+    idempotency_key: str | None = None
+    deadline_at_ms: int | None = None
 ```
 
-这个方法会把可执行工具转成模型可见的工具规格。注意，`to_spec()` 不会把 `execute` 函数给模型。模型只能看到：
+Request 不得携带：
 
-- 工具名
-- 工具说明
-- JSON Schema 参数
+- System Prompt。
+- 完整消息历史。
+- Memory。
+- PlanState。
+- CLI/Web 对象。
+- ApprovalProvider。
+- SessionRuntime。
+- 可直接执行的 handler。
 
-模型看不到：
+业务 handler 需要的状态通过构造时注入的窄接口获得，不能把完整 runtime 当作 service locator 塞进 request。`registration_id` 必须来自产生本次模型请求的 Catalog snapshot，不能由模型或外部调用方自行提供。
 
-- Python 函数对象
-- 权限策略
-- 审批 provider
-- 工作区路径解析逻辑
+## 7. 注册协议
 
-这就是“模型只能请求，不能执行”的第一层隔离。
-
-`ToolRuntime.as_agent_tools()` 会把注册表里的原始工具包装成 `runtime_managed=True` 的适配器。模型后续调用这些工具时，实际执行入口不是原始工具函数，而是 `ToolRuntime.execute()`。
-
----
-
-## 5. 阶段三：Agent 循环收到模型的 ToolCall
-
-模型返回 `AssistantMessage` 后，`core/agent_loop.py` 会提取里面的 `ToolCall`，交给 `ToolCallCoordinator`。
-
-核心文件：`src/codepilot/core/tool_coordinator.py`
-
-`ToolCallCoordinator` 负责的是 Agent loop 视角的调度，不负责真正的安全策略。它主要做四件事：
-
-1. 检查工具是否在当前 `AgentContext.tools` 中可见。
-2. 拒绝未托管工具，除非配置显式允许 `allow_unmanaged_tools`。
-3. 执行 `before_tool_call` hook，允许项目规则或扩展临时拦截。
-4. 根据 metadata 决定工具串行还是并行执行。
-
-它的 `_prepare()` 很关键：
-
-- 找不到工具：返回 `tool_not_found` 风格的错误结果。
-- 工具不是 `runtime_managed`：默认拒绝，避免绕过 `ToolRuntime`。
-- before hook 拦截：返回 `denied`，工具不会执行。
-
-并发调度也在这里：
-
-```text
-read(a.py) + read(b.py) + grep(pattern)  -> 可以并行
-edit(a.py) + edit(b.py)                  -> 串行
-bash(pytest)                             -> 独占执行
-```
-
-判断依据来自 `ToolMetadata`：
-
-- `concurrency_safe=True`
-- `exclusive=False`
-
-没有 metadata 的工具会被保守地串行执行。
-
----
-
-## 6. 阶段四：ToolRuntime 执行前安全检查
-
-真正的工具安全边界在 `ToolRuntime`。
-
-核心文件：`src/codepilot/tools/execution.py`
-
-`ToolRuntime.execute()` 的顺序是：
-
-```text
-1. ToolRegistry 查找工具
-2. PermissionPolicy 权限硬拦截
-3. SchemaValidator 参数校验
-4. ApprovalProvider 用户审批
-5. 调用真实工具 execute
-6. 写入权限/耗时 metadata
-7. ToolResultGuard 结果防护
-8. 同步 tool_call_id、tool_name、status、approval_id
-```
-
-这里有两个设计点要特别注意。
-
-### 6.1 权限检查早于 schema 校验
-
-`PermissionPolicy` 会先检查模型是否试图通过参数给自己授权：
+### 7.1 ToolRegistration
 
 ```python
-forbidden_keys = {
-    "allow_dangerous",
-    "bypass_approval",
-    "ignore_workspace_boundary",
-    "trusted",
-}
+@dataclass(frozen=True)
+class ToolRegistration:
+    version: str
+    implementation_version: str
+    spec: ToolSpec
+    category: ToolCategory
+    source: ToolSource
+    owner: str
+    policy: ToolPolicy
+    input_codec: ToolCodec[object]
+    output_codec: ToolCodec[object]
+    handler: ToolHandler
+    renderer: ToolOutputRenderer
+    access_resolver: ToolAccessResolver
 ```
 
-如果模型传入这些字段，结果是：
+`ToolRegistration` 是待注册定义，不携带可信 registration ID。Registry 校验定义后生成内部 `MaterializedTool`，并为其分配 registration ID。
+
+外部 owner 通过受控 builder 创建 Registration：builder 从 codec 生成 ToolSpec 中的 Schema；Registry 再做深度一致性校验，不一致时拒绝注册。调用方不能独立维护 Spec Schema 与 codec Schema。
+
+registration identity 至少绑定：
+
+- owner、tool name、显式 version 和 implementation_version。
+- description、input/output Schema、category、source 和完整 Policy。
+- codec、renderer、resolver 与 handler 的显式实现版本。
+
+不能 hash Python callable、对象地址或 `repr()`。替换、卸载后恢复、Extension/MCP 重连都会产生新的 revision 和 registration ID。
+
+`owner` 示例：
 
 ```text
-status = denied
-error_code = model_authorization_forbidden
+codepilot.builtin
+codepilot.core.plan
+codepilot.runtime.subagent
+extension:<extension-id>
+skill:<skill-id>
+mcp:<server-id>
+caller:<client-id>
 ```
 
-这一步放在 schema 校验之前，是有意设计的。否则模型传了 `bypass_approval=true`，系统只返回“参数不符合 schema”，安全含义会被弱化。Codepilot 希望明确表达：模型没有资格给自己授权。
+### 7.2 Opaque handler
 
-### 6.2 参数 schema 校验是所有工具统一执行的
-
-`SchemaValidator` 位于 `src/codepilot/tools/argument_schema.py`。它实现的是轻量 JSON Schema 子集：
-
-- `type`
-- `required`
-- `properties`
-- `additionalProperties`
-- `items`
-- `enum`
-
-如果模型传入错误参数，例如缺少必填字段、类型错误、额外字段不允许，工具不会执行，而是返回：
-
-```text
-status = error
-error_code = invalid_tool_arguments
-metadata.schema_validation.valid = false
-```
-
-这样具体工具实现不需要重复写基础参数校验。
-
----
-
-## 7. PermissionPolicy 怎么判断 allow、deny、approval_required
-
-核心文件：`src/codepilot/tools/policy.py`
-
-`PermissionPolicy.decide()` 会返回三种结果：
-
-| 决策 | 含义 |
-|---|---|
-| `allow` | 可以继续执行 |
-| `deny` | 直接拒绝，不产生副作用 |
-| `approval_required` | 需要用户确认，当前 run 暂停等待审批 |
-
-影响权限的主要因素有：
-
-| 因素 | 说明 |
-|---|---|
-| 权限模式 | `read-only`、`workspace-write`、`ask` |
-| 工具 metadata | 是否只读、是否高风险、是否要求审批、资源 scope |
-| shell 命令分类 | `verification`、`mutation`、`high_risk`、`unknown` |
-| allow/block pattern | 用户配置的 bash allowlist 或 blocklist |
-| 模型非法授权参数 | `allow_dangerous`、`bypass_approval` 等 |
-
-三种权限模式：
-
-| 模式 | 行为 |
-|---|---|
-| `read-only` | 只允许 read/search/status 等只读工具 |
-| `workspace-write` | 允许工作区内修改，但未知/写入 shell 命令仍可能要求审批 |
-| `ask` | 写入或高风险操作需要审批 |
-
-shell 工具有特殊处理，因为 `bash` 的真实能力太大：
-
-| 分类 | 示例 | 默认处理 |
-|---|---|---|
-| `verification` | `pytest`、`ruff check`、`git status` | workspace-write 下允许 |
-| `mutation` | `ruff format`、`git add` | 通常要求审批 |
-| `high_risk` | `rm -rf`、`git reset --hard`、`git push --force` | 默认拒绝 |
-| `unknown` | 无法识别的命令 | 通常要求审批 |
-
-这不是完整 shell 沙箱，但对学习型 Coding Agent 来说，它提供了一条清晰、可测试、可讲解的安全链。
-
----
-
-## 8. 审批系统：需要用户确认时发生什么
-
-核心文件：
-
-- `src/codepilot/tools/approval.py`
-- `src/codepilot/runtime/service.py`
-- `src/codepilot/runtime/execution/approval.py`
-- `src/codepilot/interfaces/cli/approval.py`
-
-当 `PermissionPolicy` 返回 `approval_required` 时，`ToolRuntime` 会调用 `ApprovalProvider.request_approval()`。
-
-在没有交互式审批 provider 时，默认使用 `DeferredApprovalProvider`。它不会直接放行，而是返回一个未批准的审批结果，于是工具结果会变成：
-
-```text
-status = approval_required
-approved = false
-approval_id = ...
-error_code = approval_required
-```
-
-这条 `ToolResultMessage` 会进入 Agent 运行结果，`RuntimeService` 会从结果中提取 pending approval，保存在内存表 `_pending_approvals` 中。
-
-CLI 或 Web 后续可以调用：
+包含 handler 的 MaterializedTool 只允许 Registry 和 ToolRuntime 持有。公共目录只能返回：
 
 ```python
-RuntimeService.approve_tool_call(approval_id, "approve")
+@dataclass(frozen=True)
+class ToolCatalogEntry:
+    spec: ToolSpec
+    category: ToolCategory
+    source: ToolSource
+    policy: ToolPolicyView
+    registration_id: str
+    version: str
 ```
 
-批准后不是直接执行原始工具函数，而是走：
+生产代码不能通过 `registry.get(name).execute(...)` 绕过 Runtime。
+
+- `MaterializedTool` 不从 `tools.__init__` 导出。
+- Registry 公共查询不返回 handler。
+- 架构测试禁止在 ToolRuntime 外访问 handler。
+
+### 7.3 ToolCatalogSnapshot
+
+```python
+@dataclass(frozen=True)
+class ToolCatalogSnapshot:
+    catalog_id: str
+    entries: tuple[ToolCatalogEntry, ...]
+    created_at_ms: int
+```
+
+Core 发起模型请求时保存 `tool_name -> registration_id`。模型返回 ToolCall 后，ExecutionRequest 必须携带当时的 registration ID。
+
+如果工具在模型请求之后被替换或卸载：
 
 ```text
-RuntimeService._execute_approved_tool()
-  -> assembly.tool_runtime.execute_approved()
-  -> ToolRuntime._execute(..., granted_approval_id=approval_id)
+request.registration_id != active.registration_id
+  -> tool.registration.stale
 ```
 
-也就是说，审批恢复后仍然会经过：
+旧调用不能误执行新 handler。
 
-- 工具查找
-- 权限记录
-- schema 校验
-- 真实执行
-- duration metadata
-- `ToolResultGuard`
-- status 同步
+### 7.4 名称与覆盖规则
 
-审批只表示“用户允许这次需要确认的动作继续”，不表示绕过工具主链。
+- 内置短名称为保留名称。
+- 外部工具使用命名空间，例如 `mcp__github__create_issue`。
+- 名称过长时使用截断前缀和稳定短 hash。
+- 默认 `replace=False`。
+- 外部工具不能覆盖 builtin。
+- 同名非内置工具默认注册失败。
+- 覆盖必须显式声明 owner 和 override 配置。
+- 覆盖、卸载和恢复均产生新的 registration ID。
 
----
+## 8. Schema 与 Codec
 
-## 9. 阶段五：具体工具如何执行
+### 8.1 ToolCodec
 
-`ToolRuntime` 只负责编排安全链，不理解每个工具的业务细节。真正的文件、搜索、shell 行为在内置工具里。
+```python
+T = TypeVar("T")
 
-| 文件 | 工具 | 重点 |
-|---|---|---|
-| `tools/builtins/files.py` | `ls`、`read`、`write`、`edit` | 路径边界、文件状态、写入证据 |
-| `tools/builtins/search.py` | `grep`、`find` | 只读搜索，可并行 |
-| `tools/builtins/shell.py` | `bash` | shell 执行、超时、环境过滤、副作用检测 |
-| `tools/builtins/workspace_status.py` | `workspace_status` | 读取工作区状态 |
+class ToolCodec(Protocol, Generic[T]):
+    @property
+    def json_schema(self) -> Mapping[str, object] | None:
+        ...
 
-文件工具依赖 `WorkspaceSandbox`：
+    def decode(self, value: object) -> T:
+        ...
+
+    def encode(self, value: T) -> object:
+        ...
+```
+
+执行链：
 
 ```text
-用户参数 path
-  -> WorkspaceSandbox.resolve_path()
-  -> 确认路径仍在 workspace 内
-  -> 执行读写
-  -> 返回 affected_paths / workspace_changed / file_state
+raw arguments
+  -> input_codec.decode
+  -> typed input
+  -> access_resolver.resolve
+  -> resolved typed input
+  -> handler
+  -> domain output
+  -> output_codec.encode
+  -> validated JSON-safe data
+  -> renderer
 ```
 
-这能阻止：
+`ToolResult.data` 必须是 output codec 编码并验证后的结构化数据。Renderer 接收这份已验证数据，不直接接收未经编码的领域对象。
 
-- `../` 路径穿越
-- 绝对路径逃逸
-- 通过符号链接访问工作区外文件
+### 8.2 第一版 Codec
 
-shell 工具依赖 `shell_safety.py`：
+第一版只实现：
 
-- `classify_shell_command()`：命令分类
-- `build_shell_environment()`：只保留安全环境变量，并过滤 token、secret、password 等敏感变量
-- `truncate_output()`：限制 stdout/stderr 进入上下文的大小
+- `JsonObjectCodec`
+- `DataclassCodec`
+- `UnverifiedJsonCodec`，仅供缺少可信 output Schema 的 MCP/外部工具使用。
 
-shell 工具还会做执行前后副作用检测：
+`JsonObjectCodec` 用于 MCP、动态扩展和迁移期工具；`DataclassCodec` 用于内置工具。`UnverifiedJsonCodec` 仍必须执行 JSON-safe、类型白名单、深度、大小和敏感内容防护，只是不声称完成 Schema 级语义验证。
+
+第一版不绑定 Pydantic。以后可以增加 Pydantic、TypedDict 或 MCP codec adapter，而不改变 ToolRuntime。
+
+### 8.3 Schema 规则
+
+注册阶段：
+
+1. Schema 使用 JSON Schema Draft 2020-12，并且必须合法。
+2. 顶层输入必须为 object。
+3. Schema 必须可以 JSON 序列化。
+4. 不支持的关键字不得静默忽略。
+5. properties、required 和参数 description 必须一致。
+
+执行阶段：
 
 ```text
-执行前采集 workspace 状态
-  -> 运行命令
-  -> 执行后再次采集状态
-  -> 对比 affected_paths / diff_summary / workspace_changed
+input decode 失败
+  -> handler 不启动
+  -> tool.input.invalid
+
+output encode 或验证失败
+  -> 不能返回 success
+  -> tool.output.invalid
 ```
 
-即使命令失败，只要失败前改了文件，结果里也会保留副作用证据。
+output Schema 只校验 handler 成功产生的领域输出。denied、approval、interaction、timeout、cancelled、interrupted 等控制结果不套用工具 output Schema，但始终经过 ToolResult 协议校验和 final guard。
 
----
+内置工具默认 `additionalProperties=false`。MCP 和动态扩展遵循其声明的 Schema。
 
-## 10. 阶段六：工具执行后的结果防护
+## 9. Handler、Context 与领域输出
 
-工具返回后，`ToolRuntime` 会补齐结构化 metadata，然后调用 `ToolResultGuard`。
+### 9.1 ToolExecutionContext
 
-核心文件：`src/codepilot/tools/result_safety.py`
+```python
+@dataclass(frozen=True)
+class ToolExecutionContext:
+    cancellation: CancellationToken
+    deadline_at_ms: int | None
+    progress: ProgressReporter
+    effects: EffectReporter
+    cleanup: CleanupStack
+```
 
-`ToolResultGuard` 做四类处理：
+Context 只提供运行控制能力：
 
-1. secret 脱敏：API key、token、private key、GitHub token、AWS key 等。
-2. PII 脱敏：目前包括 email。
-3. prompt injection 检测：例如 “ignore previous instructions”“reveal system prompt”。
-4. 输出可信度标记：`trusted` 或 `untrusted`。
+- 检查取消。
+- 获取 deadline。
+- 上报进度。
+- 上报实际副作用。
+- 注册清理动作。
 
-结果会写入：
+它不提供 UI、PlanState、Memory、完整 transcript 或直接审批能力。
+
+### 9.2 ToolHandler
+
+```python
+class ToolHandler(Protocol, Generic[TInput, TOutput]):
+    async def __call__(
+        self,
+        input: TInput,
+        context: ToolExecutionContext,
+    ) -> TOutput:
+        ...
+```
+
+Handler 返回领域输出，不能构造最终 `ToolResult`，不能设置：
+
+- 最终 status。
+- approved/approval_id。
+- 权限决策。
+- 最终耗时。
+- `is_error`。
+- 最终 workspace_changed。
+
+### 9.3 ToolOutputRenderer
+
+```python
+class ToolOutputRenderer(Protocol):
+    def render(self, data: Mapping[str, object]) -> tuple[ToolContent, ...]:
+        ...
+```
+
+Handler 返回完整的领域对象；output codec 将其编码为可验证的 `ToolResult.data`；Renderer 再从已验证数据生成模型可见内容。UI、审计和持久化不依赖脆弱的文本输出。
+
+支持的模型内容：
+
+- `TextContent`
+- `ImageContent`
+- `ArtifactContent`
+
+大文件使用 opaque ArtifactRef，不能直接暴露本机路径或长期保存 data URL。
+
+## 10. 唯一标准结果
+
+`ToolResult` 是 ToolRuntime 向 Core 返回的唯一 settlement envelope，既可表达终态，也可表达等待审批或输入的暂停态。暂停态不是模型对话中的最终工具结果。
+
+### 10.1 ToolStatus
+
+```python
+ToolStatus = Literal[
+    "success",
+    "error",
+    "denied",
+    "approval_required",
+    "user_input_required",
+    "cancelled",
+    "timed_out",
+    "interrupted",
+]
+```
+
+### 10.2 ToolResult
+
+```python
+@dataclass(frozen=True)
+class ToolResult:
+    tool_call_id: str
+    tool_name: str
+    status: ToolStatus
+    content: tuple[ToolContent, ...] = ()
+    data: Mapping[str, object] = field(default_factory=dict)
+    error: ToolError | None = None
+    effects: tuple[ToolEffect, ...] = ()
+    artifacts: tuple[ArtifactRef, ...] = ()
+    approval: ApprovalChallenge | None = None
+    interaction: InteractionRequest | None = None
+    timing: ToolTiming = field(default_factory=ToolTiming)
+    registration_id: str = ""
+    output_validation: Literal["schema_validated", "structurally_validated"] = "schema_validated"
+    content_trust: Literal["trusted", "untrusted"] = "trusted"
+```
+
+删除重复真值字段：
+
+- `is_error` 由 status 推导。
+- `approved` 由审批记录推导。
+- `workspace_changed` 由 write/delete effect 推导。
+- `affected_paths` 由 effects 投影。
+- `error_code` 进入 `ToolError.code`。
+- `approval_id` 进入 ApprovalChallenge。
+
+`ToolResultMessage` 可以继续作为对话协议，但只能由 Core 从 ToolResult 单向投影。
+
+### 10.3 结果不变量
 
 ```text
-result.metadata["result_guard"]
-result.metadata["output_trust"]
+success
+  -> error=None
+  -> approval=None
+  -> interaction=None
+
+error/denied/cancelled/timed_out/interrupted
+  -> error 必须存在
+
+approval_required
+  -> approval 必须存在
+  -> handler 尚未启动
+
+user_input_required
+  -> interaction 必须存在
 ```
 
-MCP、extension、network 工具的输出默认更保守，可能被标记为 `untrusted`。这不是说它不能用，而是提醒后续上下文治理和 Agent：工具输出里可能包含不可信文本，不能把其中的指令当成系统指令执行。
+所有结果必须携带非空 call ID、tool name 和 registration ID，并经过输出验证、大小限制和结果防护。
 
-工具结果里还会包含这些结构化字段：
+终态集合为 success、error、denied、cancelled、timed_out 和 interrupted。approval_required、user_input_required 只是同一 attempt 的暂停快照，不写入 final result 槽位，也不投影为模型 ToolResultMessage。
 
-| 字段 | 用途 |
-|---|---|
-| `status` | `success`、`error`、`denied`、`approval_required`、`cancelled` |
-| `error_code` | 稳定错误分类 |
-| `exit_code` | shell 进程退出码 |
-| `affected_paths` | 受影响文件 |
-| `workspace_changed` | 工作区是否变化 |
-| `diff_summary` | 变更摘要 |
-| `verification` | 验证命令的 passed/failed 结构化结论 |
-| `metadata.permission_decision` | 权限决策记录 |
-| `metadata.duration_ms` | 执行耗时 |
-| `metadata.result_guard` | 脱敏和输出可信度信息 |
+## 11. ToolPolicy 与副作用模型
 
----
+### 11.1 Effect 类型
 
-## 11. 阶段七：工具结果回到 Agent 主循环
+```python
+ToolEffectKind = Literal[
+    "filesystem_read",
+    "filesystem_write",
+    "filesystem_delete",
+    "process_spawn",
+    "network_access",
+    "credential_access",
+    "external_state_read",
+    "external_state_write",
+    "session_state_read",
+    "session_state_write",
+]
+```
 
-`ToolCallCoordinator._finalize()` 会把 `AgentToolResult` 转成 `ToolResultMessage`，并发出事件：
+`read_only` 不再是核心真值，只作为派生展示属性。
 
-- `tool_execution_start`
-- `tool_execution_update`
-- `tool_execution_end`
-- `message_start`
-- `message_end`
+### 11.2 ToolPolicy
 
-然后 `agent_loop` 会把 `ToolResultMessage` 加回消息列表，进入下一轮模型调用或任务控制判断。
+```python
+@dataclass(frozen=True)
+class ToolPolicy:
+    allowed_modes: frozenset[ToolMode]
+    declared_effects: frozenset[ToolEffectKind]
+    required_permissions: frozenset[str]
+    base_risk: RiskLevel
+    approval: ApprovalPolicy
+    timeout: TimeoutPolicy
+    concurrency: ConcurrencyPolicy
+    output_limits: OutputLimits
+    output_trust: OutputTrustPolicy
+```
 
-工具结果会被多个模块消费：
-
-| 消费者 | 使用哪些字段 | 作用 |
-|---|---|---|
-| `TaskController` | `status`、`error_code`、`verification`、`affected_paths` | 判断继续、修复、重规划、停止、完成 |
-| `ContextGovernor` | 工具输出、artifact、freshness、affected paths | 生成下一轮上下文投影 |
-| `MemoryWriter` | 验证结果、失败和修复证据 | 写入结构化记忆 |
-| `Observability` | 工具事件、权限、耗时、工作区变化 | 生成 trace、summary、audit bundle |
-| `Evaluation` | 工具调用证据和结果字段 | 评估工具安全、任务规划和上下文效果 |
-| CLI/Web | 工具事件和审批结果 | 展示运行进度和审批提示 |
-
-这就是为什么工具结果不能只是一段文本。它必须是结构化证据，后续模块才能可靠判断。
-
----
-
-## 12. MCP、Skill、Python 扩展和工具主链的关系
-
-`extensions/` 负责“外部能力接入”，不是工具安全策略本身。
-
-三类外部能力进入系统的方式不同：
-
-| 类型 | 入口 | 最终形态 |
-|---|---|---|
-| Python 扩展 | `extensions/loader.py` + `ExtensionAPI` | `AgentTool`、hook、命令、prompt |
-| Markdown skill | `extensions/skills.py` | 命令和 prompt 文本 |
-| MCP | `extensions/mcp/bridge.py` | MCP 代理 `AgentTool` |
-
-MCP 的 server/tool 风险、scope、输出可信度属于 MCP 接入配置；解析后会转成 `ToolMetadata`。但 MCP 工具真正执行时，仍然会进入：
+基础类型第一版固定为：
 
 ```text
-ToolCallCoordinator -> ToolRuntime -> PermissionPolicy -> SchemaValidator -> ApprovalProvider -> ToolResultGuard
+ToolMode = plan | execute | unrestricted
+RiskLevel = low < medium < high < critical
+ApprovalPolicy = never | on_risk | always
+RuleSource = hard_constraint | configuration | approval_grant | runtime_default
 ```
 
-这样 tools 模块不需要反向了解 MCP server 细节，仍能守住统一执行边界。
+`OutputLimits` 至少限制结构化数据字节数、模型内容字节数、artifact 数量和单 artifact 大小。`OutputTrustPolicy` 声明默认 content trust 以及是否允许 structurally validated 输出。`required_permissions` 是工具启用所需的静态 capability 集合，不能替代每次调用的 action/resource/effect 决策。
 
----
+### 11.3 ToolAccessResolver
 
-## 13. 为什么要保留多层检查
+静态 Policy 不能描述具体调用。输入校验后，Runtime 调用无副作用的 resolver。Resolver 接收 input codec 生成的 typed input，并同时返回 handler 必须使用的 resolved input 与访问请求：
 
-新手容易觉得这里有重复检查：Coordinator 查一次，Runtime 查一次，具体工具里又查一次。其实它们守的是不同边界。
+```python
+@dataclass(frozen=True)
+class ToolAccessResolution(Generic[TInput]):
+    input: TInput
+    access: ToolAccessRequest
 
-| 检查位置 | 守住的边界 |
-|---|---|
-| runtime 装配 | 当前会话有哪些工具可以暴露给模型 |
-| `ToolCallCoordinator._prepare()` | 模型这次请求的工具是否在当前上下文可见，是否是 runtime-managed |
-| `before_tool_call` hook | 项目规则或扩展临时拦截 |
-| `PermissionPolicy` | 权限模式、危险参数、shell 风险、metadata 风险 |
-| `SchemaValidator` | 参数形状是否符合工具 schema |
-| `ApprovalProvider` | 用户是否批准需要确认的操作 |
-| 具体工具 | 路径边界、shell 环境、文件状态、业务语义 |
-| `ToolResultGuard` | 执行结果是否泄露敏感信息或包含 prompt injection |
+class ToolAccessResolver(Protocol, Generic[TInput]):
+    def resolve(
+        self,
+        input: TInput,
+        context: ToolAccessContext,
+    ) -> ToolAccessResolution[TInput]:
+        ...
+```
 
-这种分层能保证：即使有人绕过 Agent loop 直接调用 `ToolRuntime`，仍然不能跳过权限、schema、审批和结果防护。
+Resolver 可以：
 
----
+- 规范化路径。
+- 解析命令。
+- 提取 action/resource。
+- 推导本次 effect。
+- 提升风险等级。
+- 生成安全预览。
 
-## 14. 关键文件速查
+Resolver 不能执行副作用、修改计划、启动进程、访问网络或请求 UI 审批。
 
-| 文件 | 新手应该看什么 |
-|---|---|
-| `src/codepilot/tools/contracts.py` | `AgentTool` 和 `ToolRuntimeRequest/Result` 的字段 |
-| `src/codepilot/tools/metadata.py` | read-only、mutating、risk、scope、output_trust 怎么描述 |
-| `src/codepilot/tools/registry.py` | 工具如何注册和按名称查找 |
-| `src/codepilot/tools/policy.py` | allow/deny/approval_required 怎么判断 |
-| `src/codepilot/tools/argument_schema.py` | 工具参数 JSON Schema 怎么统一校验 |
-| `src/codepilot/tools/approval.py` | 审批请求和默认延迟审批 provider |
-| `src/codepilot/tools/execution.py` | `ToolRuntime` 主执行管线 |
-| `src/codepilot/tools/result_safety.py` | secret/PII/prompt injection/output_trust 防护 |
-| `src/codepilot/tools/workspace_safety.py` | 文件路径边界和文件状态快照 |
-| `src/codepilot/tools/shell_safety.py` | shell 分类、环境变量过滤、输出截断 |
-| `src/codepilot/tools/builtins/files.py` | 文件工具具体实现 |
-| `src/codepilot/tools/builtins/shell.py` | shell 工具具体实现 |
-| `src/codepilot/runtime/bootstrap/tool_assembler.py` | 工具从哪里来、怎么合并、怎么创建 `ToolRuntime` |
-| `src/codepilot/core/tool_coordinator.py` | Agent loop 怎么调度一批工具调用 |
-| `src/codepilot/runtime/service.py` | 审批恢复如何重新进入工具主链 |
+Handler 只能接收 `ToolAccessResolution.input`，不能重新从 raw arguments 解析路径或命令。这样权限判断和实际执行使用同一份规范化输入；文件句柄、符号链接与 TOCTOU 防护仍由 sandbox/资源层负责。
 
-推荐阅读顺序：
+### 11.4 ToolAccessRequest
+
+```python
+@dataclass(frozen=True)
+class ToolAccessRequest:
+    actions: tuple[str, ...]
+    resources: tuple[ToolResource, ...]
+    effects: frozenset[ToolEffectKind]
+    risk: RiskLevel
+    reason: str
+    safe_preview: Mapping[str, object]
+```
+
+资源统一为规范化 URI，例如：
 
 ```text
-contracts.py
-  -> metadata.py
-  -> runtime/bootstrap/tool_assembler.py
-  -> execution.py
-  -> policy.py / argument_schema.py / approval.py / result_safety.py
-  -> core/tool_coordinator.py
-  -> sessions/context/governor.py
+workspace:///src/codepilot/tools/runtime.py
+process://shell/powershell
+network://api.github.com
+mcp://github/create_issue
+session://session_123/task_plan
+agent://session_123/exploration
+credential://github/token
 ```
 
----
+## 12. 权限与审批
 
-## 15. 当前设计取舍
+### 12.1 PermissionRule
 
-Codepilot 是学习型 Coding Agent 项目，所以工具模块刻意保持“严肃但不重型”：
+```python
+PermissionEffect = Literal["allow", "deny", "ask"]
 
-- 不引入 DI 框架，`ToolRuntime` 直接注入少量明确依赖。
-- 不引入完整 JSON Schema 引擎，只实现当前工具需要的轻量子集。
-- 不实现 Docker/VM/seccomp 级隔离，保留 workspace 边界、shell 分类、环境过滤和审批。
-- 不做企业级 RBAC，只保留 `read-only`、`workspace-write`、`ask` 三种模式。
-- 不把 MCP 安全策略硬塞进 tools，MCP-specific 解析留在 `extensions/mcp`。
+@dataclass(frozen=True)
+class PermissionRule:
+    action_pattern: str
+    resource_pattern: str
+    effect: PermissionEffect
+    modes: frozenset[ToolMode] = frozenset()
+    source: RuleSource = "configuration"
+    priority: int = 0
+```
 
-这种取舍的目标是：让学生能看懂完整链路，又能在面试中讲清楚为什么这些边界是必要的。
+规则顺序：
 
----
+1. 硬安全约束。
+2. ToolPolicy 的 mode/effect 限制。
+3. 用户或项目配置规则。
+4. 动态风险判断。
+5. 默认策略。
 
-## 16. 用一句话串起来
+硬约束不能被审批绕过，包括路径逃逸、禁用能力、Schema 非法、自授权参数和不可恢复危险操作。
 
-在 Codepilot 里，模型只负责提出工具调用意图；runtime 决定本会话有哪些工具；core 负责调度工具调用；tools 负责执行前权限、参数、审批和执行后结果防护；具体工具负责路径、shell 和副作用证据；sessions、observability、memory、evaluation 再消费结构化工具结果，推动 Agent 继续工作。
+空 `modes` 表示适用于全部 mode。同一规则层内依次按 priority、更具体的 action/resource pattern 和 `deny > ask > allow` 决定；不得依赖注册顺序得到结果。
+
+Catalog 可见性不能代替执行授权。
+
+### 12.2 ApprovalChallenge
+
+```python
+@dataclass(frozen=True)
+class ApprovalChallenge:
+    approval_id: str
+    request_fingerprint: str
+    run_id: str
+    session_id: str
+    tool_call_id: str
+    tool_name: str
+    registration_id: str
+    actions: tuple[str, ...]
+    resources: tuple[ToolResource, ...]
+    effects: frozenset[ToolEffectKind]
+    risk: RiskLevel
+    reason: str
+    safe_preview: Mapping[str, object]
+    allowed_scopes: frozenset[ApprovalScope]
+    expires_at_ms: int | None
+```
+
+第一版 ApprovalScope：
+
+```text
+once
+session
+project
+```
+
+暂不支持 global。
+
+### 12.3 ApprovalGrant
+
+批准后生成不可伪造的 Grant，而不是简单设置 `source=approval_resume`：
+
+```python
+@dataclass(frozen=True)
+class ApprovalGrant:
+    grant_id: str
+    approval_id: str
+    request_fingerprint: str
+    scope: ApprovalScope
+    actions: tuple[str, ...]
+    resources: tuple[ToolResource, ...]
+    issued_at_ms: int
+    expires_at_ms: int | None
+```
+
+恢复时重新检查：
+
+- approval ID。
+- request fingerprint。
+- registration identity。
+- Schema。
+- 资源解析结果。
+- 硬安全策略。
+- Grant 过期和消费状态。
+
+`approve_once` 必须单次消费。
+
+### 12.4 三种暂停语义
+
+必须区分：
+
+1. ToolRuntime 安全审批：是否允许危险动作执行。
+2. Core 计划审批：是否接受计划作为执行合同。
+3. Interaction 输入暂停：缺少用户选择或信息。
+
+Core-owned Plan adapter 必须先通过窄 PlanService 原子提交计划操作，才能向 ToolRuntime 返回成功领域输出；随后由 Core 单独发出计划业务审批。不能使用 ToolRuntime 的安全 ApprovalChallenge 表达计划批准。
+
+Interaction 工具只能返回受控 InteractionRequest。ToolRuntime 只持久化暂停状态并返回 `user_input_required`；外层 application runtime 负责把请求路由给 Interface，避免 tools 反向依赖 interfaces。
+
+InteractionResponse 必须携带 interaction ID、request fingerprint、session/tool call ID 和结构化答案。恢复时 ToolRuntime 使用 compare-and-set 消费 response，核对 fingerprint 与 attempt 状态，然后直接结算同一 attempt 的 success ToolResult；Interaction handler 不重复执行。
+
+## 13. timeout、取消、清理与基础并发
+
+### 13.1 TimeoutPolicy
+
+```python
+@dataclass(frozen=True)
+class TimeoutPolicy:
+    default_execution_ms: int
+    max_execution_ms: int
+    idle_timeout_ms: int | None = None
+    cleanup_grace_ms: int = 5_000
+```
+
+区分 queue timeout、execution timeout 和流式 idle timeout。
+
+有效 deadline 取 request、tool policy 和 runtime 剩余预算的最小值。
+
+### 13.2 取消
+
+ToolRuntime 为每个 attempt 创建 CancellationToken。
+
+取消顺序：
+
+1. 设置 token。
+2. 等待 handler 在 grace period 内协作清理。
+3. 超时后取消 asyncio task。
+4. 运行 CleanupStack。
+5. 返回 cancelled Result，并保留已发生 effect。
+
+`CancelledError` 不能被包装成普通 handler error。
+
+### 13.3 CleanupStack
+
+Shell、MCP、临时文件和子代理工具必须注册资源清理动作。清理采用 LIFO；单个 cleanup 失败不能阻止其他 cleanup，并进入审计信息。
+
+### 13.4 第一版并发
+
+第一版保持简单：
+
+```python
+@dataclass(frozen=True)
+class ConcurrencyPolicy:
+    mode: Literal["parallel", "serial"]
+    group: str | None = None
+
+@dataclass(frozen=True)
+class ToolRuntimeLimits:
+    max_parallel_per_session: int = 4
+    max_pending_per_session: int = 32
+```
+
+- parallel 工具受 Session semaphore 限制。
+- serial 工具按 group 串行。
+- workspace 写入使用 `workspace_mutation` group。
+- Plan 使用 `task_plan` group。
+- Shell 第一版使用 `system_command` group。
+- 审批和 Interaction 是执行屏障。
+- Core 不再自行 `asyncio.gather()`。
+
+第一版不实现资源级读写锁、优先级队列或复杂公平调度，只保留可扩展接口。
+
+### 13.5 execute_batch
+
+ToolRuntime 先按模型 ToolCall 顺序执行无副作用 preflight：materialize、decode、access resolve、permission/approval 和 queue admission。遇到第一个 ask、input、deny 或 admission failure 时停止接纳后续调用，再从已经接纳的调用构建连续兼容批次：
+
+- 结果顺序与输入顺序一致。
+- 只并发连续、兼容的 parallel 工具。
+- serial 工具始终形成执行 fence，并按 group 排队；serial 注册的 group 不得为空。
+- approval/input 暂停后，后续调用不会通过 preflight，也不会启动。
+- 已启动批次必须收集全部结果。
+- deny 默认阻止后续批次。
+- pending 超过上限返回 `tool.queue.full`。
+- 排队时间计入 request deadline；超时返回 queue timeout，不启动 handler。
+
+## 14. Progress 与副作用
+
+### 14.1 ToolProgressEvent
+
+```python
+@dataclass(frozen=True)
+class ToolProgressEvent:
+    tool_call_id: str
+    attempt_id: str
+    sequence: int
+    kind: ToolProgressKind
+    message: str = ""
+    data: Mapping[str, object] = field(default_factory=dict)
+    created_at_ms: int = 0
+```
+
+Progress kind：queued、started、message、output_delta、effect_started、effect_completed、heartbeat、cleanup_started。
+
+- sequence 单调递增。
+- Progress 不能修改最终状态。
+- 高频输出需要限速和合并。
+- 事件先脱敏再交给外层。
+
+### 14.2 副作用三阶段
+
+1. ToolPolicy 声明允许的 effect。
+2. AccessResolver 根据参数生成计划 effect。
+3. Handler 和 Runtime auditor 记录实际 effect。
+
+```python
+@dataclass(frozen=True)
+class ToolEffect:
+    kind: ToolEffectKind
+    resource: ToolResource
+    operation: str
+    status: Literal["started", "completed", "partial", "unknown"]
+    certainty: Literal["observed", "reported", "inferred"]
+```
+
+最终必须满足：
+
+```text
+实际 effect <= 已声明且已授权的 effect
+```
+
+超出范围时返回 policy violation，但不能丢弃已经发生的副作用证据。
+
+timeout/cancelled 不代表没有副作用。
+
+## 15. 状态机、持久化与恢复
+
+### 15.1 ToolAttemptState
+
+```text
+received
+validating
+resolving_access
+awaiting_approval
+awaiting_input
+queued
+running
+cleaning_up
+succeeded
+failed
+denied
+timed_out
+cancelled
+interrupted
+```
+
+状态转换必须先持久化，再进入可能产生副作用的下一阶段。
+
+### 15.2 暂停不是终态
+
+`approval_required` 和 `user_input_required` 是 ToolResult 的暂停态，但不作为最终 ToolResultMessage 写入模型对话。
+
+- 它们进入事件、checkpoint 和 RuntimeFrame。
+- resume 继续同一 attempt。
+- 最终只向模型追加一次终态结果。
+- deny 后终态为 denied。
+
+### 15.3 ToolStateStore
+
+tools 定义窄 Store Port，sessions 实现持久化，runtime 注入。
+
+Store 保存：
+
+- 完整 ExecutionRequest。
+- Attempt 状态。
+- Approval/Interaction challenge。
+- ApprovalGrant 消费状态。
+- 最终 Result。
+
+状态更新使用 expected-state compare-and-set，防止重复 resume 和重复执行。
+
+### 15.4 崩溃恢复
+
+- received/validating/resolving_access：可重做无副作用阶段。
+- awaiting_approval/awaiting_input：恢复 challenge。
+- queued：重新调度。
+- running/cleaning_up：标记 interrupted。
+- mutation 工具不自动重试。
+- 只有显式 retry-safe 工具可以自动重试。
+
+无法自动恢复的 interrupted attempt 必须结算为 status=interrupted、error.code=tool.execution.interrupted，并保留已观察到的 effects；不能只停留在内部状态机中。
+
+第一版 RecoveryMode：not_resumable、retry_safe、checkpointed。
+
+## 16. 错误模型
+
+### 16.1 ToolErrorKind
+
+```text
+registration
+validation
+unavailable
+permission
+approval
+interaction
+queue_timeout
+execution_timeout
+cancelled
+interrupted
+execution
+output_validation
+policy_violation
+resource_cleanup
+stale_registration
+internal
+```
+
+### 16.2 ToolError
+
+```python
+@dataclass(frozen=True)
+class ToolError:
+    code: str
+    kind: ToolErrorKind
+    message: str
+    retryable: bool = False
+    recovery_hint: str = ""
+    details: Mapping[str, object] = field(default_factory=dict)
+```
+
+错误码使用稳定命名空间，例如：
+
+```text
+tool.registration.not_found
+tool.registration.stale
+tool.input.invalid
+tool.permission.denied
+tool.approval.expired
+tool.execution.timeout
+tool.execution.cancelled
+tool.execution.interrupted
+tool.execution.handler_error
+tool.output.invalid
+tool.effect.policy_violation
+tool.cleanup.failed
+tool.runtime.internal_error
+```
+
+Handler 只能抛出受控 `ToolHandlerError`。未预期异常统一转换为安全错误，原始 traceback 只进入受保护诊断日志。
+
+## 17. Description 规范
+
+Description 只回答：
+
+1. 工具做什么。
+2. 什么时候使用。
+3. 关键限制。
+4. 返回什么信息。
+
+不应包含当前权限模式、用户是否批准、动态 timeout、内部实现或无法证明的安全承诺。
+
+推荐模板：
+
+```text
+<一句话说明核心能力。>
+
+Use when:
+- <典型场景>
+
+Constraints:
+- <关键边界或语义>
+
+Returns:
+- <结构化结果重点>
+```
+
+质量规则：
+
+- 非空且不超过约 1,200 字符。
+- 第一段能独立说明核心行为。
+- 非显然参数必须有 Schema description。
+- Description 中引用参数时必须使用真实 Schema 参数名。
+- 不重复完整 Schema。
+- 不堆积大量示例。
+- 不承诺并发顺序、完成时机或其他 Runtime 无法保证的动态行为。
+- 不描述尚未实现的安全保证。
+- Description 与 Schema、Policy 一起进入 registration version hash。
+
+## 18. Extension、Skill 与 Hook
+
+Extension API 只能注册 canonical ToolRegistration，不能直接执行工具或访问 MaterializedTool、ApprovalStore 和 Scheduler 内部对象。
+
+Hook 收敛为：
+
+- `ToolObserver`：只读观察生命周期，不能修改结果和权限。
+- `ToolOutputTransformer`：若修改领域输出，必须在 output codec 之前运行；固定顺序为 `domain output -> transformer -> output codec -> ToolResult.data -> renderer -> final guard`。Transformer 不能修改权限、状态或副作用。
+- 权限扩展使用独立 PermissionRuleProvider，不能通过普通 before hook 临时放行。
+
+所有来源最终进入相同 Registry 和 ToolRuntime。
+
+Extension/Skill/MCP 按 owner 进行原子批量注册：整批校验成功后才发布新 Catalog snapshot；任一注册失败则整批回滚。卸载或重连按 owner 撤销对应 revision，不影响其他 owner，也不能留下部分可见工具。
+
+## 19. MCP 适配
+
+MCP 必须转换为 canonical ToolRegistration，不能保留特殊执行旁路。
+
+```text
+MCP Definition
+  -> MCP Adapter
+  -> ToolSpec / Codec / Policy / Handler / Renderer
+  -> ToolRegistration
+  -> ToolRegistry
+  -> ToolRuntime
+```
+
+约束：
+
+- 名称为 `mcp__<server>__<tool>`，保留原始 server/tool 名用于审计。
+- inputSchema 转 input codec。
+- outputSchema 转 output codec。
+- 无 outputSchema 时使用受限 `UnverifiedJsonCodec` 并标记为 unverified，而不是假装完成强校验。
+- 明确只读的 MCP 工具至少声明 network_access 和 external_state_read。
+- 无法确认是否写远端状态时，保守声明 external_state_write，默认 medium risk + ask；如果适配器无法安全界定资源或副作用，则拒绝启用。
+- server 配置 timeout、并发上限、凭据绑定和 allowlist。
+- MCP 文本默认 untrusted。
+- 图片和 blob 经过类型、大小和 artifact 控制。
+- 不支持内容返回明确 omission。
+- 不暴露本机路径。
+
+缺少 outputSchema 的结果记录 `output_validation=structurally_validated`；MCP 文本和外部资源默认记录 `content_trust=untrusted`。这两个字段分别表达“结构验证强度”和“内容信任级别”，不能混用。
+
+## 20. Plan、Interaction 与 Subagent
+
+### 20.1 Plan
+
+- category=plan，source=builtin。
+- handler 由 Core 提供并注册。
+- ToolRuntime 只做通用校验、权限、串行调度和结果返回。
+- Plan adapter 通过 Core 提供的窄 PlanService 完成业务校验和 PlanState 原子提交后，才能返回成功领域输出。
+- ToolResult success 表示本次计划操作已提交，不表示计划已获用户批准；计划业务审批仍由 Core 负责。
+- Plan 工具使用 `task_plan` 串行组。
+
+### 20.2 Interaction
+
+- handler 由 Core 提供。
+- 只能返回受控 InteractionRequest。
+- ToolRuntime 转成 user_input_required 暂停结果。
+- 外层 application runtime 路由到 Interface，Interface 不参与工具策略。
+- InteractionResponse 由 ToolRuntime 校验并单次消费，恢复同一 attempt；不重新运行 handler。
+
+### 20.3 Subagent
+
+- handler 由 Runtime adapter 提供。
+- 通过 Session semaphore 限制并发。
+- 支持 cancellation、progress 和 checkpointed recovery。
+- 子代理结果仍通过统一 ToolResult 返回。
+
+Plan、Interaction、Subagent、Extension 和 MCP registrations 都由顶层 composition root 注入 ToolRuntime。tools 不导入 Core、Runtime adapter 或 Interface 的具体实现。
+
+## 21. 可观测性
+
+ToolEventEnvelope 包含：
+
+- event ID 和 sequence。
+- run/session/tool call/attempt/registration ID。
+- timestamp。
+- 脱敏 payload。
+
+事件类型覆盖 received、validated、access resolved、denied、approval、queued、started、progress、effect、cleanup、completed、failed、timed out、cancelled 和 interrupted。
+
+原则：
+
+1. 同 attempt sequence 单调递增。
+2. 先持久化状态，再发送事件。
+3. 普通事件只包含 safe preview。
+4. 大输出使用 artifact ID。
+5. Event sink 失败不能导致重复副作用。
+6. 最终 Result 是事实源，事件是证据。
+
+ToolStateStore 保存恢复所需完整数据；Observability 只保存脱敏事件，两者不能混用。
+
+## 22. 模块目录
+
+```text
+src/codepilot/
+├── protocols/
+│   └── tools.py
+├── tools/
+│   ├── __init__.py
+│   ├── contracts.py
+│   ├── codecs.py
+│   ├── registry.py
+│   ├── runtime.py
+│   ├── policy.py
+│   ├── permissions.py
+│   ├── approvals.py
+│   ├── scheduling.py
+│   ├── cancellation.py
+│   ├── progress.py
+│   ├── effects.py
+│   ├── results.py
+│   ├── errors.py
+│   ├── rendering.py
+│   ├── guards.py
+│   ├── resources.py
+│   ├── artifacts.py
+│   ├── state.py
+│   ├── sandbox.py
+│   └── builtins/
+│       ├── filesystem.py
+│       ├── search.py
+│       ├── command.py
+│       └── workspace.py
+├── core/
+│   └── tool_adapters/
+│       ├── plan.py
+│       └── interaction.py
+├── runtime/
+│   ├── composition.py
+│   └── tool_adapters/
+│       └── subagents.py
+├── sessions/
+│   └── tool_state_store.py
+└── extensions/
+    ├── tool_api.py
+    └── mcp/
+        ├── adapter.py
+        ├── codec.py
+        └── renderer.py
+```
+
+主要类型归属：contracts 放 Spec、Registration、Request 和 Context；codecs 放 codec；results/errors 放结算协议；resources/effects 放访问与副作用类型；rendering/guards/artifacts 放输出链；state 只定义 Store Port，sessions 实现持久化，runtime/composition.py 负责依赖装配。
+
+## 23. 测试规范
+
+### 23.1 Registration compliance
+
+每个工具必须通过统一契约测试：
+
+- 名称和 registration ID 合法。
+- input/output Schema 合法。
+- Codec 可往返。
+- category/source/policy 完整。
+- Description 合规。
+- declared effect 与 category 不冲突。
+- handler 不能返回最终 ToolResult。
+- renderer 输出合法 ToolContent。
+- access resolver 无副作用且确定性。
+
+### 23.2 ToolRuntime 管线
+
+测试必须证明：
+
+- input invalid 时 handler 调用次数为 0。
+- denied 和 awaiting approval 时 handler 调用次数为 0。
+- output invalid 时不能 success。
+- handler 异常不穿透 Core。
+- final guard 在 transformer/renderer 后执行。
+- 同 attempt handler 最多启动一次。
+
+### 23.3 安全与审批
+
+覆盖路径/符号链接逃逸、敏感文件、Shell 工作区外访问、自授权参数、effect 超范围、审批指纹、过期、单次消费和作用域隔离。
+
+### 23.4 timeout、取消、恢复
+
+覆盖 queue/execution timeout、协作取消、强制 task cancel、cleanup 顺序、进程树终止、partial effect、waiting approval 恢复和 mutation interrupted。
+
+### 23.5 第一版并发
+
+只覆盖 Session 上限、parallel 工具并发、同 serial group 串行、审批屏障、结果顺序和 pending 上限。
+
+### 23.6 架构测试
+
+- ToolRuntime 外不能访问 handler。
+- Core 不导入 MaterializedTool。
+- Interface 不导入 PermissionEngine。
+- tools 不导入 PlanState、Memory、ContextGovernor 或 CLI。
+- adapters 不直接构造最终 ToolResult。
+- 生产代码不直接调用内置 handler。
+- 不再引入第二套跨层结果协议。
+
+## 24. 迁移方案
+
+### 阶段 0：冻结旧协议
+
+- 不继续扩展旧 ToolResult/ToolObservation。
+- 记录当前行为并建立兼容测试。
+- 暂不同时修改 Plan 业务语义。
+
+### 阶段 1：建立新协议对象
+
+新增 Spec、Registration、Codec、ExecutionRequest、Result、Error、Policy、AccessRequest，并提供新 Result 到旧消息协议的适配器。
+
+### 阶段 2：Registry 与 Codec
+
+- 建立 opaque Registry。
+- 默认禁止覆盖。
+- 增加 Catalog snapshot 和 registration identity。
+- 使用标准 JSON Schema validator。
+- 为旧定义提供临时 LegacyRegistrationAdapter。
+
+### 阶段 3：单工具执行闭环
+
+先实现 ToolRuntime.execute 的新链路，不同时迁移复杂并发和恢复。选择 workspace_status 或 read 完成第一个端到端切片。
+
+### 阶段 4：逐个迁移 Builtins
+
+推荐顺序：workspace_status、read、ls、grep/find、write、edit、apply_patch、bash/PowerShell。
+
+每迁移一个工具，同时完成 typed input/output、Schema、access resolver、effect、policy、description 和 compliance tests。
+
+### 阶段 5：权限、安全与审批
+
+接入 action/resource/effect 权限、ApprovalGrant、ToolStateStore、敏感文件和 Shell 策略，移除内存 `_pending` 真值。
+
+### 阶段 6：timeout、取消和基础并发
+
+实现通用 timeout、CancellationToken、CleanupStack、Session semaphore、parallel/serial group 和 execute_batch；移除 Core 自行 gather。
+
+### 阶段 7：特殊工具
+
+迁移 Plan、Interaction 和 Subagent adapter，保持安全审批、计划审批和用户输入暂停分离。
+
+### 阶段 8：Extension、Skill、MCP
+
+所有来源改为 canonical registration，删除 MCP 特殊执行旁路，接入 output trust、artifact 和 server 限制。
+
+### 阶段 9：删除旧协议
+
+删除旧公开 execute、ToolCallRequest、PreparedToolCall、ToolObservation、重复 Approval 类型、关键 metadata 语义和不安全 legacy after hook。
+
+保留 Session 已持久化数据的向后读取兼容。
+
+## 25. 验收标准
+
+1. 所有工具只能由 ToolRuntime 启动。
+2. 所有来源转换为同一个 ToolRegistration。
+3. 输入和输出均经过 Codec 校验。
+4. Core 不再负责工具并发调度。
+5. ToolRuntime 不理解 PlanState、Memory、Context 或 Interface。
+6. 安全审批、计划审批和人机输入完全分离。
+7. ToolResult 是唯一跨层执行结果。
+8. 关键控制语义不隐藏在 metadata。
+9. timeout/cancelled 保留副作用证据。
+10. pending approval 可跨进程恢复且不可重复消费。
+11. Description、Schema、Policy 和实现同步版本化。
+12. 旧模型调用不能误执行热重载后的新 handler。
+
+## 26. OpenCode 调研结论
+
+本设计参考了 OpenCode `dev` 分支提交 `9976269ab1accfc9f9dc98a4a688c516934de422` 中正在迁移的 V2 工具架构。
+
+值得借鉴：
+
+- canonical Tool。
+- 输入和输出 codec。
+- 领域输出与模型输出分离。
+- 小型 ExecutionContext。
+- registration identity 和 stale call 防护。
+- action/resource/effect 权限模型。
+- 统一 settlement boundary。
+
+不直接照搬：
+
+- TypeScript Effect/WeakMap 的实现形式。
+- V1/V2 双轨迁移结构。
+- leaf tool 自行决定权限的边界。
+- 任意 metadata 承载关键语义。
+- 本机 output path 和 data URL 持久化。
+- 自定义工具静默覆盖 builtin。
+- 无上限并发和宿主用户完整 Shell 权限。
+
+OpenCode V2 当前仍有 MCP、plugin、attachment 和 cancellation settlement 未完成项，因此只作为设计方向参考，不作为逐文件移植蓝本。

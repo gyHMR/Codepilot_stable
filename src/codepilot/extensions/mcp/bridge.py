@@ -8,8 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from codepilot.protocols import TextContent, ToolMetadata, ToolRiskLevel
-from codepilot.tools import AgentTool, AgentToolResult
+from codepilot.protocols import TextContent, ToolRiskLevel
+from codepilot.tools import ToolCallRequest, ToolDefinition, ToolMetadata, ToolResult
 
 
 class MCPClient(Protocol):
@@ -60,7 +60,7 @@ class MCPToolPolicy:
             exclusive=True,
             requires_approval=self.requires_approval,
             risk_level=self.risk_level,
-            resource_scope=self.resource_scope,
+            scopes=("build", "extension"),
             network_access=self.network_access,
             credential_required=self.credential_required,
             extra={
@@ -68,6 +68,7 @@ class MCPToolPolicy:
                 "tool": tool,
                 "output_trust": self.output_trust,
                 "capabilities": ["mcp.call"],
+                "resource_scope": list(self.resource_scope),
             },
         )
 
@@ -132,30 +133,34 @@ def parse_mcp_tool_configs(raw_servers: list[dict[str, Any]] | None) -> list[MCP
     return result
 
 
-def create_mcp_proxy_tools(configs: list[MCPToolConfig], client: MCPClient | None) -> list[AgentTool]:
-    """从 MCP 工具配置创建代理 AgentTool 列表（通过 MCPClient 转发调用）。"""
-    tools: list[AgentTool] = []
+def create_mcp_proxy_tools(configs: list[MCPToolConfig], client: MCPClient | None) -> list[ToolDefinition]:
+    """从 MCP 工具配置创建代理工具列表（通过 MCPClient 转发调用）。"""
+    tools: list[ToolDefinition] = []
     for cfg in configs:
-        async def _execute(tool_call_id, params, signal=None, on_update=None, *, _cfg=cfg):  # type: ignore[no-untyped-def]
-            _ = tool_call_id, signal, on_update
-            args = params if isinstance(params, dict) else {}
+        async def _execute(request: ToolCallRequest, signal=None, on_update=None, *, _cfg=cfg):
+            _ = signal, on_update
+            args = request.arguments
             if client is None:
-                return AgentToolResult(
+                return ToolResult(
                     content=[TextContent(text=f"MCP bridge unavailable for `{_cfg.name}`")],
                     is_error=True,
+                    status="error",
+                    error_code="mcp_unavailable",
                     metadata={"output_trust": _cfg.output_trust},
                 )
             try:
                 result = await client.call_tool(_cfg.server, _cfg.tool, args)
             except Exception as exc:  # pragma: no cover - adapter-specific
-                return AgentToolResult(
+                return ToolResult(
                     content=[TextContent(text=f"MCP call failed `{_cfg.server}.{_cfg.tool}`: {exc}")],
                     is_error=True,
+                    status="error",
+                    error_code="mcp_call_failed",
                     metadata={"output_trust": _cfg.output_trust},
                 )
             text, metadata = _normalize_mcp_result(result)
             metadata.setdefault("output_trust", _cfg.output_trust)
-            return AgentToolResult(
+            return ToolResult(
                 content=[TextContent(text=text)],
                 details={"server": _cfg.server, "tool": _cfg.tool},
                 metadata=metadata,
@@ -163,7 +168,7 @@ def create_mcp_proxy_tools(configs: list[MCPToolConfig], client: MCPClient | Non
 
         metadata = _mcp_tool_metadata(cfg)
         tools.append(
-            AgentTool(
+            ToolDefinition(
                 name=cfg.name,
                 label=f"MCP/{cfg.server}",
                 description=cfg.description,

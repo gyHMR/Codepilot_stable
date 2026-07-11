@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,115 +12,59 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
-def _model():
-    from codepilot.protocols import Model
-
-    return Model(
-        id="run-test",
-        name="Run Test",
-        api="unit-test",
-        provider="unit-test",
-        base_url="",
-        reasoning=False,
-        input=["text"],
-        context_window=1000,
-        max_tokens=100,
-    )
-
-
-def _managed_tool(name: str, execute):
-    from codepilot.tools import AgentTool, ToolMetadata, ToolRegistry, ToolRuntime
-
-    registry = ToolRegistry()
-    registry.register(
-        AgentTool(
-            name=name,
-            label=name,
-            description=name,
-            parameters={},
-            execute=execute,
-        ),
-        metadata=ToolMetadata(
-            name=name,
-            category="test",
-            read_only=False,
-            concurrency_safe=False,
-            exclusive=True,
-            requires_approval=False,
-            risk_level="low",
-            resource_scope=("workspace",),
-        ),
-    )
-    return ToolRuntime(registry).as_agent_tools()[0]
-
-
 def test_run_result_collects_counters_changes_and_verification() -> None:
     asyncio.run(_run_result_case())
 
 
 async def _run_result_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import (
-        AssistantMessage,
-        TextContent,
-        ToolCall,
-        ToolResultMessage,
-        UserMessage,
-    )
-    from codepilot.tools import AgentToolResult
+    from codepilot.core.contracts import AgentLoopPorts
+    from codepilot.core.runner import run_agent_loop
+    from codepilot.protocols import AssistantMessage, RunVerification, TextContent, ToolCall, ToolResultMessage
+    from codepilot.tools.contracts import ToolObservation
 
-    async def fake_stream(_model, context, _options):
-        stream = AssistantMessageEventStream()
-        if any(isinstance(message, ToolResultMessage) for message in context.messages):
-            stream.end(AssistantMessage(content=[TextContent(text="finished")]))
-        else:
-            stream.end(
-                AssistantMessage(
-                    content=[ToolCall(id="call_edit", name="edit", arguments={})],
-                    stop_reason="toolUse",
-                )
-            )
-        return stream
-
-    async def edit_tool(*_args):
-        return AgentToolResult(
-            content=[TextContent(text="edited")],
-            affected_paths=["src/example.py"],
-            workspace_changed=True,
-            diff_summary="one replacement",
-            verification={
-                "status": "passed",
-                "command": "python -m compileall src",
-                "exit_code": 0,
-                "summary": "compiled",
-            },
+    model = _ScriptedModel(
+        lambda request, calls: AssistantMessage(
+            content=[TextContent(text="finished")]
+            if any(isinstance(message, ToolResultMessage) for message in request.messages)
+            else [ToolCall(id="call_edit", name="edit", arguments={})],
+            stop_reason="stop" if calls > 1 else "toolUse",
         )
-
-    events: list[dict[str, Any]] = []
-    result = await run_agent_loop(
-        prompts=[UserMessage(content="edit and verify")],
-        context=AgentContext(
-            system_prompt="",
-            messages=[],
-            tools=[_managed_tool("edit", edit_tool)],
-        ),
-        config=AgentLoopConfig(model=_model(), convert_to_llm=lambda items: items),
-        emit=events.append,
-        stream_fn=fake_stream,
+    )
+    tools = _StaticToolPort(
+        ToolObservation(
+            tool_call_id="call_edit",
+            name="edit",
+            status="success",
+            content=(TextContent(text="edited"),),
+            affected_paths=("src/example.py",),
+            workspace_changed=True,
+            verification=(
+                RunVerification(
+                    tool_call_id="call_edit",
+                    tool_name="edit",
+                    status="passed",
+                    command="python -m compileall src",
+                    exit_code=0,
+                    summary="compiled",
+                ),
+            ),
+        )
     )
 
-    assert result.status == "completed"
-    assert result.stop_reason == "final_answer"
-    assert result.counters.model_attempts == 1
-    assert result.counters.tool_iterations == 1
-    assert result.counters.tool_calls == 1
-    assert result.affected_paths == ["src/example.py"]
-    assert result.workspace_changed
-    assert result.verification[0].status == "passed"
-    agent_end = events[-1]
-    assert agent_end["runId"] == result.run_id
-    assert agent_end["result"] is result
+    outcome = await run_agent_loop(
+        _loop_input("run_result", prompt="edit and verify"),
+        AgentLoopPorts(model=model, tools=tools),
+    )
+
+    assert outcome.status == "completed"
+    assert outcome.stop_reason == "final_answer"
+    assert outcome.counters.model_attempts == 2
+    assert outcome.counters.tool_iterations == 1
+    assert outcome.counters.tool_calls == 1
+    assert outcome.workspace_effects.affected_paths == ("src/example.py",)
+    assert outcome.workspace_effects.changed
+    assert outcome.verification[0].status == "passed"
+    assert outcome.events[-1]["runId"] == outcome.run_id
 
 
 def test_run_stops_on_waiting_approval_and_repeated_calls() -> None:
@@ -128,393 +72,172 @@ def test_run_stops_on_waiting_approval_and_repeated_calls() -> None:
 
 
 async def _run_stop_cases() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, UserMessage
-    from codepilot.tools import AgentToolResult
+    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts
+    from codepilot.core.runner import run_agent_loop
+    from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+    from codepilot.tools.contracts import ToolInterruption, ToolObservation, ToolRiskView
 
-    async def approval_stream(_model, _context, _options):
-        stream = AssistantMessageEventStream()
-        stream.end(
-            AssistantMessage(
-                content=[ToolCall(id="call_approval", name="deploy", arguments={})],
-                stop_reason="toolUse",
-            )
+    approval_model = _ScriptedModel(
+        lambda _request, _calls: AssistantMessage(
+            content=[ToolCall(id="call_approval", name="deploy", arguments={})],
+            stop_reason="toolUse",
         )
-        return stream
-
-    async def approval_tool(*_args):
-        return AgentToolResult(
-            content=[TextContent(text="approval needed")],
+    )
+    approval_tools = _StaticToolPort(
+        ToolObservation(
+            tool_call_id="call_approval",
+            name="deploy",
             status="approval_required",
-            approved=False,
-            error_code="approval_required",
+            interruption=ToolInterruption(
+                approval_id="approval_1",
+                run_id="run_approval",
+                tool_call_id="call_approval",
+                tool_name="deploy",
+                reason="approval needed",
+                risk=ToolRiskView(level="high", summary="deploy"),
+            ),
+            metadata={"approval_id": "approval_1"},
         )
+    )
 
     approval = await run_agent_loop(
-        prompts=[UserMessage(content="deploy")],
-        context=AgentContext(
-            system_prompt="",
-            messages=[],
-            tools=[_managed_tool("deploy", approval_tool)],
-        ),
-        config=AgentLoopConfig(model=_model(), convert_to_llm=lambda items: items),
-        emit=lambda _event: None,
-        stream_fn=approval_stream,
+        _loop_input("run_approval", prompt="deploy"),
+        AgentLoopPorts(model=approval_model, tools=approval_tools),
     )
     assert approval.status == "waiting_approval"
     assert approval.stop_reason == "approval_required"
 
-    executions = 0
-
-    async def repeated_tool(*_args):
-        nonlocal executions
-        executions += 1
-        return AgentToolResult(content=[TextContent(text="same")])
-
-    async def repeated_stream(_model, _context, _options):
-        stream = AssistantMessageEventStream()
-        stream.end(
-            AssistantMessage(
-                content=[ToolCall(id="call_repeat", name="repeat", arguments={})],
-                stop_reason="toolUse",
-            )
+    repeated_tools = _CountingToolPort(
+        ToolObservation(
+            tool_call_id="call_repeat",
+            name="repeat",
+            status="success",
+            content=(TextContent(text="same"),),
         )
-        return stream
-
+    )
     repeated = await run_agent_loop(
-        prompts=[UserMessage(content="repeat")],
-        context=AgentContext(
-            system_prompt="",
-            messages=[],
-            tools=[_managed_tool("repeat", repeated_tool)],
+        _loop_input(
+            "run_repeat",
+            prompt="repeat",
+            limits=AgentLoopLimits(
+                max_model_turns=3,
+                repeated_tool_call_limit=1,
+            ),
         ),
-        config=AgentLoopConfig(
-            model=_model(),
-            convert_to_llm=lambda items: items,
-            repeated_tool_call_limit=1,
+        AgentLoopPorts(
+            model=_ScriptedModel(
+                lambda _request, _calls: AssistantMessage(
+                    content=[ToolCall(id="call_repeat", name="repeat", arguments={})],
+                    stop_reason="toolUse",
+                )
+            ),
+            tools=repeated_tools,
         ),
-        emit=lambda _event: None,
-        stream_fn=repeated_stream,
     )
     assert repeated.status == "failed"
     assert repeated.stop_reason == "repeated_tool_call"
-    assert executions == 1
+    assert repeated_tools.executions == 1
 
 
 def test_retryable_model_error_remains_inside_one_run() -> None:
     asyncio.run(_run_retry_case())
 
 
-def test_model_retry_decision_explains_retry_and_stop_cases() -> None:
-    from codepilot.core import AgentLoopConfig
-    from codepilot.core.run_decisions import decide_model_retry
-    from codepilot.protocols import ErrorInfo
-
-    retryable = ErrorInfo(
-        code="llm.rate_limit",
-        message="rate limited",
-        retryable=True,
-        source="llm",
-    )
-    permanent = ErrorInfo(
-        code="llm.bad_request",
-        message="bad request",
-        retryable=False,
-        source="llm",
-    )
-    config = AgentLoopConfig(
-        model=_model(),
-        convert_to_llm=lambda items: items,
-        retry_base_delay_ms=100,
-        max_model_retries=2,
-    )
-
-    first = decide_model_retry(retryable, retries_so_far=0, config=config)
-    second = decide_model_retry(retryable, retries_so_far=1, config=config)
-    exhausted = decide_model_retry(retryable, retries_so_far=2, config=config)
-    disabled = decide_model_retry(
-        retryable,
-        retries_so_far=0,
-        config=AgentLoopConfig(
-            model=_model(),
-            convert_to_llm=lambda items: items,
-            retry_enabled=False,
-        ),
-    )
-
-    assert first.should_retry is True
-    assert first.next_retry_count == 1
-    assert first.delay_ms == 100
-    assert second.should_retry is True
-    assert second.next_retry_count == 2
-    assert second.delay_ms == 200
-    assert exhausted.should_retry is False
-    assert exhausted.reason == "retry_limit_exhausted"
-    assert disabled.reason == "retry_disabled"
-    assert decide_model_retry(permanent, retries_so_far=0, config=config).reason == (
-        "error_not_retryable"
-    )
-
-
-def test_tool_execution_gate_explains_loop_stop_cases() -> None:
-    from codepilot.core import AgentLoopConfig, RunState
-    from codepilot.core.run_decisions import decide_tool_execution_gate
-    from codepilot.protocols import ToolCall
-
-    config = AgentLoopConfig(
-        model=_model(),
-        convert_to_llm=lambda items: items,
-        repeated_tool_call_limit=1,
-        max_tool_iterations=2,
-    )
-    first_call = [ToolCall(id="read_1", name="read", arguments={"path": "a.py"})]
-    repeated_call = [ToolCall(id="read_2", name="read", arguments={"path": "a.py"})]
-
-    repeated_state = RunState(run_id="run_1", session_id="session_1")
-    assert decide_tool_execution_gate(first_call, repeated_state, config).should_execute
-    repeated = decide_tool_execution_gate(repeated_call, repeated_state, config)
-
-    maxed_state = RunState(run_id="run_2", session_id="session_1")
-    maxed_state.counters.tool_iterations = 2
-    maxed = decide_tool_execution_gate(first_call, maxed_state, config)
-
-    assert repeated.should_execute is False
-    assert repeated.stop_reason == "repeated_tool_call"
-    assert repeated.error_code == "run.repeated_tool_call"
-    assert maxed.should_execute is False
-    assert maxed.stop_reason == "max_iterations"
-    assert maxed.assistant_stop_reason == "max_iterations"
-    assert maxed.error_code == "run.max_iterations"
-
-
-def test_post_tool_run_decision_explains_pause_and_stop_cases() -> None:
-    from codepilot.core.run_decisions import decide_post_tool_run
-    from codepilot.core import ExecutionDecision
-    from codepilot.protocols import ToolResultMessage
-
-    approval = decide_post_tool_run(
-        [
-            ToolResultMessage(
-                tool_call_id="tool_1",
-                tool_name="write",
-                status="approval_required",
-            )
-        ],
-        task_decision=ExecutionDecision("wait_approval", "approval_required"),
-    )
-    cancelled = decide_post_tool_run(
-        [
-            ToolResultMessage(
-                tool_call_id="tool_2",
-                tool_name="bash",
-                status="cancelled",
-            )
-        ],
-        task_decision=ExecutionDecision("stop", "cancelled"),
-    )
-    revert = decide_post_tool_run(
-        [],
-        task_decision=ExecutionDecision("propose_revert", "repeated_failure_after_change"),
-    )
-    replan_limit = decide_post_tool_run(
-        [],
-        task_decision=ExecutionDecision("stop", "replan_limit_exceeded"),
-    )
-    task_blocked = decide_post_tool_run(
-        [],
-        task_decision=ExecutionDecision("stop", "tool_unavailable"),
-    )
-    finished = decide_post_tool_run(
-        [],
-        task_decision=ExecutionDecision("finish", "all_steps_completed"),
-    )
-    keep_going = decide_post_tool_run(
-        [],
-        task_decision=ExecutionDecision("continue", "next_step"),
-    )
-
-    assert approval.should_stop is True
-    assert approval.status == "waiting_approval"
-    assert approval.stop_reason == "approval_required"
-    assert cancelled.status == "aborted"
-    assert cancelled.stop_reason == "aborted"
-    assert revert.status == "waiting_user"
-    assert revert.stop_reason == "task_blocked"
-    assert replan_limit.status == "failed"
-    assert replan_limit.error_code == "run.replan_limit"
-    assert replan_limit.stop_reason == "replan_limit"
-    assert task_blocked.status == "waiting_user"
-    assert task_blocked.stop_reason == "task_blocked"
-    assert finished.should_stop is False
-    assert finished.force_completion_check is True
-    assert finished.reason == "finish"
-    assert keep_going.should_stop is False
-    assert keep_going.reason == "continue"
-
-
-def test_task_finish_decision_exits_tool_loop_for_completion_check() -> None:
-    asyncio.run(_task_finish_exits_tool_loop_case())
-
-
-async def _task_finish_exits_tool_loop_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import AssistantMessage, TextContent, ToolCall, UserMessage
-    from codepilot.tools import AgentTool, AgentToolResult
-
-    model_calls = 0
-
-    async def fake_stream(_model, _context, _options):
-        nonlocal model_calls
-        model_calls += 1
-        stream = AssistantMessageEventStream()
-        stream.end(
-            AssistantMessage(
-                content=[ToolCall(id=f"test_{model_calls}", name="run_tests", arguments={})],
-                stop_reason="toolUse",
-            )
-        )
-        return stream
-
-    async def run_tests(*_args):
-        return AgentToolResult(
-            content=[TextContent(text="tests passed")],
-            verification={
-                "status": "passed",
-                "command": "python -m pytest test -q",
-                "exit_code": 0,
-                "summary": "passed",
-            },
-        )
-
-    events: list[dict[str, Any]] = []
-    result = await run_agent_loop(
-        prompts=[UserMessage(content="运行验证")],
-        context=AgentContext(
-            system_prompt="",
-            messages=[],
-            tools=[
-                AgentTool(
-                    name="run_tests",
-                    label="Run tests",
-                    description="Run tests",
-                    parameters={},
-                    execute=run_tests,
-                )
-            ],
-        ),
-        config=AgentLoopConfig(
-            model=_model(),
-            convert_to_llm=lambda items: items,
-            allow_unmanaged_tools=True,
-            max_tool_iterations=1,
-            repeated_tool_call_limit=20,
-        ),
-        emit=events.append,
-        stream_fn=fake_stream,
-    )
-
-    assert result.status == "completed"
-    assert result.stop_reason == "final_answer"
-    assert model_calls == 1
-    assert any(event.get("type") == "completion_checked" for event in events)
-
-
-def test_completion_run_decision_explains_continue_wait_and_done_cases() -> None:
-    from codepilot.core.run_decisions import decide_completion_run
-    from codepilot.core import CompletionCheck
-
-    needs_more_work = decide_completion_run(
-        CompletionCheck(
-            satisfied=False,
-            reason="modified_without_fresh_verification",
-            missing=["fresh_verification"],
-            can_continue=True,
-        )
-    )
-    blocked = decide_completion_run(
-        CompletionCheck(
-            satisfied=False,
-            reason="blocked_steps",
-            missing=["unblocked_steps"],
-        )
-    )
-    incomplete = decide_completion_run(
-        CompletionCheck(
-            satisfied=False,
-            reason="incomplete_steps",
-            missing=["运行测试"],
-        )
-    )
-    done = decide_completion_run(
-        CompletionCheck(satisfied=True, reason="all_steps_completed")
-    )
-
-    assert needs_more_work.action == "continue_with_steering"
-    assert needs_more_work.should_stop is False
-    assert blocked.action == "stop"
-    assert blocked.status == "waiting_user"
-    assert blocked.stop_reason == "task_blocked"
-    assert incomplete.action == "stop"
-    assert incomplete.stop_reason == "task_incomplete"
-    assert done.action == "satisfied"
-    assert done.should_stop is False
-
-
 async def _run_retry_case() -> None:
-    from codepilot.core import AgentContext, AgentLoopConfig, run_agent_loop
-    from codepilot.llm.event_stream import AssistantMessageEventStream
-    from codepilot.protocols import (
-        AssistantMessage,
-        LLMErrorInfo,
-        TextContent,
-        UserMessage,
-    )
+    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts, RetryPolicy
+    from codepilot.core.runner import run_agent_loop
+    from codepilot.llm.ports import LLMCompleted, LLMFailed
+    from codepilot.protocols import AssistantMessage, ErrorInfo, TextContent
 
-    attempts = 0
+    class RetryModel:
+        def __init__(self) -> None:
+            self.attempts = 0
 
-    async def retry_stream(_model, _context, _options):
-        nonlocal attempts
-        attempts += 1
-        stream = AssistantMessageEventStream()
-        if attempts == 1:
-            info = LLMErrorInfo(
-                code="llm.rate_limit",
-                message="rate limited",
-                retryable=True,
-                kind="rate_limit",
-            )
-            stream.end(
-                AssistantMessage(
-                    stop_reason="error",
-                    error_message=info.message,
-                    error_info=info,
+        async def stream(self, _request):
+            self.attempts += 1
+            if self.attempts == 1:
+                yield LLMFailed(
+                    error=ErrorInfo(
+                        code="llm.rate_limit",
+                        message="rate limited",
+                        retryable=True,
+                        source="llm",
+                    )
                 )
+                return
+            yield LLMCompleted(
+                message=AssistantMessage(content=[TextContent(text="recovered")])
             )
-        else:
-            stream.end(AssistantMessage(content=[TextContent(text="recovered")]))
-        return stream
 
-    events: list[dict[str, Any]] = []
-    result = await run_agent_loop(
-        prompts=[UserMessage(content="retry")],
-        context=AgentContext(system_prompt="", messages=[]),
-        config=AgentLoopConfig(
-            model=_model(),
-            convert_to_llm=lambda items: items,
-            retry_base_delay_ms=1,
+    model = RetryModel()
+    outcome = await run_agent_loop(
+        _loop_input(
+            "run_retry",
+            prompt="retry",
+            limits=AgentLoopLimits(max_model_turns=1),
+            retry_policy=RetryPolicy(enabled=True, max_retries=1, base_delay_ms=0),
         ),
-        emit=events.append,
-        stream_fn=retry_stream,
+        AgentLoopPorts(model=model, tools=None),
     )
 
-    assert result.status == "completed"
-    assert result.counters.model_attempts == 2
-    assert attempts == 2
-    run_ids = {event["runId"] for event in events}
-    assert run_ids == {result.run_id}
-    assert any(event["type"] == "model_retry_start" for event in events)
+    assert outcome.status == "completed"
+    assert outcome.counters.model_attempts == 2
+    assert model.attempts == 2
+    run_ids = {event["runId"] for event in outcome.events}
+    assert run_ids == {outcome.run_id}
+    assert any(event["type"] == "model_retry_start" for event in outcome.events)
+
+
+def test_passed_verification_returns_to_model_before_completion_check() -> None:
+    asyncio.run(_passed_verification_returns_to_model_case())
+
+
+async def _passed_verification_returns_to_model_case() -> None:
+    from codepilot.core.contracts import AgentLoopLimits, AgentLoopPorts
+    from codepilot.core.runner import run_agent_loop
+    from codepilot.protocols import AssistantMessage, RunVerification, TextContent, ToolCall
+    from codepilot.tools.contracts import ToolObservation
+
+    model = _ScriptedModel(
+        lambda _request, calls: AssistantMessage(
+            content=[ToolCall(id=f"test_{calls}", name="run_tests", arguments={})],
+            stop_reason="toolUse",
+        )
+        if calls == 1
+        else AssistantMessage(content=[TextContent(text="verified done")])
+    )
+    tools = _StaticToolPort(
+        ToolObservation(
+            tool_call_id="test_1",
+            name="run_tests",
+            status="success",
+            verification=(
+                RunVerification(
+                    tool_call_id="test_1",
+                    tool_name="run_tests",
+                    status="passed",
+                    command="python -m pytest test -q",
+                    exit_code=0,
+                    summary="passed",
+                ),
+            ),
+        )
+    )
+
+    outcome = await run_agent_loop(
+        _loop_input(
+            "run_finish",
+            prompt="运行验证",
+            limits=AgentLoopLimits(max_tool_iterations=1, repeated_tool_call_limit=20),
+        ),
+        AgentLoopPorts(model=model, tools=tools),
+    )
+
+    assert outcome.status == "completed"
+    assert outcome.stop_reason == "final_answer"
+    assert model.calls == 2
+    assert outcome.final_text == "verified done"
+    assert any(event.get("type") == "run_guard_checked" for event in outcome.events)
 
 
 def test_builtin_file_and_shell_results_are_structured(tmp_path: Path, monkeypatch) -> None:
@@ -522,10 +245,11 @@ def test_builtin_file_and_shell_results_are_structured(tmp_path: Path, monkeypat
 
 
 async def _run_builtin_result_case(tmp_path: Path, monkeypatch) -> None:
-    from codepilot.tools.builtins import create_builtin_tools, get_builtin_tool_metadata
+    from codepilot.tools.builtins import create_builtin_tools
+    from codepilot.tools.contracts import ToolInvocation
+    from codepilot.tools.permissions import PermissionPolicy
     from codepilot.tools.registry import ToolRegistry
-    from codepilot.tools.execution import ToolRuntime
-    from codepilot.tools.policy import PermissionPolicy
+    from codepilot.tools.runtime import ToolRuntime
 
     return_codes = iter([3, 0])
 
@@ -545,53 +269,132 @@ async def _run_builtin_result_case(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(asyncio, "create_subprocess_shell", fake_subprocess)
 
     registry = ToolRegistry()
-    for tool in create_builtin_tools(tmp_path):
-        registry.register(tool, metadata=get_builtin_tool_metadata(tool.name))
-    tools = {
-        tool.name: tool
-        for tool in ToolRuntime(
-            registry,
-            permission_policy=PermissionPolicy(
-                bash_allow_patterns=[r"^python -c"],
-            ),
-        ).as_agent_tools()
-    }
+    registry.extend(create_builtin_tools(tmp_path))
+    runtime = ToolRuntime(
+        registry,
+        permission_policy=PermissionPolicy(
+            bash_allow_patterns=[r"^python -c"],
+        ),
+    )
 
-    write = await tools["write"].execute(
-        "write_1",
-        {"path": "hello.txt", "content": "hello"},
+    write = await runtime.execute(
+        ToolInvocation(
+            run_id="run_builtin",
+            tool_call_id="write_1",
+            name="write",
+            arguments={"path": "hello.txt", "content": "hello"},
+        )
     )
     assert write.workspace_changed is True
-    assert write.affected_paths == ["hello.txt"]
-    assert write.diff_summary
+    assert write.affected_paths == ("hello.txt",)
     assert write.metadata["file_state"]["path"] == "hello.txt"
     assert isinstance(write.metadata["file_state"]["sha256"], str)
 
-    unchanged = await tools["write"].execute(
-        "write_2",
-        {"path": "hello.txt", "content": "hello"},
+    unchanged = await runtime.execute(
+        ToolInvocation(
+            run_id="run_builtin",
+            tool_call_id="write_2",
+            name="write",
+            arguments={"path": "hello.txt", "content": "hello"},
+        )
     )
     assert unchanged.workspace_changed is False
     assert unchanged.metadata["file_state"]["path"] == "hello.txt"
 
-    read = await tools["read"].execute(
-        "read_1",
-        {"path": "hello.txt"},
+    read = await runtime.execute(
+        ToolInvocation(
+            run_id="run_builtin",
+            tool_call_id="read_1",
+            name="read",
+            arguments={"path": "hello.txt"},
+        )
     )
     assert read.metadata["file_state"]["path"] == "hello.txt"
 
-    shell = await tools["bash"].execute(
-        "bash_1",
-        {"command": 'python -c "import sys; sys.exit(3)"'},
+    shell = await runtime.execute(
+        ToolInvocation(
+            run_id="run_builtin",
+            tool_call_id="bash_1",
+            name="bash",
+            arguments={"command": 'python -c "import sys; sys.exit(3)"'},
+        )
     )
     assert shell.status == "error"
-    assert shell.error_code == "shell_exit_nonzero"
-    assert shell.exit_code == 3
+    assert shell.metadata["error_code"] == "shell_exit_nonzero"
+    assert shell.metadata["details"]["exit_code"] == 3
 
-    verification = await tools["bash"].execute(
-        "bash_2",
-        {"command": "python -m pytest -q"},
+    verification = await runtime.execute(
+        ToolInvocation(
+            run_id="run_builtin",
+            tool_call_id="bash_2",
+            name="bash",
+            arguments={"command": "python -m pytest -q"},
+        )
     )
     assert verification.status == "success"
-    assert verification.verification is not None
-    assert verification.verification["status"] == "passed"
+    assert verification.verification
+    assert verification.verification[0].status == "passed"
+
+
+def _loop_input(
+    run_id: str,
+    *,
+    prompt: str,
+    limits: Any | None = None,
+    retry_policy: "RetryPolicy | None" = None,
+):
+    from codepilot.core.contracts import (
+        AgentLoopInput,
+        AgentLoopLimits,
+        RetryPolicy,
+        RunCorrelation,
+    )
+    from codepilot.llm.ports import ModelDescriptor
+
+    return AgentLoopInput(
+        run_id=run_id,
+        correlation=RunCorrelation(session_id="s1"),
+        user_prompt=prompt,
+        model=ModelDescriptor(provider="unit-test", model_id="run-test"),
+        limits=limits or AgentLoopLimits(max_model_turns=4),
+        retry_policy=retry_policy or RetryPolicy(),
+    )
+
+
+class _ScriptedModel:
+    def __init__(self, factory: Callable[[Any, int], Any]) -> None:
+        self._factory = factory
+        self.calls = 0
+
+    async def stream(self, request):
+        from codepilot.llm.ports import LLMCompleted
+
+        self.calls += 1
+        yield LLMCompleted(message=self._factory(request, self.calls))
+
+
+class _StaticToolPort:
+    def __init__(self, observation):
+        self._observation = observation
+
+    def catalog(self, current_mode: str = "build"):
+        return {"tools": [self._observation.name]}
+
+    async def execute(self, invocation):
+        from dataclasses import replace
+
+        return replace(
+            self._observation,
+            tool_call_id=invocation.tool_call_id,
+            name=invocation.name,
+        )
+
+
+class _CountingToolPort(_StaticToolPort):
+    def __init__(self, observation) -> None:
+        super().__init__(observation)
+        self.executions = 0
+
+    async def execute(self, invocation):
+        self.executions += 1
+        return await super().execute(invocation)

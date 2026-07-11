@@ -1,7 +1,7 @@
 [project]
 name = "codepilot"
 version = "0.3.0"
-description = "Codepilot: local coding agent focused on CLI workflows and a future Web console"
+description = "Codepilot: local coding agent focused on CLI workflows and DingTalk remote control"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -12,9 +12,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
+dingtalk = ["dingtalk-stream>=0.24.3,<0.25"]
 
 [project.scripts]
 codepilot = "codepilot.interfaces.cli.main:main"
+codepilot-dingtalk = "codepilot.interfaces.dingtalk.main:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
