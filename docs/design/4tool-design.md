@@ -1242,8 +1242,7 @@ src/codepilot/
 ### 阶段 9：删除旧协议
 
 删除旧公开 execute、ToolCallRequest、PreparedToolCall、ToolObservation、重复 Approval 类型、关键 metadata 语义和不安全 legacy after hook。
-
-保留 Session 已持久化数据的向后读取兼容。
+不保留 Session 已持久化数据的向后读取兼容。
 
 ## 25. 验收标准
 
