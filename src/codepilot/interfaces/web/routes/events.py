@@ -69,7 +69,7 @@ async def session_events(
 
 
 def format_sse(event: WebEvent) -> str:
-    payload = json.dumps(event.data, ensure_ascii=False, separators=(",", ":"))
+    payload = json.dumps(event.model_dump(), ensure_ascii=False, separators=(",", ":"))
     return f"id: {event.event_id}\nevent: {event.type}\ndata: {payload}\n\n"
 
 

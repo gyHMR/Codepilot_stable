@@ -124,4 +124,21 @@ def test_sse_route_is_registered_and_formats_events(tmp_path) -> None:
     assert "/api/sessions/{session_id}/events" in paths
     assert "id: e1\n" in rendered
     assert "event: progress\n" in rendered
-    assert 'data: {"message":"你好"}\n\n' in rendered
+    assert '"event_id":"e1"' in rendered
+    assert '"data":{"message":"你好"}' in rendered
+
+
+def test_static_assets_and_spa_fallback(tmp_path) -> None:
+    from fastapi.testclient import TestClient
+    from codepilot.interfaces.web.app import create_app
+
+    frontend = tmp_path / "frontend"
+    (frontend / "assets").mkdir(parents=True)
+    (frontend / "index.html").write_text("<html>web deck</html>", encoding="utf-8")
+    (frontend / "assets" / "app.js").write_text("console.log('ok')", encoding="utf-8")
+    app = create_app(workspace=tmp_path, runtime=ApiGateway(), frontend_dir=frontend)
+
+    with TestClient(app) as client:
+        assert client.get("/assets/app.js").status_code == 200
+        assert "web deck" in client.get("/sessions/s1").text
+        assert client.get("/api/missing").status_code == 404

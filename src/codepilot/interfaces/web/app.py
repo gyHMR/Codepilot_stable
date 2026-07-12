@@ -8,6 +8,8 @@ from typing import AsyncIterator
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from codepilot.runtime import RuntimeGateway
 
@@ -21,7 +23,6 @@ def create_app(
     runtime: RuntimeGateway | None = None,
     frontend_dir: Path | None = None,
 ) -> FastAPI:
-    del frontend_dir
     gateway = runtime or RuntimeGateway()
     service = WebService(runtime=gateway, workspace=workspace)
 
@@ -36,6 +37,23 @@ def create_app(
     app.include_router(sessions.router)
     app.include_router(actions.router)
     app.include_router(events.router)
+
+    static_root = frontend_dir or (Path(__file__).parent / "static")
+    if (static_root / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=static_root / "assets"), name="web-assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    async def spa_fallback(path: str):
+        if path == "api" or path.startswith("api/"):
+            return _error_response(404, "web.route_not_found", "API route not found")
+        index = static_root / "index.html"
+        if index.is_file():
+            return FileResponse(index)
+        return _error_response(
+            503,
+            "web.frontend_not_built",
+            "Web frontend assets are missing; run the frontend build",
+        )
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(
