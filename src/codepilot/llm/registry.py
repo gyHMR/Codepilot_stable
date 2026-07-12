@@ -62,6 +62,43 @@ class ApiProvider:
 _REGISTRY: dict[str, ApiProvider] = {}
 
 
+class ApiProviderRegistry:
+    """Instance-scoped provider registry used by one runtime assembly."""
+
+    def __init__(self) -> None:
+        self._providers: dict[str, ApiProvider] = {}
+
+    def register(self, provider: ApiProvider) -> None:
+        self._providers[provider.api] = provider
+
+    def get(self, api: str) -> ApiProvider | None:
+        return self._providers.get(api)
+
+    def require(self, api: str) -> ApiProvider:
+        provider = self.get(api)
+        if provider is None:
+            raise RuntimeError(f"No API provider registered for api: {api}")
+        return provider
+
+    def stream_simple(
+        self,
+        model: Model,
+        context: Context,
+        options: SimpleStreamOptions | None = None,
+    ) -> AssistantMessageEventStream:
+        return self.require(model.api).stream_simple(
+            model, context, options or SimpleStreamOptions()
+        )
+
+    async def complete_simple(
+        self,
+        model: Model,
+        context: Context,
+        options: SimpleStreamOptions | None = None,
+    ) -> AssistantMessage:
+        return await self.stream_simple(model, context, options).result()
+
+
 def register_api_provider(provider: ApiProvider) -> None:
     """注册或覆盖某个 api 的 provider。"""
     _REGISTRY[provider.api] = provider
@@ -126,7 +163,7 @@ async def complete_simple(
     return await stream_simple(model, context, options).result()
 
 
-def register_builtin_api_providers() -> None:
+def register_builtin_api_providers(registry: ApiProviderRegistry | None = None) -> None:
     """Register built-in provider adapters explicitly during runtime assembly."""
 
     from .providers.anthropic import stream_anthropic, stream_simple_anthropic
@@ -135,7 +172,8 @@ def register_builtin_api_providers() -> None:
         stream_simple_openai_compatible,
     )
 
-    register_api_provider(
+    target = registry.register if registry is not None else register_api_provider
+    target(
         ApiProvider(
             api="anthropic-messages",
             stream=stream_anthropic,
@@ -144,7 +182,7 @@ def register_builtin_api_providers() -> None:
             provider_id="anthropic",
         )
     )
-    register_api_provider(
+    target(
         ApiProvider(
             api="openai-compatible",
             stream=stream_openai_compatible,
@@ -153,6 +191,12 @@ def register_builtin_api_providers() -> None:
             provider_id="openai-compatible",
         )
     )
+
+
+def builtin_api_provider_registry() -> ApiProviderRegistry:
+    registry = ApiProviderRegistry()
+    register_builtin_api_providers(registry)
+    return registry
 
 
 def reset_api_providers() -> None:
@@ -164,6 +208,7 @@ def reset_api_providers() -> None:
 
 __all__ = [
     "ApiProvider",
+    "ApiProviderRegistry",
     "LLMProvider",
     "SimpleStreamFn",
     "StreamFn",
@@ -173,6 +218,7 @@ __all__ = [
     "get_api_provider",
     "register_api_provider",
     "register_builtin_api_providers",
+    "builtin_api_provider_registry",
     "reset_api_providers",
     "stream",
     "stream_simple",

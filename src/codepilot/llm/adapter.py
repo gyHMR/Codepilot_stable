@@ -4,6 +4,7 @@ from __future__ import annotations
 # 关注点：端口契约在 ports.py；这里才允许接触 provider registry、event stream 和模型能力细节。
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 from codepilot.protocols import (
     Context,
@@ -17,8 +18,11 @@ from .ports import (
     LLMCompleted,
     LLMEvent,
     LLMFailed,
+    LLMReasoningDelta,
     LLMRequest,
+    LLMStarted,
     LLMTextDelta,
+    LLMToolCallDelta,
     ModelPort,
 )
 from .provider_types import (
@@ -27,8 +31,8 @@ from .provider_types import (
     ProviderMessageConverter,
     ProviderSimpleStreamFn,
 )
-from .registry import complete_simple, stream_simple
-from .stream import SimpleStreamOptions
+from .registry import ApiProviderRegistry, complete_simple, stream_simple
+from .stream import SimpleStreamOptions, classify_llm_error
 
 
 class ProviderModelPort(ModelPort):
@@ -42,12 +46,14 @@ class ProviderModelPort(ModelPort):
         complete_fn: ProviderCompleteFn | None = None,
         convert_messages: ProviderMessageConverter | None = None,
         get_api_key: ProviderApiKeyResolver | None = None,
+        registry: ApiProviderRegistry | None = None,
     ) -> None:
         self._model = model
         self._stream_fn = stream_fn
         self._complete_fn = complete_fn
         self._convert_messages = convert_messages
         self._get_api_key = get_api_key
+        self._registry = registry
 
     async def stream(self, request: LLMRequest) -> AsyncIterator[LLMEvent]:
         try:
@@ -80,29 +86,61 @@ class ProviderModelPort(ModelPort):
                 ),
                 temperature=request.options.temperature,
                 max_tokens=request.options.max_tokens,
+                timeout_seconds=request.options.timeout_seconds,
                 api_key=api_key,
                 session_id=request.correlation.session_id or None,
             )
             if not capabilities.streaming:
-                complete_fn = self._complete_fn or complete_simple
-                message = complete_fn(self._model, context, options)
-                yield LLMCompleted(
-                    message=await message if _is_awaitable(message) else message
+                complete_fn = self._complete_fn or (
+                    self._registry.complete_simple if self._registry is not None else complete_simple
                 )
+                message = complete_fn(self._model, context, options)
+                completed = await message if _is_awaitable(message) else message
+                if completed.error_info is not None:
+                    yield LLMFailed(error=_correlate_error(completed.error_info, request))
+                else:
+                    yield LLMCompleted(message=completed, usage=completed.usage)
                 return
-            stream_fn = self._stream_fn or stream_simple
+            stream_fn = self._stream_fn or (
+                self._registry.stream_simple if self._registry is not None else stream_simple
+            )
             response = stream_fn(self._model, context, options)
             response_stream = await response if _is_awaitable(response) else response
-            async for event in response_stream:
-                if event.get("type") == "text_delta":
-                    yield LLMTextDelta(text=str(event.get("delta", "")))
-            yield LLMCompleted(message=await response_stream.result())
+            try:
+                async for event in response_stream:
+                    event_type = event.get("type")
+                    if event_type == "start":
+                        yield LLMStarted()
+                    elif event_type == "text_delta":
+                        yield LLMTextDelta(text=str(event.get("delta", "")))
+                    elif event_type == "thinking_delta":
+                        yield LLMReasoningDelta(text=str(event.get("delta", "")))
+                    elif event_type == "toolcall_end" and event.get("toolCall") is not None:
+                        yield LLMToolCallDelta(tool_call=event["toolCall"])
+                message = await response_stream.result()
+                if message.error_info is not None:
+                    yield LLMFailed(error=_correlate_error(message.error_info, request))
+                    return
+                yield LLMCompleted(message=message, usage=message.usage)
+            finally:
+                await response_stream.aclose()
         except Exception as exc:
-            yield LLMFailed(error=exc)
+            yield LLMFailed(
+                error=_correlate_error(classify_llm_error(exc, self._model), request)
+            )
 
 
 def _is_awaitable(value: object) -> bool:
     return hasattr(value, "__await__")
+
+
+def _correlate_error(error: LLMErrorInfo, request: LLMRequest) -> LLMErrorInfo:
+    details = dict(error.details)
+    if request.correlation.run_id:
+        details["run_id"] = request.correlation.run_id
+    if request.correlation.session_id:
+        details["session_id"] = request.correlation.session_id
+    return replace(error, details=details)
 
 
 def _validate_capabilities(

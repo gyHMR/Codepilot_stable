@@ -76,12 +76,12 @@ def stream_openai_compatible(
                 payload["temperature"] = resolved_options.temperature
             if resolved_options.max_tokens is not None:
                 payload["max_tokens"] = resolved_options.max_tokens
+            apply_openai_reasoning_options(payload, model, resolved_options)
             tools = to_openai_tools(context.tools)
             if tools:
                 payload["tools"] = tools
 
-            timeout = resolved_options.timeout_seconds or None
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=resolved_options.timeout_seconds) as client:
                 async with client.stream(
                     "POST",
                     f"{model.base_url.rstrip('/')}/chat/completions",
@@ -89,7 +89,12 @@ def stream_openai_compatible(
                     json=payload,
                 ) as response:
                     if not response.is_success:
-                        await response.aread()
+                        body = await response.aread()
+                        try:
+                            response.raise_for_status()
+                        except httpx.HTTPStatusError as exc:
+                            exc._response_text = body.decode("utf-8", errors="replace")  # type: ignore[attr-defined]
+                            raise
                     response.raise_for_status()
                     stream.push(llm_event("start", partial=out))
 
@@ -236,3 +241,22 @@ def stream_simple_openai_compatible(
 ) -> AssistantMessageEventStream:
     # 第一阶段实现：simple 接口直接复用标准 stream。
     return stream_openai_compatible(model, context, options)
+
+
+def apply_openai_reasoning_options(
+    payload: dict[str, Any], model: Model, options: SimpleStreamOptions
+) -> None:
+    level = getattr(options, "reasoning", None)
+    if level is None:
+        return
+    if model.provider == "deepseek":
+        payload["thinking"] = {"type": "enabled"}
+        return
+    if model.provider == "openai":
+        payload["reasoning_effort"] = {
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "high",
+        }[level]

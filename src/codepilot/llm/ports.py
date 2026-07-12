@@ -25,6 +25,7 @@ class LLMOptions:
     temperature: float | None = None
     max_tokens: int | None = None
     reasoning: str | None = None
+    timeout_seconds: float = 120.0
 
 
 @dataclass(frozen=True)

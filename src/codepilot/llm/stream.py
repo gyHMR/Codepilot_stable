@@ -18,6 +18,7 @@ from __future__ import annotations
 """
 
 import asyncio
+import re
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Literal, Optional, TypedDict, cast
@@ -70,7 +71,7 @@ class StreamOptions:
     max_tokens: int | None = None
     api_key: str | None = None
     headers: dict[str, str] | None = None
-    timeout_seconds: float | None = None
+    timeout_seconds: float = 120.0
     session_id: str | None = None
 
 
@@ -128,8 +129,9 @@ class AssistantMessageEventStream:
         # 事件队列：用于迭代消费
         self._queue: asyncio.Queue[LLMStreamEvent | object] = asyncio.Queue()
         # 最终结果 Future：用于一次性获取完整消息
-        self._result: "asyncio.Future[AssistantMessage]" = asyncio.get_event_loop().create_future()
+        self._result: "asyncio.Future[AssistantMessage]" = asyncio.get_running_loop().create_future()
         self._closed = False
+        self._background_task: asyncio.Task[None] | None = None
 
     def push(self, event: LLMStreamEvent) -> None:
         """推送一个事件到队列（text_delta/toolcall_delta/...）。
@@ -146,8 +148,24 @@ class AssistantMessageEventStream:
         Args:
             coroutine: provider 的异步协程。
         """
+        if self._background_task is not None:
+            raise RuntimeError("Provider background task already started")
         task = asyncio.create_task(coroutine)
+        self._background_task = task
         task.add_done_callback(self._handle_background_done)
+
+    async def aclose(self) -> None:
+        """Cancel provider work and close this stream."""
+        task = self._background_task
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if self._closed:
+            return
+        self._closed = True
+        if not self._result.done():
+            self._result.cancel()
+        self._queue.put_nowait(_SENTINEL)
 
     def _handle_background_done(self, task: asyncio.Task[None]) -> None:
         """处理后台任务完成：如果任务异常则调用 fail()。"""
@@ -205,9 +223,23 @@ class AssistantMessageEventStream:
 
 def _safe_response_text(response: httpx.Response, limit: int = 1000) -> str:
     try:
-        return response.text[:limit]
+        content = response.content
+        return content[:limit].decode(response.encoding or "utf-8", errors="replace")
     except (httpx.ResponseNotRead, httpx.StreamConsumed):
         return ""
+
+
+def redact_llm_error_text(value: object, limit: int = 1000) -> str:
+    """Remove common credential forms from provider error text."""
+    text = str(value)[:limit]
+    text = re.sub(r"(?i)(bearer\s+)[^\s\"']+", r"\1[REDACTED]", text)
+    text = re.sub(
+        r"(?i)((?:api[_-]?key|x-api-key|authorization)[\"']?\s*[:=]\s*[\"']?)[^\s\"',}]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(r"\bsk-[A-Za-z0-9_-]+", "[REDACTED]", text)
+    return text
 
 
 def classify_llm_error(exc: Exception, model: Model) -> LLMErrorInfo:
@@ -216,13 +248,27 @@ def classify_llm_error(exc: Exception, model: Model) -> LLMErrorInfo:
     kind: LLMErrorKind = "unknown"
     retryable = False
     status_code: int | None = None
-    details: dict[str, Any] = {"exception": type(exc).__name__}
+    details: dict[str, Any] = {"exception_type": type(exc).__name__}
 
     if isinstance(exc, httpx.HTTPStatusError):
         status_code = exc.response.status_code
-        response_text = _safe_response_text(exc.response)
+        response_text = redact_llm_error_text(
+            getattr(exc, "_response_text", "") or _safe_response_text(exc.response)
+        )
         if response_text:
+            details["response_excerpt"] = response_text
+            # Backward-compatible field name; value is already sanitized and truncated.
             details["response_text"] = response_text
+        request_id = (
+            exc.response.headers.get("x-request-id")
+            or exc.response.headers.get("request-id")
+            or exc.response.headers.get("cf-ray")
+        )
+        if request_id:
+            details["provider_request_id"] = request_id
+        retry_after = exc.response.headers.get("retry-after")
+        if retry_after:
+            details["retry_after"] = retry_after
         if status_code in {401, 403}:
             kind = "auth"
         elif status_code == 429:
@@ -246,7 +292,7 @@ def classify_llm_error(exc: Exception, model: Model) -> LLMErrorInfo:
 
     return LLMErrorInfo(
         code=f"llm.{kind}",
-        message=str(exc),
+        message=redact_llm_error_text(exc),
         retryable=retryable,
         kind=kind,
         provider=model.provider,
@@ -271,4 +317,5 @@ __all__ = [
     "is_context_overflow",
     "llm_event",
     "overflow_ratio",
+    "redact_llm_error_text",
 ]

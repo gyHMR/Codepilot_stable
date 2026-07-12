@@ -78,12 +78,12 @@ def stream_anthropic(
                 payload["system"] = context.system_prompt
             if resolved_options.temperature is not None:
                 payload["temperature"] = resolved_options.temperature
+            apply_anthropic_reasoning_options(payload, resolved_options)
             tools = to_anthropic_tools(context.tools)
             if tools:
                 payload["tools"] = tools
 
-            timeout = resolved_options.timeout_seconds or None
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=resolved_options.timeout_seconds) as client:
                 async with client.stream(
                     "POST",
                     f"{model.base_url.rstrip('/')}/v1/messages",
@@ -91,7 +91,12 @@ def stream_anthropic(
                     json=payload,
                 ) as response:
                     if not response.is_success:
-                        await response.aread()
+                        body = await response.aread()
+                        try:
+                            response.raise_for_status()
+                        except httpx.HTTPStatusError as exc:
+                            exc._response_text = body.decode("utf-8", errors="replace")  # type: ignore[attr-defined]
+                            raise
                     response.raise_for_status()
                     stream.push(llm_event("start", partial=out))
 
@@ -244,3 +249,22 @@ def stream_simple_anthropic(
 ) -> AssistantMessageEventStream:
     # 第一阶段实现：simple 接口复用标准 stream。
     return stream_anthropic(model, context, options)
+
+
+def apply_anthropic_reasoning_options(
+    payload: dict[str, Any], options: SimpleStreamOptions
+) -> None:
+    level = getattr(options, "reasoning", None)
+    if level is None:
+        return
+    max_tokens = int(payload.get("max_tokens") or 1)
+    ratio = {
+        "minimal": 0.1,
+        "low": 0.25,
+        "medium": 0.5,
+        "high": 0.8,
+        "xhigh": 0.9,
+    }[level]
+    budget = min(max_tokens - 1, max(128, int(max_tokens * ratio)))
+    payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+    payload["temperature"] = 1
