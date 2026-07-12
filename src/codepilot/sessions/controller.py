@@ -117,14 +117,14 @@ class SessionController:
     def record_event(self, event: dict[str, Any]) -> None:
         self._session.record_event(event)
 
-    def pending_approvals(self) -> list[dict[str, Any]]:
-        return self._session.pending_approvals()
-
-    def pending_approval(self, approval_id: str) -> dict[str, Any] | None:
-        return self._session.pending_approval(approval_id)
-
     def runtime_checkpoint(self) -> dict[str, Any] | None:
         return self._session.runtime_checkpoint()
+
+    def current_plan_state(self) -> dict[str, Any] | None:
+        return self._session.plan_state.current()
+
+    def save_plan_state(self, state: Any) -> dict[str, Any]:
+        return self._session.plan_state.save(state)
 
     def stage_derived_session(self, session: SessionRuntime) -> None:
         self._derived_controllers[session.session_id] = _bind_session_runtime(session)

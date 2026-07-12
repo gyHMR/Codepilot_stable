@@ -186,13 +186,13 @@ class PlanSnapshot:
         if missing:
             raise PlanValidationError("missing plan snapshot fields: " + ", ".join(missing))
         criteria = raw.get("completion_criteria")
-        if not isinstance(criteria, list):
+        if not isinstance(criteria, (list, tuple)):
             raise PlanValidationError("completion_criteria must be a list")
         risks = raw.get("risks_and_open_questions", [])
-        if not isinstance(risks, list):
+        if not isinstance(risks, (list, tuple)):
             raise PlanValidationError("risks_and_open_questions must be a list")
         items_raw = raw.get("items")
-        if not isinstance(items_raw, list):
+        if not isinstance(items_raw, (list, tuple)):
             raise PlanValidationError("items must be a list")
         items: list[PlanSnapshotItem] = []
         for index, item in enumerate(items_raw):
@@ -315,7 +315,7 @@ class PlanState:
         if missing:
             raise PlanValidationError("missing plan state fields: " + ", ".join(missing))
         items_raw = raw.get("items")
-        if not isinstance(items_raw, list):
+        if not isinstance(items_raw, (list, tuple)):
             raise PlanValidationError("items must be a list")
         items = tuple(
             PlanItem(
@@ -331,10 +331,10 @@ class PlanState:
         if len(items) != len(items_raw):
             raise PlanValidationError("plan items must be objects")
         criteria = raw.get("completion_criteria")
-        if not isinstance(criteria, list):
+        if not isinstance(criteria, (list, tuple)):
             raise PlanValidationError("completion_criteria must be a list")
         risks = raw.get("risks_and_open_questions")
-        if not isinstance(risks, list):
+        if not isinstance(risks, (list, tuple)):
             raise PlanValidationError("risks_and_open_questions must be a list")
         return cls(
             schema_version=PLAN_STATE_SCHEMA_VERSION,
@@ -463,28 +463,6 @@ def apply_plan_snapshot(
         state,
         snapshot,
         operation=plan_operation,
-        qualified_failure_count=qualified_failure_count,
-    )
-
-
-def apply_plan_snapshot_metadata(
-    state: PlanState | None,
-    metadata: Mapping[str, Any],
-    *,
-    mode: RunMode,
-    run_id: str,
-    qualified_failure_count: int = 0,
-) -> PlanState | None:
-    raw_snapshot = metadata.get("plan_snapshot")
-    if not isinstance(raw_snapshot, Mapping):
-        return state
-    operation = metadata.get("plan_operation")
-    return apply_plan_snapshot(
-        state,
-        PlanSnapshot.from_mapping(raw_snapshot),
-        mode=mode,
-        run_id=run_id,
-        operation=operation if isinstance(operation, str) else None,
         qualified_failure_count=qualified_failure_count,
     )
 
@@ -787,7 +765,6 @@ __all__ = [
     "PlanningBudgetProfile",
     "RunMode",
     "apply_plan_snapshot",
-    "apply_plan_snapshot_metadata",
     "ensure_plan_change_reason",
     "ensure_plan_item_status",
     "ensure_plan_operation",

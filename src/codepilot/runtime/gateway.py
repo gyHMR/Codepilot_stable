@@ -13,13 +13,13 @@ from codepilot.sessions.contracts import (
     PreparedAgentRun,
     SessionCommandIntent,
     SessionContinuationIntent,
+    SessionResumeIntent,
     SessionRunIntent,
     SessionRunRecord,
     SessionView,
 )
 from codepilot.sessions.controller import SessionController
 from codepilot.protocols import RunSignalsSummary
-from codepilot.tools.contracts import ToolCatalogView
 
 from .actions import (
     ApprovalDecided,
@@ -267,9 +267,13 @@ class RuntimeGateway:
         session: RuntimeSession,
         action: ApprovalDecided,
     ) -> AsyncIterator[RuntimeFrame]:
-        transaction = self._approvals.get(action.approval_id)
-        checkpoint_approval = session.controller.pending_approval(action.approval_id)
-        if transaction is None and checkpoint_approval is None:
+        tool_port = session.tool_port or self._tool_port
+        challenge = (
+            tool_port.approval_challenge(action.approval_id)
+            if tool_port is not None
+            else None
+        )
+        if challenge is None:
             yield FailedFrame(
                 error={
                     "code": "runtime.approval_not_found",
@@ -277,7 +281,7 @@ class RuntimeGateway:
                 }
             )
             return
-        if transaction is not None and transaction.session_id != session.session_id:
+        if challenge.session_id != session.session_id:
             yield FailedFrame(
                 error={
                     "code": "runtime.approval_session_mismatch",
@@ -287,11 +291,12 @@ class RuntimeGateway:
             )
             return
 
-        prepared = await session.controller.prepare_continuation(
-            SessionContinuationIntent(
-                kind="tool_approved" if action.decision == "approve" else "tool_denied",
+        prepared = await session.controller.prepare_resume(
+            SessionResumeIntent(
                 approval_id=action.approval_id,
+                decision=action.decision,
                 reason=action.reason,
+                run_id=challenge.run_id,
             )
         )
         if prepared.resume_input is None:
@@ -430,36 +435,29 @@ class RuntimeGateway:
         if tool_port is None:
             return []
         mode = session.controller.describe().current_mode
-        try:
-            catalog = tool_port.catalog(mode)
-        except TypeError:
-            catalog = tool_port.catalog()
-        if isinstance(catalog, ToolCatalogView):
-            return list(catalog.tools)
-        if isinstance(catalog, dict):
-            value = catalog.get("tools")
-            return list(value) if isinstance(value, (list, tuple)) else [catalog]
-        if isinstance(catalog, (list, tuple)):
-            return list(catalog)
-        return [catalog]
+        snapshot = tool_port.catalog_snapshot(
+            mode="plan" if mode in {"read", "plan"} else "execute"
+        )
+        return [entry.spec for entry in snapshot.entries]
 
     def _pending_approvals_for(self, session: RuntimeSession) -> list[ApprovalView]:
         by_id = {
             view.approval_id: view
             for view in self._approvals.list(session.session_id)
         }
-        for item in session.controller.pending_approvals():
-            approval_id = _optional_text(item.get("approval_id"))
-            if approval_id is None or approval_id in by_id:
+        tool_port = session.tool_port or self._tool_port
+        challenges = tuple(tool_port.pending_challenges()) if tool_port is not None else ()
+        for challenge in challenges:
+            if challenge.approval_id in by_id:
                 continue
-            by_id[approval_id] = ApprovalView(
-                approval_id=approval_id,
+            by_id[challenge.approval_id] = ApprovalView(
+                approval_id=challenge.approval_id,
                 session_id=session.session_id,
-                run_id=_optional_text(item.get("run_id")) or "",
-                tool_call_id=_optional_text(item.get("id")) or "",
-                tool_name=_optional_text(item.get("name")) or "",
-                reason=_optional_text(item.get("reason")) or "",
-                risk_level=_optional_text(item.get("risk_level")) or "unknown",
+                run_id=challenge.run_id,
+                tool_call_id=challenge.tool_call_id,
+                tool_name=challenge.tool_name,
+                reason=challenge.reason,
+                risk_level=challenge.risk,
             )
         return sorted(by_id.values(), key=lambda item: item.approval_id)
 

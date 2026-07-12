@@ -242,6 +242,9 @@ def test_agent_loop_context_is_named_prepared_context_contract() -> None:
     assert resume_hints["context"] is PreparedContext
     assert loop_input.context.system_prompt == "Base rules"
     assert resume_input.context.session_id == "s1"
+    assert not hasattr(resume_input, "tool_call_id")
+    assert not hasattr(resume_input, "tool_name")
+    assert not hasattr(resume_input, "arguments")
     assert dict(loop_input.context) == {
         "system_prompt": "Base rules",
         "session_id": "s1",
@@ -317,38 +320,40 @@ def test_session_intents_normalize_resume_and_cancel_values() -> None:
         SessionResumeIntent(approval_id="approval1", decision="maybe")
 
 
-def test_tool_port_approval_contract_is_explicit_interruption() -> None:
-    from codepilot.tools.contracts import (
-        ToolInterruption,
-        ToolInvocation,
-        ToolObservation,
-        ToolResumeDecision,
-        ToolRiskView,
-    )
+def test_tool_port_approval_contract_uses_typed_challenge_and_response() -> None:
+    from codepilot.tools.results import ToolResult
+    from codepilot.tools.security import ApprovalChallenge, ApprovalResponse, ToolResource
 
-    interruption = ToolInterruption(
+    challenge = ApprovalChallenge(
         approval_id="approval1",
+        request_fingerprint="sha256:test",
         run_id="run1",
+        session_id="session1",
         tool_call_id="call1",
         tool_name="shell",
-        arguments={"cmd": "git status"},
+        registration_id="reg1",
+        actions=("shell",),
+        resources=(ToolResource("workspace:///"),),
+        effects=frozenset({"process_spawn"}),
+        risk="medium",
         reason="requires user approval",
-        risk=ToolRiskView(level="medium", summary="workspace write"),
+        safe_preview={"command": "git status"},
     )
-    observation = ToolObservation(
+    result = ToolResult(
         tool_call_id="call1",
-        name="shell",
+        tool_name="shell",
         status="approval_required",
-        interruption=interruption,
+        approval=challenge,
+        registration_id="reg1",
     )
-    decision = ToolResumeDecision(
+    response = ApprovalResponse(
         approval_id="approval1",
+        request_fingerprint="sha256:test",
         decision="approve",
         reason="ok",
     )
-    assert observation.interruption is interruption
-    assert decision.decision == "approve"
-    assert ToolInvocation(run_id="run1", tool_call_id="call1", name="shell").source == "agent"
+    assert result.approval is challenge
+    assert response.decision == "approve"
 
 
 def test_v2_contract_modules_do_not_import_higher_layers() -> None:

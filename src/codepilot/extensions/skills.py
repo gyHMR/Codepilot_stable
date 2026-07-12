@@ -6,12 +6,25 @@ from __future__ import annotations
 """技能加载器：发现工作区中的 .md 技能文件，启动时只暴露索引，正文按需加载。"""
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from codepilot.protocols import TextContent
 from codepilot.protocols.commands import RegisteredCommand
-from codepilot.tools import ToolCallRequest, ToolDefinition, ToolMetadata, ToolResult
+from codepilot.tools import (
+    ConcurrencyPolicy,
+    DataclassCodec,
+    OutputLimits,
+    OutputTrustPolicy,
+    TextContent,
+    TimeoutPolicy,
+    ToolAccessRequest,
+    ToolAccessResolution,
+    ToolHandlerError,
+    ToolPolicy,
+    ToolRegistration,
+    ToolSpec,
+)
 
 from .types import LoadedExtensions, SkillSpec
 
@@ -113,87 +126,121 @@ def _render_skill_index(skills: list[SkillSpec]) -> str:
     return "\n".join(lines)
 
 
-def _create_skill_loader_tool(skills: list[SkillSpec]) -> ToolDefinition:
-    """创建模型可调用的 skill 正文加载工具。"""
+@dataclass(frozen=True)
+class _SkillLoadInput:
+    name: str
+
+
+@dataclass(frozen=True)
+class _SkillLoadOutput:
+    skill: str
+    command: str
+    content: str
+
+
+def _create_skill_loader_tool(skills: list[SkillSpec]) -> ToolRegistration:
+    """创建模型可调用的 canonical skill 正文加载工具。"""
 
     lookup: dict[str, SkillSpec] = {}
     for skill in skills:
         lookup[_skill_lookup_key(skill.name)] = skill
         lookup[_skill_lookup_key(skill.command_name)] = skill
 
-    async def _execute(
-        request: ToolCallRequest,
-        signal: Any | None = None,
-        on_update: Any | None = None,
-    ) -> ToolResult:
-        _ = signal, on_update
-        raw_name = request.arguments.get("name", "")
-        skill = lookup.get(_skill_lookup_key(raw_name))
+    input_schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Skill name or slash command from the Available Skills index.",
+            }
+        },
+        "required": ["name"],
+        "additionalProperties": False,
+    }
+    output_schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "skill": {"type": "string"},
+            "command": {"type": "string"},
+            "content": {"type": "string"},
+        },
+        "required": ["skill", "command", "content"],
+        "additionalProperties": False,
+    }
+
+    class Resolver:
+        def resolve(self, input, request):
+            _ = request
+            return ToolAccessResolution(
+                input=input,
+                access=ToolAccessRequest(
+                    actions=("skill.load",),
+                    resources=(),
+                    effects=frozenset(),
+                    risk="low",
+                    reason="Load one already discovered skill workflow",
+                ),
+            )
+
+    async def handler(input: _SkillLoadInput, context) -> _SkillLoadOutput:
+        context.cancellation.raise_if_cancelled()
+        skill = lookup.get(_skill_lookup_key(input.name))
         if skill is None:
-            available = [skill.command_name for skill in skills]
-            return ToolResult(
-                tool_call_id=request.tool_call_id,
-                tool_name=SKILL_LOADER_TOOL_NAME,
-                content=[
-                    TextContent(
-                        text=(
-                            f"Skill not found: {raw_name}. "
-                            f"Available skills: {', '.join('/' + name for name in available)}"
-                        )
-                    )
-                ],
-                status="error",
-                is_error=True,
-                error_code="skill_not_found",
+            raise ToolHandlerError(
+                "skill.not_found",
+                f"Skill not found: {input.name}",
                 details={
-                    "reason": "skill_not_found",
-                    "requested": str(raw_name),
-                    "available": available,
+                    "requested": input.name,
+                    "available": [item.command_name for item in skills],
                 },
             )
-        return ToolResult(
-            tool_call_id=request.tool_call_id,
-            tool_name=SKILL_LOADER_TOOL_NAME,
-            content=[TextContent(text=_render_loaded_skill(skill))],
-            details={
-                "skill": skill.name,
-                "command": skill.command_name,
-                "source_path": skill.source_path,
-            },
+        return _SkillLoadOutput(
+            skill=skill.name,
+            command=skill.command_name,
+            content=_render_loaded_skill(skill),
         )
 
-    return ToolDefinition(
-        name=SKILL_LOADER_TOOL_NAME,
-        label="Load Skill",
-        description=(
-            "Load the full Markdown workflow for a discovered skill when the current "
-            "task matches the Available Skills index."
+    class Renderer:
+        def render(self, data):
+            return (TextContent(text=data["content"]),)
+
+    input_codec = DataclassCodec(_SkillLoadInput, input_schema)
+    output_codec = DataclassCodec(_SkillLoadOutput, output_schema)
+    return ToolRegistration(
+        version="1.0.0",
+        implementation_version="1",
+        spec=ToolSpec(
+            SKILL_LOADER_TOOL_NAME,
+            (
+                "Load the full Markdown workflow for one discovered skill. Use when the current task "
+                "matches an entry in the Available Skills index. The name must identify a listed skill "
+                "or slash command. Returns the selected skill name, command, and workflow content."
+            ),
+            input_schema,
+            output_schema,
         ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Skill name or slash command, for example demo-review or /demo-review.",
-                },
-            },
-            "required": ["name"],
-            "additionalProperties": False,
-        },
-        execute=_execute,
-        metadata=ToolMetadata(
-            name=SKILL_LOADER_TOOL_NAME,
-            category="skill",
-            read_only=True,
-            concurrency_safe=True,
-            exclusive=False,
-            requires_approval=False,
-            risk_level="low",
-            scopes=("read", "plan", "build"),
-            network_access=False,
-            credential_required=False,
-            extra={"capabilities": ["skill.load"]},
+        category="external",
+        source="skill",
+        owner="skill:loader",
+        policy=ToolPolicy(
+            allowed_modes=frozenset({"plan", "execute", "unrestricted"}),
+            declared_effects=frozenset(),
+            required_permissions=frozenset(),
+            base_risk="low",
+            approval="never",
+            timeout=TimeoutPolicy(5_000, 5_000),
+            concurrency=ConcurrencyPolicy(mode="parallel"),
+            output_limits=OutputLimits(max_content_bytes=256_000),
+            output_trust=OutputTrustPolicy(),
         ),
+        input_codec=input_codec,
+        output_codec=output_codec,
+        handler=handler,
+        renderer=Renderer(),
+        access_resolver=Resolver(),
     )
 
 

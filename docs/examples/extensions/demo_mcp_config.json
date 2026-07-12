@@ -4,10 +4,9 @@
       "name": "demo",
       "tools": [
         {
-          "name": "mcp_demo_echo",
           "tool": "echo",
           "description": "Demo MCP proxy tool that forwards arguments to a fake MCP client.",
-          "parameters": {
+          "inputSchema": {
             "type": "object",
             "properties": {
               "text": {
@@ -17,7 +16,21 @@
             "required": [
               "text"
             ]
-          }
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "echo": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "echo"
+            ],
+            "additionalProperties": false
+          },
+          "read_only": true,
+          "requires_approval": false
         }
       ]
     }

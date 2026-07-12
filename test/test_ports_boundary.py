@@ -130,48 +130,52 @@ def test_registry_import_does_not_register_providers() -> None:
     assert get_api_provider("openai-compatible") is not None
 
 
-def test_tools_ports_contains_only_tool_port_contracts() -> None:
-    ports = SRC / "tools" / "contracts.py"
-    forbidden = {
-        "codepilot.tools.runtime",
-        "codepilot.tools.adapter",
+def test_tools_contracts_expose_only_canonical_execution_types() -> None:
+    import codepilot.tools.contracts as contracts
+
+    expected = {
+        "ToolExecutionContext",
+        "ToolExecutionRequest",
+        "ToolPort",
+        "ToolRegistration",
+        "ToolSpec",
+    }
+    removed = {
+        "ToolCallRequest",
+        "ToolDefinition",
+        "ToolInterruption",
+        "ToolInvocation",
+        "ToolObservation",
+        "ToolResumeDecision",
     }
 
-    assert _has_forbidden_import(ports, forbidden) == []
-
-    import codepilot.tools.contracts as ports_module
-
-    assert hasattr(ports_module, "ToolPort")
-    assert hasattr(ports_module, "ToolCatalogView")
-    assert hasattr(ports_module, "ToolInvocation")
-    assert hasattr(ports_module, "ToolObservation")
-    assert hasattr(ports_module, "ToolPolicyContext")
-    assert not hasattr(ports_module, "ToolRuntimePort")
+    assert expected <= set(contracts.__all__)
+    assert not any(hasattr(contracts, name) for name in removed)
 
 
-def test_tools_top_level_is_not_the_core_port_surface() -> None:
+def test_tools_public_facade_exposes_canonical_runtime_only() -> None:
     import codepilot.tools as tools
 
-    public_tool_surface = {
+    expected = {
+        "ToolExecutionRequest",
+        "ToolRegistration",
+        "ToolResult",
+        "ToolRuntime",
+    }
+    removed = {
+        "PermissionPolicy",
+        "RestrictedToolPort",
         "ToolCatalogView",
         "ToolDefinition",
         "ToolInvocation",
         "ToolObservation",
-        "ToolPort",
         "ToolResumeDecision",
-        "ToolRuntime",
-        "PermissionPolicy",
-    }
-    removed_names = {
-        "AgentTool",
-        "AgentToolResult",
-        "ToolRuntimePort",
-        "ToolRuntimeRequest",
-        "ToolRuntimeResult",
     }
 
-    assert public_tool_surface <= set(tools.__all__)
-    assert not any(hasattr(tools, name) for name in removed_names)
+    assert expected <= set(tools.__all__)
+    assert not any(hasattr(tools, name) for name in removed)
+
+
 
 
 def test_core_does_not_import_concrete_llm_or_tool_adapters() -> None:

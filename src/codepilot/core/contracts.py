@@ -22,7 +22,8 @@ from codepilot.protocols import (
     Usage,
     UserMessage,
 )
-from codepilot.tools.contracts import ToolInterruption, ToolPort
+from codepilot.tools.contracts import ToolPort
+from codepilot.tools.security import ApprovalChallenge
 from .plan import RunMode, ensure_run_mode, plan_state_to_dict
 
 
@@ -209,9 +210,6 @@ class AgentResumeInput:
     approval_id: str | None = None
     decision: str | None = None
     reason: str = ""
-    tool_call_id: str | None = None
-    tool_name: str | None = None
-    arguments: dict[str, Any] = field(default_factory=dict)
     mode: RunMode = "build"
     plan_state: dict[str, object] | None = None
     limits: AgentLoopLimits = field(default_factory=AgentLoopLimits)
@@ -229,11 +227,6 @@ class AgentResumeInput:
             "run_state",
             _copy_optional_dict(self.run_state, field_name="run_state"),
         )
-        object.__setattr__(self, "tool_call_id", _optional_text(self.tool_call_id))
-        object.__setattr__(self, "tool_name", _optional_text(self.tool_name))
-        if not isinstance(self.arguments, dict):
-            raise TypeError("AgentResumeInput arguments must be a dict")
-        object.__setattr__(self, "arguments", deepcopy(self.arguments))
         object.__setattr__(
             self,
             "event_start_seq",
@@ -267,7 +260,7 @@ class AgentLoopOutcome:
     stop_reason: str
     new_messages: list[Message] = field(default_factory=list)
     final_message: AssistantMessage | None = None
-    interruptions: list[ToolInterruption] = field(default_factory=list)
+    interruptions: list[ApprovalChallenge] = field(default_factory=list)
     counters: AgentRunCounters = field(default_factory=AgentRunCounters)
     usage: Usage | None = None
     verification: list[RunVerification] = field(default_factory=list)

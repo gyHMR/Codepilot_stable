@@ -18,14 +18,7 @@ from codepilot.core.plan import PlanningBudgetProfile, RunMode
 from codepilot.llm.provider_types import ProviderSimpleStreamFn
 from codepilot.protocols import AgentEvent, Message
 from codepilot.protocols import Model
-from codepilot.protocols.commands import (
-    AfterToolCallContext,
-    AfterToolCallResult,
-    BeforeToolCallContext,
-    BeforeToolCallResult,
-    LifecycleHook,
-    RegisteredCommand,
-)
+from codepilot.protocols.commands import LifecycleHook, RegisteredCommand
 
 
 ConvertToLlmFn = Callable[[list[AgentMessage]], list[Message] | Awaitable[list[Message]]]
@@ -76,18 +69,6 @@ class SessionOptions:
     extension_commands: dict[str, RegisteredCommand] = field(default_factory=dict)
     before_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
     after_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
-    before_tool_call: Optional[
-        Callable[
-            [BeforeToolCallContext, Any | None],
-            BeforeToolCallResult | None | Awaitable[BeforeToolCallResult | None],
-        ]
-    ] = None
-    after_tool_call: Optional[
-        Callable[
-            [AfterToolCallContext, Any | None],
-            AfterToolCallResult | None | Awaitable[AfterToolCallResult | None],
-        ]
-    ] = None
     stream_fn: ProviderSimpleStreamFn | None = None
     prepare_context: PrepareContextFn | None = None
 

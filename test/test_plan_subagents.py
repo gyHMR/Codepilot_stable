@@ -4,88 +4,47 @@ import asyncio
 import json
 
 
-def _metadata(name: str, *, read_only: bool, scopes=("read", "plan", "build")):
-    from codepilot.tools.contracts import ToolMetadata
-
-    return ToolMetadata(
-        name=name,
-        category="test",
-        read_only=read_only,
-        concurrency_safe=True,
-        exclusive=False,
-        requires_approval=False,
-        risk_level="low",
-        scopes=tuple(scopes),
-    )
-
-
-def test_restricted_tool_port_only_exposes_and_executes_read_allowlist() -> None:
+def test_restricted_tool_port_only_exposes_and_executes_read_allowlist(tmp_path) -> None:
     async def run_case() -> None:
-        from codepilot.protocols import TextContent, Tool
-        from codepilot.tools.contracts import (
-            ToolCatalogItem,
-            ToolCatalogView,
-            ToolInvocation,
-            ToolObservation,
-        )
-        from codepilot.tools.restricted import RestrictedToolPort
+        from codepilot.tools.builtins import create_builtin_registrations
+        from codepilot.tools.contracts import ToolExecutionRequest
+        from codepilot.tools.registry import ToolRegistry
+        from codepilot.runtime.tool_adapters.subagents import RestrictedToolPort
+        from codepilot.tools.runtime import ToolRuntime
 
-        class BaseTools:
-            def __init__(self) -> None:
-                self.executed_modes: list[str] = []
-
-            def catalog(self, current_mode: str = "build"):
-                return ToolCatalogView(
-                    (
-                        ToolCatalogItem(
-                            spec=Tool(name="read", description="Read", parameters={}),
-                            metadata=_metadata("read", read_only=True),
-                        ),
-                        ToolCatalogItem(
-                            spec=Tool(name="propose_plan", description="Plan", parameters={}),
-                            metadata=_metadata("propose_plan", read_only=True),
-                        ),
-                        ToolCatalogItem(
-                            spec=Tool(name="dispatch_exploration", description="Dispatch", parameters={}),
-                            metadata=_metadata("dispatch_exploration", read_only=True, scopes=("plan",)),
-                        ),
-                        ToolCatalogItem(
-                            spec=Tool(name="write", description="Write", parameters={}),
-                            metadata=_metadata("write", read_only=False, scopes=("build",)),
-                        ),
-                    )
-                )
-
-            async def execute(self, invocation):
-                self.executed_modes.append(invocation.current_mode)
-                return ToolObservation(
-                    tool_call_id=invocation.tool_call_id,
-                    name=invocation.name,
-                    status="success",
-                    content=(TextContent(text="ok"),),
-                )
-
-        base = BaseTools()
+        (tmp_path / "sample.py").write_text("value = 1\n", encoding="utf-8", newline="\n")
+        registry = ToolRegistry()
+        ids = {
+            item.spec.name: registry.register(item)
+            for item in create_builtin_registrations(tmp_path, enabled_names=["read", "write"])
+        }
+        base = ToolRuntime(registry)
         restricted = RestrictedToolPort(base)
 
-        names = {item.spec.name for item in restricted.catalog("plan").items}
+        names = {item.spec.name for item in restricted.catalog_snapshot(mode="plan").entries}
         assert names == {"read"}
 
         allowed = await restricted.execute(
-            ToolInvocation(run_id="run1", tool_call_id="read1", name="read", current_mode="plan")
+            ToolExecutionRequest(
+                "run1", "session1", "read1", "read", {"path": "sample.py"}, "plan", ids["read"]
+            )
         )
         denied = await restricted.execute(
-            ToolInvocation(run_id="run1", tool_call_id="write1", name="write", current_mode="read")
+            ToolExecutionRequest(
+                "run1", "session1", "write1", "write", {"path": "x", "content": "x"}, "plan", ids["write"]
+            )
         )
-        denied_plan = await restricted.execute(
-            ToolInvocation(run_id="run1", tool_call_id="plan1", name="propose_plan", current_mode="read")
+        batch = await restricted.execute_batch(
+            [
+                ToolExecutionRequest("run1", "session1", "read2", "read", {"path": "sample.py"}, "plan", ids["read"]),
+                ToolExecutionRequest("run1", "session1", "read3", "read", {"path": "sample.py"}, "plan", ids["read"]),
+            ]
         )
 
         assert allowed.status == "success"
-        assert base.executed_modes == ["read"]
+        assert [item.status for item in batch] == ["success", "success"]
         assert denied.status == "denied"
-        assert denied.metadata["error_code"] == "restricted_tool_denied"
-        assert denied_plan.status == "denied"
+        assert denied.error.code == "restricted_tool_denied"
 
     asyncio.run(run_case())
 
@@ -106,56 +65,57 @@ def test_plan_policy_prioritizes_subagents_for_broad_repository_analysis() -> No
 
 
 def test_exploration_tool_descriptions_explain_preferred_and_reuse_behavior(tmp_path) -> None:
-    from codepilot.runtime.subagents import create_exploration_tools
+    from codepilot.runtime.tool_adapters.subagents import create_subagent_registrations
 
     tools = {
-        tool.name: tool
-        for tool in create_exploration_tools(
+        tool.spec.name: tool
+        for tool in create_subagent_registrations(
             workspace=tmp_path,
             session_provider=lambda: None,  # type: ignore[arg-type]
         )
     }
 
-    dispatch = tools["dispatch_exploration"].description
-    listed = tools["list_exploration_agents"].description
-    assert "Plan mode: use subagents to explore the repository" in dispatch
-    assert "before producing the final plan" in dispatch
-    assert "distinct investigation scopes" in dispatch
-    assert "The main agent must integrate their reports" in dispatch
+    dispatch = tools["dispatch_exploration"].spec.description
+    listed = tools["list_exploration_agents"].spec.description
+    assert "Plan mode only" in dispatch
+    assert "read-only exploration subagents" in dispatch
+    assert "distinct scopes" in dispatch
+    assert "integrate the returned evidence" in dispatch
     assert "reuse=auto" in dispatch
-    assert "does not explore the repository" in listed
     assert "does not create or run subagents" in listed
-    assert "only to inspect reports already produced by dispatch_exploration" in listed
-    assert "Do not call it as the first exploration action" in listed
+    assert "reports already produced by dispatch_exploration" in listed
 
 
 def test_list_exploration_agents_empty_result_points_to_dispatch(tmp_path) -> None:
     async def run_case() -> None:
         from types import SimpleNamespace
 
-        from codepilot.runtime.subagents import create_exploration_tools
-        from codepilot.tools.contracts import ToolCallRequest
+        from codepilot.runtime.tool_adapters.subagents import create_subagent_registrations
+        from codepilot.tools.contracts import ToolExecutionRequest
+        from codepilot.tools.registry import ToolRegistry
+        from codepilot.tools.runtime import ToolRuntime
 
-        tools = {
-            tool.name: tool
-            for tool in create_exploration_tools(
+        registrations = create_subagent_registrations(
                 workspace=tmp_path,
                 session_provider=lambda: SimpleNamespace(session_id="session_a"),
             )
-        }
-        result = await tools["list_exploration_agents"].execute(
-            ToolCallRequest(
+        registry = ToolRegistry()
+        ids = {item.spec.name: registry.register(item) for item in registrations}
+        result = await ToolRuntime(registry).execute(
+            ToolExecutionRequest(
                 run_id="run_plan",
+                session_id="session_a",
                 tool_call_id="list1",
-                name="list_exploration_agents",
-                current_mode="plan",
+                tool_name="list_exploration_agents",
+                mode="plan",
                 arguments={},
+                registration_id=ids["list_exploration_agents"],
             )
         )
 
-        payload = json.loads(result.content[0].text)
+        payload = result.data
         assert payload == {
-            "agents": [],
+            "agents": (),
             "has_reports": False,
             "next_action": (
                 "Call dispatch_exploration to create read-only exploration subagents."
@@ -405,6 +365,7 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
                                     "risks_and_open_questions": ["暂无阻塞待确认项。"],
                                     "verification_plan": "运行相关 Python 检查。",
                                     "summary": "Use exploration evidence to edit src/app.py.",
+                                    "explanation": "等待用户审批后执行。",
                                     "completion_criteria": ["Python 检查通过"],
                                     "items": [
                                         {
@@ -439,6 +400,7 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
                 ),
             )
         )
+        assert gateway.describe(ref.session_id).session.current_mode == "plan"
 
         frames = [
             frame
@@ -450,11 +412,26 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
         paused = [frame for frame in frames if isinstance(frame, RunPausedFrame)]
         session = gateway._require_session(ref.session_id)._session  # noqa: SLF001
         messages = session.store.load_session_messages()
+        completed_plan_events = [
+            frame.event
+            for frame in frames
+            if getattr(frame, "event", {}).get("type") == "tool_completed"
+            and getattr(frame, "event", {}).get("toolName") == "propose_plan"
+        ]
+        assert completed_plan_events
+        assert completed_plan_events[0]["result"]["data"]["plan_operation"] == "propose_plan"
+        assert completed_plan_events[0]["result"]["data"]["plan_state"]["status"] == "proposed"
 
         assert paused
         assert paused[-1].record.stop_reason == "plan_approval_required"
         assert session.plan_state.current()["interpreted_goal"] == "完善 src/app.py 的实现并完成验证。"
-        assert model_port.subagent_calls == 1
+        dispatch_data = next(
+            frame.event["result"]["data"]
+            for frame in frames
+            if getattr(frame, "event", {}).get("type") == "tool_completed"
+            and getattr(frame, "event", {}).get("toolName") == "dispatch_exploration"
+        )
+        assert model_port.subagent_calls == 1, dispatch_data
         assert any(
             message.tool_name == "dispatch_exploration"
             for message in messages

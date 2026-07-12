@@ -1,8 +1,20 @@
 from __future__ import annotations
 
-from codepilot.extensions import AfterToolCallResult
-from codepilot.protocols import TextContent
-from codepilot.tools import ToolCallRequest, ToolDefinition, ToolMetadata, ToolResult
+from dataclasses import dataclass
+
+from codepilot.tools import (
+    ConcurrencyPolicy,
+    DataclassCodec,
+    OutputLimits,
+    OutputTrustPolicy,
+    TextContent,
+    TimeoutPolicy,
+    ToolAccessRequest,
+    ToolAccessResolution,
+    ToolPolicy,
+    ToolRegistration,
+    ToolSpec,
+)
 
 
 def register(api):
@@ -18,31 +30,7 @@ def register(api):
         _demo_command,
         description="Show that a Python extension command is available.",
     )
-    api.register_tool(
-        ToolDefinition(
-            name="demo_echo",
-            label="Demo Echo",
-            description="Return the provided text. This demonstrates extension tools.",
-            parameters={
-                "type": "object",
-                "properties": {"text": {"type": "string"}},
-                "required": ["text"],
-            },
-            metadata=ToolMetadata(
-                name="demo_echo",
-                category="extension",
-                read_only=True,
-                concurrency_safe=True,
-                exclusive=False,
-                requires_approval=False,
-                risk_level="low",
-                scopes=("read", "plan", "build"),
-                extra={"capabilities": ["demo.echo"]},
-            ),
-            execute=_demo_echo,
-        )
-    )
-    api.on_after_tool_call(_mark_demo_tool_result)
+    api.register_tool(_demo_registration())
 
 
 def _demo_command(ctx):
@@ -50,19 +38,86 @@ def _demo_command(ctx):
     return "Demo extension is loaded."
 
 
-async def _demo_echo(request: ToolCallRequest, signal=None, on_update=None):
-    _ = signal, on_update
-    text = str(request.arguments.get("text", ""))
-    return ToolResult(
-        content=[TextContent(text=text)],
-        details={"demo_extension": True},
+@dataclass(frozen=True)
+class DemoInput:
+    text: str
+
+
+@dataclass(frozen=True)
+class DemoOutput:
+    text: str
+    demo_extension: bool = True
+
+
+def _demo_registration() -> ToolRegistration:
+    input_schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+        "additionalProperties": False,
+    }
+    output_schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "demo_extension": {"type": "boolean"},
+        },
+        "required": ["text", "demo_extension"],
+        "additionalProperties": False,
+    }
+
+    class Resolver:
+        def resolve(self, input, request):
+            _ = request
+            return ToolAccessResolution(
+                input=input,
+                access=ToolAccessRequest(
+                    actions=("demo.echo",),
+                    resources=(),
+                    effects=frozenset(),
+                    risk="low",
+                    reason="Return the provided demo text",
+                ),
+            )
+
+    async def handler(input: DemoInput, context) -> DemoOutput:
+        context.cancellation.raise_if_cancelled()
+        return DemoOutput(text=input.text)
+
+    class Renderer:
+        def render(self, data):
+            return (TextContent(text=data["text"]),)
+
+    input_codec = DataclassCodec(DemoInput, input_schema)
+    output_codec = DataclassCodec(DemoOutput, output_schema)
+    return ToolRegistration(
+        version="1.0.0",
+        implementation_version="1",
+        spec=ToolSpec(
+            "demo_echo",
+            "Return the provided text for the extension demonstration.",
+            input_schema,
+            output_schema,
+        ),
+        category="external",
+        source="extension",
+        owner="extension:demo",
+        policy=ToolPolicy(
+            allowed_modes=frozenset({"plan", "execute"}),
+            declared_effects=frozenset(),
+            required_permissions=frozenset(),
+            base_risk="low",
+            approval="never",
+            timeout=TimeoutPolicy(5_000, 5_000),
+            concurrency=ConcurrencyPolicy(mode="parallel"),
+            output_limits=OutputLimits(),
+            output_trust=OutputTrustPolicy(),
+        ),
+        input_codec=input_codec,
+        output_codec=output_codec,
+        handler=handler,
+        renderer=Renderer(),
+        access_resolver=Resolver(),
     )
-
-
-def _mark_demo_tool_result(ctx, signal=None):
-    _ = signal
-    if ctx.tool_call.name != "demo_echo":
-        return None
-    details = dict(ctx.result.details)
-    details["demo_after_hook_seen"] = True
-    return AfterToolCallResult(details=details)

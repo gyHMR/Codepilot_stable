@@ -273,15 +273,7 @@ def test_session_checkpoint_carries_cumulative_run_state_into_resume(tmp_path) -
             {
                 "phase": "tool_approval",
                 "run_id": prepared.run_id,
-                "pending_tool_call_ids": ["call_edit"],
-                "pending_tool_calls": [
-                    {
-                        "id": "call_edit",
-                        "name": "edit",
-                        "arguments": {"path": "app.py"},
-                        "approval_id": "approval_edit",
-                    }
-                ],
+                "approval_id": "approval_edit",
             }
         )
         snapshot = {
@@ -1321,7 +1313,7 @@ def test_session_runtime_records_streamed_checkpoint_phases(tmp_path) -> None:
                     "message": assistant,
                 }
             )
-            assert session.store.read_meta()["runtime_checkpoint"]["phase"] == "tool_approval"
+            assert session.store.read_meta()["runtime_checkpoint"]["phase"] == "tools_running"
 
             session.record_event(
                 {
@@ -1333,8 +1325,8 @@ def test_session_runtime_records_streamed_checkpoint_phases(tmp_path) -> None:
                 }
             )
             checkpoint = session.store.read_meta()["runtime_checkpoint"]
-            assert checkpoint["phase"] == "tool_approval"
-            assert checkpoint["pending_tool_call_ids"] == ["call_read_b"]
+            assert checkpoint["phase"] == "tools_completed"
+            assert checkpoint["tool_result_message_id"]
 
             session.record_event(
                 {

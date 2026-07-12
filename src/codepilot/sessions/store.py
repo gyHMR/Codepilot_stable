@@ -20,7 +20,18 @@ from .serde import message_from_dict, message_to_dict
 
 
 FreshnessStatus = Literal["valid", "stale", "mismatch"]
-RUN_ARTIFACT_SCHEMA_VERSION = "1"
+SESSION_SCHEMA_VERSION = 2
+SESSION_MESSAGE_SCHEMA_VERSION = 2
+SESSION_CHECKPOINT_SCHEMA_VERSION = 2
+RUN_ARTIFACT_SCHEMA_VERSION = "2"
+_REMOVED_CHECKPOINT_FIELDS = frozenset(
+    {
+        "pending_tool_call_ids",
+        "pending_tool_calls",
+        "completed_tool_result_ids",
+        "arguments",
+    }
+)
 _FRESHNESS_STATUSES = frozenset({"valid", "stale", "mismatch"})
 _MANIFEST_PROJECT_TYPES = {
     "pyproject.toml": "Python",
@@ -82,6 +93,10 @@ class SessionLayout:
     @property
     def context_ledger_file(self) -> Path:
         return self.session_dir / "context_ledger.jsonl"
+
+    @property
+    def tool_state_file(self) -> Path:
+        return self.session_dir / "tool_state.json"
 
     @property
     def tool_outputs_dir(self) -> Path:
@@ -189,7 +204,15 @@ class RunStore:
     def append_run_result(self, result: AgentRunResult) -> None:
         run_dir = self.layout.run_dir(result.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
-        existing = _read_json(self.layout.run_file(result.run_id)) or {}
+        existing_payload = _read_json(self.layout.run_file(result.run_id))
+        existing = (
+            _validate_run_artifact(
+                existing_payload,
+                run_id=result.run_id,
+            )
+            if existing_payload is not None
+            else {}
+        )
         events = self.load_events(result.run_id)
         model_attempts = sum(
             1
@@ -268,7 +291,7 @@ class RunStore:
         data = _read_json(self.layout.run_file(run_id))
         if data is None:
             raise FileNotFoundError(f"Run result not found: {run_id}")
-        return data
+        return _validate_run_artifact(data, run_id=run_id)
 
     def load_run_state(self, run_id: str) -> dict[str, Any]:
         return self.load_run_result(run_id)
@@ -282,18 +305,27 @@ class RunStore:
                 continue
             data = _read_json(run_dir / "run.json")
             if isinstance(data, dict) and data.get("session_id") == self.session_id:
-                records.append((str(data.get("updated_at") or run_dir.name), data))
+                validated = _validate_run_artifact(
+                    data,
+                    run_id=run_dir.name,
+                )
+                records.append((str(validated.get("updated_at") or run_dir.name), validated))
         records.sort(key=lambda item: item[0])
         items = [item[1] for item in records]
         return items[-limit:] if limit is not None else items
 
     def write_rollback_metadata(self, run_id: str, metadata: dict[str, Any]) -> None:
-        state = _read_json(self.layout.run_file(run_id)) or {
-            "schema_version": RUN_ARTIFACT_SCHEMA_VERSION,
-            "run_id": run_id,
-            "session_id": self.session_id,
-            "workspace_path": str(self.workspace_dir.resolve()),
-        }
+        payload = _read_json(self.layout.run_file(run_id))
+        state = (
+            _validate_run_artifact(payload, run_id=run_id)
+            if payload is not None
+            else {
+                "schema_version": RUN_ARTIFACT_SCHEMA_VERSION,
+                "run_id": run_id,
+                "session_id": self.session_id,
+                "workspace_path": str(self.workspace_dir.resolve()),
+            }
+        )
         state["rollback"] = redact_artifact(metadata)
         state["updated_at"] = _utc_now_iso()
         _write_json(self.layout.run_file(run_id), state)
@@ -358,18 +390,23 @@ class RunStore:
         return list(tracked.values())
 
     def _merge_event_into_run_state(self, run_id: str, event: dict[str, Any]) -> None:
-        state = _read_json(self.layout.run_file(run_id)) or {
-            "schema_version": RUN_ARTIFACT_SCHEMA_VERSION,
-            "run_id": run_id,
-            "session_id": event.get("sessionId") or self.session_id,
-            "status": "running",
-            "stop_reason": None,
-            "model_attempts": 0,
-            "tool_calls": 0,
-            "workspace_path": str(self.workspace_dir.resolve()),
-            "affected_paths": [],
-            "workspace_changed": False,
-        }
+        payload = _read_json(self.layout.run_file(run_id))
+        state = (
+            _validate_run_artifact(payload, run_id=run_id)
+            if payload is not None
+            else {
+                "schema_version": RUN_ARTIFACT_SCHEMA_VERSION,
+                "run_id": run_id,
+                "session_id": self.session_id,
+                "status": "running",
+                "stop_reason": None,
+                "model_attempts": 0,
+                "tool_calls": 0,
+                "workspace_path": str(self.workspace_dir.resolve()),
+                "affected_paths": [],
+                "workspace_changed": False,
+            }
+        )
         event_type = event.get("type")
         if event_type == "message_end" and _message_role(event.get("message")) == "assistant":
             state["model_attempts"] = int(state.get("model_attempts", 0)) + 1
@@ -421,7 +458,7 @@ class SessionStore:
             _write_json(
                 self.session_file,
                 {
-                    "schema_version": 1,
+                    "schema_version": SESSION_SCHEMA_VERSION,
                     "session_id": self.session_id,
                     "workspace_root": str(self.workspace_dir.resolve()).replace("\\", "/"),
                     "model": {"provider": provider, "model": model_id},
@@ -441,21 +478,27 @@ class SessionStore:
                     "updated_at": _utc_now_iso(),
                 },
             )
+        else:
+            self.read_meta()
         for path in (self.messages_file, self.events_file, self.context_ledger_file):
             if not path.exists():
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("", encoding="utf-8", newline="\n")
 
     def read_meta(self) -> dict[str, Any] | None:
-        return _read_json(self.session_file)
+        state = _read_json(self.session_file)
+        if state is None:
+            return None
+        return _validate_session_meta(state, session_id=self.session_id)
 
     def update_meta(self, updates: dict[str, Any]) -> dict[str, Any]:
         state = self.read_meta() or {
-            "schema_version": 1,
+            "schema_version": SESSION_SCHEMA_VERSION,
             "session_id": self.session_id,
             "created_at": _utc_now_iso(),
         }
         state.update(updates)
+        state["schema_version"] = SESSION_SCHEMA_VERSION
         state["session_id"] = self.session_id
         state["updated_at"] = _utc_now_iso()
         _write_json(self.session_file, state)
@@ -470,7 +513,9 @@ class SessionStore:
     def set_checkpoint(self, checkpoint: dict[str, Any] | None) -> None:
         if checkpoint is not None:
             checkpoint = dict(checkpoint)
+            checkpoint["schema_version"] = SESSION_CHECKPOINT_SCHEMA_VERSION
             checkpoint.setdefault("created_at", _utc_now_iso())
+            _validate_checkpoint(checkpoint)
         self.update_meta({"runtime_checkpoint": checkpoint})
         event_type = "checkpoint_cleared" if checkpoint is None else "checkpoint_saved"
         self.append_event(
@@ -491,6 +536,7 @@ class SessionStore:
         parent_id = (self.read_meta() or {}).get("leaf_message_id")
         message_id = new_message_id()
         row = {
+            "schema_version": SESSION_MESSAGE_SCHEMA_VERSION,
             "id": message_id,
             "run_id": run_id,
             "parent_id": parent_id if isinstance(parent_id, str) else None,
@@ -511,6 +557,7 @@ class SessionStore:
             message_id = new_message_id()
             rows.append(
                 {
+                    "schema_version": SESSION_MESSAGE_SCHEMA_VERSION,
                     "id": message_id,
                     "run_id": None,
                     "parent_id": parent_id,
@@ -527,12 +574,16 @@ class SessionStore:
         return [message_from_dict(row) for row in rows]
 
     def list_entry_ids(self) -> list[str]:
-        return [str(row["id"]) for row in _read_jsonl(self.messages_file) if isinstance(row.get("id"), str)]
+        return [
+            str(row["id"])
+            for row in self._message_rows()
+            if isinstance(row.get("id"), str)
+        ]
 
     def list_entries(self) -> list[dict[str, Any]]:
         leaf_id = self.get_leaf_id()
         result = []
-        for row in _read_jsonl(self.messages_file):
+        for row in self._message_rows():
             message_id = row.get("id")
             if not isinstance(message_id, str):
                 continue
@@ -577,7 +628,7 @@ class SessionStore:
     def get_session_tree(self) -> list[dict[str, Any]]:
         nodes: dict[str, dict[str, Any]] = {}
         roots: list[dict[str, Any]] = []
-        for row in _read_jsonl(self.messages_file):
+        for row in self._message_rows():
             message_id = row.get("id")
             if not isinstance(message_id, str):
                 continue
@@ -684,12 +735,12 @@ class SessionStore:
     def _messages_by_id(self) -> dict[str, dict[str, Any]]:
         return {
             str(row["id"]): row
-            for row in _read_jsonl(self.messages_file)
+            for row in self._message_rows()
             if isinstance(row.get("id"), str)
         }
 
     def _message_chain(self, leaf_id: str | None = None) -> list[dict[str, Any]]:
-        rows = _read_jsonl(self.messages_file)
+        rows = self._message_rows()
         if not rows:
             return []
         by_id = {str(row["id"]): row for row in rows if isinstance(row.get("id"), str)}
@@ -706,6 +757,16 @@ class SessionStore:
             current = parent_id if isinstance(parent_id, str) else None
         chain.reverse()
         return chain
+
+    def _message_rows(self) -> list[dict[str, Any]]:
+        rows = _read_jsonl(self.messages_file)
+        for index, row in enumerate(rows, start=1):
+            if row.get("schema_version") != SESSION_MESSAGE_SCHEMA_VERSION:
+                raise ValueError(
+                    "Unsupported session message schema_version "
+                    f"on line {index}: {row.get('schema_version')!r}"
+                )
+        return rows
 
 
 def load_session_open_metadata(
@@ -796,6 +857,64 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
     return data if isinstance(data, dict) else None
+
+
+def _validate_session_meta(
+    state: dict[str, Any],
+    *,
+    session_id: str,
+) -> dict[str, Any]:
+    schema_version = state.get("schema_version")
+    if schema_version != SESSION_SCHEMA_VERSION:
+        raise ValueError(
+            "Unsupported session schema_version: "
+            f"{schema_version!r}; expected {SESSION_SCHEMA_VERSION}"
+        )
+    stored_session_id = state.get("session_id")
+    if stored_session_id != session_id:
+        raise ValueError(
+            f"Session id mismatch: expected {session_id!r}, got {stored_session_id!r}"
+        )
+    checkpoint = state.get("runtime_checkpoint")
+    if checkpoint is not None:
+        if not isinstance(checkpoint, dict):
+            raise ValueError("runtime_checkpoint must be an object or null")
+        _validate_checkpoint(checkpoint)
+    return dict(state)
+
+
+def _validate_checkpoint(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    schema_version = checkpoint.get("schema_version")
+    if schema_version != SESSION_CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError(
+            "Unsupported runtime checkpoint schema_version: "
+            f"{schema_version!r}; expected {SESSION_CHECKPOINT_SCHEMA_VERSION}"
+        )
+    removed = sorted(_REMOVED_CHECKPOINT_FIELDS & checkpoint.keys())
+    if removed:
+        raise ValueError(
+            "Removed runtime checkpoint fields are not supported: "
+            + ", ".join(removed)
+        )
+    return dict(checkpoint)
+
+
+def _validate_run_artifact(
+    state: dict[str, Any],
+    *,
+    run_id: str,
+) -> dict[str, Any]:
+    schema_version = state.get("schema_version")
+    if schema_version != RUN_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError(
+            "Unsupported run artifact schema_version: "
+            f"{schema_version!r}; expected {RUN_ARTIFACT_SCHEMA_VERSION!r}"
+        )
+    if state.get("run_id") != run_id:
+        raise ValueError(
+            f"Run id mismatch: expected {run_id!r}, got {state.get('run_id')!r}"
+        )
+    return dict(state)
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:

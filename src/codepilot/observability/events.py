@@ -111,15 +111,20 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
         "memory_written",
     }:
         return _memory_written(raw, event_type)
-    if event_type in {"tool_call_started", "tool_started"}:
+    if event_type == "tool_started":
+        _require_internal_tool_event(raw, finished=False)
         return {
             **_base(raw, "tool_call_started"),
-            "tool_call_id": str(raw.get("toolCallId") or raw.get("tool_call_id") or ""),
-            "tool_name": str(raw.get("toolName") or raw.get("tool_name") or ""),
+            "tool_call_id": str(raw.get("toolCallId") or ""),
+            "tool_name": str(raw.get("toolName") or ""),
             "args": _slim_args(_dict(raw.get("args"))),
         }
-    if event_type in {"tool_call_finished", "tool_completed", "tool_failed", "tool_interrupted"}:
+    if event_type in {"tool_completed", "tool_failed", "tool_interrupted"}:
+        _require_internal_tool_event(raw, finished=True)
         return _tool_finished(raw)
+    if event_type in {"tool_call_started", "tool_call_finished"}:
+        _require_canonical_tool_record(raw)
+        return _canonical_existing(raw)
     if event_type in _PLAN_EVENTS:
         return _plan_event(raw, event_type)
     if event_type == "run_guard_checked":
@@ -310,45 +315,44 @@ def _tool_finished(raw: dict[str, Any]) -> dict[str, Any]:
         permission = permission.get("decision") or permission.get("action")
     verification = _dict(result.get("verification"))
     affected = raw.get("affectedPaths")
-    if not isinstance(affected, list):
-        affected = raw.get("affected_paths")
-    if not isinstance(affected, list):
-        affected = result.get("affected_paths")
-    is_error = bool(
-        raw.get("isError", raw.get("is_error", result.get("is_error", False)))
-    )
-    status = str(raw.get("status") or result.get("status") or "")
+    is_error = bool(raw.get("isError", False))
+    status = str(raw.get("status") or "")
     if not status:
         status = "error" if is_error else "success"
     return {
         **_base(raw, "tool_call_finished"),
-        "tool_call_id": str(
-            raw.get("toolCallId")
-            or raw.get("tool_call_id")
-            or result.get("tool_call_id")
-            or ""
-        ),
-        "tool_name": str(
-            raw.get("toolName")
-            or raw.get("tool_name")
-            or result.get("tool_name")
-            or ""
-        ),
+        "tool_call_id": str(raw.get("toolCallId") or ""),
+        "tool_name": str(raw.get("toolName") or ""),
         "status": status,
         "is_error": is_error,
-        "error_reason": raw.get("errorReason")
-        or result.get("error_code")
-        or result.get("error_reason"),
-        "approved": bool(raw.get("approved", result.get("approved", True))),
+        "error_reason": raw.get("errorReason"),
+        "approved": bool(raw.get("approved", True)),
         "permission": permission,
-        "duration_ms": _optional_int(raw.get("durationMs", raw.get("duration_ms"))),
+        "duration_ms": _optional_int(raw.get("durationMs")),
         "affected_paths": [str(path) for path in affected or [] if isinstance(path, str)],
-        "workspace_changed": _optional_bool(
-            raw.get("workspaceChanged", result.get("workspace_changed"))
-        ),
+        "workspace_changed": _optional_bool(raw.get("workspaceChanged")),
         "verification_status": str(verification.get("status") or "none"),
-        "output_truncated": bool(raw.get("outputTruncated", raw.get("output_truncated", False))),
+        "output_truncated": bool(raw.get("outputTruncated", False)),
     }
+
+
+def _require_internal_tool_event(raw: dict[str, Any], *, finished: bool) -> None:
+    for field_name in ("toolCallId", "toolName"):
+        if not isinstance(raw.get(field_name), str) or not raw[field_name]:
+            raise ValueError(f"Internal tool event requires {field_name}")
+    if finished:
+        if "status" not in raw or "isError" not in raw:
+            raise ValueError("Finished internal tool event requires status and isError")
+    elif not isinstance(raw.get("args"), dict):
+        raise ValueError("tool_started event requires args")
+
+
+def _require_canonical_tool_record(raw: dict[str, Any]) -> None:
+    if raw.get("schema_version") != 1:
+        raise ValueError("Canonical tool record requires schema_version=1")
+    for field_name in ("tool_call_id", "tool_name"):
+        if not isinstance(raw.get(field_name), str) or not raw[field_name]:
+            raise ValueError(f"Canonical tool record requires {field_name}")
 
 
 def _memory_retrieved(raw: dict[str, Any]) -> dict[str, Any]:

@@ -6,23 +6,10 @@ from __future__ import annotations
 """扩展层类型定义：钩子、命令、技能规格和加载结果。"""
 
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
-from codepilot.protocols.commands import (
-    AfterToolCallContext,
-    AfterToolCallResult,
-    BeforeToolCallContext,
-    BeforeToolCallResult,
-    LifecycleHook,
-    RegisteredCommand,
-)
-from codepilot.tools import ToolDefinition
-
-# 工具调用前钩子类型
-BeforeHook = Callable[[BeforeToolCallContext, Any | None], BeforeToolCallResult | None | Awaitable[BeforeToolCallResult | None]]
-# 工具调用后钩子类型
-AfterHook = Callable[[AfterToolCallContext, Any | None], AfterToolCallResult | None | Awaitable[AfterToolCallResult | None]]
-
+from codepilot.protocols.commands import LifecycleHook, RegisteredCommand
+from codepilot.tools import ToolRegistration
 
 @dataclass
 class SkillSpec:
@@ -45,9 +32,7 @@ class LoadedExtensions:
     - 钩子 → 进入生命周期或工具调用管道
     """
 
-    tools: list[ToolDefinition] = field(default_factory=list)
-    before_tool_hooks: list[BeforeHook] = field(default_factory=list)
-    after_tool_hooks: list[AfterHook] = field(default_factory=list)
+    tools: list[ToolRegistration] = field(default_factory=list)
     prompt_guidelines: list[str] = field(default_factory=list)
     append_prompts: list[str] = field(default_factory=list)
     commands: dict[str, RegisteredCommand] = field(default_factory=dict)

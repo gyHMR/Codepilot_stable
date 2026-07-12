@@ -5,23 +5,25 @@ from __future__ import annotations
 from dataclasses import replace
 
 from codepilot.core.model_step import convert_to_llm
+from codepilot.core.tool_adapters import (
+    StoreBackedPlanService,
+    create_interaction_registration,
+    create_plan_registrations,
+)
 from codepilot.llm.adapter import ProviderModelPort
 from codepilot.llm.registry import register_builtin_api_providers
 from codepilot.sessions.contracts import SessionOptions
 from codepilot.sessions.controller import create_session_controller
-from codepilot.tools import DeferredApprovalProvider, PermissionPolicy, ToolRuntime
+from codepilot.sessions.tool_state_store import SessionToolStateStore
+from codepilot.tools import PermissionEngine, ToolRuntime
 
 from .config import load_runtime_config
-from .hooks import (
-    compose_after_tool_call,
-    compose_before_tool_call,
-    compose_lifecycle_hooks,
-)
+from .hooks import compose_lifecycle_hooks
 from .model import resolve_runtime_model
 from .opening import SessionOpenIntent
 from .prompt import build_system_prompt
 from .sessions import RuntimeSession, RuntimeStatusInfo
-from .subagents import create_exploration_tools
+from .tool_adapters import create_subagent_registrations
 from .tools import build_runtime_tools
 
 
@@ -50,14 +52,6 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
     def system_prompt_for(_mode: str) -> str:
         return system_prompt
 
-    before_tool_call = compose_before_tool_call(
-        intent.before_tool_call,
-        tools.before_tool_hooks,
-    )
-    after_tool_call = compose_after_tool_call(
-        intent.after_tool_call,
-        tools.after_tool_hooks,
-    )
     before_prompt_hooks = compose_lifecycle_hooks(
         intent.before_prompt_hooks,
         tools.before_prompt_hooks,
@@ -91,8 +85,6 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         },
         before_prompt_hooks=before_prompt_hooks,
         after_prompt_hooks=after_prompt_hooks,
-        before_tool_call=before_tool_call,
-        after_tool_call=after_tool_call,
         stream_fn=intent.stream_fn,
         prepare_context=intent.prepare_context,
     )
@@ -107,15 +99,8 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
     )
     tool_port = ToolRuntime(
         registry=tools.registry,
-        permission_policy=PermissionPolicy(
-            permission_mode=config.tool_permission_mode,
-            block_dangerous_bash=config.block_dangerous_bash,
-            bash_allow_patterns=config.bash_allow_patterns,
-            bash_block_patterns=config.bash_block_patterns,
-        ),
-        approval_provider=intent.approval_provider or DeferredApprovalProvider(),
-        before_tool_call=effective_options.before_tool_call,
-        after_tool_call=effective_options.after_tool_call,
+        permission_engine=_permission_engine(config.tool_permission_mode),
+        state_store=SessionToolStateStore(config.workspace, controller.session_id),
     )
 
     runtime_session = RuntimeSession(
@@ -136,12 +121,37 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         },
     )
     tools.registry.extend(
-        create_exploration_tools(
+        create_plan_registrations(
+            service=StoreBackedPlanService(
+                load=controller.current_plan_state,
+                save=controller.save_plan_state,
+            )
+        )
+    )
+    tools.registry.register(create_interaction_registration())
+    tools.registry.extend(
+        create_subagent_registrations(
             workspace=config.workspace,
             session_provider=lambda: runtime_session,
         )
     )
     return runtime_session
+
+
+def _permission_engine(mode: str) -> PermissionEngine:
+    controlled_effects = frozenset(
+        {
+            "filesystem_write",
+            "filesystem_delete",
+            "process_spawn",
+            "external_state_write",
+        }
+    )
+    if mode == "read-only":
+        return PermissionEngine(denied_effects=controlled_effects)
+    if mode == "ask":
+        return PermissionEngine(approval_effects=controlled_effects)
+    return PermissionEngine()
 
 
 __all__ = [

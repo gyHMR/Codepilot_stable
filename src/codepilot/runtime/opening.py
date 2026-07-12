@@ -7,7 +7,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from codepilot.protocols import AssistantMessage, Message, ToolResultMessage, UserMessage
 from codepilot.sessions.contracts import SessionView
+from codepilot.tools.contracts import ToolRegistration
 
 from .approvals import ApprovalView
 from .views import CommandDescriptor, SessionStatus
@@ -24,15 +26,14 @@ class SessionOpenIntent:
     model_id: str | None = None
     get_api_key: Any | None = None
     system_prompt: str | None = None
-    messages: list[Any] = field(default_factory=list)
-    tools: list[Any] = field(default_factory=list)
+    messages: list[Message] = field(default_factory=list)
+    tools: list[ToolRegistration] = field(default_factory=list)
     memory_enabled: bool = True
     current_mode: str | None = None
     planning_budget_profile: str | None = None
     load_workspace_resources: bool = True
     tool_permission_mode: str | None = None
     enabled_builtin_tools: list[str] | None = None
-    approval_provider: Any | None = None
     stream_fn: Any | None = None
     thinking_level: str | None = None
     tool_execution: str | None = None
@@ -62,9 +63,18 @@ class SessionOpenIntent:
     extension_commands: dict[str, Any] = field(default_factory=dict)
     before_prompt_hooks: list[Any] = field(default_factory=list)
     after_prompt_hooks: list[Any] = field(default_factory=list)
-    before_tool_call: Any | None = None
-    after_tool_call: Any | None = None
     prepare_context: Any | None = None
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(message, (UserMessage, AssistantMessage, ToolResultMessage))
+            for message in self.messages
+        ):
+            raise TypeError("SessionOpenIntent.messages must contain protocol Message values")
+        if any(not isinstance(tool, ToolRegistration) for tool in self.tools):
+            raise TypeError("SessionOpenIntent.tools must contain ToolRegistration values")
+        object.__setattr__(self, "messages", list(self.messages))
+        object.__setattr__(self, "tools", list(self.tools))
 
 
 @dataclass(frozen=True)

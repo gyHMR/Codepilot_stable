@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from codepilot.tools.contracts import ToolInterruption
+from codepilot.tools.security import ApprovalChallenge
 
 
 @dataclass(frozen=True)
@@ -19,22 +19,21 @@ class ApprovalView:
 @dataclass(frozen=True)
 class ApprovalTransaction:
     session_id: str
-    interruption: ToolInterruption
+    challenge: ApprovalChallenge
 
     @property
     def approval_id(self) -> str:
-        return str(self.interruption.approval_id)
+        return self.challenge.approval_id
 
     def view(self) -> ApprovalView:
-        risk = getattr(self.interruption, "risk", None)
         return ApprovalView(
             approval_id=self.approval_id,
             session_id=self.session_id,
-            run_id=str(getattr(self.interruption, "run_id", "")),
-            tool_call_id=str(getattr(self.interruption, "tool_call_id", "")),
-            tool_name=str(getattr(self.interruption, "tool_name", "")),
-            reason=str(getattr(self.interruption, "reason", "")),
-            risk_level=str(getattr(risk, "level", "unknown")),
+            run_id=self.challenge.run_id,
+            tool_call_id=self.challenge.tool_call_id,
+            tool_name=self.challenge.tool_name,
+            reason=self.challenge.reason,
+            risk_level=self.challenge.risk,
         )
 
 
@@ -42,10 +41,10 @@ class ApprovalRegistry:
     def __init__(self) -> None:
         self._items: dict[str, ApprovalTransaction] = {}
 
-    def add(self, session_id: str, interruption: ToolInterruption) -> None:
+    def add(self, session_id: str, challenge: ApprovalChallenge) -> None:
         transaction = ApprovalTransaction(
             session_id=session_id,
-            interruption=interruption,
+            challenge=challenge,
         )
         self._items[transaction.approval_id] = transaction
 

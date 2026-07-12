@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Any
 
 from codepilot.extensions import load_extensions, load_skills
-from codepilot.extensions.mcp import create_mcp_proxy_tools, parse_mcp_tool_configs
+from codepilot.extensions.mcp import create_mcp_registrations, parse_mcp_tool_configs
 from codepilot.protocols import Tool
 from codepilot.protocols.commands import RegisteredCommand
-from codepilot.tools.builtins import create_builtin_tools
-from codepilot.tools.contracts import ToolDefinition
-from codepilot.tools.registry import ToolRegistry, get_builtin_tool_metadata
+from codepilot.tools.builtins import create_builtin_registrations
+from codepilot.tools.contracts import ToolRegistration
+from codepilot.tools.registry import ToolRegistry
 from codepilot.tools.sandbox import ShellExecutionPolicy
 
 from .config import RuntimeConfig
@@ -24,8 +24,6 @@ class RuntimeTools:
     registry: ToolRegistry
     specs: list[Tool]
     commands: dict[str, RegisteredCommand] = field(default_factory=dict)
-    before_tool_hooks: list[Any] = field(default_factory=list)
-    after_tool_hooks: list[Any] = field(default_factory=list)
     before_prompt_hooks: list[Any] = field(default_factory=list)
     after_prompt_hooks: list[Any] = field(default_factory=list)
     prompt_guidelines: list[str] = field(default_factory=list)
@@ -45,14 +43,14 @@ def build_runtime_tools(
     warnings.extend(f"skill: {error}" for error in loaded_skills.errors)
     warnings.extend(f"skill: {item}" for item in loaded_skills.diagnostics)
 
-    mcp_tools = create_mcp_proxy_tools(
+    mcp_tools = create_mcp_registrations(
         parse_mcp_tool_configs(config.mcp_servers),
         client=intent.mcp_client,
     )
     if config.mcp_servers and intent.mcp_client is None:
         warnings.append("MCP servers configured but no MCP client was provided")
 
-    builtin_tools = create_builtin_tools(
+    builtin_tools = create_builtin_registrations(
         workspace,
         enabled_names=config.enabled_builtin_tools,
         edit_require_unique_match=config.edit_require_unique_match,
@@ -66,18 +64,51 @@ def build_runtime_tools(
     )
 
     registry = ToolRegistry()
-    _register_tools(registry, builtin_tools, source="builtin", warnings=warnings)
-    _register_tools(registry, list(intent.tools), source="caller", warnings=warnings)
-    _register_tools(registry, loaded_skills.tools, source="skill", warnings=warnings)
-    _register_tools(registry, loaded_extensions.tools, source="extension", warnings=warnings)
-    _register_tools(registry, mcp_tools, source="mcp", warnings=warnings)
+    _register_registration_groups(
+        registry,
+        builtin_tools,
+        source="builtin",
+        warnings=warnings,
+    )
+    _register_registration_groups(
+        registry,
+        list(intent.tools),
+        source="caller",
+        warnings=warnings,
+    )
+    _register_registration_groups(
+        registry,
+        loaded_skills.tools,
+        source="skill",
+        warnings=warnings,
+    )
+    _register_registration_groups(
+        registry,
+        loaded_extensions.tools,
+        source="extension",
+        warnings=warnings,
+    )
+    _register_registration_groups(
+        registry,
+        mcp_tools,
+        source="mcp",
+        warnings=warnings,
+    )
+
+    canonical_mode = "plan" if config.current_mode in {"read", "plan"} else "execute"
+    canonical_specs = [
+        Tool(
+            name=item.spec.name,
+            description=item.spec.description,
+            parameters=_plain_json(item.spec.input_schema),
+        )
+        for item in registry.catalog_snapshot(mode=canonical_mode).entries
+    ]
 
     return RuntimeTools(
         registry=registry,
-        specs=[item.spec for item in registry.catalog(current_mode=config.current_mode).items],
+        specs=canonical_specs,
         commands={**loaded_skills.commands, **loaded_extensions.commands},
-        before_tool_hooks=[*loaded_extensions.before_tool_hooks, *loaded_skills.before_tool_hooks],
-        after_tool_hooks=[*loaded_extensions.after_tool_hooks, *loaded_skills.after_tool_hooks],
         before_prompt_hooks=[*loaded_extensions.before_prompt_hooks, *loaded_skills.before_prompt_hooks],
         after_prompt_hooks=[*loaded_extensions.after_prompt_hooks, *loaded_skills.after_prompt_hooks],
         prompt_guidelines=[
@@ -95,23 +126,32 @@ def build_runtime_tools(
     )
 
 
-def _register_tools(
+def _register_registration_groups(
     registry: ToolRegistry,
-    tools: list[ToolDefinition],
+    registrations: list[ToolRegistration],
     *,
     source: str,
     warnings: list[str],
 ) -> None:
-    for tool in tools:
-        if not isinstance(tool, ToolDefinition):
-            warnings.append(f"{source} provided non-ToolDefinition tool: {type(tool).__name__}")
-            continue
-        if source != "builtin" and get_builtin_tool_metadata(tool.name) is not None:
-            warnings.append(f"{source} tool '{tool.name}' uses a reserved builtin name")
-            continue
-        if registry.get(tool.name) is not None:
-            warnings.append(f"{source} tool '{tool.name}' overrides an earlier tool")
-        registry.register(tool)
+    groups: dict[str, list[ToolRegistration]] = {}
+    for registration in registrations:
+        if not isinstance(registration, ToolRegistration):
+            raise TypeError(
+                f"{source} tools must be ToolRegistration values, got "
+                f"{type(registration).__name__}"
+            )
+        if registration.source != source:
+            raise ValueError(
+                f"{source} tool '{registration.spec.name}' declares source "
+                f"'{registration.source}'"
+            )
+        groups.setdefault(registration.owner, []).append(registration)
+
+    for owner, items in groups.items():
+        try:
+            registry.register_batch(items, owner=owner)
+        except Exception as exc:
+            warnings.append(f"{source} owner '{owner}' registration failed: {exc}")
 
 
 def _debug_prompt_sources(extensions: Any, skills: Any) -> list[str]:
@@ -127,6 +167,14 @@ def _debug_prompt_sources(extensions: Any, skills: Any) -> list[str]:
         lines.append("### diagnostics")
         lines.extend(f"- {item}" for item in skills.diagnostics)
     return ["\n".join(lines)]
+
+
+def _plain_json(value: Any) -> Any:
+    if isinstance(value, dict) or hasattr(value, "items"):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json(item) for item in value]
+    return value
 
 
 __all__ = ["RuntimeTools", "build_runtime_tools"]

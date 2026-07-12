@@ -36,11 +36,11 @@ def render_event(event: dict[str, Any], *, verbose: bool = False) -> list[str]:
         if approval:
             return [safe_reply(approval)]
         if verbose:
-            tool = event.get("toolName") or event.get("tool_name") or "tool"
+            tool = event.get("toolName") or "tool"
             status = event.get("status") or _field(event.get("result"), "status") or "done"
             return [safe_reply(f"Tool {tool}: {status}")]
     if event_type == "tool_started" and verbose:
-        tool = event.get("toolName") or event.get("tool_name") or "tool"
+        tool = event.get("toolName") or "tool"
         return [safe_reply(f"Tool {tool}: started")]
     if event_type == "agent_end":
         return [render_run_summary(event.get("result") or event)]
@@ -145,7 +145,7 @@ def render_status(
         f"- pending_approvals: `{len(pending_approvals)}`",
     ]
     approval_ids = [
-        str(_field(item, "approval_id") or _field(item, "approvalId") or "")
+        str(_field(item, "approval_id") or "")
         for item in pending_approvals[:5]
     ]
     approval_ids = [item for item in approval_ids if item]
@@ -154,9 +154,9 @@ def render_status(
     if pending_approvals:
         lines.extend(["", "**pending approval details**"])
         for item in pending_approvals[:5]:
-            approval_id = _field(item, "approval_id") or _field(item, "approvalId") or ""
-            tool_name = _field(item, "tool_name") or _field(item, "toolName") or "tool"
-            run_id = _field(item, "run_id") or _field(item, "runId") or "(unknown)"
+            approval_id = _field(item, "approval_id") or ""
+            tool_name = _field(item, "tool_name") or "tool"
+            run_id = _field(item, "run_id") or "(unknown)"
             reason = _field(item, "reason") or ""
             detail = f"- `{approval_id}` tool=`{tool_name}` run_id=`{run_id}`"
             if reason:
@@ -169,9 +169,9 @@ def render_pending_approval_followup(pending_approvals: list[object]) -> str:
     """Render a follow-up message when approval resumes into another approval."""
 
     first = pending_approvals[0] if pending_approvals else {}
-    approval_id = str(_field(first, "approval_id") or _field(first, "approvalId") or "")
-    tool_name = str(_field(first, "tool_name") or _field(first, "toolName") or "tool")
-    run_id = str(_field(first, "run_id") or _field(first, "runId") or "(unknown)")
+    approval_id = str(_field(first, "approval_id") or "")
+    tool_name = str(_field(first, "tool_name") or "tool")
+    run_id = str(_field(first, "run_id") or "(unknown)")
     reason = str(_field(first, "reason") or "")
     lines = [
         "### More tool approval required",
@@ -226,17 +226,13 @@ def _approval_from_tool_event(event: dict[str, Any]) -> str | None:
     status = event.get("status") or _field(result, "status")
     approval_id = (
         event.get("approvalId")
-        or event.get("approval_id")
-        or _field(result, "approval_id")
     )
     if status != "approval_required" or not approval_id:
         return None
-    tool = event.get("toolName") or event.get("tool_name") or _field(result, "tool_name") or "tool"
-    reason = event.get("errorReason") or _field(result, "error_code") or "approval_required"
+    tool = event.get("toolName") or "tool"
+    reason = event.get("errorReason") or "approval_required"
     risk = (
         event.get("riskLevel")
-        or event.get("risk_level")
-        or _field(result, "risk_level")
         or "unknown"
     )
     args = event.get("args") or _field(result, "arguments") or _field(result, "args") or {}

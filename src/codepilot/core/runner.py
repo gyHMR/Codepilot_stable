@@ -22,7 +22,8 @@ from codepilot.protocols import (
     ToolResultMessage,
     ensure_runtime_event_type,
 )
-from codepilot.tools.contracts import ToolInvocation, ToolObservation, ToolResumeDecision
+from codepilot.tools.results import ToolResult
+from codepilot.tools.security import ApprovalResponse
 
 from .contracts import (
     AgentLoopInput,
@@ -33,20 +34,20 @@ from .contracts import (
     RetryPolicy,
     WorkspaceEffects,
 )
-from .model_step import ModelTurnResult, run_model_turn, tool_catalog_for_request
+from .model_step import ModelTurnResult, run_model_turn
 from .plan import (
     PlanState,
     PlanValidationError,
-    apply_plan_snapshot_metadata,
     ensure_run_mode,
     load_plan_state,
 )
 from .run_guard import RunGuard
 from .state import RunState
 from .tool_step import (
-    approval_observations,
+    approval_results,
     execute_tool_turn,
     to_tool_result_message,
+    tool_end_event,
     verification,
     workspace_effects,
 )
@@ -195,8 +196,9 @@ async def resume_agent_loop(
 
     recorder.emit({"type": "agent_start"})
     recorder.emit({"type": "turn_start"})
-    tool_call_id = input.tool_call_id or input.approval_id
-    tool_name = input.tool_name or "approval_resume"
+    challenge = ports.tools.approval_challenge(input.approval_id)
+    tool_call_id = challenge.tool_call_id if challenge is not None else input.approval_id
+    tool_name = challenge.tool_name if challenge is not None else "approval_resume"
     recorder.emit(
         {
             "type": "tool_started",
@@ -205,20 +207,14 @@ async def resume_agent_loop(
             "args": {
                 "approval_id": input.approval_id,
                 "decision": input.decision,
-                "tool_call_id": input.tool_call_id,
-                "tool_name": input.tool_name,
             },
             "source": "approval_resume",
         }
     )
 
     observation = await _resume_tool_observation(input, ports)
-    recorder.emit(_resume_tool_end_event(input.approval_id, observation))
-    tool_message = to_tool_result_message(
-        observation,
-        approval_id=input.approval_id,
-        approved=input.decision == "approve",
-    )
+    recorder.emit(tool_end_event(observation))
+    tool_message = to_tool_result_message(observation)
     messages.append(tool_message)
     new_messages.append(tool_message)
     _emit_message(recorder, tool_message)
@@ -230,7 +226,7 @@ async def resume_agent_loop(
     run_state.counters.tool_iterations += 1
     plan_state = _apply_plan_updates(
         plan_state,
-        [tool_message],
+        [observation],
         input=loop_input,
         recorder=recorder,
         qualified_failure_count=run_state.qualified_plan_failure_count,
@@ -266,39 +262,16 @@ async def resume_agent_loop(
 async def _resume_tool_observation(
     input: AgentResumeInput,
     ports: AgentLoopPorts,
-) -> ToolObservation:
+) -> ToolResult:
     approval_id = input.approval_id or ""
-    if input.tool_call_id and input.tool_name:
-        if input.decision == "deny":
-            return ToolObservation(
-                tool_call_id=input.tool_call_id,
-                name=input.tool_name,
-                status="denied",
-                content=(
-                    TextContent(text=input.reason or "Tool execution denied by user"),
-                ),
-                metadata={
-                    "approval_id": approval_id,
-                    "approved": False,
-                    "error_code": "approval_denied",
-                },
-            )
-        return await ports.tools.execute(
-            ToolInvocation(
-                run_id=input.run_id,
-                tool_call_id=input.tool_call_id,
-                name=input.tool_name,
-                arguments=dict(input.arguments),
-                current_mode=input.mode,
-                source="approval_resume",
-                assistant_message=last_assistant(input.messages),
-            )
-        )
-
+    challenge = ports.tools.approval_challenge(approval_id)
+    fingerprint = challenge.request_fingerprint if challenge is not None else "unknown"
     return await ports.tools.resume(
-        ToolResumeDecision(
+        ApprovalResponse(
             approval_id=approval_id,
+            request_fingerprint=fingerprint,
             decision=input.decision,  # type: ignore[arg-type]
+            scope="once",
             reason=input.reason,
         )
     )
@@ -313,7 +286,7 @@ async def _drive_loop(
     new_messages: list[Message],
     run_state: RunState,
     plan_state: PlanState | None,
-    observations: list[ToolObservation],
+    observations: list[ToolResult],
     first_turn_started: bool,
 ) -> AgentLoopOutcome:
     usage = None
@@ -429,46 +402,25 @@ async def _drive_loop(
         if limit_outcome is not None:
             return limit_outcome
 
-        has_prior_plan_exploration = run_state.has_plan_exploration_evidence()
-
         turn_observations = await execute_tool_turn(
             run_id=input.run_id,
-            session_id=input.correlation.session_id,
-            assistant_message=assistant,
-            messages=list(messages),
-            system_prompt=str(input.context.get("system_prompt", "")),
-            available_tools=tool_catalog_for_request(input, ports),
+            session_id=input.correlation.session_id or "session_unknown",
             current_mode=input.mode,
-            run_signals=_run_signal_payload(run_state),
-            metadata={
-                "model_provider": input.model.provider,
-                "model_id": input.model.model_id,
-                "plan_state": plan_state.to_dict() if plan_state is not None else None,
-            },
             tools=ports.tools,
             tool_calls=tool_calls,
+            catalog_snapshot=model_turn.catalog_snapshot,
             emit=recorder.emit,
         )
         observations.extend(turn_observations)
         run_state.counters.tool_iterations += 1
 
         tool_messages = _tool_messages_from_observations(turn_observations)
-        if _must_explore_before_plan_submission(
-            input=input,
-            plan_state=plan_state,
-            has_prior_exploration=has_prior_plan_exploration,
-        ):
-            tool_messages = _reject_premature_plan_submissions(tool_messages)
         run_state.collect_tool_results(tool_messages)
         run_state.observe_plan_execution(
             tool_messages,
             in_progress_item_id=_in_progress_plan_item_id(plan_state),
         )
-        visible_tool_messages = [
-            message
-            for message in tool_messages
-            if message.status != "approval_required"
-        ]
+        visible_tool_messages = list(tool_messages)
         for message in visible_tool_messages:
             messages.append(message)
             new_messages.append(message)
@@ -476,7 +428,7 @@ async def _drive_loop(
 
         plan_state = _apply_plan_updates(
             plan_state,
-            visible_tool_messages,
+            turn_observations,
             input=input,
             recorder=recorder,
             qualified_failure_count=run_state.qualified_plan_failure_count,
@@ -486,12 +438,11 @@ async def _drive_loop(
             in_progress_item_id=_in_progress_plan_item_id(plan_state),
         )
 
-        plan_ready_for_approval = input.mode == "plan" and _is_pending_plan(plan_state) and any(
-            message.tool_name == PROPOSE_PLAN_TOOL
-            and message.status == "success"
-            and isinstance(message.metadata.get("plan_snapshot"), dict)
-            and message.metadata.get("plan_operation") == "propose_plan"
-            for message in visible_tool_messages
+        plan_ready_for_approval = _is_pending_plan(plan_state) and any(
+            result.tool_name == PROPOSE_PLAN_TOOL
+            and result.status == "success"
+            and result.data.get("plan_operation") == "propose_plan"
+            for result in turn_observations
         )
 
         recovery_instruction = run_state.truncated_read_recovery_instruction(visible_tool_messages)
@@ -618,7 +569,7 @@ def _finish_or_steer(
     assistant: AssistantMessage,
     run_state: RunState,
     plan_state: PlanState | None,
-    observations: list[ToolObservation],
+    observations: list[ToolResult],
     usage: Any,
     turn_index: int,
     max_model_turns: int,
@@ -836,7 +787,7 @@ def _tool_limit_outcome(
     new_messages: list[Message],
     run_state: RunState,
     plan_state: PlanState | None,
-    observations: list[ToolObservation],
+    observations: list[ToolResult],
     usage: Any,
 ) -> AgentLoopOutcome | None:
     if (
@@ -949,7 +900,7 @@ def _tool_continuation_limit_outcome(
     new_messages: list[Message],
     run_state: RunState,
     plan_state: PlanState | None,
-    observations: list[ToolObservation],
+    observations: list[ToolResult],
     usage: Any,
 ) -> AgentLoopOutcome | None:
     if turn_index + 1 < max_model_turns:
@@ -989,10 +940,10 @@ def _interruption_after_tool_results(
     new_messages: list[Message],
     run_state: RunState,
     plan_state: PlanState | None,
-    observations: list[ToolObservation],
+    observations: list[ToolResult],
     usage: Any,
 ) -> AgentLoopOutcome | None:
-    approvals = approval_observations(observations)
+    approvals = approval_results(observations)
     if approvals:
         recorder.emit(
             {
@@ -1013,9 +964,26 @@ def _interruption_after_tool_results(
             observations=observations,
             events=recorder.events,
             usage=usage,
-            interruptions=[item.interruption for item in approvals if item.interruption],
+            interruptions=[item.approval for item in approvals if item.approval is not None],
         )
-    if any(message.status == "cancelled" for message in visible_tool_messages):
+    if any(result.status == "user_input_required" for result in observations):
+        recorder.emit(
+            {"type": "turn_end", "message": assistant, "toolResults": visible_tool_messages}
+        )
+        recorder.emit({"type": "agent_end", "status": "waiting_user"})
+        return _outcome(
+            input=input,
+            status="waiting_user",
+            stop_reason="user_input_required",
+            new_messages=new_messages,
+            final_message=assistant,
+            run_state=run_state,
+            plan_state=plan_state,
+            observations=observations,
+            events=recorder.events,
+            usage=usage,
+        )
+    if any(result.status == "cancelled" for result in observations):
         recorder.emit({"type": "turn_end", "message": assistant, "toolResults": visible_tool_messages})
         recorder.emit({"type": "agent_end", "status": "aborted"})
         return _outcome(
@@ -1059,7 +1027,7 @@ def _plan_approval_pause_outcome(
     new_messages: list[Message],
     run_state: RunState,
     plan_state: PlanState | None,
-    observations: list[ToolObservation],
+    observations: list[ToolResult],
     usage: Any,
     tool_results: list[ToolResultMessage] | None = None,
 ) -> AgentLoopOutcome:
@@ -1158,7 +1126,7 @@ def _outcome(
     final_message: AssistantMessage | None,
     run_state: RunState,
     plan_state: PlanState | None,
-    observations: list[ToolObservation],
+    observations: list[ToolResult],
     events: list[AgentEvent],
     usage: Any = None,
     error: Any = None,
@@ -1195,22 +1163,19 @@ def _outcome(
 
 def _apply_plan_updates(
     plan_state: PlanState | None,
-    tool_messages: list[ToolResultMessage],
+    tool_results: list[ToolResult],
     *,
     input: AgentLoopInput,
     recorder: "_EventRecorder",
     qualified_failure_count: int,
 ) -> PlanState | None:
     current = plan_state
-    for message in tool_messages:
+    for result in tool_results:
+        raw_state = result.data.get("plan_state")
+        if not isinstance(raw_state, dict) and not hasattr(raw_state, "items"):
+            continue
         try:
-            next_state = apply_plan_snapshot_metadata(
-                current,
-                message.metadata,
-                mode=ensure_run_mode(input.mode),
-                run_id=input.run_id,
-                qualified_failure_count=qualified_failure_count,
-            )
+            next_state = load_plan_state(dict(raw_state))
         except PlanValidationError as exc:
             recorder.emit(
                 {
@@ -1230,26 +1195,13 @@ def _apply_plan_updates(
 
 
 def _tool_messages_from_observations(
-    observations: list[ToolObservation],
+    observations: list[ToolResult],
 ) -> list[ToolResultMessage]:
-    messages: list[ToolResultMessage] = []
-    for observation in observations:
-        if observation.status == "approval_required":
-            approval_id = (
-                observation.interruption.approval_id
-                if observation.interruption is not None
-                else None
-            )
-            messages.append(
-                to_tool_result_message(
-                    observation,
-                    approval_id=approval_id,
-                    approved=False,
-                )
-            )
-            continue
-        messages.append(to_tool_result_message(observation))
-    return messages
+    return [
+        to_tool_result_message(result)
+        for result in observations
+        if result.status not in {"approval_required", "user_input_required"}
+    ]
 
 
 def _synthetic_control(
@@ -1378,49 +1330,6 @@ def last_assistant(messages: list[Message]) -> AssistantMessage | None:
     return None
 
 
-def _must_explore_before_plan_submission(
-    *,
-    input: AgentLoopInput,
-    plan_state: PlanState | None,
-    has_prior_exploration: bool,
-) -> bool:
-    return input.mode == "plan" and plan_state is None and not has_prior_exploration
-
-
-def _reject_premature_plan_submissions(
-    messages: list[ToolResultMessage],
-) -> list[ToolResultMessage]:
-    rejected: list[ToolResultMessage] = []
-    for message in messages:
-        if (
-            message.tool_name == PROPOSE_PLAN_TOOL
-            and message.status == "success"
-            and isinstance(message.metadata.get("plan_snapshot"), dict)
-            and message.metadata.get("plan_operation") == "propose_plan"
-        ):
-            rejected.append(
-                replace(
-                    message,
-                    content=[
-                        TextContent(
-                            text=(
-                                "Plan proposals require repository evidence first. Use read/grep/find/ls "
-                                "or dispatch_exploration to inspect the relevant implementation and tests, "
-                                "then submit an implementation plan."
-                            )
-                        )
-                    ],
-                    status="error",
-                    is_error=True,
-                    error_code="plan_exploration_required",
-                    metadata={},
-                )
-            )
-            continue
-        rejected.append(message)
-    return rejected
-
-
 def _guard_stop_reason(reason: str) -> AgentRunStopReason:
     if reason == "tool_unavailable":
         return "tool_unavailable"
@@ -1479,39 +1388,6 @@ class _EventRecorder:
 def _emit_message(recorder: _EventRecorder, message: Message) -> None:
     recorder.emit({"type": "message_start", "message": message})
     recorder.emit({"type": "message_end", "message": message})
-
-
-def _resume_tool_end_event(
-    approval_id: str,
-    observation: ToolObservation,
-) -> dict[str, Any]:
-    metadata = dict(observation.metadata)
-    metadata.setdefault("approval_id", approval_id)
-    return {
-        "type": _tool_event_type(observation),
-        "toolCallId": observation.tool_call_id or approval_id,
-        "toolName": observation.name or "approval_resume",
-        "status": observation.status,
-        "isError": observation.status != "success",
-        "approved": observation.status == "success",
-        "approvalId": approval_id,
-        "errorReason": metadata.get("error_code"),
-        "affectedPaths": list(observation.affected_paths),
-        "workspaceChanged": observation.workspace_changed,
-        "verification": list(observation.verification),
-        "result": {
-            "content": list(observation.content),
-            "metadata": metadata,
-        },
-    }
-
-
-def _tool_event_type(observation: ToolObservation) -> str:
-    if observation.status == "success":
-        return "tool_completed"
-    if observation.status in {"approval_required", "denied", "cancelled"}:
-        return "tool_interrupted"
-    return "tool_failed"
 
 
 def _required_text(value: object, field_name: str) -> str:

@@ -314,18 +314,21 @@ Memory v2 的边界定义十分严格：**仅保存跨任务可复用的长期�
 内置工具 → 调用方工具 → Python 扩展工具 → MCP 代理工具
 ```
 
-装配阶段通过 `assemble_tools()` 合并工具、校验定义、绑定 metadata、过滤 read-only 工具，并创建统一的 `ToolRuntime`。
+装配阶段通过 `build_runtime_tools()` 将内置、调用方、Skill、Extension 和 MCP 能力统一注册为 `ToolRegistration`，再由 `ToolRegistry` 生成模型可见的 catalog snapshot。
 
 ### 执行安全流水线
 
 ```
-ToolRegistry 查找
-  → PermissionPolicy 权限决策
-  → SchemaValidator 参数校验
-  → ApprovalProvider 用户审批
-  → 真实工具执行
-  → ToolResultGuard 结果防护
-  → ToolObservation / ToolResultMessage
+ToolRegistry materialize registration
+  → Input Codec 参数校验
+  → AccessResolver 解析资源与副作用
+  → PermissionEngine 权限与风险决策
+  → ApprovalChallenge / ToolStateStore 审批暂停与恢复
+  → ExecutionController 超时、取消和并发控制
+  → ToolRegistration.handler 执行
+  → Output Codec / Renderer 校验与渲染
+  → ToolResult
+  → ToolResultMessage（仅模型对话投影）
 ```
 
 ### 安全策略要点
@@ -334,7 +337,7 @@ ToolRegistry 查找
 - Shell 命令按风险分类：`verification` / `mutation` / `high_risk` / `unknown`，对应走放行、审批或拒绝
 - 文件工具通过 `WorkspaceSandbox` 执行路径边界校验，防止目录逃逸
 - Shell 执行过滤敏感环境变量，控制超时与输出长度上限
-- 工具结果经 `ToolResultGuard` 脱敏、检测 prompt injection 并标注输出可信度
+- 输出经过 Codec、大小限制和 output trust 校验；MCP 等外部内容默认按不可信内容处理
 
 > ⚠️ 此处的"沙箱"指工作区路径边界与受控执行策略，而非容器或操作系统级的强隔离。
 

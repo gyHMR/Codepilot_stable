@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sys
 
 from .api import ExtensionAPI
 from .types import LoadedExtensions
@@ -52,7 +53,7 @@ def load_extensions(workspace_dir: str | Path, configured_paths: list[str] | Non
     """加载所有扩展：执行每个 .py 文件的 register(api) 函数，收集注册的能力。"""
     result = LoadedExtensions()
     for path in discover_extension_paths(workspace_dir, configured_paths=configured_paths):
-        api = ExtensionAPI()
+        api = ExtensionAPI(owner=f"extension:{path}")
         try:
             module = _load_module_from_file(path)
             register = getattr(module, "register", None) or getattr(module, "setup", None)
@@ -62,8 +63,6 @@ def load_extensions(workspace_dir: str | Path, configured_paths: list[str] | Non
             register(api)
             snapshot = api.snapshot()
             result.tools.extend(snapshot.tools)
-            result.before_tool_hooks.extend(snapshot.before_tool_hooks)
-            result.after_tool_hooks.extend(snapshot.after_tool_hooks)
             result.prompt_guidelines.extend(snapshot.prompt_guidelines)
             result.append_prompts.extend(snapshot.append_prompts)
             result.commands.update(snapshot.commands)
@@ -81,5 +80,10 @@ def _load_module_from_file(path: Path):
     if spec is None or spec.loader is None:
         raise RuntimeError("cannot create import spec")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
     return module

@@ -52,10 +52,6 @@ from .context import (
     RunnerPreflightReport,
 )
 from .commands import (
-    AfterToolCallContext,
-    AfterToolCallResult,
-    BeforeToolCallContext,
-    BeforeToolCallResult,
     CommandHandler,
     CommandSource,
     LifecycleHook,
@@ -64,7 +60,6 @@ from .commands import (
     SessionCommandView,
     SessionLifecycleContext,
     SessionLifecycleView,
-    ToolHookContextSnapshot,
 )
 from .errors import ErrorInfo, ErrorSource, LLMErrorInfo, LLMErrorKind
 from .runtime import (
@@ -113,9 +108,7 @@ from .tools import (
     PLAN_TOOL_NAMES,
     PROPOSE_PLAN_TOOL,
     Tool,
-    ToolResult,
     ToolResultStatus,
-    ToolRiskLevel,
     UPDATE_PLAN_PROGRESS_TOOL,
 )
 
@@ -161,20 +154,13 @@ __all__ = [
     # ── 工具 ──
     "Tool",
     "ToolCall",
-    "ToolResult",
     "ToolResultStatus",
-    "ToolRiskLevel",
     "CLOSE_PLAN_TOOL",
     "CREATE_BUILD_PLAN_TOOL",
     "PLAN_TOOL_NAMES",
     "PROPOSE_PLAN_TOOL",
     "UPDATE_PLAN_PROGRESS_TOOL",
     "PLAN_ITEM_LIMIT",
-    "AfterToolCallContext",
-    "AfterToolCallResult",
-    "BeforeToolCallContext",
-    "BeforeToolCallResult",
-    "ToolHookContextSnapshot",
     # ── LLM ──
     "Api",
     "Cost",

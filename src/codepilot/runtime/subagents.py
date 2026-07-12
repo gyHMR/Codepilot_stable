@@ -8,7 +8,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable
 from uuid import uuid4
 
 from codepilot.core.contracts import (
@@ -19,20 +19,9 @@ from codepilot.core.contracts import (
 )
 from codepilot.core.runner import run_agent_loop
 from codepilot.llm.ports import ModelDescriptor, ModelPort
-from codepilot.protocols import TextContent, UserMessage
+from codepilot.protocols import UserMessage
 from codepilot.sessions.subagents import SubagentStore
-from codepilot.tools.contracts import (
-    ToolCallRequest,
-    ToolDefinition,
-    ToolMetadata,
-    ToolPort,
-    ToolResult,
-)
-from codepilot.tools.restricted import DEFAULT_READ_ONLY_TOOL_NAMES, RestrictedToolPort
-
-if TYPE_CHECKING:
-    from .sessions import RuntimeSession
-
+from codepilot.tools.contracts import ToolPort
 
 LIST_EXPLORATION_AGENTS_TOOL = "list_exploration_agents"
 DISPATCH_EXPLORATION_TOOL = "dispatch_exploration"
@@ -40,6 +29,9 @@ MAX_TASKS_PER_BATCH = 4
 DEFAULT_MAX_PARALLEL = 3
 SUBAGENT_TIMEOUT_SECONDS = 90
 REPORT_TEXT_LIMIT = 12000
+DEFAULT_READ_ONLY_TOOL_NAMES = frozenset(
+    {"ls", "read", "grep", "find", "workspace_status"}
+)
 
 _EXPECTED_OUTPUTS = {"architecture", "flow", "risk", "tests", "open"}
 _REUSE_MODES = {"auto", "no_reuse", "force_refresh"}
@@ -75,8 +67,9 @@ class SubagentRunner:
         previous_report: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         events: list[dict[str, Any]] = []
+        subrun_id = f"subrun_{uuid4().hex[:12]}"
         loop_input = AgentLoopInput(
-            run_id=f"subrun_{uuid4().hex[:12]}",
+            run_id=subrun_id,
             correlation=RunCorrelation(session_id=self.session_id),
             messages=[UserMessage(content=_subagent_user_prompt(task, peer_assignments, previous_report))],
             user_prompt=task.instruction,
@@ -93,7 +86,7 @@ class SubagentRunner:
         )
         ports = AgentLoopPorts(
             model=self.model_port,
-            tools=RestrictedToolPort(self.tool_port),
+            tools=self.tool_port,
             context=None,
             events=events.append,
         )
@@ -276,140 +269,6 @@ class ExplorationCoordinator:
             return None
         subagent_id = str(existing.get("subagent_id") or "")
         return self.store.latest_report(subagent_id)
-
-
-def create_exploration_tools(
-    *,
-    workspace: Path,
-    session_provider: Callable[[], "RuntimeSession"],
-) -> list[ToolDefinition]:
-    return [
-        ToolDefinition(
-            name=LIST_EXPLORATION_AGENTS_TOOL,
-            label="List exploration agents",
-            description=(
-                "This tool does not explore the repository and does not create or run subagents. "
-                "Use it only to inspect reports already produced by dispatch_exploration. "
-                "Do not call it as the first exploration action. Normal Plan mode exploration "
-                "should start with dispatch_exploration using reuse=auto."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "focus_paths": {"type": "array", "items": {"type": "string"}},
-                },
-                "additionalProperties": False,
-            },
-            metadata=_exploration_metadata(LIST_EXPLORATION_AGENTS_TOOL),
-            execute=lambda request, signal=None, on_update=None: _execute_list_agents(
-                request,
-                workspace=workspace,
-                session_provider=session_provider,
-            ),
-        ),
-        ToolDefinition(
-            name=DISPATCH_EXPLORATION_TOOL,
-            label="Dispatch exploration",
-            description=(
-                "Plan mode: use subagents to explore the repository and gather information before "
-                "producing the final plan. Dispatch up to four focused read-only subagents with "
-                "distinct investigation scopes and request concrete files, symbols, call paths, "
-                "risks, open questions, and verification evidence. The main agent must integrate "
-                "their reports, use direct read/grep/find only for focused confirmation or missing "
-                "details, and publish the final canonical plan with propose_plan. reuse=auto "
-                "automatically reuses relevant non-stale reports. Child agents cannot edit files, "
-                "update plans, run shell, or dispatch more subagents."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "tasks": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": MAX_TASKS_PER_BATCH,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "subagent_id": {"type": "string"},
-                                "purpose": {"type": "string"},
-                                "instruction": {"type": "string"},
-                                "focus_paths": {"type": "array", "items": {"type": "string"}},
-                                "expected_output": {
-                                    "type": "string",
-                                    "enum": sorted(_EXPECTED_OUTPUTS),
-                                },
-                                "critical": {"type": "boolean"},
-                            },
-                            "required": ["purpose", "instruction"],
-                            "additionalProperties": False,
-                        },
-                    },
-                    "max_parallel": {"type": "integer", "minimum": 1, "maximum": MAX_TASKS_PER_BATCH},
-                    "reuse": {"type": "string", "enum": sorted(_REUSE_MODES)},
-                },
-                "required": ["tasks"],
-                "additionalProperties": False,
-            },
-            metadata=_exploration_metadata(DISPATCH_EXPLORATION_TOOL),
-            execute=lambda request, signal=None, on_update=None: _execute_dispatch(
-                request,
-                workspace=workspace,
-                session_provider=session_provider,
-            ),
-        ),
-    ]
-
-
-async def _execute_list_agents(
-    request: ToolCallRequest,
-    *,
-    workspace: Path,
-    session_provider: Callable[[], "RuntimeSession"],
-) -> ToolResult:
-    _ = request
-    session = session_provider()
-    store = SubagentStore(workspace, session.session_id)
-    agents = store.list_agents(
-        query=_optional_text(request.arguments.get("query")),
-        focus_paths=_string_list(request.arguments.get("focus_paths")),
-    )
-    result: dict[str, Any] = {
-        "agents": agents,
-        "has_reports": bool(agents),
-    }
-    if not agents:
-        result["next_action"] = (
-            "Call dispatch_exploration to create read-only exploration subagents."
-        )
-    return _json_tool_result(result, metadata={"exploration_agents": result})
-
-
-async def _execute_dispatch(
-    request: ToolCallRequest,
-    *,
-    workspace: Path,
-    session_provider: Callable[[], "RuntimeSession"],
-) -> ToolResult:
-    session = session_provider()
-    coordinator = ExplorationCoordinator(
-        workspace=workspace,
-        session_id=session.session_id,
-        model=session.controller.model,
-        model_port=session.model_port,
-        tool_port=session.tool_port,
-        store=SubagentStore(workspace, session.session_id),
-    )
-    try:
-        result = await coordinator.dispatch(dict(request.arguments))
-    except ValueError as exc:
-        return ToolResult(
-            content=[TextContent(text=str(exc))],
-            status="error",
-            is_error=True,
-            error_code="invalid_exploration_request",
-        )
-    return _json_tool_result(result, metadata={"exploration_batch": result})
 
 
 def _parse_tasks(arguments: dict[str, Any]) -> list[ExplorationTask]:
@@ -658,32 +517,6 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _json_tool_result(payload: dict[str, Any], *, metadata: dict[str, Any]) -> ToolResult:
-    return ToolResult(
-        content=[
-            TextContent(
-                text=json.dumps(payload, ensure_ascii=False, indent=2)[:REPORT_TEXT_LIMIT]
-            )
-        ],
-        status="success",
-        is_error=False,
-        metadata=metadata,
-    )
-
-
-def _exploration_metadata(name: str) -> ToolMetadata:
-    return ToolMetadata(
-        name=name,
-        category="exploration",
-        read_only=True,
-        concurrency_safe=True,
-        exclusive=False,
-        requires_approval=False,
-        risk_level="low",
-        scopes=("plan",),
-    )
-
-
 def _scope_key(purpose: str, focus_paths: list[str]) -> str:
     payload = json.dumps(
         {
@@ -776,5 +609,4 @@ __all__ = [
     "ExplorationCoordinator",
     "ExplorationTask",
     "SubagentRunner",
-    "create_exploration_tools",
 ]

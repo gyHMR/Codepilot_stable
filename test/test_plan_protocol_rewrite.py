@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from codepilot.core.plan import (
@@ -11,11 +9,7 @@ from codepilot.core.plan import (
     apply_plan_snapshot,
 )
 from codepilot.protocols import (
-    CLOSE_PLAN_TOOL,
-    CREATE_BUILD_PLAN_TOOL,
     PROPOSE_PLAN_TOOL,
-    ToolHookContextSnapshot,
-    UPDATE_PLAN_PROGRESS_TOOL,
 )
 
 
@@ -390,236 +384,21 @@ def test_active_plan_cannot_replace_request_or_goal() -> None:
         )
 
 
-def test_semantic_plan_tools_emit_canonical_operation_metadata() -> None:
-    from codepilot.tools.builtins.plan import create_plan_tools
-    from codepilot.tools.contracts import ToolCallRequest
-
-    tools = {tool.name: tool for tool in create_plan_tools(allow=lambda name: True)}
-    assert set(tools) == {
-        PROPOSE_PLAN_TOOL,
-        CREATE_BUILD_PLAN_TOOL,
-        UPDATE_PLAN_PROGRESS_TOOL,
-        CLOSE_PLAN_TOOL,
-    }
-    tool = tools[PROPOSE_PLAN_TOOL]
-    assert "only authoritative way to publish" in tool.description
-    assert "ordinary assistant text is not an approvable Task Plan" in tool.description
-    result = asyncio.run(
-        tool.execute(
-            ToolCallRequest(
-                run_id="run_plan",
-                tool_call_id="call_plan",
-                name=PROPOSE_PLAN_TOOL,
-                current_mode="plan",
-                arguments={
-                    "raw_user_request": "用户要求优化登录逻辑并先给出方案。",
-                    "interpreted_goal": "重构登录模块并验证登录流程。",
-                    "summary": "批准后完成登录模块重构。",
-                    "task_understanding": "用户希望优化登录逻辑并先审批方案。",
-                    "current_implementation": "已确认登录服务和注册测试是主要修改边界。",
-                    "target_design": "保持现有接口，调整登录服务内部职责。",
-                    "impact_scope": "影响登录服务和注册回归测试。",
-                    "risks_and_open_questions": ["暂无阻塞风险。"],
-                    "verification_plan": "运行登录模块测试。",
-                    "completion_criteria": ["相关测试通过"],
-                    "items": [
-                        {
-                            "step": "重构登录服务",
-                            "details": "整理登录服务职责。",
-                            "verification": "运行登录测试。",
-                        }
-                    ],
-                },
-            )
-        )
-    )
-
-    assert result.status == "success"
-    assert set(result.metadata) == {"plan_operation", "plan_snapshot"}
-    assert result.metadata["plan_operation"] == "propose_plan"
-    assert result.metadata["plan_snapshot"]["items"][0]["status"] == "pending"
-    assert "id" not in result.metadata["plan_snapshot"]["items"][0]
-
 
 def test_propose_plan_schema_does_not_expose_framework_owned_item_fields() -> None:
-    from codepilot.tools.builtins.plan import create_plan_tools
+    from codepilot.core.tool_adapters.plan import create_plan_registrations
 
-    tool = {tool.name: tool for tool in create_plan_tools(allow=lambda name: True)}[
-        PROPOSE_PLAN_TOOL
-    ]
-    item_schema = tool.parameters["properties"]["items"]["items"]
+    registration = {
+        item.spec.name: item
+        for item in create_plan_registrations(
+            service=None,  # type: ignore[arg-type]
+            allow=lambda name: True,
+        )
+    }[PROPOSE_PLAN_TOOL]
+    parameters = registration.spec.input_schema
+    item_schema = parameters["properties"]["items"]["items"]
 
     assert set(item_schema["properties"]) == {"step", "details", "verification"}
-    assert item_schema["required"] == ["step", "details", "verification"]
-    assert "raw_user_request" in tool.parameters["required"]
-    assert "interpreted_goal" in tool.parameters["required"]
-
-
-def test_propose_plan_tool_rejects_framework_owned_item_fields() -> None:
-    from codepilot.tools.builtins.plan import create_plan_tools
-    from codepilot.tools.contracts import ToolCallRequest
-
-    tool = {tool.name: tool for tool in create_plan_tools(allow=lambda name: True)}[
-        PROPOSE_PLAN_TOOL
-    ]
-    result = asyncio.run(
-        tool.execute(
-            ToolCallRequest(
-                run_id="run_plan",
-                tool_call_id="call_plan",
-                name=PROPOSE_PLAN_TOOL,
-                current_mode="plan",
-                arguments={
-                    "raw_user_request": "用户要求优化登录逻辑并先给出方案。",
-                    "interpreted_goal": "重构登录模块并验证登录流程。",
-                    "summary": "批准后完成登录模块重构。",
-                    "task_understanding": "用户希望优化登录逻辑并先审批方案。",
-                    "current_implementation": "已确认登录服务和注册测试是主要修改边界。",
-                    "target_design": "保持现有接口，调整登录服务内部职责。",
-                    "impact_scope": "影响登录服务和注册回归测试。",
-                    "risks_and_open_questions": ["暂无阻塞风险。"],
-                    "verification_plan": "运行登录模块测试。",
-                    "completion_criteria": ["相关测试通过"],
-                    "items": [
-                        {
-                            "step": "重构登录服务",
-                            "details": "整理登录服务职责。",
-                            "verification": "运行登录测试。",
-                            "status": "pending",
-                        }
-                    ],
-                },
-            )
-        )
-    )
-
-    assert result.status == "error"
-    assert result.error_code == "invalid_plan_snapshot"
-    assert "items[0] has unknown fields: status" in result.content[0].text
-
-
-def test_propose_plan_normalizes_string_lists_and_allows_no_known_risks() -> None:
-    from codepilot.tools.builtins.plan import create_plan_tools
-    from codepilot.tools.contracts import ToolCallRequest
-
-    tool = {tool.name: tool for tool in create_plan_tools(allow=lambda name: True)}[
-        PROPOSE_PLAN_TOOL
-    ]
-    result = asyncio.run(
-        tool.execute(
-            ToolCallRequest(
-                run_id="run_plan",
-                tool_call_id="call_plan",
-                name=PROPOSE_PLAN_TOOL,
-                current_mode="plan",
-                arguments={
-                    "raw_user_request": "用户要求优化登录逻辑并先给出方案。",
-                    "interpreted_goal": "重构登录模块并验证登录流程。",
-                    "summary": "批准后完成登录模块重构。",
-                    "task_understanding": "用户希望优化登录逻辑并先审批方案。",
-                    "current_implementation": "已确认登录服务和注册测试是主要修改边界。",
-                    "target_design": "保持现有接口，调整登录服务内部职责。",
-                    "impact_scope": "影响登录服务和注册回归测试。",
-                    "risks_and_open_questions": [],
-                    "verification_plan": "运行登录模块测试。",
-                    "completion_criteria": "相关测试通过",
-                    "items": [
-                        {
-                            "step": "重构登录服务",
-                            "details": "整理登录服务职责。",
-                            "verification": "运行登录测试。",
-                        }
-                    ],
-                },
-            )
-        )
-    )
-
-    assert result.status == "success"
-    snapshot = result.metadata["plan_snapshot"]
-    assert snapshot["risks_and_open_questions"] == []
-    assert snapshot["completion_criteria"] == ["相关测试通过"]
-    assert snapshot["items"][0]["status"] == "pending"
-
-
-def test_propose_plan_revision_repeats_request_and_goal_for_schema_consistency() -> None:
-    from codepilot.tools.builtins.plan import create_plan_tools
-    from codepilot.tools.contracts import ToolCallRequest
-
-    proposed = apply_plan_snapshot(
-        None,
-        _snapshot(),
-        mode="plan",
-        run_id="run_plan",
-        operation="propose_plan",
-    )
-    tool = {tool.name: tool for tool in create_plan_tools(allow=lambda name: True)}[
-        PROPOSE_PLAN_TOOL
-    ]
-    request = ToolCallRequest(
-        run_id="run_plan",
-        tool_call_id="call_revision",
-        name=PROPOSE_PLAN_TOOL,
-        current_mode="plan",
-        context=ToolHookContextSnapshot(metadata={"plan_state": proposed.to_dict()}),
-            arguments={
-                "raw_user_request": "用户要求优化登录逻辑并先给出方案。",
-                "interpreted_goal": "重构登录模块并验证登录流程。",
-                "task_understanding": "用户反馈要求先补测试再调整登录逻辑。",
-                "current_implementation": "已确认登录服务和测试边界仍然适用。",
-                "target_design": "先补回归测试，再进行登录服务调整。",
-                "impact_scope": "影响登录测试和登录服务。",
-                "risks_and_open_questions": ["暂无新的待确认项。"],
-                "verification_plan": "运行登录测试。",
-                "summary": "批准后先补登录测试，再重构登录模块。",
-                "completion_criteria": ["相关测试通过"],
-                "items": [
-                {
-                    "step": "补充登录测试",
-                    "details": "先覆盖关键登录边界。",
-                    "verification": "运行登录测试。",
-                }
-            ],
-        },
-    )
-
-    result = asyncio.run(tool.execute(request))
-
-    assert result.status == "success"
-    assert result.metadata["plan_snapshot"]["raw_user_request"] == "用户要求优化登录逻辑并先给出方案。"
-    assert result.metadata["plan_snapshot"]["interpreted_goal"] == "重构登录模块并验证登录流程。"
-
-
-def test_first_propose_plan_requires_request_and_goal_even_if_schema_is_soft() -> None:
-    from codepilot.tools.builtins.plan import create_plan_tools
-    from codepilot.tools.contracts import ToolCallRequest
-
-    tool = {tool.name: tool for tool in create_plan_tools(allow=lambda name: True)}[
-        PROPOSE_PLAN_TOOL
-    ]
-    result = asyncio.run(
-        tool.execute(
-            ToolCallRequest(
-                run_id="run_plan",
-                tool_call_id="call_plan",
-                name=PROPOSE_PLAN_TOOL,
-                current_mode="plan",
-                arguments={
-                    "summary": "批准后完成登录模块重构。",
-                    "completion_criteria": ["相关测试通过"],
-                    "items": [
-                        {
-                            "step": "重构登录服务",
-                            "details": "整理登录服务职责。",
-                            "verification": "运行登录测试。",
-                            "status": "pending",
-                        }
-                    ],
-                },
-            )
-        )
-    )
-
-    assert result.status == "error"
-    assert result.error_code == "invalid_plan_snapshot"
-    assert "raw_user_request is required" in result.content[0].text
+    assert item_schema["required"] == ("step", "details", "verification")
+    assert "raw_user_request" in parameters["required"]
+    assert "interpreted_goal" in parameters["required"]

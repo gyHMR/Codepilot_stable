@@ -145,10 +145,10 @@ Model Provider
 - `ToolExecutionRequest`
 - `ToolResult`
 - `ToolProgressEvent`
-- `ApprovalChallenge/Decision`
+- `ApprovalChallenge/Response`
 - `InteractionRequest/Response`
 
-当前 `ToolCallRequest -> ToolResult -> ToolObservation -> ToolResultMessage` 的多层近重复结构应逐步收敛。
+迁移前的 `ToolCallRequest -> ToolResult -> ToolObservation -> ToolResultMessage` 多层近重复结构必须收敛；最终仅保留 canonical `ToolResult`，`ToolResultMessage` 只是面向模型对话的单向投影。
 
 ## 6. 模型可见协议
 
@@ -1013,6 +1013,8 @@ Hook 收敛为：
 
 Extension/Skill/MCP 按 owner 进行原子批量注册：整批校验成功后才发布新 Catalog snapshot；任一注册失败则整批回滚。卸载或重连按 owner 撤销对应 revision，不影响其他 owner，也不能留下部分可见工具。
 
+`tools.__init__` 作为受控公共 facade，只重导出 Extension 所需的稳定注册协议、Codec 接口、Policy 模型和 provider 接口，不导出 MaterializedTool 或内部服务。Extension API 应依赖该 facade，不能直接依赖 `tools.runtime`、`tools.security` 或 `tools.state` 的实现细节。
+
 ## 19. MCP 适配
 
 MCP 必须转换为 canonical ToolRegistration，不能保留特殊执行旁路。
@@ -1020,7 +1022,7 @@ MCP 必须转换为 canonical ToolRegistration，不能保留特殊执行旁路�
 ```text
 MCP Definition
   -> MCP Adapter
-  -> ToolSpec / Codec / Policy / Handler / Renderer
+  -> ToolSpec / ToolCodec / ToolPolicy / Handler / Renderer contracts
   -> ToolRegistration
   -> ToolRegistry
   -> ToolRuntime
@@ -1041,6 +1043,8 @@ MCP Definition
 - 不暴露本机路径。
 
 缺少 outputSchema 的结果记录 `output_validation=structurally_validated`；MCP 文本和外部资源默认记录 `content_trust=untrusted`。这两个字段分别表达“结构验证强度”和“内容信任级别”，不能混用。
+
+第一版 MCP adapter 可以在单个 `extensions/mcp/adapter.py` 内实现 MCP 专用 codec 和 renderer adapter，但必须复用 tools 中的公共协议与结果防护。只有当 transport、协议转换或内容渲染形成可独立测试、独立演进的职责时，才继续拆分 MCP 子模块。
 
 ## 20. Plan、Interaction 与 Subagent
 
@@ -1094,6 +1098,8 @@ ToolStateStore 保存恢复所需完整数据；Observability 只保存脱敏事
 
 ## 22. 模块目录
 
+工具模块采用“稳定协议 + 核心编排 + 四个领域聚合模块”的适度聚合结构。避免为每一种数据类型或运行步骤单独创建文件，同时保留安全、状态和沙箱等需要独立演进的边界。
+
 ```text
 src/codepilot/
 ├── protocols/
@@ -1104,45 +1110,68 @@ src/codepilot/
 │   ├── codecs.py
 │   ├── registry.py
 │   ├── runtime.py
-│   ├── policy.py
-│   ├── permissions.py
-│   ├── approvals.py
-│   ├── scheduling.py
-│   ├── cancellation.py
-│   ├── progress.py
-│   ├── effects.py
+│   ├── execution.py
+│   ├── security.py
 │   ├── results.py
-│   ├── errors.py
-│   ├── rendering.py
-│   ├── guards.py
-│   ├── resources.py
-│   ├── artifacts.py
 │   ├── state.py
 │   ├── sandbox.py
 │   └── builtins/
-│       ├── filesystem.py
+│       ├── __init__.py
+│       ├── files.py
 │       ├── search.py
-│       ├── command.py
+│       ├── shell.py
 │       └── workspace.py
 ├── core/
 │   └── tool_adapters/
 │       ├── plan.py
 │       └── interaction.py
 ├── runtime/
-│   ├── composition.py
+│   ├── builder.py
+│   ├── tools.py
 │   └── tool_adapters/
 │       └── subagents.py
 ├── sessions/
 │   └── tool_state_store.py
 └── extensions/
-    ├── tool_api.py
+    ├── api.py
     └── mcp/
-        ├── adapter.py
-        ├── codec.py
-        └── renderer.py
+        └── adapter.py
 ```
 
-主要类型归属：contracts 放 Spec、Registration、Request 和 Context；codecs 放 codec；results/errors 放结算协议；resources/effects 放访问与副作用类型；rendering/guards/artifacts 放输出链；state 只定义 Store Port，sessions 实现持久化，runtime/composition.py 负责依赖装配。
+模块职责：
+
+| 模块 | 聚合职责 | 不应包含 |
+|---|---|---|
+| `__init__.py` | 受控公共 facade，重导出外部注册所需的稳定类型 | MaterializedTool、Runtime 内部服务、持久化实现 |
+| `contracts.py` | Spec、Registration、Request、Context、Handler/Resolver/Renderer 等稳定 Protocol | 具体执行流程、持久化实现、平台 I/O |
+| `codecs.py` | JSON Schema、输入输出 Codec、内置 Codec 实现 | Registry、权限和模型内容渲染 |
+| `registry.py` | 注册、materialize、Catalog snapshot、registration identity | handler 执行、安全审批 |
+| `runtime.py` | `execute/resume/execute_batch` 主入口和管线编排 | 具体权限匹配、调度算法、文件系统安全实现 |
+| `execution.py` | timeout、取消、CleanupStack、基础调度、并发、progress | 权限规则、审批存储、结果渲染 |
+| `security.py` | ToolPolicy、资源/effect、Permission、Approval、AccessResolution | OS 沙箱实现、Runtime 主流程 |
+| `results.py` | ToolResult、ToolError、内容块和模型消息单向投影 | handler 调度、权限决策、Runtime 输出限额执行 |
+| `state.py` | Attempt 状态机、Store Port、恢复协议 | Session 持久化细节 |
+| `sandbox.py` | workspace 边界、敏感文件、Shell/路径安全与资源级防护 | 审批 UI、任务策略 |
+
+原细分设计按以下方式收敛：
+
+| 原职责文件 | 收敛后的模块 |
+|---|---|
+| `scheduling.py`、`cancellation.py`、`progress.py` | `execution.py` |
+| `policy.py`、`permissions.py`、`approvals.py`、`resources.py`、`effects.py` | `security.py` |
+| `errors.py`、`rendering.py`、`guards.py`、`artifacts.py` | `results.py` |
+| `state.py` | 继续独立，避免恢复协议挤入 Runtime |
+| `sandbox.py` | 继续独立，避免平台安全代码挤入 Security |
+
+`state.py` 定义 Attempt 状态、Interaction 恢复对象和 Store Port，`sessions/tool_state_store.py` 实现持久化；`runtime/builder.py` 与 `runtime/tools.py` 负责依赖装配和来源注册。Plan 和 Interaction 不放回 `tools/builtins`，仍由 Core adapter 注册；Subagent 仍由 Runtime adapter 注册。
+
+文件规模控制遵循以下规则：
+
+1. 不因只有一个 dataclass、Protocol 或 helper 就创建独立模块。
+2. `runtime.py` 只保留管线编排，复杂算法下沉到对应聚合模块，避免形成总控大文件。
+3. 单文件接近 800 行时检查职责边界；超过约 1,000 行且包含两个可以独立测试、独立演进的核心职责时再拆分。
+4. 拆分优先形成有业务含义的子模块或子包，不按“一类一文件”机械拆分。
+5. 私有 helper 与所属领域放在同一模块；只有被两个以上领域稳定复用时才提升为公共协议。
 
 ## 23. 测试规范
 
@@ -1192,6 +1221,9 @@ src/codepilot/
 - adapters 不直接构造最终 ToolResult。
 - 生产代码不直接调用内置 handler。
 - 不再引入第二套跨层结果协议。
+- `runtime.py` 只编排 `registry/execution/security/results/state` 的公开接口，不实现具体权限匹配、调度或 sandbox 逻辑。
+- Extension/MCP 只通过 `codepilot.tools` 公共 facade 使用注册协议，不导入 ToolRuntime、MaterializedTool 或工具状态存储实现。
+- 禁止仅为单个简单类型创建无独立行为的新工具模块；模块拆分必须对应可独立测试和演进的职责。
 
 ## 24. 迁移方案
 
@@ -1203,11 +1235,11 @@ src/codepilot/
 
 ### 阶段 1：建立新协议对象
 
-新增 Spec、Registration、Codec、ExecutionRequest、Result、Error、Policy、AccessRequest，并提供新 Result 到旧消息协议的适配器。
+在 `contracts.py` 建立 Spec、Registration、ExecutionRequest 和运行 Protocol；在 `results.py` 建立 Result/Error；在 `security.py` 建立 Policy、Resource、Effect 和 AccessRequest。提供新 Result 到旧消息协议的临时适配器。
 
 ### 阶段 2：Registry 与 Codec
 
-- 建立 opaque Registry。
+- 在 `registry.py` 建立 opaque Registry，在 `codecs.py` 建立统一 Codec。
 - 默认禁止覆盖。
 - 增加 Catalog snapshot 和 registration identity。
 - 使用标准 JSON Schema validator。
@@ -1225,11 +1257,11 @@ src/codepilot/
 
 ### 阶段 5：权限、安全与审批
 
-接入 action/resource/effect 权限、ApprovalGrant、ToolStateStore、敏感文件和 Shell 策略，移除内存 `_pending` 真值。
+在 `security.py` 接入 action/resource/effect 权限和 ApprovalGrant，在 `sandbox.py` 实现敏感文件与 Shell/路径策略，在 `state.py` 定义 ToolStateStore Port；移除内存 `_pending` 真值。
 
 ### 阶段 6：timeout、取消和基础并发
 
-实现通用 timeout、CancellationToken、CleanupStack、Session semaphore、parallel/serial group 和 execute_batch；移除 Core 自行 gather。
+在 `execution.py` 实现通用 timeout、CancellationToken、CleanupStack、Session semaphore、parallel/serial group 和 progress；由 `runtime.py` 编排 execute_batch，移除 Core 自行 gather。
 
 ### 阶段 7：特殊工具
 
@@ -1237,7 +1269,7 @@ src/codepilot/
 
 ### 阶段 8：Extension、Skill、MCP
 
-所有来源改为 canonical registration，删除 MCP 特殊执行旁路，接入 output trust、artifact 和 server 限制。
+所有来源改为 canonical registration。第一版通过 `extensions/mcp/adapter.py` 使用 `codepilot.tools` 公共 facade 提供的 Codec、Policy、Result/Renderer 协议，删除 MCP 特殊执行旁路，接入 output trust、artifact 和 server 限制。
 
 ### 阶段 9：删除旧协议
 

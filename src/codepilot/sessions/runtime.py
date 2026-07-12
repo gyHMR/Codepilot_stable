@@ -127,8 +127,6 @@ class SessionRuntime:
             provider=options.model.provider,
             system_prompt=system_prompt,
         )
-        self._repair_checkpoint_messages()
-
         persisted = self.store.load_session_messages()
         messages = [*persisted, *options.messages]
         self.store.update_meta(
@@ -172,8 +170,6 @@ class SessionRuntime:
         self.extension_commands = dict(options.extension_commands)
         self.before_prompt_hooks = list(options.before_prompt_hooks)
         self.after_prompt_hooks = list(options.after_prompt_hooks)
-        self.before_tool_call = options.before_tool_call
-        self.after_tool_call = options.after_tool_call
         self.stream_fn = options.stream_fn
         self.convert_to_llm = options.convert_to_llm
 
@@ -257,7 +253,6 @@ class SessionRuntime:
         run_id: str,
         model: ModelDescriptor,
     ) -> PreparedAgentRun:
-        pending_approval = self.pending_approval(intent.approval_id)
         messages = self._messages_for_loop()
         event_start_seq, turn_start_seq = self._run_sequence_offsets(run_id)
         run_state = self._checkpoint_run_state(run_id)
@@ -271,22 +266,6 @@ class SessionRuntime:
             approval_id=intent.approval_id,
             decision=intent.decision,
             reason=intent.reason,
-            tool_call_id=(
-                _optional_text(pending_approval.get("id"))
-                if pending_approval is not None
-                else None
-            ),
-            tool_name=(
-                _optional_text(pending_approval.get("name"))
-                if pending_approval is not None
-                else None
-            ),
-            arguments=(
-                dict(pending_approval.get("arguments"))
-                if pending_approval is not None
-                and isinstance(pending_approval.get("arguments"), dict)
-                else {}
-            ),
             mode=self.current_mode,
             plan_state=self.active_plan_state(),
             limits=self.loop_limits(),
@@ -514,35 +493,6 @@ class SessionRuntime:
             "active_item_preview": _short_text(active, limit=72),
         }
 
-    def pending_approvals(self) -> list[dict[str, Any]]:
-        checkpoint = self._runtime_checkpoint()
-        if not checkpoint:
-            return []
-        run_id = _optional_text(checkpoint.get("run_id"))
-        approvals: list[dict[str, Any]] = []
-        for call in _checkpoint_pending_calls(checkpoint):
-            approval_id = _optional_text(call.get("approval_id"))
-            if approval_id is None:
-                continue
-            approvals.append(
-                {
-                    **call,
-                    "approval_id": approval_id,
-                    "run_id": run_id,
-                    "session_id": self.session_id,
-                }
-            )
-        return approvals
-
-    def pending_approval(self, approval_id: str) -> dict[str, Any] | None:
-        target = _optional_text(approval_id)
-        if target is None:
-            return None
-        for approval in self.pending_approvals():
-            if approval.get("approval_id") == target:
-                return approval
-        return None
-
     def runtime_checkpoint(self) -> dict[str, Any] | None:
         checkpoint = self._runtime_checkpoint()
         return dict(checkpoint) if checkpoint is not None else None
@@ -582,10 +532,13 @@ class SessionRuntime:
         return run_id
 
     def resume_run_id(self, approval_id: str) -> str:
-        approval = self.pending_approval(approval_id)
-        if approval is None:
+        checkpoint = self.runtime_checkpoint()
+        if (
+            checkpoint is None
+            or _optional_text(checkpoint.get("approval_id")) != _optional_text(approval_id)
+        ):
             raise ValueError(f"Approval not found: {approval_id}")
-        run_id = _optional_text(approval.get("run_id"))
+        run_id = _optional_text(checkpoint.get("run_id"))
         if run_id is None:
             raise ValueError(f"Approval has no run_id: {approval_id}")
         return run_id
@@ -1068,20 +1021,10 @@ class SessionRuntime:
             if tool_calls:
                 self.store.set_checkpoint(
                     {
-                        "phase": "tool_approval",
+                        "phase": "tools_running",
                         "run_id": run_id,
                         "turn_id": turn_id,
                         "assistant_message_id": message_id,
-                        "pending_tool_call_ids": [call.id for call in tool_calls],
-                        "pending_tool_calls": [
-                            {
-                                "id": call.id,
-                                "name": call.name,
-                                "arguments": dict(call.arguments),
-                            }
-                            for call in tool_calls
-                        ],
-                        "completed_tool_result_ids": [],
                     }
                 )
                 return
@@ -1095,82 +1038,26 @@ class SessionRuntime:
             )
             return
 
-        checkpoint = self.store.read_meta() or {}
-        runtime_checkpoint = checkpoint.get("runtime_checkpoint")
-        runtime_checkpoint = runtime_checkpoint if isinstance(runtime_checkpoint, dict) else {}
-        pending_ids = [
-            str(item)
-            for item in runtime_checkpoint.get("pending_tool_call_ids", [])
-            if isinstance(item, str)
-        ]
-        pending_ids = [item for item in pending_ids if item != message.tool_call_id]
-        pending_calls = [
-            item
-            for item in runtime_checkpoint.get("pending_tool_calls", [])
-            if isinstance(item, dict) and item.get("id") != message.tool_call_id
-        ]
-        completed = [
-            str(item)
-            for item in runtime_checkpoint.get("completed_tool_result_ids", [])
-            if isinstance(item, str)
-        ]
-        completed.append(message_id)
-        phase = "tool_approval" if pending_ids else "tools_completed"
         self.store.set_checkpoint(
             {
-                "phase": phase,
+                "phase": "tools_completed",
                 "run_id": run_id,
                 "turn_id": turn_id,
-                "assistant_message_id": runtime_checkpoint.get("assistant_message_id"),
-                "pending_tool_call_ids": pending_ids,
-                "pending_tool_calls": pending_calls,
-                "completed_tool_result_ids": completed,
+                "tool_result_message_id": message_id,
             }
         )
 
     def _checkpoint_approval_from_event(self, event: dict[str, Any]) -> None:
-        checkpoint = self._runtime_checkpoint()
-        if checkpoint is None:
-            return
         tool_call_id = _optional_text(event.get("toolCallId"))
         approval_id = _optional_text(event.get("approvalId"))
         if tool_call_id is None or approval_id is None:
             return
-
-        pending_calls = _checkpoint_pending_calls(checkpoint)
-        updated = False
-        for call in pending_calls:
-            if call.get("id") != tool_call_id:
-                continue
-            call["approval_id"] = approval_id
-            call["reason"] = _approval_reason_from_event(event)
-            call["risk_level"] = _approval_risk_from_event(event)
-            updated = True
-            break
-        if not updated:
-            pending_calls.append(
-                {
-                    "id": tool_call_id,
-                    "name": _optional_text(event.get("toolName")) or "",
-                    "arguments": {},
-                    "approval_id": approval_id,
-                    "reason": _approval_reason_from_event(event),
-                    "risk_level": _approval_risk_from_event(event),
-                }
-            )
-
         self.store.set_checkpoint(
             {
-                **checkpoint,
                 "phase": "tool_approval",
-                "run_id": _event_run_id(event) or checkpoint.get("run_id"),
-                "turn_id": _int_or_none(event.get("turnId")) or checkpoint.get("turn_id"),
-                "pending_tool_call_ids": [
-                    str(call["id"])
-                    for call in pending_calls
-                    if isinstance(call.get("id"), str)
-                ],
-                "pending_tool_calls": pending_calls,
+                "run_id": _event_run_id(event),
+                "turn_id": _int_or_none(event.get("turnId")),
+                "approval_id": approval_id,
             }
         )
 
@@ -1233,84 +1120,6 @@ class SessionRuntime:
         _set_session_message_id(message, message_id)
         self._persisted_message_object_ids[id(message)] = message_id
         return message_id
-
-    def _repair_checkpoint_messages(self) -> None:
-        meta = self.store.read_meta() or {}
-        checkpoint = meta.get("runtime_checkpoint")
-        if not isinstance(checkpoint, dict) or checkpoint.get("phase") != "tool_approval":
-            return
-        all_pending_calls = _checkpoint_pending_calls(checkpoint)
-        approval_pending_calls = [
-            call
-            for call in all_pending_calls
-            if _optional_text(call.get("approval_id")) is not None
-        ]
-        pending_calls = [
-            call
-            for call in all_pending_calls
-            if _optional_text(call.get("approval_id")) is None
-        ]
-        if not pending_calls:
-            return
-        existing_results = {
-            message.tool_call_id
-            for message in self.store.load_session_messages()
-            if isinstance(message, ToolResultMessage)
-        }
-        created_ids: list[str] = []
-        for call in pending_calls:
-            call_id = call.get("id")
-            if not isinstance(call_id, str) or not call_id or call_id in existing_results:
-                continue
-            tool_name = call.get("name") if isinstance(call.get("name"), str) else ""
-            created_ids.append(
-                self.store.append_message(
-                    ToolResultMessage(
-                        tool_call_id=call_id,
-                        tool_name=tool_name,
-                        content=[
-                            TextContent(
-                                text="Error: task was interrupted before this tool returned."
-                            )
-                        ],
-                        status="error",
-                        is_error=True,
-                        error_code="tool_result_missing",
-                    ),
-                    run_id=_optional_text(checkpoint.get("run_id")),
-                )
-            )
-        if created_ids:
-            self.store.append_event(
-                {
-                    "type": "checkpoint_restored",
-                    "sessionId": self.session_id,
-                    "runId": checkpoint.get("run_id"),
-                    "checkpoint": checkpoint,
-                    "synthetic_tool_result_ids": created_ids,
-                }
-            )
-            self.store.set_checkpoint(
-                {
-                    "phase": "tool_approval" if approval_pending_calls else "tools_completed",
-                    "run_id": checkpoint.get("run_id"),
-                    "assistant_message_id": checkpoint.get("assistant_message_id"),
-                    "pending_tool_call_ids": [
-                        str(call["id"])
-                        for call in approval_pending_calls
-                        if isinstance(call.get("id"), str)
-                    ],
-                    "pending_tool_calls": approval_pending_calls,
-                    "completed_tool_result_ids": [
-                        *[
-                            str(item)
-                            for item in checkpoint.get("completed_tool_result_ids", [])
-                            if isinstance(item, str)
-                        ],
-                        *created_ids,
-                    ],
-                }
-            )
 
     def _loop_context(
         self,
@@ -1583,25 +1392,30 @@ def _mode_policy(mode: str) -> str:
     if mode == "plan":
         return (
             "当前 mode=plan。你仍是同一个 Coding Agent，处理同一个用户任务，但本轮只允许只读调查和方案设计，禁止修改工作区。"
-            "Plan 是固定的宏观工作流：接收并保持用户的软件目标 → 派发只读 Subagent 探索仓库 → 主 Agent 汇总报告并做必要的定点核查 "
-            "→ 形成可执行、可验证的方案 → 用 propose_plan 发布 canonical plan → 等待运行时处理用户审批或修改反馈。"
+            "Plan 是固定的宏观工作流，遵循五阶段：理解任务 → Subagent 探索 → 主 Agent 设计 → 审查并发布 canonical plan → 框架审批和切换 Build。"
             "框架负责模式、工具边界、canonical plan 状态、审批状态和 Plan 到 Build 的切换；主 Agent 负责理解目标、拆分探索任务、"
             "决定 Subagent 的关注范围、综合证据、识别真正阻塞的问题，并设计最终方案。不得自行假设计划已获批准或切换模式。"
-            "首先分离对象级任务和控制级指令：代码、行为、测试和配置目标属于对象级；“给方案”“先分析”“不要修改”等只约束交付方式，"
-            "不能成为 interpreted_goal 或计划步骤。"
-            "探索阶段默认使用 dispatch_exploration，让不同只读 Subagent 调查相关实现、调用方、依赖、风险和验证边界；"
-            "主 Agent 不应先用大量 ls/read/grep/find 顺序扫描仓库，这些工具用于 Subagent 报告后的局部确认和缺口补充。"
+            "阶段一，理解任务：分离对象级任务和控制级指令。代码、行为、测试和配置目标属于对象级；“给方案”“先分析”“不要修改”等"
+            "只约束交付方式，不能成为 interpreted_goal 或计划步骤。识别用户目标、约束、当前证据和真正阻塞的歧义；"
+            "只有缺少会实质改变实现范围或设计的必要信息时，才提出一个具体澄清问题。"
+            "阶段二，Subagent 探索：探索阶段默认使用 dispatch_exploration 派发只读 Subagent 探索仓库，并按最少必要原则选择 0 到 3 个。"
+            "上下文已经充分或任务真正微小时使用 0 个；已知文件或单一范围需要确认时使用 1 个；存在两个独立调查方向时使用 2 个；"
+            "只有跨模块、架构不明或风险较高时使用 3 个。多个任务必须具有不同且具体的调查范围，分别覆盖相关实现、调用链、测试或风险，"
+            "不得重复搜索同一区域。主 Agent 不应先用大量 ls/read/grep/find 顺序扫描仓库，这些工具只用于报告后的局部确认和缺口补充。"
             "dispatch_exploration 的 reuse=auto 会自动复用未过期报告；只有需要查看、筛选或比较已有报告时才使用 list_exploration_agents。"
-            "综合阶段必须基于成功的仓库探索证据；若缺少会实质改变实现范围或设计的必要信息，提出一个具体澄清问题，不要执行修改。"
-            "发布阶段用 propose_plan 发布或修订 proposed plan：raw_user_request 保存用户原始请求，interpreted_goal 必须描述 Build 要完成的软件工作；"
+            "阶段三，主 Agent 设计：综合用户上下文、Subagent 报告和必要的定点核查，选择一个推荐实现方案。Subagent 只提供仓库事实、"
+            "风险、设计约束和验证线索，主 Agent 对最终设计、影响范围、执行步骤和验证方式负责。"
+            "阶段四，审查并发布：检查方案是否覆盖用户目标、当前实现、目标设计、影响范围、风险、执行步骤、完成标准和验证方式。"
+            "若仍有阻塞性问题，直接询问用户；若证据充分且方案已可交给 Build 执行，必须在当前回合直接调用 propose_plan。"
+            "propose_plan 用于发布或修订 proposed plan：raw_user_request 保存用户原始请求，interpreted_goal 必须描述 Build 要完成的软件工作；"
             "task_understanding、current_implementation、target_design、impact_scope、risks_and_open_questions、verification_plan "
             "必须分别记录任务理解、仓库证据、目标设计、影响范围、风险待确认项和验证方案；"
             "summary 只做压缩概括，不能替代这些结构化字段。"
             "items 只能描述批准后实际要执行的代码修改与验证，不能写分析需求、查看代码、撰写方案、回复用户或等待审批。"
-            "当证据充分且方案已可交给 Build 执行时，必须在当前回合直接调用 propose_plan；普通文本方案不是可审批的 Task Plan。"
-            "不要先完整展示文本草案、询问用户方向是否合适，或等待用户认可文本草案后才调用 propose_plan；"
+            "普通文本方案不是可审批的 Task Plan。不要先完整展示文本草案、询问用户方向是否合适，或等待用户认可文本草案后才调用 propose_plan；"
             "运行时会在 propose_plan 成功后统一展示 canonical plan 并发起审批。"
-            "审批阶段所有条目保持 pending；发布后等待用户审查、拒绝、批准或提出修改。未经运行时确认批准，不得执行实现、推进步骤、"
+            "阶段五，框架审批和切换 Build：propose_plan 只表示计划已提交，不表示用户已经批准。审批阶段所有条目保持 pending；"
+            "发布后等待用户审查、拒绝、批准或提出修改。未经运行时确认批准，不得执行实现、推进步骤、"
             "声称已经开始实现，或承诺下一步立即修改代码。"
             "用户反馈只能用于继续规划、修改同一个 proposed plan、拒绝或等待批准。只有高置信审批命令会由运行时转换为状态变化。"
         )
@@ -1716,60 +1530,6 @@ def _needs_plan_approval_notice(mode: str, plan_state: object) -> bool:
         and isinstance(plan_state, dict)
         and plan_state.get("status") == "proposed"
     )
-
-
-def _checkpoint_pending_calls(checkpoint: dict[str, Any]) -> list[dict[str, Any]]:
-    calls = checkpoint.get("pending_tool_calls")
-    if isinstance(calls, list):
-        result: list[dict[str, Any]] = []
-        for item in calls:
-            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-                continue
-            call = {
-                "id": str(item.get("id")),
-                "name": str(item.get("name") or ""),
-                "arguments": dict(item.get("arguments")) if isinstance(item.get("arguments"), dict) else {},
-            }
-            for field_name in ("approval_id", "reason", "risk_level"):
-                value = _optional_text(item.get(field_name))
-                if value is not None:
-                    call[field_name] = value
-            result.append(call)
-        return result
-    ids = checkpoint.get("pending_tool_call_ids")
-    if not isinstance(ids, list):
-        return []
-    return [{"id": item, "name": "", "arguments": {}} for item in ids if isinstance(item, str)]
-
-
-def _approval_reason_from_event(event: dict[str, Any]) -> str:
-    direct = _optional_text(event.get("reason")) or _optional_text(event.get("errorReason"))
-    if direct is not None:
-        return direct
-    result = event.get("result")
-    metadata = result.get("metadata") if isinstance(result, dict) else None
-    if isinstance(metadata, dict):
-        decision = metadata.get("permission_decision")
-        if isinstance(decision, dict):
-            reason = _optional_text(decision.get("reason"))
-            if reason is not None:
-                return reason
-    return ""
-
-
-def _approval_risk_from_event(event: dict[str, Any]) -> str:
-    direct = _optional_text(event.get("riskLevel"))
-    if direct is not None:
-        return direct
-    result = event.get("result")
-    metadata = result.get("metadata") if isinstance(result, dict) else None
-    if isinstance(metadata, dict):
-        decision = metadata.get("permission_decision")
-        if isinstance(decision, dict):
-            risk = _optional_text(decision.get("risk_level"))
-            if risk is not None:
-                return risk
-    return "unknown"
 
 
 def _set_session_message_id(message: Message, message_id: str) -> None:

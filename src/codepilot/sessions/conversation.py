@@ -32,7 +32,7 @@ class SessionConversationState:
     current_mode: RunMode = "build"
     stream_message: Message | None = None
     error: str | None = None
-    pending_tool_calls: set[str] = field(default_factory=set)
+    active_tool_call_ids: set[str] = field(default_factory=set)
     last_run_result: AgentRunResult | None = None
     _steering_messages: list[AgentMessage] = field(default_factory=list)
     _listeners: list[AgentEventSink] = field(default_factory=list)
@@ -94,11 +94,11 @@ class SessionConversationState:
         elif event_type == "tool_started":
             tool_call_id = event.get("toolCallId")
             if tool_call_id:
-                self.pending_tool_calls.add(str(tool_call_id))
+                self.active_tool_call_ids.add(str(tool_call_id))
         elif event_type in {"tool_completed", "tool_failed", "tool_interrupted"}:
             tool_call_id = event.get("toolCallId")
             if tool_call_id:
-                self.pending_tool_calls.discard(str(tool_call_id))
+                self.active_tool_call_ids.discard(str(tool_call_id))
         elif event_type == "error":
             self.error = str(event.get("error", "unknown error"))
 

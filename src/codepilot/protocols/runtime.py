@@ -20,7 +20,7 @@ from typing import Any, Awaitable, Callable, Literal, TypedDict, cast
 
 from .errors import ErrorInfo
 from .conversation import AssistantMessage, Message, ToolResultMessage, UserMessage
-from .tools import ToolResult, ToolResultStatus
+from .tools import ToolResultStatus
 
 
 # ── 枚举类型 ────────────────────────────────────────────────────

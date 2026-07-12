@@ -65,7 +65,17 @@ ShellCommandClass = Literal["verification", "read_only", "mutation", "high_risk"
 # ---------------------------------------------------------------------------
 # .codepilot 是 Codepilot 内部元数据和状态的存储目录，
 # 禁止通过 Shell 命令直接修改其中的文件，必须通过 Session Store API 操作。
-_INTERNAL_ROOTS = {".codepilot"}
+_INTERNAL_ROOTS = {".codepilot", ".git"}
+_SENSITIVE_FILE_NAMES = {
+    ".env",
+    "credentials",
+    "credentials.json",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "known_hosts",
+}
 
 # ---------------------------------------------------------------------------
 # 高风险命令的正则模式列表
@@ -334,8 +344,21 @@ class WorkspaceSandbox:
         target = self.ensure_within_workspace(path)
         relative = target.relative_to(self.root)
         if relative.parts and relative.parts[0].lower() in _INTERNAL_ROOTS:
-            raise ValueError("Internal .codepilot files must be updated through session stores")
+            raise ValueError("Internal workspace state cannot be modified by tools")
+        self._ensure_not_sensitive(relative)
         return target
+
+    def ensure_readable_path(self, path: str | Path) -> Path:
+        """Validate a workspace path and reject credential-like sensitive files."""
+
+        target = self.ensure_within_workspace(path)
+        self._ensure_not_sensitive(target.relative_to(self.root))
+        return target
+
+    @staticmethod
+    def _ensure_not_sensitive(relative: Path) -> None:
+        if is_sensitive_workspace_path(relative):
+            raise ValueError(f"Sensitive workspace file is protected: {relative.as_posix()}")
 
 
 @dataclass(frozen=True)
@@ -536,6 +559,51 @@ def classify_shell_command(command: str) -> ShellCommandClass:
 
     # 无法匹配任何已知安全模式，标记为未知
     return "unknown"
+
+
+def validate_shell_command(command: str) -> ShellCommandClass:
+    """Apply non-bypassable Shell safety checks before permission approval."""
+
+    shell_class = classify_shell_command(command)
+    if shell_class == "high_risk":
+        raise ValueError("Shell command is high-risk and cannot be approved")
+    if command_mentions_internal_state(command):
+        raise ValueError("Shell command targets internal workspace state")
+    if command_mentions_sensitive_path(command):
+        raise ValueError("Shell command targets a sensitive workspace file")
+    return shell_class
+
+
+def is_sensitive_workspace_path(path: str | Path) -> bool:
+    relative = Path(path)
+    name = relative.name.lower()
+    parts = tuple(part.lower() for part in relative.parts)
+    if name == ".env" or (
+        name.startswith(".env.")
+        and not name.endswith((".example", ".sample", ".template"))
+    ):
+        return True
+    if name in _SENSITIVE_FILE_NAMES or name.endswith((".key", ".p12", ".pfx")):
+        return True
+    if ".ssh" in parts or (".aws" in parts and name == "credentials"):
+        return True
+    if len(parts) >= 2 and parts[0] == ".git" and name in {"config", "credentials"}:
+        return True
+    return False
+
+
+def command_mentions_sensitive_path(command: str) -> bool:
+    text = command.replace("\\", "/").lower()
+    markers = (
+        "/.env",
+        " .env",
+        "/id_rsa",
+        "/id_ed25519",
+        "/credentials",
+        ".ssh/",
+        ".aws/credentials",
+    )
+    return any(marker in text for marker in markers)
 
 
 def build_shell_environment(extra_allowed: tuple[str, ...] = ()) -> dict[str, str]:

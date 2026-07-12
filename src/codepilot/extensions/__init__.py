@@ -20,24 +20,9 @@ from codepilot.protocols.commands import (
     SessionLifecycleContext,
     SessionLifecycleView,
 )
-from .types import (
-    AfterToolCallContext,
-    AfterToolCallResult,
-    AfterHook,
-    BeforeToolCallContext,
-    BeforeToolCallResult,
-    BeforeHook,
-    LoadedExtensions,
-    SkillSpec,
-)
+from .types import LoadedExtensions, SkillSpec
 
 __all__ = [
-    "BeforeHook",
-    "AfterHook",
-    "BeforeToolCallContext",
-    "BeforeToolCallResult",
-    "AfterToolCallContext",
-    "AfterToolCallResult",
     "CommandHandler",
     "RegisteredCommand",
     "SessionCommandContext",

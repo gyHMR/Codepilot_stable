@@ -36,6 +36,38 @@ def test_codepilot_namespace_imports() -> None:
     assert dingtalk_main.main is not None
 
 
+def test_tool_module_layout_matches_design() -> None:
+    package = SRC / "codepilot"
+    tools_dir = package / "tools"
+    builtins_dir = tools_dir / "builtins"
+
+    assert {path.name for path in tools_dir.glob("*.py")} == {
+        "__init__.py",
+        "codecs.py",
+        "contracts.py",
+        "execution.py",
+        "registry.py",
+        "results.py",
+        "runtime.py",
+        "sandbox.py",
+        "security.py",
+        "state.py",
+    }
+    assert {path.name for path in builtins_dir.glob("*.py")} == {
+        "__init__.py",
+        "files.py",
+        "search.py",
+        "shell.py",
+        "workspace.py",
+    }
+    assert (package / "protocols" / "tools.py").is_file()
+    assert (package / "core" / "tool_adapters" / "plan.py").is_file()
+    assert (package / "core" / "tool_adapters" / "interaction.py").is_file()
+    assert (package / "runtime" / "tool_adapters" / "subagents.py").is_file()
+    assert (package / "sessions" / "tool_state_store.py").is_file()
+    assert (package / "extensions" / "mcp" / "adapter.py").is_file()
+
+
 def test_im_interface_source_package_is_removed() -> None:
     im_dir = SRC / "codepilot" / "interfaces" / "im"
     remaining_sources = sorted(path.name for path in im_dir.glob("*.py")) if im_dir.exists() else []
@@ -110,13 +142,13 @@ def test_session_controller_public_surface_matches_v2_contract() -> None:
         "close",
         "commit_run",
             "describe",
-            "pending_approval",
-            "pending_approvals",
+            "current_plan_state",
             "prepare_continuation",
             "prepare_resume",
             "prepare_run",
             "record_event",
             "runtime_checkpoint",
+            "save_plan_state",
         "stage_derived_session",
     }
     assert not hasattr(controller_module, "_controller_from_runtime_session")
@@ -382,28 +414,14 @@ def test_removed_protocol_and_llm_aliases_are_gone() -> None:
 
 
 def test_removed_builtin_file_tool_aliases_are_gone(tmp_path: Path) -> None:
-    from codepilot.tools.builtins import create_builtin_tools, get_builtin_tool_metadata
-    from codepilot.tools.registry import MUTATING_TOOL_NAMES, READ_ONLY_TOOL_NAMES
+    from codepilot.tools.builtins import create_builtin_registrations
 
     removed_aliases = {"list_dir", "read_file", "write_file"}
-    tool_names = {tool.name for tool in create_builtin_tools(tmp_path)}
+    tool_names = {tool.spec.name for tool in create_builtin_registrations(tmp_path)}
 
     assert tool_names.isdisjoint(removed_aliases)
-    assert {"propose_plan", "create_build_plan", "update_plan_progress", "close_plan"} <= tool_names
-    assert "complete_task_step" not in tool_names
-    assert "task_update" not in tool_names
-    assert READ_ONLY_TOOL_NAMES.isdisjoint(removed_aliases)
-    assert MUTATING_TOOL_NAMES.isdisjoint(removed_aliases)
-    assert all(get_builtin_tool_metadata(name) is None for name in removed_aliases)
-
-    for plan_tool in ("propose_plan", "create_build_plan", "update_plan_progress", "close_plan"):
-        plan_metadata = get_builtin_tool_metadata(plan_tool)
-        assert plan_metadata is not None
-        assert plan_metadata.category == "plan"
-        assert plan_metadata.read_only is True
-        assert plan_metadata.risk_level == "low"
-    assert get_builtin_tool_metadata("complete_task_step") is None
-    assert get_builtin_tool_metadata("task_update") is None
+    assert {"ls", "read", "write", "edit", "apply_patch"} <= tool_names
+    assert "propose_plan" not in tool_names
 
 
 def test_tools_refactor_exposes_new_lifecycle_modules() -> None:
@@ -412,8 +430,10 @@ def test_tools_refactor_exposes_new_lifecycle_modules() -> None:
     expected_modules = (
         "codepilot.tools.contracts",
         "codepilot.tools.registry",
-        "codepilot.tools.permissions",
-        "codepilot.tools.approvals",
+        "codepilot.tools.codecs",
+        "codepilot.tools.execution",
+        "codepilot.tools.security",
+        "codepilot.tools.state",
         "codepilot.tools.results",
         "codepilot.tools.runtime",
         "codepilot.tools.sandbox",
@@ -421,7 +441,6 @@ def test_tools_refactor_exposes_new_lifecycle_modules() -> None:
         "codepilot.tools.builtins.files",
         "codepilot.tools.builtins.search",
         "codepilot.tools.builtins.shell",
-        "codepilot.tools.builtins.plan",
         "codepilot.tools.builtins.workspace",
     )
 
@@ -479,11 +498,12 @@ def test_tools_top_level_exports_contracts_not_live_runtime() -> None:
     import codepilot.tools as tools
     from codepilot.tools import __all__ as tool_exports
 
-    assert "ToolDefinition" in tool_exports
+    assert "ToolRegistration" in tool_exports
+    assert "ToolExecutionRequest" in tool_exports
     assert "ToolResult" in tool_exports
     assert "ToolPort" in tool_exports
     assert "ToolRuntime" in tool_exports
-    assert "PermissionPolicy" in tool_exports
+    assert "PermissionEngine" in tool_exports
     assert "WorkspaceSandbox" not in tool_exports
     assert "AgentTool" not in tool_exports
     assert "AgentToolResult" not in tool_exports
@@ -494,7 +514,9 @@ def test_tools_top_level_exports_contracts_not_live_runtime() -> None:
     assert "ToolResultGuard" not in tool_exports
     assert hasattr(tools, "ToolRuntime")
     assert hasattr(tools, "ToolPort")
-    assert hasattr(tools, "ToolDefinition")
+    assert hasattr(tools, "ToolRegistration")
+    assert not hasattr(tools, "ToolDefinition")
+    assert not hasattr(tools, "PermissionPolicy")
     assert not hasattr(tools, "ToolRuntimePort")
     assert not hasattr(tools, "ToolRuntimeRequest")
     assert not hasattr(tools, "ToolRuntimeResult")
@@ -592,9 +614,9 @@ def test_removed_evaluation_service_facade_is_gone() -> None:
 def test_core_namespace_keeps_cross_layer_contracts_out() -> None:
     import codepilot.core as core
     from codepilot.core import __all__ as core_exports
-    from codepilot.extensions import AfterToolCallResult
+    import codepilot.extensions as extensions
     from codepilot.protocols import AgentRunResult
-    from codepilot.tools import ToolDefinition
+    from codepilot.tools import ToolRegistration
 
     assert not hasattr(core, "AgentEvent")
     assert not hasattr(core, "AgentRunResult")
@@ -619,8 +641,8 @@ def test_core_namespace_keeps_cross_layer_contracts_out() -> None:
     assert "LLMStreamRunner" not in core_exports
     assert "ToolCallCoordinator" not in core_exports
     assert AgentRunResult.__module__.startswith("codepilot.protocols")
-    assert ToolDefinition.__module__ == "codepilot.tools.contracts"
-    assert AfterToolCallResult.__module__ == "codepilot.protocols.commands"
+    assert ToolRegistration.__module__ == "codepilot.tools.contracts"
+    assert not hasattr(extensions, "AfterToolCallResult")
 
 
 def test_web_interface_package_is_removed() -> None:

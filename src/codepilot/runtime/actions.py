@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from codepilot.sessions.contracts import SessionCommandRecord, SessionRunRecord
-from codepilot.tools.contracts import ToolInterruption
+from codepilot.tools.security import ApprovalChallenge
 
 
 ApprovalDecisionValue = Literal["approve", "deny"]
@@ -61,7 +61,7 @@ class ProgressFrame:
 
 @dataclass(frozen=True)
 class ApprovalRequiredFrame:
-    approval: ToolInterruption
+    approval: ApprovalChallenge
     kind: Literal["approval_required"] = field(default="approval_required", init=False)
 
 

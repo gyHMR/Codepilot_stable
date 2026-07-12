@@ -23,7 +23,7 @@ from codepilot.protocols import (
     Usage,
     UserMessage,
 )
-from codepilot.tools.contracts import ToolCatalogView
+from codepilot.tools.registry import ToolCatalogSnapshot
 
 from .context_preflight import TOOL_RESULT_MAX_CHARS, prepare_messages_for_model
 from .contracts import AgentLoopInput, AgentLoopPorts, AgentMessage
@@ -34,6 +34,7 @@ class ModelTurnResult:
     message: AssistantMessage
     usage: Usage | None = None
     error: Any = None
+    catalog_snapshot: ToolCatalogSnapshot | None = None
 
 
 async def run_model_turn(
@@ -45,19 +46,27 @@ async def run_model_turn(
 ) -> ModelTurnResult:
     """Ask the model for the next assistant message."""
 
+    catalog_snapshot = tool_catalog_snapshot_for_request(input, ports)
     if ports.model is None:
         return ModelTurnResult(
-            message=AssistantMessage(content=[TextContent(text=input.user_prompt or "")])
+            message=AssistantMessage(content=[TextContent(text=input.user_prompt or "")]),
+            catalog_snapshot=catalog_snapshot,
         )
 
     assistant: AssistantMessage | None = None
     usage = None
-    request = await build_model_request(input, ports, messages)
+    request = await build_model_request(
+        input,
+        ports,
+        messages,
+        catalog_snapshot=catalog_snapshot,
+    )
     async for event in ports.model.stream(request):
         if isinstance(event, LLMFailed):
             return ModelTurnResult(
                 message=AssistantMessage(content=[TextContent(text="")]),
                 error=event.error,
+                catalog_snapshot=catalog_snapshot,
             )
         if isinstance(event, LLMTextDelta):
             _emit_llm_delta(
@@ -87,6 +96,7 @@ async def run_model_turn(
     return ModelTurnResult(
         message=assistant or AssistantMessage(content=[TextContent(text="")]),
         usage=usage,
+        catalog_snapshot=catalog_snapshot,
     )
 
 
@@ -113,8 +123,11 @@ async def build_model_request(
     input: AgentLoopInput,
     ports: AgentLoopPorts,
     messages: list[Any],
+    *,
+    catalog_snapshot: ToolCatalogSnapshot | None = None,
 ) -> LLMRequest:
-    tools = tool_catalog_for_request(input, ports)
+    snapshot = catalog_snapshot or tool_catalog_snapshot_for_request(input, ports)
+    tools = tool_catalog_for_request(input, ports, catalog_snapshot=snapshot)
     request_data: dict[str, Any] = {
         "run_id": input.run_id,
         "session_id": input.correlation.session_id or "",
@@ -196,52 +209,46 @@ def _control_text(control: dict[str, object], key: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def tool_catalog_for_request(input: AgentLoopInput, ports: AgentLoopPorts) -> list[Tool]:
+def tool_catalog_snapshot_for_request(
+    input: AgentLoopInput,
+    ports: AgentLoopPorts,
+) -> ToolCatalogSnapshot | None:
     if bool(input.context.get("suppress_tools", False)):
+        return None
+    if ports.tools is None:
+        return None
+    return ports.tools.catalog_snapshot(mode=_tool_mode(input.mode))
+
+
+def tool_catalog_for_request(
+    input: AgentLoopInput,
+    ports: AgentLoopPorts,
+    *,
+    catalog_snapshot: ToolCatalogSnapshot | None = None,
+) -> list[Tool]:
+    snapshot = catalog_snapshot or tool_catalog_snapshot_for_request(input, ports)
+    if snapshot is None:
         return []
-    if ports.tools is not None:
-        catalog = ports.tools.catalog(input.mode)
-        if catalog:
-            return [_as_tool(item) for item in _catalog_items(catalog)]
-    return [_as_tool(item) for item in input.tools]
-
-
-def _catalog_items(catalog: Any) -> list[Any]:
-    if isinstance(catalog, ToolCatalogView):
-        return list(catalog.tools)
-    if isinstance(catalog, dict):
-        value = catalog.get("tools")
-        if isinstance(value, (list, tuple)):
-            return list(value)
-        return [catalog]
-    if isinstance(catalog, (list, tuple)):
-        return list(catalog)
-    return [catalog]
-
-
-def _as_tool(item: Any) -> Tool:
-    if isinstance(item, Tool):
-        return item
-    if isinstance(item, str):
-        return Tool(name=item, description=item, parameters={})
-    if hasattr(item, "to_spec"):
-        spec = item.to_spec()
-        if isinstance(spec, Tool):
-            return spec
-    if isinstance(item, dict):
-        name = str(item.get("name") or item.get("id") or "")
-        description = str(item.get("description") or name)
-        return Tool(
-            name=name,
-            description=description,
-            parameters=dict(item.get("parameters") or item.get("input_schema") or {}),
+    return [
+        Tool(
+            name=item.spec.name,
+            description=item.spec.description,
+            parameters=_plain_json(item.spec.input_schema),
         )
-    name = str(getattr(item, "name"))
-    return Tool(
-        name=name,
-        description=str(getattr(item, "description", "") or name),
-        parameters=dict(getattr(item, "parameters", {}) or {}),
-    )
+        for item in snapshot.entries
+    ]
+
+
+def _plain_json(value: Any) -> Any:
+    if isinstance(value, dict) or hasattr(value, "items"):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json(item) for item in value]
+    return value
+
+
+def _tool_mode(mode: str) -> str:
+    return "plan" if mode in {"read", "plan"} else "execute"
 
 
 def convert_to_llm(

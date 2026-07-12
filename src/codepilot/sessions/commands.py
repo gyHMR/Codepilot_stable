@@ -947,8 +947,6 @@ def _open_derived_runtime(session: Any, session_id: str) -> Any:
             extension_commands=dict(session.extension_commands),
             before_prompt_hooks=list(session.before_prompt_hooks),
             after_prompt_hooks=list(session.after_prompt_hooks),
-            before_tool_call=session.before_tool_call,
-            after_tool_call=session.after_tool_call,
             stream_fn=session.stream_fn,
             prepare_context=getattr(session, "_custom_prepare_context", None),
         )

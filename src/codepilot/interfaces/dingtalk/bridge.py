@@ -530,13 +530,8 @@ class DingTalkBridge:
     ) -> None:
         event_type = event.get("type")
         if event_type == "tool_interrupted":
-            result = event.get("result")
-            status = event.get("status") or _field(result, "status")
-            approval_id = (
-                event.get("approvalId")
-                or event.get("approval_id")
-                or _field(result, "approval_id")
-            )
+            status = event.get("status")
+            approval_id = event.get("approvalId")
             if status == "approval_required" and approval_id:
                 self.audit.record(
                     "approval_requested",
