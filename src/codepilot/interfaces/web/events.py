@@ -114,6 +114,10 @@ class EventHub:
                 return ReplayResult(events=events[index + 1 :])
         return ReplayResult(events=(), expired=bool(events))
 
+    @property
+    def latest_sequence(self) -> int:
+        return self._events[-1].sequence if self._events else 0
+
 
 def _run_id(frame: Any) -> str | None:
     record = getattr(frame, "record", None)

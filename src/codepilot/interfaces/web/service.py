@@ -72,6 +72,13 @@ class WebService:
         self.events_for(ref.session_id)
         return self.session_detail(ref.session_id)
 
+    async def get_session(self, session_id: str) -> dict[str, Any]:
+        await self.ensure_open(session_id)
+        return self.session_detail(session_id)
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        return [self.session_detail(session_id) for session_id in sorted(self._opened)]
+
     def events_for(self, session_id: str) -> EventHub:
         return self._hubs.setdefault(
             session_id, EventHub(capacity=self._event_capacity)
