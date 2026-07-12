@@ -28,7 +28,7 @@ class WebServerOptions:
             )
 
 
-def run_web_server(options: WebServerOptions) -> None:
+async def run_web_server(options: WebServerOptions) -> None:
     try:
         import uvicorn
     except ImportError as exc:
@@ -37,13 +37,14 @@ def run_web_server(options: WebServerOptions) -> None:
         ) from exc
 
     os.environ["CODEPILOT_WEB_WORKSPACE"] = str(options.workspace)
-    uvicorn.run(
+    config = uvicorn.Config(
         "codepilot.interfaces.web.app:create_app_from_env",
         host=options.host,
         port=options.port,
         reload=options.reload,
         factory=True,
     )
+    await uvicorn.Server(config).serve()
 
 
 __all__ = ["WebServerOptions", "run_web_server"]

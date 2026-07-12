@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -220,7 +221,7 @@ async def _run_from_args(args: argparse.Namespace) -> int:
     if args.command == "web":
         from codepilot.interfaces.web.main import WebServerOptions, run_web_server
 
-        run_web_server(
+        server_result = run_web_server(
             WebServerOptions(
                 host=args.host,
                 port=args.port,
@@ -228,6 +229,8 @@ async def _run_from_args(args: argparse.Namespace) -> int:
                 reload=args.reload,
             )
         )
+        if inspect.isawaitable(server_result):
+            await server_result
         return 0
 
     intent = build_session_intent(args)

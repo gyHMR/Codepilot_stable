@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 
@@ -62,3 +64,27 @@ def test_non_loopback_host_warns_about_missing_authentication(capsys, tmp_path) 
     WebServerOptions(host="0.0.0.0", port=8000, workspace=tmp_path)
 
     assert "no authentication" in capsys.readouterr().err.lower()
+
+
+def test_web_server_awaits_uvicorn_without_nested_event_loop(monkeypatch, tmp_path) -> None:
+    from codepilot.interfaces.web.main import WebServerOptions, run_web_server
+
+    calls = {}
+
+    class FakeConfig:
+        def __init__(self, app, **kwargs):
+            calls["config"] = (app, kwargs)
+
+    class FakeServer:
+        def __init__(self, config):
+            calls["server"] = config
+
+        async def serve(self):
+            calls["served"] = True
+
+    monkeypatch.setitem(sys.modules, "uvicorn", SimpleNamespace(Config=FakeConfig, Server=FakeServer))
+
+    asyncio.run(run_web_server(WebServerOptions(workspace=tmp_path)))
+
+    assert calls["served"] is True
+    assert calls["config"][1]["factory"] is True
