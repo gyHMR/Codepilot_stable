@@ -20,7 +20,7 @@ from codepilot.core.contracts import (
 from codepilot.core.runner import run_agent_loop
 from codepilot.llm.ports import ModelDescriptor, ModelPort
 from codepilot.protocols import UserMessage
-from codepilot.sessions.subagents import SubagentStore
+from .subagent_registry import SubagentStore
 from codepilot.tools.contracts import ToolPort
 
 LIST_EXPLORATION_AGENTS_TOOL = "list_exploration_agents"

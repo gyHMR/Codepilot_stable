@@ -20,6 +20,7 @@ from codepilot.core.contracts import (
     RunCorrelation,
 )
 from codepilot.core.plan import PlanState, ensure_planning_budget_profile, ensure_run_mode
+from codepilot.core.plan_state import PlanStateManager
 from codepilot.core.runner import maybe_await
 from codepilot.llm.ports import ModelDescriptor
 from codepilot.protocols import (
@@ -33,14 +34,15 @@ from codepilot.protocols import (
 )
 from codepilot.protocols.commands import SessionLifecycleContext, SessionLifecycleView
 
-from .context import (
+from codepilot.sessions.context import (
     ContextGovernor,
     SessionContextState,
-    build_context_freshness_notice,
     calibrate_context_usage,
 )
-from .contracts import (
+from codepilot.sessions.contracts import (
+    ModelRef,
     PreparedAgentRun,
+    RecoveryRequest,
     RollbackBaselineRef,
     SessionContinuationIntent,
     SessionOptions,
@@ -49,14 +51,29 @@ from .contracts import (
     SessionRunRecord,
     SessionView,
 )
-from .conversation import SessionConversationState
-from .rollback import GitRollbackBaseline, build_rollback_metadata, capture_git_baseline
-from .memory import MemoryRetriever, MemoryStore, MemoryWriteContext, MemoryWriter
-from .store import SessionStore, new_session_id
-from .plan_state import PlanStateStore
+from .live_conversation import SessionConversationState
+from codepilot.sessions.rollback import GitRollbackBaseline, build_rollback_metadata, capture_git_baseline
+from codepilot.sessions.memory import (
+    MemoryRepository,
+    MemoryRetriever,
+    MemoryStore,
+    MemoryWriteContext,
+    MemoryWriter,
+)
+from codepilot.sessions.workspace import capture_workspace_checkpoint
+from codepilot.sessions.service import (
+    BeginRunRequest,
+    CommitBoundaryRequest,
+    CreateSessionRequest,
+    FinishRunRequest,
+    ResumeRunRequest,
+    SessionStateService,
+    new_session_id,
+)
+from .session_state_adapter import RuntimeSessionStateAdapter
 
 
-logger = logging.getLogger("codepilot.sessions.runtime")
+logger = logging.getLogger("codepilot.runtime.session_coordinator")
 
 _TOOL_ITERATION_BUDGET_BY_PROFILE = {
     "conservative": {
@@ -100,7 +117,7 @@ _PLAN_STATE_EVENT_TYPES = {
 }
 
 
-class SessionRuntime:
+class RuntimeSessionCoordinator:
     """Live session object.
 
     A session runtime owns the mutable state needed while the agent is running:
@@ -121,20 +138,32 @@ class SessionRuntime:
             self.current_mode,
             fallback=options.system_prompt,
         )
-        self.store = SessionStore(self.workspace_dir, self.session_id)
-        self.store.ensure_initialized(
-            model_id=options.model.id,
-            provider=options.model.provider,
-            system_prompt=system_prompt,
+        self.state_service = SessionStateService(self.workspace_dir)
+        session_state = (
+            self.state_service.get_session(self.session_id)
+            if options.session_id is not None
+            else None
         )
-        persisted = self.store.load_session_messages()
+        if session_state is None:
+            session_state = self.state_service.create_session(
+                CreateSessionRequest(
+                    workspace_root=str(self.workspace_dir),
+                    model=ModelRef(
+                        provider=options.model.provider,
+                        model=options.model.id,
+                    ),
+                    current_mode=self.current_mode,
+                    system_prompt_hash=_hash_text(system_prompt),
+                    session_id=self.session_id,
+                )
+            )
+        self.session_state = session_state
+        self.current_mode = ensure_run_mode(session_state.current_mode)
+        persisted = [
+            record.message
+            for record in self.state_service.load_messages(self.session_id)
+        ]
         messages = [*persisted, *options.messages]
-        self.store.update_meta(
-            {
-                "current_mode": self.current_mode,
-                "system_prompt_hash": _hash_text(system_prompt),
-            }
-        )
         self.planning_budget_profile = ensure_planning_budget_profile(
             options.planning_budget_profile
         )
@@ -147,8 +176,8 @@ class SessionRuntime:
         )
 
         self.memory_enabled = bool(options.memory_enabled)
-        self.plan_state = PlanStateStore(self.store)
-        self.memory_store = MemoryStore(self.store)
+        self.plan_state = PlanStateManager()
+        self.memory_store = MemoryStore(MemoryRepository(self.workspace_dir))
         self.memory_writer = MemoryWriter(
             store=self.memory_store,
             workspace_dir=self.workspace_dir,
@@ -158,6 +187,7 @@ class SessionRuntime:
             workspace_dir=self.workspace_dir,
         )
         self.context_governor = self._new_context_governor()
+        self._restore_active_checkpoint()
         self._custom_prepare_context = options.prepare_context
         self.prepare_context = self._custom_prepare_context or self.context_governor.prepare
         self.latest_context_report: dict[str, Any] | None = None
@@ -176,7 +206,6 @@ class SessionRuntime:
         self._last_session_run_record: SessionRunRecord | None = None
         self._rollback_baselines: dict[str, GitRollbackBaseline] = {}
         self._persisted_event_ids: set[str] = set()
-        self._persisted_message_object_ids: dict[int, str] = {}
 
     async def prepare_run(
         self,
@@ -197,16 +226,27 @@ class SessionRuntime:
             is_continue=is_continue,
         )
         user_message = UserMessage(content=intent.text)
-        user_message_id = self.store.append_message(user_message, run_id=run_id)
+        begun = self.state_service.begin_run(
+            BeginRunRequest(
+                session_id=self.session_id,
+                run_id=run_id,
+                user_message=user_message,
+                initial_core_state={},
+                workspace=capture_workspace_checkpoint(self.workspace_dir),
+            ),
+            expected_session_revision=self.session_state.revision,
+        )
+        self.session_state = begun.session
+        user_message_id = begun.message.message_id
         user_message.metadata["session_message_id"] = user_message_id
         self.conversation.append_messages([user_message])
-        self.store.set_checkpoint(
-            {
-                "phase": "user_received",
-                "state": "user_received",
-                "run_id": run_id,
-                "message_id": user_message_id,
-            }
+        state_port = RuntimeSessionStateAdapter(
+            self.state_service,
+            begun.session,
+            begun.run,
+            context_state=self.context_governor.checkpoint_state,
+            plan_state=self.plan_state.current,
+            workspace_state=self._capture_workspace_checkpoint,
         )
         if not is_continue:
             if self.memory_enabled:
@@ -239,6 +279,7 @@ class SessionRuntime:
                 retry_policy=self.retry_policy(),
             ),
             context_port=RuntimeSessionContextPort(self),
+            state_port=state_port,
             input_messages=[user_message],
             rollback_baseline=self._remember_rollback_baseline(run_id, rollback),
             context_refs={"context": "session_context"},
@@ -253,9 +294,40 @@ class SessionRuntime:
         run_id: str,
         model: ModelDescriptor,
     ) -> PreparedAgentRun:
-        messages = self._messages_for_loop()
+        recovery = self.state_service.inspect_recovery(
+            RecoveryRequest(
+                session_id=self.session_id,
+                run_id=run_id,
+                expected_waiting_kind="tool_approval",
+            )
+        )
+        if recovery.bundle is None:
+            raise ValueError(f"Run is not recoverable: {run_id}")
+        self._ensure_workspace_recovery(recovery.bundle.workspace_status)
+        self._restore_context_checkpoint(recovery.bundle.run)
+        self._restore_plan_state(recovery.bundle.run)
+        resumed_run = self.state_service.resume_run(
+            ResumeRunRequest(
+                session_id=self.session_id,
+                run_id=run_id,
+                checkpoint_id=recovery.bundle.run.checkpoint.checkpoint_id,  # type: ignore[union-attr]
+                request_id=intent.approval_id,
+            ),
+            expected_run_revision=recovery.bundle.run.revision,
+        )
+        self.session_state = recovery.bundle.session
+        state_port = RuntimeSessionStateAdapter(
+            self.state_service,
+            self.session_state,
+            resumed_run,
+            context_state=self.context_governor.checkpoint_state,
+            plan_state=self.plan_state.current,
+            workspace_state=self._capture_workspace_checkpoint,
+        )
+        messages = [record.message for record in recovery.bundle.messages]
+        self.conversation.set_messages(messages)
         event_start_seq, turn_start_seq = self._run_sequence_offsets(run_id)
-        run_state = self._checkpoint_run_state(run_id)
+        run_state = dict(resumed_run.core_state)
         resume_input = AgentResumeInput(
             run_id=run_id,
             correlation=RunCorrelation(session_id=self.session_id),
@@ -294,6 +366,7 @@ class SessionRuntime:
             ),
             resume_input=resume_input,
             context_port=RuntimeSessionContextPort(self),
+            state_port=state_port,
             plan_refs={"plan_state": self.active_plan_state()},
             rollback_baseline=self._rollback_baseline_ref(run_id),
         )
@@ -317,24 +390,64 @@ class SessionRuntime:
                 model=model,
             )
 
-        checkpoint = self.runtime_checkpoint()
-        if checkpoint is None or _optional_text(checkpoint.get("run_id")) != run_id:
+        recovery = self.state_service.inspect_recovery(
+            RecoveryRequest(session_id=self.session_id, run_id=run_id)
+        )
+        if recovery.bundle is None or recovery.bundle.run.checkpoint is None:
             raise ValueError(f"No resumable checkpoint for run: {run_id}")
-        run_state = self._checkpoint_run_state(run_id)
-
+        self._ensure_workspace_recovery(recovery.bundle.workspace_status)
+        self._restore_context_checkpoint(recovery.bundle.run)
+        self._restore_plan_state(recovery.bundle.run)
+        checkpoint = recovery.bundle.run.checkpoint
+        waiting = checkpoint.waiting
+        resumed_run = self.state_service.resume_run(
+            ResumeRunRequest(
+                session_id=self.session_id,
+                run_id=run_id,
+                checkpoint_id=checkpoint.checkpoint_id,
+                request_id=waiting.request_id if waiting is not None else None,
+            ),
+            expected_run_revision=recovery.bundle.run.revision,
+        )
+        self.session_state = recovery.bundle.session
         input_messages: list[Message] = []
         if intent.text:
             user_message = UserMessage(content=intent.text)
-            message_id = self.store.append_message(user_message, run_id=run_id)
-            user_message.metadata["session_message_id"] = message_id
+            committed = self.state_service.commit_boundary(
+                CommitBoundaryRequest(
+                    session_id=self.session_id,
+                    run_id=run_id,
+                    status="running",
+                    phase="model",
+                    resume_point="before_model",
+                    core_state=resumed_run.core_state,
+                    new_messages=(user_message,),
+                    workspace=(resumed_run.checkpoint.workspace if resumed_run.checkpoint else None),
+                ),
+                expected_run_revision=resumed_run.revision,
+                expected_session_revision=self.session_state.revision,
+            )
+            resumed_run = committed.run
+            self.session_state = committed.session
+            user_message.metadata["session_message_id"] = committed.committed_messages[0].message_id
             self.conversation.append_messages([user_message])
             input_messages.append(user_message)
+        state_port = RuntimeSessionStateAdapter(
+            self.state_service,
+            self.session_state,
+            resumed_run,
+            context_state=self.context_governor.checkpoint_state,
+            plan_state=self.plan_state.current,
+            workspace_state=self._capture_workspace_checkpoint,
+        )
+        run_state = dict(resumed_run.core_state)
 
         event_start_seq, turn_start_seq = self._run_sequence_offsets(run_id)
         mode = ensure_run_mode(intent.target_mode or self.current_mode)
         plan = self.context_plan_state_for_mode(mode)
         synthetic_control = _continuation_control(intent.kind)
-        messages = self._messages_for_loop()
+        messages = [record.message for record in self.state_service.load_messages(self.session_id)]
+        self.conversation.set_messages(messages)
         loop_input = AgentLoopInput(
             run_id=run_id,
             correlation=RunCorrelation(session_id=self.session_id),
@@ -343,7 +456,7 @@ class SessionRuntime:
             context=self._loop_context(
                 mode,
                 synthetic_control=synthetic_control,
-                checkpoint_phase=str(checkpoint.get("phase") or intent.kind),
+                checkpoint_phase=waiting.kind if waiting is not None else intent.kind,
             ),
             model=model,
             tools=[],
@@ -360,6 +473,7 @@ class SessionRuntime:
             session_id=self.session_id,
             loop_input=loop_input,
             context_port=RuntimeSessionContextPort(self),
+            state_port=state_port,
             input_messages=input_messages,
             context_refs={"context": "session_context", "continuation": intent.kind},
             memory_refs={"enabled": self.memory_enabled},
@@ -375,6 +489,46 @@ class SessionRuntime:
         *,
         store_outcome: bool,
     ) -> SessionRunRecord:
+        state_port = (
+            prepared.state_port
+            if isinstance(prepared.state_port, RuntimeSessionStateAdapter)
+            else None
+        )
+        if state_port is not None:
+            if outcome.status not in {"waiting_approval", "waiting_user"}:
+                terminal_status = {
+                    "completed": "completed",
+                    "failed": "failed",
+                    "aborted": "cancelled",
+                    "cancelled": "cancelled",
+                }.get(result.status, "failed")
+                finished = self.state_service.finish_run(
+                    FinishRunRequest(
+                        session_id=self.session_id,
+                        run_id=result.run_id,
+                        status=terminal_status,  # type: ignore[arg-type]
+                        stop_reason=result.stop_reason,
+                        result=result,
+                        workspace_effects=None,
+                        final_messages=tuple(
+                            message
+                            for message in outcome.new_messages
+                            if id(message) not in state_port.committed_message_ids
+                        ),
+                    ),
+                    expected_run_revision=state_port.run.revision,
+                    expected_session_revision=state_port.session.revision,
+                )
+                state_port.run = finished.run
+                state_port.session = finished.session
+                uncommitted = [
+                    message
+                    for message in outcome.new_messages
+                    if id(message) not in state_port.committed_message_ids
+                ]
+                for message, record in zip(uncommitted, finished.committed_messages, strict=True):
+                    state_port.committed_message_ids[id(message)] = record.message_id
+            self.session_state = state_port.session
         if store_outcome:
             for event in outcome.events:
                 payload = dict(event)
@@ -384,12 +538,11 @@ class SessionRuntime:
             committed_messages = list(outcome.new_messages)
             self.conversation.append_messages(committed_messages)
             for message in committed_messages:
-                if id(message) not in self._persisted_message_object_ids:
-                    message_id = self.store.append_message(message, run_id=result.run_id)
+                message_id = state_port.committed_message_ids.get(id(message)) if state_port else None
+                if message_id is not None:
                     _set_session_message_id(message, message_id)
             self.conversation.remember_result(result)
 
-        self.store.append_run_result(result)
         if prepared.rollback_baseline is not None:
             self._write_rollback_metadata(
                 result,
@@ -403,17 +556,6 @@ class SessionRuntime:
         if self.memory_enabled:
             self._finalize_memory(result)
         self.context_governor.finalize_run(result)
-        if outcome.status == "waiting_approval":
-            pass
-        elif outcome.stop_reason == "plan_approval_required":
-            self._save_plan_approval_checkpoint(outcome)
-        elif outcome.stop_reason == "plan_clarification_required":
-            self._save_plan_clarification_checkpoint(outcome)
-        elif outcome.stop_reason == "plan_incomplete":
-            self._save_plan_incomplete_checkpoint(outcome)
-        else:
-            self.store.set_checkpoint(None)
-        self._save_run_state_checkpoint(outcome)
         await self._run_lifecycle_hooks(
             text=_prompt_text(prepared),
             is_continue=_is_continue_text(_prompt_text(prepared)),
@@ -452,10 +594,10 @@ class SessionRuntime:
         return {
             "session_id": self.session_id,
             "message_count": len(self.conversation.messages),
-            "entry_ids": self.store.list_entry_ids(),
-            "entries": self.store.list_entries(),
-            "tree": self.store.get_session_tree(),
-            "leaf_id": self.store.get_leaf_id(),
+            "entry_ids": self.state_service.list_entry_ids(self.session_id),
+            "entries": self.state_service.list_entries(self.session_id),
+            "tree": self.state_service.get_session_tree(self.session_id),
+            "leaf_id": (self.state_service.get_session(self.session_id).leaf_message_id if self.state_service.get_session(self.session_id) else None),
             "current_mode": self.current_mode,
             "planning_budget_profile": self.planning_budget_profile,
             "plan_summary": self.plan_summary(),
@@ -494,54 +636,52 @@ class SessionRuntime:
         }
 
     def runtime_checkpoint(self) -> dict[str, Any] | None:
-        checkpoint = self._runtime_checkpoint()
-        return dict(checkpoint) if checkpoint is not None else None
+        run_id = self.session_state.current_run_id
+        if run_id is None:
+            return None
+        run = self.state_service.get_run(run_id)
+        if run is None or run.checkpoint is None:
+            return None
+        checkpoint = run.checkpoint
+        waiting = checkpoint.waiting
+        phase = checkpoint.resume_point
+        if waiting is not None:
+            phase = {
+                "tool_approval": "tool_approval",
+                "plan_confirmation": "plan_approval",
+                "user_input": str(waiting.payload.get("stop_reason") or "waiting_user"),
+            }[waiting.kind]
+        return {
+            "checkpoint_id": checkpoint.checkpoint_id,
+            "phase": phase,
+            "run_id": run.run_id,
+            "approval_id": (
+                waiting.request_id
+                if waiting is not None and waiting.kind == "tool_approval"
+                else None
+            ),
+            "request_id": waiting.request_id if waiting is not None else None,
+            "waiting_kind": waiting.kind if waiting is not None else None,
+            "run_state": dict(run.core_state),
+        }
 
     def _checkpoint_run_state(self, run_id: str) -> dict[str, object] | None:
-        checkpoint = self.runtime_checkpoint()
-        if checkpoint is None or _optional_text(checkpoint.get("run_id")) != run_id:
-            return None
-        run_state = checkpoint.get("run_state")
-        if not isinstance(run_state, dict):
-            return None
-        return dict(run_state)
-
-    def _save_run_state_checkpoint(self, outcome: AgentLoopOutcome) -> None:
-        if _is_terminal_outcome(outcome) or not outcome.run_state:
-            return
-        checkpoint = self.runtime_checkpoint()
-        if checkpoint is None:
-            checkpoint = {
-                "phase": outcome.stop_reason,
-                "run_id": outcome.run_id,
-            }
-        checkpoint_run_id = _optional_text(checkpoint.get("run_id"))
-        if checkpoint_run_id is not None and checkpoint_run_id != outcome.run_id:
-            return
-        checkpoint["run_id"] = outcome.run_id
-        checkpoint["run_state"] = dict(outcome.run_state)
-        self.store.set_checkpoint(checkpoint)
+        run = self.state_service.get_run(run_id)
+        return dict(run.core_state) if run is not None else None
 
     def continuation_run_id(self) -> str:
-        checkpoint = self.runtime_checkpoint()
-        if checkpoint is None:
-            raise ValueError("No paused run to continue")
-        run_id = _optional_text(checkpoint.get("run_id"))
+        run_id = self.session_state.current_run_id
         if run_id is None:
-            raise ValueError("Runtime checkpoint has no run_id")
+            raise ValueError("No paused run to continue")
         return run_id
 
     def resume_run_id(self, approval_id: str) -> str:
-        checkpoint = self.runtime_checkpoint()
-        if (
-            checkpoint is None
-            or _optional_text(checkpoint.get("approval_id")) != _optional_text(approval_id)
-        ):
+        run_id = self.session_state.current_run_id
+        run = self.state_service.get_run(run_id) if run_id is not None else None
+        waiting = run.checkpoint.waiting if run is not None and run.checkpoint is not None else None
+        if waiting is None or waiting.kind != "tool_approval" or waiting.request_id != approval_id:
             raise ValueError(f"Approval not found: {approval_id}")
-        run_id = _optional_text(checkpoint.get("run_id"))
-        if run_id is None:
-            raise ValueError(f"Approval has no run_id: {approval_id}")
-        return run_id
+        return run.run_id
 
     def pending_plan_approval(self) -> dict[str, Any] | None:
         state = self.workflow_plan_state()
@@ -617,19 +757,18 @@ class SessionRuntime:
         self.conversation.set_current_mode(normalized)
         if normalized != self.current_mode:
             self.current_mode = normalized
-            self.store.append_event(
+            self.session_state = self.state_service.update_session_mode(
+                self.session_id,
+                normalized,
+                expected_revision=self.session_state.revision,
+            )
+            self.append_event(
                 {
                     "type": "mode_changed",
                     "sessionId": self.session_id,
                     "currentMode": normalized,
                 }
             )
-        self.store.update_meta(
-            {
-                "current_mode": normalized,
-                "system_prompt_hash": _hash_text(self.conversation.system_prompt),
-            }
-        )
         return normalized
 
     def archive_plan_for_mode_switch(
@@ -643,7 +782,6 @@ class SessionRuntime:
         if not isinstance(current, dict):
             return None
         if current.get("status") not in {"proposed", "active"}:
-            self.store.update_meta({"active_plan_id": None})
             return current
         if normalized != "plan" or current.get("status") != "active":
             return current
@@ -653,7 +791,6 @@ class SessionRuntime:
             source="mode_switch",
         )
         if state is not None:
-            self._sync_current_plan_meta(state)
             self._record_plan_event("plan_abandoned", state, run_id=run_id)
         return state
 
@@ -665,7 +802,6 @@ class SessionRuntime:
         state = self.plan_state.approve_current(run_id=run_id)
         if state is None:
             return None
-        self._sync_current_plan_meta(state)
         self._record_plan_event("plan_approved", state, run_id=run_id)
         if switch_to_build:
             self.set_current_mode("build")
@@ -679,9 +815,7 @@ class SessionRuntime:
         state = self.plan_state.reject_current(run_id=run_id)
         if state is None:
             return None
-        self._sync_current_plan_meta(state)
         self._record_plan_event("plan_rejected", state, run_id=run_id)
-        self.store.set_checkpoint(None)
         self.set_current_mode("plan")
         return state
 
@@ -692,21 +826,28 @@ class SessionRuntime:
         state = self.plan_state.abandon_current(source="user_abandoned")
         if state is None:
             return None
-        self._sync_current_plan_meta(state)
         self._record_plan_event("plan_abandoned", state, run_id=None)
-        self.store.set_checkpoint(None)
         return state
 
     def close(self) -> None:
         self.conversation.clear_listeners()
 
     def record_event(self, event: dict[str, Any]) -> None:
-        """Persist a streamed runner event and update the recoverable checkpoint."""
+        """Persist a streamed runner event for audit and live views."""
 
         payload = dict(event)
         self._apply_plan_event(payload)
         self._persist_event(payload)
-        self._checkpoint_from_event(payload)
+
+    def append_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(event)
+        if "eventId" in payload:
+            payload.setdefault("event_id", payload.pop("eventId"))
+        if "sessionId" in payload:
+            payload.pop("sessionId")
+        if "runId" in payload:
+            payload.setdefault("run_id", payload.pop("runId"))
+        return self.state_service.append_event(self.session_id, payload)
 
     def _is_continue_run(self, text: str) -> bool:
         return self.active_plan_state() is not None and _is_continue_text(text)
@@ -724,7 +865,6 @@ class SessionRuntime:
             is_continue=is_continue,
             hooks=self.before_prompt_hooks,
         )
-        self._check_context_freshness()
         return rollback
 
     def _admit_prompt_memory(
@@ -753,7 +893,7 @@ class SessionRuntime:
             if result is None:
                 return
             record, decision = result
-            self.store.append_event(
+            self.append_event(
                 {
                     "type": decision.reason,
                     "eventId": event_id,
@@ -765,7 +905,7 @@ class SessionRuntime:
             )
         except Exception as exc:
             logger.warning("failed to admit prompt memory: %s", exc)
-            self.store.append_event(
+            self.append_event(
                 {
                     "type": "memory_warning",
                     "sessionId": self.session_id,
@@ -797,22 +937,6 @@ class SessionRuntime:
                 return text
         return None
 
-    def _check_context_freshness(self) -> None:
-        freshness = self.store.run_store.evaluate_freshness()
-        if not freshness.should_record_event():
-            return
-        self.store.append_event(
-            {
-                "type": "context_freshness_checked",
-                "sessionId": self.session_id,
-                "freshness": freshness.to_event_payload(),
-            }
-        )
-        if freshness.requires_steering():
-            notice = build_context_freshness_notice(freshness)
-            if notice is not None:
-                self.conversation.add_steering_message(notice)
-
     def _finalize_memory(self, result: AgentRunResult) -> None:
         try:
             event_id = f"event_{uuid4().hex[:12]}"
@@ -826,7 +950,7 @@ class SessionRuntime:
                 ),
             )
             for record in records:
-                self.store.append_event(
+                self.append_event(
                     {
                         "type": "memory_candidate_created",
                         "sessionId": self.session_id,
@@ -837,7 +961,7 @@ class SessionRuntime:
                 )
         except Exception as exc:
             logger.warning("failed to finalize memory: %s", exc)
-            self.store.append_event(
+            self.append_event(
                 {
                     "type": "memory_warning",
                     "sessionId": self.session_id,
@@ -853,7 +977,6 @@ class SessionRuntime:
                 return
             previous = self.current_plan_state()
             state = self.plan_state.save(payload)
-            self._sync_current_plan_meta(state)
             if previous == state:
                 return
             self._record_plan_event(
@@ -863,7 +986,7 @@ class SessionRuntime:
             )
         except Exception as exc:
             logger.warning("failed to finalize plan state: %s", exc)
-            self.store.append_event(
+            self.append_event(
                 {
                     "type": "plan_state_warning",
                     "sessionId": self.session_id,
@@ -883,7 +1006,6 @@ class SessionRuntime:
             source=f"run_{outcome.status}",
         )
         if abandoned is not None:
-            self._sync_current_plan_meta(abandoned)
             self._record_plan_event("plan_abandoned", abandoned, run_id=outcome.run_id)
 
     def _calibrate_context_usage(self, result: AgentRunResult) -> None:
@@ -908,7 +1030,7 @@ class SessionRuntime:
         result: AgentRunResult,
         baseline: GitRollbackBaseline,
     ) -> None:
-        self.store.write_rollback_metadata(
+        self.state_service.write_rollback_metadata(
             result.run_id,
             build_rollback_metadata(
                 baseline,
@@ -952,7 +1074,7 @@ class SessionRuntime:
         event_id = _event_id(event)
         if event_id is not None and event_id in self._persisted_event_ids:
             return False
-        self.store.append_event(dict(event))
+        self.append_event(dict(event))
         if event_id is not None:
             self._persisted_event_ids.add(event_id)
         return True
@@ -967,7 +1089,7 @@ class SessionRuntime:
             state = self.plan_state.save(payload)
         except Exception as exc:
             logger.warning("failed to apply plan event: %s", exc)
-            self.store.append_event(
+            self.append_event(
                 {
                     "type": "plan_state_warning",
                     "sessionId": self.session_id,
@@ -976,150 +1098,8 @@ class SessionRuntime:
                 }
             )
             return None
-        self._sync_current_plan_meta(state)
         event["plan"] = state
         return state
-
-    def _runtime_checkpoint(self) -> dict[str, Any] | None:
-        meta = self.store.read_meta() or {}
-        checkpoint = meta.get("runtime_checkpoint")
-        return checkpoint if isinstance(checkpoint, dict) else None
-
-    def _checkpoint_from_event(self, event: dict[str, Any]) -> None:
-        if event.get("type") == "plan_approval_required":
-            self._save_plan_approval_checkpoint_from_event(event)
-            return
-        if event.get("type") == "plan_clarification_required":
-            run_id = _event_run_id(event)
-            if run_id is not None:
-                self.store.set_checkpoint(
-                    {
-                        "phase": "plan_clarification",
-                        "run_id": run_id,
-                        "reason": event.get("reason"),
-                    }
-                )
-            return
-        if (
-            event.get("type") == "tool_interrupted"
-            and event.get("status") == "approval_required"
-        ):
-            self._checkpoint_approval_from_event(event)
-            return
-        if event.get("type") != "message_end":
-            return
-        message = event.get("message")
-        if not isinstance(message, (AssistantMessage, ToolResultMessage)):
-            return
-        message_id = self._persist_message_from_event(message, event)
-        run_id = _event_run_id(event)
-        turn_id = _int_or_none(event.get("turnId"))
-        if isinstance(message, AssistantMessage):
-            tool_calls = [
-                block for block in message.content if isinstance(block, ToolCall) and block.id
-            ]
-            if tool_calls:
-                self.store.set_checkpoint(
-                    {
-                        "phase": "tools_running",
-                        "run_id": run_id,
-                        "turn_id": turn_id,
-                        "assistant_message_id": message_id,
-                    }
-                )
-                return
-            self.store.set_checkpoint(
-                {
-                    "phase": "final_response",
-                    "run_id": run_id,
-                    "turn_id": turn_id,
-                    "assistant_message_id": message_id,
-                }
-            )
-            return
-
-        self.store.set_checkpoint(
-            {
-                "phase": "tools_completed",
-                "run_id": run_id,
-                "turn_id": turn_id,
-                "tool_result_message_id": message_id,
-            }
-        )
-
-    def _checkpoint_approval_from_event(self, event: dict[str, Any]) -> None:
-        tool_call_id = _optional_text(event.get("toolCallId"))
-        approval_id = _optional_text(event.get("approvalId"))
-        if tool_call_id is None or approval_id is None:
-            return
-        self.store.set_checkpoint(
-            {
-                "phase": "tool_approval",
-                "run_id": _event_run_id(event),
-                "turn_id": _int_or_none(event.get("turnId")),
-                "approval_id": approval_id,
-            }
-        )
-
-    def _save_plan_approval_checkpoint_from_event(self, event: dict[str, Any]) -> None:
-        plan = self.pending_plan_approval()
-        if not isinstance(plan, dict):
-            return
-        self.store.set_checkpoint(
-            {
-                "phase": "plan_approval",
-                "run_id": _event_run_id(event),
-                "turn_id": _int_or_none(event.get("turnId")),
-                "plan_id": plan.get("plan_id"),
-                "reason": _optional_text(event.get("reason")) or "plan_approval_required",
-            }
-        )
-
-    def _save_plan_approval_checkpoint(self, outcome: AgentLoopOutcome) -> None:
-        plan = self.pending_plan_approval()
-        if not isinstance(plan, dict):
-            return
-        self.store.set_checkpoint(
-            {
-                "phase": "plan_approval",
-                "run_id": outcome.run_id,
-                "plan_id": plan.get("plan_id"),
-                "reason": outcome.stop_reason,
-            }
-        )
-
-    def _save_plan_clarification_checkpoint(self, outcome: AgentLoopOutcome) -> None:
-        self.store.set_checkpoint(
-            {
-                "phase": "plan_clarification",
-                "run_id": outcome.run_id,
-                "reason": outcome.stop_reason,
-            }
-        )
-
-    def _save_plan_incomplete_checkpoint(self, outcome: AgentLoopOutcome) -> None:
-        plan = self.workflow_plan_state()
-        self.store.set_checkpoint(
-            {
-                "phase": "plan_incomplete",
-                "run_id": outcome.run_id,
-                "plan_id": plan.get("plan_id") if isinstance(plan, dict) else None,
-                "reason": outcome.stop_reason,
-            }
-        )
-
-    def _persist_message_from_event(
-        self,
-        message: AssistantMessage | ToolResultMessage,
-        event: dict[str, Any],
-    ) -> str:
-        existing = self._persisted_message_object_ids.get(id(message))
-        if existing is not None:
-            return existing
-        message_id = self.store.append_message(message, run_id=_event_run_id(event))
-        _set_session_message_id(message, message_id)
-        self._persisted_message_object_ids[id(message)] = message_id
-        return message_id
 
     def _loop_context(
         self,
@@ -1155,14 +1135,6 @@ class SessionRuntime:
             return str(fallback or "")
         return str(self._system_prompt_builder(ensure_run_mode(mode)) or "")
 
-    def _sync_current_plan_meta(self, state: dict[str, Any] | None) -> None:
-        active_plan_id = (
-            state.get("plan_id")
-            if isinstance(state, dict) and state.get("status") in {"proposed", "active"}
-            else None
-        )
-        self.store.update_meta({"active_plan_id": active_plan_id})
-
     def _approve_proposed_plan(self) -> None:
         before = self.workflow_plan_state()
         if not isinstance(before, dict) or before.get("status") != "proposed":
@@ -1170,7 +1142,6 @@ class SessionRuntime:
         state = self.plan_state.approve_current()
         if state is None:
             return
-        self._sync_current_plan_meta(state)
         self._record_plan_event("plan_approved", state, run_id=None)
 
     def _record_plan_event(
@@ -1180,7 +1151,7 @@ class SessionRuntime:
         *,
         run_id: str | None,
     ) -> None:
-        self.store.append_event(
+        self.append_event(
             {
                 "type": event_type,
                 "sessionId": self.session_id,
@@ -1195,9 +1166,51 @@ class SessionRuntime:
             session_id=self.session_id,
             state=SessionContextState(workspace_dir=self.workspace_dir),
             memory_retriever=self.memory_retriever if self.memory_enabled else None,
-            plan_state_store=self.plan_state,
-            store=self.store,
         )
+
+    def _restore_context_checkpoint(self, run: Any) -> None:
+        checkpoint = run.checkpoint
+        if checkpoint is None:
+            return
+        for component in checkpoint.components:
+            if component.owner == "context":
+                self.context_governor.restore_checkpoint_state(component.state)
+                return
+
+    def _restore_active_checkpoint(self) -> None:
+        run_id = self.session_state.current_run_id
+        if run_id is None:
+            return
+        run = self.state_service.get_run(run_id)
+        if run is None or run.checkpoint is None:
+            return
+        self._restore_context_checkpoint(run)
+        self._restore_plan_state(run)
+
+    @staticmethod
+    def _ensure_workspace_recovery(workspace_status: Any) -> None:
+        if workspace_status.status == "unchanged":
+            return
+        paths = sorted(
+            {
+                *workspace_status.changed_paths,
+                *workspace_status.missing_paths,
+            }
+        )
+        detail = ", ".join(paths) if paths else "workspace root or Git state"
+        raise ValueError(
+            "Workspace changed after checkpoint; inspect before resuming: " + detail
+        )
+
+    def _restore_plan_state(self, run: Any) -> None:
+        plan = run.core_state.get("plan_state") if isinstance(run.core_state, dict) else None
+        if isinstance(plan, dict):
+            self.plan_state.save(plan)
+
+    def _capture_workspace_checkpoint(self, core_state: dict[str, object]):
+        affected = core_state.get("affected_paths")
+        paths = [str(path) for path in affected] if isinstance(affected, list) else []
+        return capture_workspace_checkpoint(self.workspace_dir, tracked_paths=paths)
 
     def _remember_rollback_baseline(
         self,
@@ -1227,7 +1240,7 @@ class SessionRuntime:
             self._rollback_baselines.pop(ref.run_id, None)
 
     def _run_sequence_offsets(self, run_id: str) -> tuple[int, int]:
-        events = self.store.run_store.load_events(run_id)
+        events = self.state_service.load_events(self.session_id, run_id=run_id)
         turn_ids = [
             int(event.get("turnId", 0))
             for event in events
@@ -1237,7 +1250,7 @@ class SessionRuntime:
 
 
 class RuntimeSessionContextPort:
-    def __init__(self, session: SessionRuntime) -> None:
+    def __init__(self, session: RuntimeSessionCoordinator) -> None:
         self._session = session
 
     async def prepare(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -1299,7 +1312,7 @@ class RuntimeSessionContextPort:
         )
         report = prepared.report.to_dict()
         session.latest_context_report = report
-        session.store.append_event(
+        session.append_event(
             {
                 "type": "context_projected",
                 "sessionId": session.session_id,
@@ -1309,7 +1322,7 @@ class RuntimeSessionContextPort:
         )
         memory_ids = report.get("retrieved_memory_ids")
         if session.memory_enabled and isinstance(memory_ids, list) and memory_ids:
-            session.store.append_event(
+            session.append_event(
                 {
                     "type": "memory_retrieved",
                     "sessionId": session.session_id,
@@ -1334,7 +1347,7 @@ class RuntimeSessionContextPort:
             "created_at": _utc_now_iso(),
             "runner_preflight": dict(report),
         }
-        session.store.append_context_ledger(payload)
+        session.append_event(payload)
         if session.latest_context_report is not None:
             session.latest_context_report["runner_preflight"] = dict(report)
 
@@ -1565,7 +1578,7 @@ def _plan_event_type(
 
 __all__ = [
     "RuntimeSessionContextPort",
-    "SessionRuntime",
+    "RuntimeSessionCoordinator",
     "new_run_id",
     "runtime_retry_policy",
 ]

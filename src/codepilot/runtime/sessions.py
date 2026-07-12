@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass, replace
 from typing import Any
 
-from codepilot.sessions.controller import SessionController
+from .session_controller import SessionController
 
 from .config import RuntimePermissionMode
 
@@ -35,7 +35,7 @@ class RuntimeSession:
         return self.controller.session_id
 
 
-class RuntimeSessionStore:
+class RuntimeSessionRegistry:
     def __init__(self) -> None:
         self._items: dict[str, RuntimeSession] = {}
 
@@ -134,6 +134,6 @@ class ActiveRunRegistry:
 __all__ = [
     "ActiveRunRegistry",
     "RuntimeSession",
-    "RuntimeSessionStore",
+    "RuntimeSessionRegistry",
     "RuntimeStatusInfo",
 ]

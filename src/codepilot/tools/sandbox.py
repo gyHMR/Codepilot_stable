@@ -47,7 +47,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 # ---------------------------------------------------------------------------
 # ShellCommandClass 类型别名
@@ -59,6 +59,14 @@ from typing import Any, Literal
 #   - "high_risk":    高风险命令（如递归删除、强制推送），需要显式审批
 #   - "unknown":      未知命令，无法自动判定安全性，需要人工审核
 ShellCommandClass = Literal["verification", "read_only", "mutation", "high_risk", "unknown"]
+CommandProfile = Literal[
+    "inspection",
+    "repository_execution",
+    "bounded_mutation",
+    "external_effect",
+    "destructive",
+    "unknown",
+]
 
 # ---------------------------------------------------------------------------
 # 内部保留目录名集合
@@ -574,6 +582,120 @@ def validate_shell_command(command: str) -> ShellCommandClass:
     return shell_class
 
 
+def classify_command_argv(argv: Sequence[str]) -> CommandProfile:
+    """Classify one argv-based command without interpreting Shell syntax."""
+
+    if isinstance(argv, (str, bytes)) or not argv:
+        return "unknown"
+    parts = tuple(str(item).strip() for item in argv)
+    if any(not item for item in parts):
+        return "unknown"
+    executable = _command_executable(parts[0])
+    args = tuple(item.lower() for item in parts[1:])
+
+    if executable in {"rm", "rmdir", "del", "format", "mkfs", "shutdown", "reboot"}:
+        return "destructive"
+    if executable in {"git"} and args:
+        action = args[0]
+        if action == "reset" and "--hard" in args:
+            return "destructive"
+        if action == "clean" and any(item.startswith("-") and "f" in item for item in args[1:]):
+            return "destructive"
+        if action == "push" and any(item in {"--force", "-f", "--force-with-lease"} for item in args[1:]):
+            return "destructive"
+        if action in {"push", "pull", "fetch", "clone"}:
+            return "external_effect"
+        if action in {"status", "diff", "log", "show", "rev-parse", "branch", "remote"}:
+            return "inspection"
+        if action == "add":
+            return "external_effect"
+
+    if executable in {"curl", "wget"}:
+        return "external_effect"
+    if executable in {"pip", "pip3"}:
+        if args and args[0] in {"install", "uninstall", "download", "wheel"}:
+            return "external_effect"
+        if args and args[0] in {"--version", "-v", "list", "show"}:
+            return "inspection"
+    if executable in {"npm", "pnpm", "yarn"}:
+        if args and args[0] in {"install", "uninstall", "update", "publish", "ci"}:
+            return "external_effect"
+        if args and args[0] == "run" and len(args) > 1:
+            if args[1] in {"format", "generate"}:
+                return "bounded_mutation"
+            if args[1] in {"test", "lint", "build"}:
+                return "repository_execution"
+        if args and args[0] == "test":
+            return "repository_execution"
+        if args and args[0] in {"--version", "-v"}:
+            return "inspection"
+
+    if executable in {"pytest", "mypy", "pyright"}:
+        return "repository_execution"
+    if executable == "ruff":
+        if args and args[0] == "format":
+            return "bounded_mutation"
+        if args and args[0] == "check":
+            return "repository_execution"
+    if executable in {"black", "prettier"}:
+        return "bounded_mutation"
+    if executable == "go" and args and args[0] == "test":
+        return "repository_execution"
+    if executable == "cargo" and args and args[0] in {"test", "check"}:
+        return "repository_execution"
+    if executable in {"rg", "grep", "findstr"}:
+        return "inspection"
+    if executable in {"python", "python3", "py"}:
+        if args and args[0] in {"--version", "-v"}:
+            return "inspection"
+        if len(args) >= 2 and args[0] == "-m":
+            module = args[1]
+            if module in {"pytest", "compileall"}:
+                return "repository_execution"
+            if module == "build":
+                return "bounded_mutation"
+            if module == "pip" and len(args) >= 3:
+                if args[2] in {"install", "uninstall", "download", "wheel"}:
+                    return "external_effect"
+                if args[2] in {"--version", "list", "show"}:
+                    return "inspection"
+    if args and args[0] in {"--version", "-v"}:
+        return "inspection"
+    return "unknown"
+
+
+def validate_controlled_command(
+    argv: Sequence[str],
+    *,
+    sandbox: WorkspaceSandbox,
+    cwd: str | Path = ".",
+) -> tuple[tuple[str, ...], Path, CommandProfile]:
+    """Validate one argv command and its explicit path arguments."""
+
+    if isinstance(argv, (str, bytes)) or not argv:
+        raise ValueError("Controlled command argv must be a non-empty string array")
+    normalized = tuple(str(item).strip() for item in argv)
+    if any(not item for item in normalized):
+        raise ValueError("Controlled command argv cannot contain empty values")
+    profile = classify_command_argv(normalized)
+    if profile == "destructive":
+        raise ValueError("Destructive commands are not available through the command tool")
+    if profile == "unknown":
+        raise ValueError("Unsupported controlled command; use bash with approval")
+
+    working_dir = sandbox.ensure_mutable_path(sandbox.resolve_path(cwd))
+    if not working_dir.is_dir():
+        raise ValueError("Controlled command cwd must be a workspace directory")
+    for raw in normalized[1:]:
+        _validate_command_path_argument(
+            raw,
+            sandbox=sandbox,
+            cwd=working_dir,
+            mutating=profile != "inspection",
+        )
+    return normalized, working_dir, profile
+
+
 def is_sensitive_workspace_path(path: str | Path) -> bool:
     relative = Path(path)
     name = relative.name.lower()
@@ -750,6 +872,45 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _command_executable(value: str) -> str:
+    name = Path(value).name.lower()
+    for suffix in (".exe", ".cmd", ".bat"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def _validate_command_path_argument(
+    raw: str,
+    *,
+    sandbox: WorkspaceSandbox,
+    cwd: Path,
+    mutating: bool,
+) -> None:
+    value = _strip_shell_quotes(raw.strip())
+    if not value or value.startswith("-") and "=" not in value:
+        return
+    if value.startswith("-") and "=" in value:
+        value = value.split("=", 1)[1]
+    if not value or "://" in value:
+        return
+    candidate = Path(value)
+    looks_like_path = (
+        candidate.is_absolute()
+        or ".." in candidate.parts
+        or "/" in value
+        or "\\" in value
+    )
+    if not looks_like_path:
+        return
+    target = candidate if candidate.is_absolute() else cwd / candidate
+    target = sandbox.ensure_within_workspace(target)
+    if mutating:
+        sandbox.ensure_mutable_path(target)
+    else:
+        sandbox.ensure_readable_path(target)
+
+
 def _matches_command_prefix(command: str, prefix: str) -> bool:
     """
     检查命令是否以指定前缀开头（精确前缀匹配）。
@@ -806,7 +967,7 @@ def _first_command(command: str) -> str:
     提取策略（三层处理）：
 
     第 1 层：按命令分隔符拆分
-    - 使用正则 r"(?:&&|\|\||;|\r?\n)" 将命令链拆分为独立段
+    - 使用正则 ``(?:&&|\\|\\||;|\\r?\\n)`` 将命令链拆分为独立段
       （&& = 逻辑与，|| = 逻辑或，; = 顺序执行，换行 = 自然分隔）
     - 跳过空段
 
@@ -1050,13 +1211,17 @@ def _is_safe_relative_shell_path(value: str) -> bool:
 # 模块导出列表
 # ---------------------------------------------------------------------------
 __all__ = [
+    "CommandProfile",
     "ShellCommandClass",
     "ShellExecutionPolicy",
     "TruncatedOutput",
     "WorkspaceSandbox",
     "build_shell_environment",
+    "classify_command_argv",
     "classify_shell_command",
     "command_mentions_internal_state",
     "file_state_for_path",
     "truncate_output",
+    "validate_controlled_command",
+    "validate_shell_command",
 ]

@@ -8,7 +8,7 @@ from codepilot.llm.ports import ModelDescriptor
 from codepilot.protocols import AgentRunResult, ErrorInfo
 
 from .commands import apply_session_command
-from .contracts import (
+from codepilot.sessions.contracts import (
     PreparedAgentRun,
     SessionCommandIntent,
     SessionCommandRecord,
@@ -18,17 +18,16 @@ from .contracts import (
     SessionRunRecord,
     SessionView,
 )
-from .runtime import SessionRuntime, new_run_id
+from .session_coordinator import RuntimeSessionCoordinator, new_run_id
 
 
 def create_session_controller(options: Any) -> "SessionController":
-    return _bind_session_runtime(SessionRuntime(options))
+    return _bind_session_runtime(RuntimeSessionCoordinator(options))
 
 
-def _bind_session_runtime(session: SessionRuntime) -> "SessionController":
+def _bind_session_runtime(session: RuntimeSessionCoordinator) -> "SessionController":
     model = session.conversation.model
-    meta = session.store.read_meta() or {}
-    last_run_id = meta.get("last_run_id")
+    last_run_id = session.session_state.last_run_id
     return SessionController(
         session_id=session.session_id,
         model=ModelDescriptor(
@@ -37,7 +36,7 @@ def _bind_session_runtime(session: SessionRuntime) -> "SessionController":
         ),
         current_mode=session.current_mode,
         _session=session,
-        _last_run_id=last_run_id if isinstance(last_run_id, str) else None,
+        _last_run_id=last_run_id,
     )
 
 
@@ -48,13 +47,13 @@ class SessionController:
         default_factory=lambda: ModelDescriptor(provider="local", model_id="v2-test")
     )
     current_mode: str = "build"
-    _session: SessionRuntime | None = None
+    _session: RuntimeSessionCoordinator | None = None
     _last_run_id: str | None = None
     _derived_controllers: dict[str, "SessionController"] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self._session is None:
-            raise ValueError("SessionController requires SessionRuntime")
+            raise ValueError("SessionController requires RuntimeSessionCoordinator")
 
     def describe(self) -> SessionView:
         return self._session.describe(last_run_id=self._last_run_id)
@@ -126,7 +125,7 @@ class SessionController:
     def save_plan_state(self, state: Any) -> dict[str, Any]:
         return self._session.plan_state.save(state)
 
-    def stage_derived_session(self, session: SessionRuntime) -> None:
+    def stage_derived_session(self, session: RuntimeSessionCoordinator) -> None:
         self._derived_controllers[session.session_id] = _bind_session_runtime(session)
 
     def claim_derived_controller(self, session_id: str) -> "SessionController" | None:

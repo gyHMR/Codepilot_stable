@@ -30,6 +30,8 @@ from .contracts import (
     AgentLoopOutcome,
     AgentLoopPorts,
     AgentResumeInput,
+    CoreRunBoundary,
+    CoreWaitingRequest,
     PreparedContext,
     RetryPolicy,
     WorkspaceEffects,
@@ -85,6 +87,50 @@ class _SyntheticControlFrame:
         }
 
 
+class _BoundaryCommitter:
+    def __init__(self, ports: AgentLoopPorts, new_messages: list[Message]) -> None:
+        self._port = ports.state
+        self._messages = new_messages
+        self._committed_count = 0
+
+    async def commit(
+        self,
+        kind: str,
+        run_state: RunState,
+        *,
+        waiting: CoreWaitingRequest | None = None,
+        tool_recovery_state: dict[str, object] | None = None,
+    ) -> None:
+        await self.commit_state(
+            kind,
+            run_state.to_dict(),
+            waiting=waiting,
+            tool_recovery_state=tool_recovery_state,
+        )
+
+    async def commit_state(
+        self,
+        kind: str,
+        core_state: dict[str, object],
+        *,
+        waiting: CoreWaitingRequest | None = None,
+        tool_recovery_state: dict[str, object] | None = None,
+    ) -> None:
+        if self._port is None:
+            self._committed_count = len(self._messages)
+            return
+        pending = tuple(self._messages[self._committed_count :])
+        boundary = CoreRunBoundary(
+            kind=kind,  # type: ignore[arg-type]
+            core_state=core_state,
+            new_messages=pending,
+            waiting=waiting,
+            tool_recovery_state=tool_recovery_state,
+        )
+        await maybe_await(self._port.commit(boundary))
+        self._committed_count = len(self._messages)
+
+
 class AgentEventEmitter:
     """Small public helper for tests and adapters that need enriched events."""
 
@@ -131,43 +177,60 @@ async def run_agent_loop(
     plan_state = load_plan_state(input.plan_state)
     messages = list(input.messages)
     new_messages: list[Message] = []
+    committer = _BoundaryCommitter(ports, new_messages)
 
     recorder.emit({"type": "agent_start"})
     recorder.emit({"type": "turn_start"})
 
-    return await _drive_loop(
+    outcome = await _drive_loop(
         input=input,
         ports=ports,
         recorder=recorder,
         messages=messages,
         new_messages=new_messages,
+        committer=committer,
         run_state=run_state,
         plan_state=plan_state,
         observations=[],
         first_turn_started=True,
     )
+    await _commit_outcome_boundary(committer, outcome)
+    return outcome
 
 
 async def resume_agent_loop(
     input: AgentResumeInput,
     ports: AgentLoopPorts,
 ) -> AgentLoopOutcome:
+    run_state = RunState.from_mapping(
+        input.run_state,
+        run_id=input.run_id,
+        session_id=input.correlation.session_id,
+    )
+    new_messages: list[Message] = []
+    committer = _BoundaryCommitter(ports, new_messages)
     if ports.tools is None:
-        return AgentLoopOutcome(
+        outcome = AgentLoopOutcome(
             run_id=input.run_id,
             status="failed",
             stop_reason="missing_tool_port",
-            signals=RunState(input.run_id, input.correlation.session_id).summary(),
+            signals=run_state.summary(),
+            run_state=run_state.to_dict(),
             error={"code": "core.missing_tool_port"},
         )
+        await _commit_outcome_boundary(committer, outcome)
+        return outcome
     if not input.approval_id or not input.decision:
-        return AgentLoopOutcome(
+        outcome = AgentLoopOutcome(
             run_id=input.run_id,
             status="failed",
             stop_reason="missing_approval_decision",
-            signals=RunState(input.run_id, input.correlation.session_id).summary(),
+            signals=run_state.summary(),
+            run_state=run_state.to_dict(),
             error={"code": "core.missing_approval_decision"},
         )
+        await _commit_outcome_boundary(committer, outcome)
+        return outcome
 
     loop_input = AgentLoopInput(
         run_id=input.run_id,
@@ -185,14 +248,8 @@ async def resume_agent_loop(
         run_state=input.run_state,
     )
     recorder = _EventRecorder(loop_input, ports)
-    run_state = RunState.from_mapping(
-        input.run_state,
-        run_id=input.run_id,
-        session_id=input.correlation.session_id,
-    )
     plan_state = load_plan_state(input.plan_state)
     messages = list(input.messages)
-    new_messages: list[Message] = []
 
     recorder.emit({"type": "agent_start"})
     recorder.emit({"type": "turn_start"})
@@ -212,6 +269,15 @@ async def resume_agent_loop(
         }
     )
 
+    await committer.commit(
+        "before_tools",
+        run_state,
+        tool_recovery_state={
+            "approval_id": input.approval_id,
+            "decision": input.decision,
+            "source": "approval_resume",
+        },
+    )
     observation = await _resume_tool_observation(input, ports)
     recorder.emit(tool_end_event(observation))
     tool_message = to_tool_result_message(observation)
@@ -231,6 +297,7 @@ async def resume_agent_loop(
         recorder=recorder,
         qualified_failure_count=run_state.qualified_plan_failure_count,
     )
+    await committer.commit("after_tools", run_state)
 
     interruption = _interruption_after_tool_results(
         input=loop_input,
@@ -244,19 +311,23 @@ async def resume_agent_loop(
         usage=None,
     )
     if interruption is not None:
+        await _commit_outcome_boundary(committer, interruption)
         return interruption
 
-    return await _drive_loop(
+    outcome = await _drive_loop(
         input=loop_input,
         ports=ports,
         recorder=recorder,
         messages=messages,
         new_messages=new_messages,
+        committer=committer,
         run_state=run_state,
         plan_state=plan_state,
         observations=[observation],
         first_turn_started=True,
     )
+    await _commit_outcome_boundary(committer, outcome)
+    return outcome
 
 
 async def _resume_tool_observation(
@@ -284,6 +355,7 @@ async def _drive_loop(
     recorder: "_EventRecorder",
     messages: list[Message],
     new_messages: list[Message],
+    committer: _BoundaryCommitter,
     run_state: RunState,
     plan_state: PlanState | None,
     observations: list[ToolResult],
@@ -311,6 +383,7 @@ async def _drive_loop(
             ports=ports,
             recorder=recorder,
             messages=messages,
+            committer=committer,
             run_state=run_state,
             plan_state=plan_state,
         )
@@ -337,6 +410,7 @@ async def _drive_loop(
         messages.append(assistant)
         new_messages.append(assistant)
         _emit_message(recorder, assistant)
+        await committer.commit("after_model", run_state)
 
         tool_calls = [block for block in assistant.content if isinstance(block, ToolCall)]
         if not tool_calls:
@@ -402,6 +476,20 @@ async def _drive_loop(
         if limit_outcome is not None:
             return limit_outcome
 
+        await committer.commit(
+            "before_tools",
+            run_state,
+            tool_recovery_state={
+                "tool_calls": [
+                    {
+                        "id": call.id,
+                        "name": call.name,
+                        "arguments": dict(call.arguments),
+                    }
+                    for call in tool_calls
+                ]
+            },
+        )
         turn_observations = await execute_tool_turn(
             run_id=input.run_id,
             session_id=input.correlation.session_id or "session_unknown",
@@ -437,6 +525,7 @@ async def _drive_loop(
             [],
             in_progress_item_id=_in_progress_plan_item_id(plan_state),
         )
+        await committer.commit("after_tools", run_state)
 
         plan_ready_for_approval = _is_pending_plan(plan_state) and any(
             result.tool_name == PROPOSE_PLAN_TOOL
@@ -529,11 +618,13 @@ async def _model_turn_with_retries(
     ports: AgentLoopPorts,
     recorder: "_EventRecorder",
     messages: list[Message],
+    committer: _BoundaryCommitter,
     run_state: RunState,
     plan_state: PlanState | None,
 ) -> ModelTurnResult:
     retries = 0
     while True:
+        await committer.commit("before_model", run_state)
         result = await run_model_turn(
             _with_runtime_context(input, plan_state, run_state),
             ports,
@@ -1115,6 +1206,55 @@ def _plan_approval_message(plan_state: PlanState) -> AssistantMessage:
     message.metadata["generated_by"] = "runner"
     _mark_plan_summary_message(message, plan_state)
     return message
+
+
+async def _commit_outcome_boundary(
+    committer: _BoundaryCommitter,
+    outcome: AgentLoopOutcome,
+) -> None:
+    if outcome.status == "waiting_approval":
+        challenge = outcome.interruptions[0] if outcome.interruptions else None
+        request_id = challenge.approval_id if challenge is not None else outcome.run_id
+        payload: dict[str, object] = {}
+        if challenge is not None:
+            payload = {
+                "tool_call_id": challenge.tool_call_id,
+                "tool_name": challenge.tool_name,
+            }
+        await committer.commit_state(
+            "waiting_tool_approval",
+            outcome.run_state,
+            waiting=CoreWaitingRequest(
+                kind="tool_approval",
+                request_id=request_id,
+                payload=payload,
+            ),
+        )
+        return
+    if outcome.status == "waiting_user":
+        if outcome.stop_reason == "plan_approval_required":
+            request_id = outcome.plan.plan_id if outcome.plan is not None else outcome.run_id
+            await committer.commit_state(
+                "waiting_plan_confirmation",
+                outcome.run_state,
+                waiting=CoreWaitingRequest(
+                    kind="plan_confirmation",
+                    request_id=request_id,
+                    payload={"stop_reason": outcome.stop_reason},
+                ),
+            )
+            return
+        await committer.commit_state(
+            "waiting_user_input",
+            outcome.run_state,
+            waiting=CoreWaitingRequest(
+                kind="user_input",
+                request_id=f"{outcome.run_id}:{outcome.stop_reason}",
+                payload={"stop_reason": outcome.stop_reason},
+            ),
+        )
+        return
+    await committer.commit_state("before_finalization", outcome.run_state)
 
 
 def _outcome(

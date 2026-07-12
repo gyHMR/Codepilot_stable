@@ -334,7 +334,9 @@ ToolRegistry materialize registration
 ### 安全策略要点
 
 - 拦截 `allow_dangerous`、`bypass_approval`、`ignore_workspace_boundary`、`trusted` 等自授权参数
-- Shell 命令按风险分类：`verification` / `mutation` / `high_risk` / `unknown`，对应走放行、审批或拒绝
+- 普通 `write/edit/apply_patch` 在 `workspace-write` 模式下按工作区 capability 放行，批量修改会动态升级为审批
+- 受控 `command` 使用 argv 和 `create_subprocess_exec`，按 `inspection` / `repository_execution` / `bounded_mutation` / `external_effect` profile 决策
+- 原始 `bash` 保留为复杂 Shell 入口并要求审批；高风险、内部状态和敏感文件命令直接拒绝
 - 文件工具通过 `WorkspaceSandbox` 执行路径边界校验，防止目录逃逸
 - Shell 执行过滤敏感环境变量，控制超时与输出长度上限
 - 输出经过 Codec、大小限制和 output trust 校验；MCP 等外部内容默认按不可信内容处理
@@ -483,6 +485,7 @@ python -m pytest test/test_evaluation_v2.py -q
 | [docs/design/3memory-design.md](docs/design/3memory-design.md) | 结构化记忆 |
 | [docs/design/4tool-design.md](docs/design/4tool-design.md) | 工具安全 |
 | [docs/design/5eval-design.md](docs/design/5eval-design.md) | Evaluation v2 |
+| [docs/design/6sessions-design.md](docs/design/6sessions-design.md) | Sessions 状态、Checkpoint 与恢复 |
 
 ---
 

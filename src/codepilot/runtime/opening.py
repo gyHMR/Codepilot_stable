@@ -43,9 +43,6 @@ class SessionOpenIntent:
     retry_base_delay_ms: int | None = None
     model_context_window: int | None = None
     model_max_output_tokens: int | None = None
-    block_dangerous_bash: bool | None = None
-    bash_allow_patterns: list[str] | None = None
-    bash_block_patterns: list[str] | None = None
     edit_require_unique_match: bool | None = None
     prompt_guidelines: list[str] | None = None
     append_system_prompt: str | None = None

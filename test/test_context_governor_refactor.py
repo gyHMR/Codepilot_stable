@@ -128,20 +128,16 @@ def test_context_governor_prepares_linear_context_with_memory_and_artifacts(
     assert prepared.report.context_view is not None
     assert prepared.report.retrieved_memory_ids == ["mem_1"]
     assert any(ref.path.endswith(".txt") for ref in prepared.report.artifact_refs)
-    assert (tmp_path / ".codepilot" / "sessions" / "session_1" / "context_ledger.jsonl").exists()
+    assert not (tmp_path / ".codepilot" / "context").exists()
+    assert not (tmp_path / ".codepilot" / "sessions" / "session_1" / "context_ledger.jsonl").exists()
 
 
-def test_context_governor_filters_archived_plan_from_store(tmp_path: Path) -> None:
+def test_context_governor_filters_archived_plan_from_agent_context(tmp_path: Path) -> None:
     from codepilot.core.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
     from codepilot.sessions.context import ContextGovernor
-    from codepilot.sessions.plan_state import PlanStateStore
-    from codepilot.sessions.store import SessionStore
 
-    session_store = SessionStore(tmp_path, "session_archived_plan")
-    session_store.ensure_initialized(model_id="m", provider="p", system_prompt="sys")
-    PlanStateStore(session_store).save(
-        {
+    archived_plan = {
                 "schema_version": 6,
             "plan_id": "plan_done",
             "owner_run_id": "run_done",
@@ -173,12 +169,7 @@ def test_context_governor_filters_archived_plan_from_store(tmp_path: Path) -> No
             "completed_at": "2026-01-01T01:00:00+00:00",
             "completion_source": "model_closeout",
         }
-    )
-    governor = ContextGovernor(
-        workspace_dir=tmp_path,
-        session_id="session_archived_plan",
-        store=session_store,
-    )
+    governor = ContextGovernor(workspace_dir=tmp_path, session_id="session_archived_plan")
 
     prepared = asyncio.run(
         governor.prepare(
@@ -186,6 +177,7 @@ def test_context_governor_filters_archived_plan_from_store(tmp_path: Path) -> No
                 system_prompt="System rules.",
                 messages=[UserMessage(content="开始新任务。")],
                 mode="build",
+                plan_state=archived_plan,
             ),
             ContextPreparationRequest(
                 session_id="session_archived_plan",
@@ -336,7 +328,7 @@ def test_context_governor_counts_tool_schemas_in_budget_estimates(
     assert "json_schema" in prepared.report.estimation["by_type"]
 
 
-def test_context_ledger_records_simple_projection(tmp_path: Path) -> None:
+def test_context_report_is_returned_without_context_state_file(tmp_path: Path) -> None:
     from codepilot.core.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
     from codepilot.sessions.context import ContextGovernor
@@ -357,17 +349,11 @@ def test_context_ledger_records_simple_projection(tmp_path: Path) -> None:
         )
     )
 
-    ledger_path = tmp_path / ".codepilot" / "sessions" / "session_ledger" / "context_ledger.jsonl"
-    payload = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[-1])
-
-    assert payload["type"] == "context_projection"
-    assert payload["context_id"] == prepared.report.context_id
-    assert "tokens_by_layer" in payload
-    assert "task_plan" in payload["tokens_by_layer"]
-    assert "runtime" in payload["tokens_by_layer"]
-    assert "memory_retrieval_reasons" in payload
-    assert "dropped_memory_reasons" in payload
-    assert "runner_preflight" in payload
+    assert prepared.report.context_id
+    assert "task_plan" in prepared.report.tokens_by_layer
+    assert "runtime" in prepared.report.tokens_by_layer
+    assert not (tmp_path / ".codepilot" / "context").exists()
+    assert not (tmp_path / ".codepilot" / "sessions" / "session_ledger" / "context_ledger.jsonl").exists()
 
 
 def test_context_governor_compacts_old_conversation_on_critical_pressure(
@@ -397,14 +383,10 @@ def test_context_governor_compacts_old_conversation_on_critical_pressure(
         )
     )
 
-    meta = governor.store.read_meta()
-    context_meta = meta["context"]
-    ledger_path = tmp_path / ".codepilot" / "sessions" / "session_compact" / "context_ledger.jsonl"
-    rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    context_state = governor.checkpoint_state()
 
-    assert context_meta["compacted_until_message_id"] == "msg_011"
-    assert context_meta["last_compact_summary"]
-    assert any(row["type"] == "context_compaction" for row in rows)
+    assert context_state["compacted_until_message_id"] == "msg_011"
+    assert context_state["compact_summary"]
     assert [message.metadata.get("session_message_id") for message in prepared.messages] == [
         "msg_012",
         "msg_013",

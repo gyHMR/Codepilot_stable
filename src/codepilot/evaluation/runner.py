@@ -863,7 +863,7 @@ def _prepare_workspace(case: EvalCase, options: EvalRunOptions) -> Path:
 def _seed_structured_memory(workspace: Path) -> None:
     """Copy fixture memory seeds into the runtime's current memory store."""
 
-    source = workspace / "memory" / "project_memory.jsonl"
+    source = workspace / ".codepilot" / "memory" / "memories.jsonl"
     if not source.is_file():
         return
     records: list[dict[str, Any]] = []
@@ -1007,7 +1007,7 @@ def _memory_evidence_refs(value: object) -> list[str]:
     refs = []
     for item in _memory_list(value):
         refs.append(item if _has_memory_ref_prefix(item) else f"artifact:{item}")
-    return refs or ["artifact:memory/project_memory.jsonl"]
+    return refs or ["artifact:.codepilot/memory/memories.jsonl"]
 
 
 def _has_memory_ref_prefix(value: str) -> bool:

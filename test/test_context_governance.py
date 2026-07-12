@@ -131,25 +131,29 @@ def test_context_freshness_notice_summarizes_stale_run_files(
 ) -> None:
     from codepilot.protocols import TextContent, UserMessage
     from codepilot.sessions.context import build_context_freshness_notice
-    from codepilot.sessions.store import FreshnessResult
+    from codepilot.sessions.contracts import WorkspaceRecoveryState
 
-    result = FreshnessResult(
-        status="stale",
-        checked_paths=["src/app.py", "src/missing.py"],
+    result = WorkspaceRecoveryState(
+        status="changed",
         changed_paths=["src/app.py"],
         missing_paths=["src/missing.py"],
-        workspace_path=str(tmp_path),
     )
 
     notice = build_context_freshness_notice(result)
 
     assert isinstance(notice, UserMessage)
-    assert notice.metadata == {"context_freshness": result.to_event_payload()}
+    assert notice.metadata == {
+        "context_freshness": {
+            "status": "changed",
+            "changed_paths": ["src/app.py"],
+            "missing_paths": ["src/missing.py"],
+        }
+    }
     assert len(notice.content) == 1
     block = notice.content[0]
     assert isinstance(block, TextContent)
     assert "[Context Freshness]" in block.text
-    assert "status=stale" in block.text
+    assert "status=changed" in block.text
     assert "changed_files=src/app.py" in block.text
     assert "missing_files=src/missing.py" in block.text
     assert "旧工具结果可能已过期" in block.text
@@ -157,9 +161,9 @@ def test_context_freshness_notice_summarizes_stale_run_files(
 
 def test_context_freshness_notice_is_absent_for_valid_state(tmp_path: Path) -> None:
     from codepilot.sessions.context import build_context_freshness_notice
-    from codepilot.sessions.store import FreshnessResult
+    from codepilot.sessions.contracts import WorkspaceRecoveryState
 
-    result = FreshnessResult(status="valid", workspace_path=str(tmp_path))
+    result = WorkspaceRecoveryState(status="unchanged")
 
     assert build_context_freshness_notice(result) is None
 

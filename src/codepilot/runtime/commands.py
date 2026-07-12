@@ -10,8 +10,8 @@ from codepilot.core.plan import RunMode
 from codepilot.protocols import AssistantMessage
 from codepilot.protocols.commands import SessionCommandContext, SessionCommandView
 
-from .contracts import SessionCommandIntent, SessionCommandRecord, SessionOptions
-from .rollback import (
+from codepilot.sessions.contracts import SessionCommandIntent, SessionCommandRecord, SessionOptions
+from codepilot.sessions.rollback import (
     GitRollbackBaseline,
     GitRollbackPlan,
     GitRollbackResult,
@@ -19,8 +19,8 @@ from .rollback import (
     plan_run_rollback,
     revert_run_changes,
 )
-from .memory import MemoryRecord, MemoryWriteContext, render_memory
-from .store import new_session_id
+from codepilot.sessions.memory import MemoryRecord, MemoryWriteContext, render_memory
+from codepilot.sessions.service import new_session_id
 
 
 def cumulative_usage(session: Any) -> dict[str, Any]:
@@ -47,23 +47,24 @@ def _set_current_mode(session: Any, mode: RunMode | str) -> RunMode:
 
 
 def list_entry_ids(session: Any) -> list[str]:
-    return session.store.list_entry_ids()
+    return session.state_service.list_entry_ids(session.session_id)
 
 
 def list_entries(session: Any) -> list[dict[str, Any]]:
-    return session.store.list_entries()
+    return session.state_service.list_entries(session.session_id)
 
 
 def get_leaf_id(session: Any) -> str | None:
-    return session.store.get_leaf_id()
+    state = session.state_service.get_session(session.session_id)
+    return state.leaf_message_id if state is not None else None
 
 
 def get_entry_path(session: Any, entry_id: str) -> list[str]:
-    return session.store.get_entry_path(entry_id)
+    return session.state_service.get_entry_path(session.session_id, entry_id)
 
 
 def get_session_tree(session: Any) -> list[dict[str, Any]]:
-    return session.store.get_session_tree()
+    return session.state_service.get_session_tree(session.session_id)
 
 
 def create_fresh_session(session: Any) -> Any:
@@ -72,14 +73,27 @@ def create_fresh_session(session: Any) -> Any:
 
 def fork_from_entry(session: Any, entry_id: str) -> Any:
     target_id = new_session_id()
-    session.store.fork_to(target_id, from_entry_id=entry_id)
+    session.state_service.fork_session(
+        session.session_id,
+        target_id,
+        from_entry_id=entry_id,
+    )
     return _open_derived_runtime(session, target_id)
 
 
 def switch_to_entry(session: Any, entry_id: str) -> None:
-    session.store.set_leaf(entry_id)
-    session.conversation.set_messages(session.store.load_session_messages(leaf_id=entry_id))
-    session.store.append_event(
+    session.session_state = session.state_service.set_leaf(session.session_id, entry_id)
+    session.conversation.set_messages(
+        [
+            record.message
+            for record in session.state_service.load_messages(
+                session.session_id,
+                leaf_id=entry_id,
+            )
+        ]
+    )
+    session.state_service.append_event(
+        session.session_id,
         {
             "type": "session_leaf_switched",
             "sessionId": session.session_id,
@@ -257,10 +271,10 @@ def revert_last_run(session: Any) -> GitRollbackResult:
 
 
 def preview_last_run_rollback(session: Any) -> GitRollbackPlan:
-    runs = session.store.load_run_results(limit=1)
-    if not runs:
+    state = session.state_service.load_last_run_view(session.session_id)
+    if state is None:
         return GitRollbackPlan(status="not_eligible", run_id="", reason="no_run_results")
-    run_id = runs[-1].get("run_id")
+    run_id = state.get("run_id")
     if not isinstance(run_id, str) or not run_id:
         return GitRollbackPlan(status="not_eligible", run_id="", reason="missing_run_id")
     return preview_run_rollback(session, run_id)
@@ -268,7 +282,7 @@ def preview_last_run_rollback(session: Any) -> GitRollbackPlan:
 
 def preview_run_rollback(session: Any, run_id: str) -> GitRollbackPlan:
     try:
-        state = session.store.run_store.load_run_state(run_id)
+        state = session.state_service.load_run_view(session.session_id, run_id)
     except FileNotFoundError:
         return GitRollbackPlan(status="not_eligible", run_id=run_id, reason="missing_run_state")
     return plan_run_rollback(session.workspace_dir, state)
@@ -276,11 +290,11 @@ def preview_run_rollback(session: Any, run_id: str) -> GitRollbackPlan:
 
 def revert_run(session: Any, run_id: str) -> GitRollbackResult:
     try:
-        state = session.store.run_store.load_run_state(run_id)
+        state = session.state_service.load_run_view(session.session_id, run_id)
     except FileNotFoundError:
         return GitRollbackResult(status="not_eligible", run_id=run_id, reason="missing_run_state")
     result = revert_run_changes(session.workspace_dir, state)
-    session.store.append_event(
+    session.append_event(
         {
             "type": "run_reverted",
             "sessionId": session.session_id,
@@ -303,7 +317,7 @@ async def apply_session_command(
     controller: Any | None = None,
 ) -> SessionCommandRecord:
     if session is None:
-        raise ValueError("Session command handling requires SessionRuntime")
+        raise ValueError("Session command handling requires RuntimeSessionCoordinator")
     text = intent.text
     command, _, rest = text.partition(" ")
     arg = rest.strip()
@@ -806,7 +820,7 @@ def _memory_id_action(
 
 def _memory_context(session: Any, event_type: str) -> MemoryWriteContext:
     event_id = f"event_{uuid.uuid4().hex[:12]}"
-    session.store.append_event({"type": event_type, "eventId": event_id, "sessionId": session.session_id})
+    session.append_event({"type": event_type, "event_id": event_id})
     return MemoryWriteContext(
         session_id=session.session_id,
         source_event_id=event_id,
@@ -831,7 +845,7 @@ def _record_memory_event(
     }
     if source_memory_id:
         payload["sourceMemoryId"] = source_memory_id
-    session.store.append_event(payload)
+    session.append_event(payload)
 
 
 def _memory_row(record: MemoryRecord) -> dict[str, str]:
@@ -924,9 +938,9 @@ def _format_plan_lines(state: Any) -> list[str]:
 
 
 def _open_derived_runtime(session: Any, session_id: str) -> Any:
-    from .runtime import SessionRuntime
+    from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
 
-    return SessionRuntime(
+    return RuntimeSessionCoordinator(
         SessionOptions(
             model=session.conversation.model,
             workspace_dir=session.workspace_dir,
@@ -970,7 +984,7 @@ def _recent_session_summaries(session: Any) -> list[dict[str, Any]]:
                 "session_id": session_id,
                 "updated_at": str(meta.get("updated_at") or ""),
                 "mode": str(meta.get("current_mode") or "build"),
-                "plan": _plan_summary_text(_read_json_file(session_dir / "plan_state.json")),
+                "plan": "",
                 "preview": _last_message_preview(session_dir / "messages.jsonl"),
             }
         )

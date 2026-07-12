@@ -17,7 +17,26 @@ from codepilot.core.plan import (
     ensure_run_mode,
 )
 from codepilot.protocols import Model, ModelCapabilities
-from codepilot.sessions.store import SessionOpenMetadata, load_session_open_metadata
+from codepilot.sessions.repository import FileSessionRepository
+
+
+@dataclass(frozen=True)
+class SessionOpenMetadata:
+    provider: str | None = None
+    model_id: str | None = None
+    system_prompt: str | None = None
+
+
+def load_session_open_metadata(
+    workspace_dir: str | Path,
+    session_id: str | None,
+) -> SessionOpenMetadata | None:
+    if not session_id:
+        return None
+    state = FileSessionRepository(workspace_dir).load_session(session_id)
+    if state is None:
+        return None
+    return SessionOpenMetadata(provider=state.model.provider, model_id=state.model.model)
 
 if TYPE_CHECKING:
     from .opening import SessionOpenIntent
@@ -28,6 +47,11 @@ ConfigSourceKind = Literal["cli", "session", "project", "default"]
 SUPPORTED_MODEL_APIS = {"openai-compatible", "anthropic-messages"}
 _PERMISSION_MODES = {"read-only", "workspace-write", "ask"}
 _TOOL_EXECUTION_MODES = {"parallel", "sequential"}
+_REMOVED_TOOL_SECURITY_KEYS = {
+    "block_dangerous_bash",
+    "bash_allow_patterns",
+    "bash_block_patterns",
+}
 
 
 class UnknownRuntimeConfigKeyError(KeyError):
@@ -127,9 +151,6 @@ class WorkspaceSettings:
     max_retries: int | None = None
     retry_base_delay_ms: int | None = None
     tool_permission_mode: RuntimePermissionMode | None = None
-    block_dangerous_bash: bool | None = None
-    bash_allow_patterns: list[str] | None = None
-    bash_block_patterns: list[str] | None = None
     edit_require_unique_match: bool | None = None
     prompt_guidelines: list[str] | None = None
     append_system_prompt: str | None = None
@@ -169,9 +190,6 @@ class RuntimeConfig:
     max_retries: int
     retry_base_delay_ms: int
     tool_permission_mode: RuntimePermissionMode
-    block_dangerous_bash: bool
-    bash_allow_patterns: list[str] | None
-    bash_block_patterns: list[str] | None
     edit_require_unique_match: bool
     prompt_guidelines: list[str] | None
     append_system_prompt: str | None
@@ -212,6 +230,12 @@ class WorkspaceResourceLoader:
         raw = self._load_json_object(self.settings_file)
         if raw is None:
             return WorkspaceSettings()
+        removed_keys = sorted(_REMOVED_TOOL_SECURITY_KEYS & raw.keys())
+        if removed_keys:
+            raise ValueError(
+                "Removed tool security settings are not supported: "
+                + ", ".join(removed_keys)
+            )
 
         tool_execution = raw.get("tool_execution")
         current_mode = raw.get("current_mode")
@@ -239,9 +263,6 @@ class WorkspaceResourceLoader:
             tool_permission_mode=cast(RuntimePermissionMode, permission_mode)
             if permission_mode in _PERMISSION_MODES
             else None,
-            block_dangerous_bash=_bool(raw.get("block_dangerous_bash")),
-            bash_allow_patterns=_string_list(raw.get("bash_allow_patterns")),
-            bash_block_patterns=_string_list(raw.get("bash_block_patterns")),
             edit_require_unique_match=_bool(raw.get("edit_require_unique_match")),
             prompt_guidelines=_string_list(raw.get("prompt_guidelines")),
             append_system_prompt=_string(raw.get("append_system_prompt")),
@@ -430,26 +451,6 @@ def load_runtime_config(intent: "SessionOpenIntent") -> RuntimeConfig:
             default=1200,
         ),
         tool_permission_mode=permission_mode,
-        block_dangerous_bash=bool(
-            choose(
-                "block_dangerous_bash",
-                (_cli_source(), intent.block_dangerous_bash),
-                (_project_source("settings.json"), settings.block_dangerous_bash),
-                default=True,
-            )
-        ),
-        bash_allow_patterns=choose(
-            "bash_allow_patterns",
-            (_cli_source(), intent.bash_allow_patterns),
-            (_project_source("settings.json"), settings.bash_allow_patterns),
-            default=None,
-        ),
-        bash_block_patterns=choose(
-            "bash_block_patterns",
-            (_cli_source(), intent.bash_block_patterns),
-            (_project_source("settings.json"), settings.bash_block_patterns),
-            default=None,
-        ),
         edit_require_unique_match=bool(
             choose(
                 "edit_require_unique_match",

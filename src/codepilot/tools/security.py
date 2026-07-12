@@ -220,6 +220,9 @@ class ToolAccessRequest:
     risk: RiskLevel
     reason: str
     safe_preview: Mapping[str, object] = field(default_factory=dict)
+    approval_scopes: frozenset[ApprovalScope] = frozenset(
+        {"once", "session", "project"}
+    )
 
     def __post_init__(self) -> None:
         actions = tuple(_require_text(value, "access action") for value in self.actions)
@@ -234,12 +237,20 @@ class ToolAccessRequest:
         risk = _clean_text(self.risk)
         if risk not in _RISK_LEVELS:
             raise ValueError(f"Unknown access risk: {self.risk}")
+        scopes = frozenset(_clean_text(value) for value in self.approval_scopes)
+        if not scopes or not scopes <= _APPROVAL_SCOPES:
+            raise ValueError(f"Invalid access approval scopes: {sorted(scopes)}")
         object.__setattr__(self, "actions", actions)
         object.__setattr__(self, "resources", resources)
         object.__setattr__(self, "effects", cast(frozenset[ToolEffectKind], effects))
         object.__setattr__(self, "risk", cast(RiskLevel, risk))
         object.__setattr__(self, "reason", _require_text(self.reason, "access reason"))
         object.__setattr__(self, "safe_preview", _freeze_mapping(self.safe_preview, "safe preview"))
+        object.__setattr__(
+            self,
+            "approval_scopes",
+            cast(frozenset[ApprovalScope], scopes),
+        )
 
 
 TInput = TypeVar("TInput")
@@ -502,6 +513,7 @@ def approval_fingerprint(request, access: ToolAccessRequest) -> str:
         "actions": list(access.actions),
         "resources": [resource.uri for resource in access.resources],
         "effects": sorted(access.effects),
+        "approval_scopes": sorted(access.approval_scopes),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -529,7 +541,7 @@ def build_approval_challenge(
         risk=access.risk,
         reason=reason,
         safe_preview=access.safe_preview,
-        allowed_scopes=frozenset({"once", "session", "project"}),
+        allowed_scopes=access.approval_scopes,
         expires_at_ms=now_ms + ttl_ms,
     )
 

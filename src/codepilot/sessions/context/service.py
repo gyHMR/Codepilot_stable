@@ -39,9 +39,7 @@ from codepilot.protocols import (
 )
 from codepilot.core.plan import MAX_PLAN_ITEMS
 from codepilot.sessions.memory import MemoryQuery, MemoryRecall, render_memory
-from codepilot.sessions.plan_state import PlanStateStore
-from codepilot.sessions.store import SessionStore, build_repository_bootstrap
-from codepilot.sessions.workspace_state import file_state_for_path
+from codepilot.sessions.workspace import build_repository_bootstrap, file_state_for_path
 
 
 ContextFileRole = Literal["target", "test", "dependency", "config", "reference"]
@@ -413,19 +411,20 @@ class ContextGovernor:
         state: SessionContextState | None = None,
         memory_retriever: Any | None = None,
         pressure_policy: ContextPressurePolicy | None = None,
-        plan_state_store: PlanStateStore | None = None,
-        store: SessionStore | None = None,
     ) -> None:
         self.workspace_dir = Path(workspace_dir)
         self.session_id = session_id
-        self.store = store or SessionStore(self.workspace_dir, self.session_id)
         self.state = state or SessionContextState(workspace_dir=self.workspace_dir)
         self.memory_retriever = memory_retriever
         self.pressure_policy = pressure_policy or ContextPressurePolicy()
-        self.plan_state_store = plan_state_store or PlanStateStore(self.store)
         self.repository = RepositoryTracker(self.workspace_dir)
-        self.tool_ledger = ToolArtifactLedger(store=self.store)
+        self.tool_ledger = ToolArtifactLedger(
+            workspace_dir=self.workspace_dir,
+            session_id=self.session_id,
+        )
         self.calibrator = ContextUsageCalibrator(self.workspace_dir)
+        self._compact_summary = ""
+        self._compact_cursor: str | None = None
 
     async def prepare(
         self,
@@ -443,7 +442,7 @@ class ContextGovernor:
 
         artifact_refs = self._observe_tools(context, request, snapshot)
         stale_items = self.state.validate_sources(snapshot.fingerprint)
-        plan_state = _plan_state_from_context(context, self.plan_state_store)
+        plan_state = _plan_state_from_context(context)
         run_signals = _run_signals_from_context(context)
         visible_messages = _without_published_plan_summaries(
             context.messages,
@@ -558,8 +557,6 @@ class ContextGovernor:
                 "by_type": dict(raw_estimate.by_type),
             },
         )
-        self.store.append_context_ledger(_projection_payload(report, run_id=_request_run_id(request)))
-        self.store.update_context_meta({"last_context_id": report.context_id})
         return PreparedAgentContext(
             system_prompt=system_prompt,
             messages=selected_messages,
@@ -577,10 +574,8 @@ class ContextGovernor:
         pressure: ContextPressure,
         run_id: str | None,
     ) -> tuple[str, str | None]:
-        meta = self.store.read_meta() or {}
-        context_meta = meta.get("context") if isinstance(meta.get("context"), dict) else {}
-        current_cursor = _optional_text(context_meta.get("compacted_until_message_id"))
-        current_summary = _optional_text(context_meta.get("last_compact_summary")) or ""
+        current_cursor = self._compact_cursor
+        current_summary = self._compact_summary
         if pressure.level != "critical":
             return current_summary, current_cursor
 
@@ -599,27 +594,21 @@ class ContextGovernor:
             for message in group
             if (message_id := _session_message_id(message)) is not None
         ]
-        self.store.append_context_ledger(
-            {
-                "type": "context_compaction",
-                "context_id": f"ctx_compact_{_hash_text(summary + cursor)}",
-                "run_id": run_id,
-                "created_at": _utc_now_iso(),
-                "compacted_until_message_id": cursor,
-                "summary": summary,
-                "source_message_ids": source_ids,
-                "artifact_refs": [],
-                "fallback": True,
-            }
-        )
-        self.store.update_context_meta(
-            {
-                "compacted_until_message_id": cursor,
-                "last_compact_summary": summary,
-                "last_compacted_at": _utc_now_iso(),
-            }
-        )
+        self._compact_cursor = cursor
+        self._compact_summary = summary
         return summary, cursor
+
+    def checkpoint_state(self) -> dict[str, object]:
+        return {
+            "compacted_until_message_id": self._compact_cursor,
+            "compact_summary": self._compact_summary,
+        }
+
+    def restore_checkpoint_state(self, state: Mapping[str, object] | None) -> None:
+        if not state:
+            return
+        self._compact_cursor = _optional_text(state.get("compacted_until_message_id"))
+        self._compact_summary = _optional_text(state.get("compact_summary")) or ""
 
     def _observe_tools(
         self,
@@ -753,12 +742,10 @@ class ToolLedgerEntry:
 class ToolArtifactLedger:
     """Archive tool outputs and expose compact references to the prompt."""
 
-    def __init__(self, *, store: SessionStore) -> None:
-        self.store = store
-        self.workspace_dir = store.workspace_dir
-        self.session_id = store.session_id
-        self.ledger_file = store.layout.context_ledger_file
-        self.artifact_dir = store.layout.tool_outputs_dir
+    def __init__(self, *, workspace_dir: Path, session_id: str) -> None:
+        self.workspace_dir = workspace_dir
+        self.session_id = session_id
+        self._entries: list[ToolLedgerEntry] = []
 
     def record_tool_result(
         self,
@@ -848,16 +835,7 @@ class ToolArtifactLedger:
         )
 
     def load_entries(self) -> list[ToolLedgerEntry]:
-        if not self.ledger_file.exists():
-            return []
-        entries: list[ToolLedgerEntry] = []
-        for line in self.ledger_file.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            payload = json.loads(line)
-            if isinstance(payload, dict) and payload.get("type") == "tool_artifact":
-                entries.append(ToolLedgerEntry.from_dict(payload))
-        return entries
+        return list(self._entries)
 
     def artifact_refs(self) -> list[ContextArtifactRef]:
         return [entry.artifact for entry in self.load_entries()]
@@ -869,7 +847,7 @@ class ToolArtifactLedger:
         return None
 
     def _append(self, entry: ToolLedgerEntry) -> None:
-        self.store.append_context_ledger({"type": "tool_artifact", **entry.to_dict()})
+        self._entries.append(entry)
 
 
 def calibrate_context_usage(
@@ -903,9 +881,13 @@ def calibrate_context_usage(
 
 
 def build_context_freshness_notice(freshness: Any) -> UserMessage | None:
-    if not freshness.requires_steering():
+    if freshness.status in {"valid", "unchanged"}:
         return None
-    payload = freshness.to_event_payload()
+    payload = {
+        "status": freshness.status,
+        "changed_paths": list(freshness.changed_paths),
+        "missing_paths": list(freshness.missing_paths),
+    }
     lines = [
         "[Context Freshness]",
         f"status={freshness.status}",
@@ -1387,11 +1369,10 @@ def _item(item_id: str, kind: str, content: str, source: str, priority: int) -> 
 
 def _plan_state_from_context(
     context: AgentContext,
-    plan_state_store: PlanStateStore,
 ) -> Mapping[str, object] | None:
     if isinstance(context.plan_state, Mapping):
         return _workflow_plan_state(context.plan_state)
-    return _workflow_plan_state(plan_state_store.current())
+    return None
 
 
 def _workflow_plan_state(state: Mapping[str, object] | None) -> Mapping[str, object] | None:

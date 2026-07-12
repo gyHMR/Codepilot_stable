@@ -18,7 +18,7 @@ from codepilot.sessions.contracts import (
     SessionRunRecord,
     SessionView,
 )
-from codepilot.sessions.controller import SessionController
+from codepilot.runtime.session_controller import SessionController
 from codepilot.protocols import RunSignalsSummary
 
 from .actions import (
@@ -39,7 +39,7 @@ from .actions import (
 from .approvals import ApprovalRegistry, ApprovalView
 from .builder import build_runtime_session
 from .opening import AppSessionView, SessionRef
-from .sessions import ActiveRunRegistry, RuntimeSession, RuntimeSessionStore
+from .sessions import ActiveRunRegistry, RuntimeSession, RuntimeSessionRegistry
 from .views import CommandDescriptor, SessionStatus, builtin_commands
 
 if TYPE_CHECKING:
@@ -58,7 +58,7 @@ class RuntimeGateway:
         model_port: Any | None = None,
         tool_port: Any | None = None,
     ) -> None:
-        self._sessions = RuntimeSessionStore()
+        self._sessions = RuntimeSessionRegistry()
         self._model_port = model_port
         self._tool_port = tool_port
         self._approvals = ApprovalRegistry()
@@ -342,6 +342,7 @@ class RuntimeGateway:
             ports = self._ports_for(
                 session.session_id,
                 context_port=prepared.context_port,
+                state_port=prepared.state_port,
                 event_sink=event_sink,
             )
             task = asyncio.create_task(run_loop(ports))
@@ -419,6 +420,7 @@ class RuntimeGateway:
         session_id: str,
         *,
         context_port: ContextPort | None,
+        state_port: Any | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> AgentLoopPorts:
         session = self._sessions.require(session_id)
@@ -426,6 +428,7 @@ class RuntimeGateway:
             model=session.model_port or self._model_port,
             tools=session.tool_port or self._tool_port,
             context=context_port,
+            state=state_port,
             events=event_sink,
         )
 

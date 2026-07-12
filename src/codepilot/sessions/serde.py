@@ -16,6 +16,18 @@ from codepilot.protocols import (
     Usage,
     UserMessage,
 )
+from codepilot.sessions.contracts import (
+    ComponentCheckpoint,
+    MessageCursor,
+    MessageRecord,
+    ModelRef,
+    RunCheckpoint,
+    RunState,
+    SessionState,
+    WaitingState,
+    WorkspaceCheckpoint,
+    WorkspaceEffectsSnapshot,
+)
 
 
 def message_to_dict(message: Message) -> dict[str, Any]:
@@ -291,4 +303,328 @@ def _float(value: object) -> float:
     return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else 0.0
 
 
-__all__ = ["message_from_dict", "message_to_dict"]
+def session_state_to_dict(state: SessionState) -> dict[str, Any]:
+    return {
+        "schema_version": state.schema_version,
+        "session_id": state.session_id,
+        "workspace_root": state.workspace_root,
+        "current_run_id": state.current_run_id,
+        "last_run_id": state.last_run_id,
+        "leaf_message_id": state.leaf_message_id,
+        "parent_session_id": state.parent_session_id,
+        "parent_run_id": state.parent_run_id,
+        "session_kind": state.session_kind,
+        "current_mode": state.current_mode,
+        "model": {"provider": state.model.provider, "model": state.model.model},
+        "system_prompt_hash": state.system_prompt_hash,
+        "created_at": state.created_at,
+        "updated_at": state.updated_at,
+        "revision": state.revision,
+    }
+
+
+def session_state_from_dict(data: dict[str, Any]) -> SessionState:
+    _expect_keys(
+        data,
+        {
+            "schema_version",
+            "session_id",
+            "workspace_root",
+            "current_run_id",
+            "last_run_id",
+            "leaf_message_id",
+            "parent_session_id",
+            "parent_run_id",
+            "session_kind",
+            "current_mode",
+            "model",
+            "system_prompt_hash",
+            "created_at",
+            "updated_at",
+            "revision",
+        },
+        "session state",
+    )
+    model = _required_dict(data["model"], "session model")
+    _expect_keys(model, {"provider", "model"}, "session model")
+    return SessionState(
+        schema_version=data["schema_version"],
+        session_id=data["session_id"],
+        workspace_root=data["workspace_root"],
+        current_run_id=data["current_run_id"],
+        last_run_id=data["last_run_id"],
+        leaf_message_id=data["leaf_message_id"],
+        parent_session_id=data["parent_session_id"],
+        parent_run_id=data["parent_run_id"],
+        session_kind=data["session_kind"],
+        current_mode=data["current_mode"],
+        model=ModelRef(provider=model["provider"], model=model["model"]),
+        system_prompt_hash=data["system_prompt_hash"],
+        created_at=data["created_at"],
+        updated_at=data["updated_at"],
+        revision=data["revision"],
+    )
+
+
+def message_record_to_dict(record: MessageRecord) -> dict[str, Any]:
+    return {
+        "schema_version": record.schema_version,
+        "message_id": record.message_id,
+        "session_id": record.session_id,
+        "run_id": record.run_id,
+        "parent_id": record.parent_id,
+        "created_at": record.created_at,
+        "message": message_to_dict(record.message),
+    }
+
+
+def message_record_from_dict(data: dict[str, Any]) -> MessageRecord:
+    _expect_keys(
+        data,
+        {
+            "schema_version",
+            "message_id",
+            "session_id",
+            "run_id",
+            "parent_id",
+            "created_at",
+            "message",
+        },
+        "message record",
+    )
+    return MessageRecord(
+        schema_version=data["schema_version"],
+        message_id=data["message_id"],
+        session_id=data["session_id"],
+        run_id=data["run_id"],
+        parent_id=data["parent_id"],
+        created_at=data["created_at"],
+        message=message_from_dict(_required_dict(data["message"], "message")),
+    )
+
+
+def run_state_to_dict(state: RunState) -> dict[str, Any]:
+    return {
+        "schema_version": state.schema_version,
+        "run_id": state.run_id,
+        "session_id": state.session_id,
+        "status": state.status,
+        "phase": state.phase,
+        "stop_reason": state.stop_reason,
+        "input_message_id": state.input_message_id,
+        "latest_message_id": state.latest_message_id,
+        "core_state": dict(state.core_state),
+        "checkpoint": _checkpoint_to_dict(state.checkpoint),
+        "result_ref": state.result_ref,
+        "workspace_effects": {
+            "changed": state.workspace_effects.changed,
+            "affected_paths": list(state.workspace_effects.affected_paths),
+            "baseline_ref": state.workspace_effects.baseline_ref,
+            "final_fingerprint": state.workspace_effects.final_fingerprint,
+        },
+        "resume_count": state.resume_count,
+        "created_at": state.created_at,
+        "updated_at": state.updated_at,
+        "started_at": state.started_at,
+        "ended_at": state.ended_at,
+        "revision": state.revision,
+    }
+
+
+def run_state_from_dict(data: dict[str, Any]) -> RunState:
+    _expect_keys(
+        data,
+        {
+            "schema_version",
+            "run_id",
+            "session_id",
+            "status",
+            "phase",
+            "stop_reason",
+            "input_message_id",
+            "latest_message_id",
+            "core_state",
+            "checkpoint",
+            "result_ref",
+            "workspace_effects",
+            "resume_count",
+            "created_at",
+            "updated_at",
+            "started_at",
+            "ended_at",
+            "revision",
+        },
+        "run state",
+    )
+    effects = _required_dict(data["workspace_effects"], "workspace_effects")
+    _expect_keys(
+        effects,
+        {"changed", "affected_paths", "baseline_ref", "final_fingerprint"},
+        "workspace_effects",
+    )
+    checkpoint = data["checkpoint"]
+    return RunState(
+        schema_version=data["schema_version"],
+        run_id=data["run_id"],
+        session_id=data["session_id"],
+        status=data["status"],
+        phase=data["phase"],
+        stop_reason=data["stop_reason"],
+        input_message_id=data["input_message_id"],
+        latest_message_id=data["latest_message_id"],
+        core_state=_required_dict(data["core_state"], "core_state"),
+        checkpoint=(
+            _checkpoint_from_dict(_required_dict(checkpoint, "checkpoint"))
+            if checkpoint is not None
+            else None
+        ),
+        result_ref=data["result_ref"],
+        workspace_effects=WorkspaceEffectsSnapshot(
+            changed=effects["changed"],
+            affected_paths=effects["affected_paths"],
+            baseline_ref=effects["baseline_ref"],
+            final_fingerprint=effects["final_fingerprint"],
+        ),
+        resume_count=data["resume_count"],
+        created_at=data["created_at"],
+        updated_at=data["updated_at"],
+        started_at=data["started_at"],
+        ended_at=data["ended_at"],
+        revision=data["revision"],
+    )
+
+
+def _checkpoint_to_dict(checkpoint: RunCheckpoint | None) -> dict[str, Any] | None:
+    if checkpoint is None:
+        return None
+    return {
+        "schema_version": checkpoint.schema_version,
+        "checkpoint_id": checkpoint.checkpoint_id,
+        "resume_point": checkpoint.resume_point,
+        "message_cursor": {"leaf_message_id": checkpoint.message_cursor.leaf_message_id},
+        "waiting": (
+            {
+                "kind": checkpoint.waiting.kind,
+                "request_id": checkpoint.waiting.request_id,
+                "payload": dict(checkpoint.waiting.payload),
+            }
+            if checkpoint.waiting is not None
+            else None
+        ),
+        "components": [
+            {
+                "owner": component.owner,
+                "schema_version": component.schema_version,
+                "state": dict(component.state),
+            }
+            for component in checkpoint.components
+        ],
+        "workspace": (
+            {
+                "root": checkpoint.workspace.root,
+                "git_head": checkpoint.workspace.git_head,
+                "dirty_paths": list(checkpoint.workspace.dirty_paths),
+                "tracked_path_hashes": dict(checkpoint.workspace.tracked_path_hashes),
+            }
+            if checkpoint.workspace is not None
+            else None
+        ),
+        "created_at": checkpoint.created_at,
+    }
+
+
+def _checkpoint_from_dict(data: dict[str, Any]) -> RunCheckpoint:
+    _expect_keys(
+        data,
+        {
+            "schema_version",
+            "checkpoint_id",
+            "resume_point",
+            "message_cursor",
+            "waiting",
+            "components",
+            "workspace",
+            "created_at",
+        },
+        "run checkpoint",
+    )
+    cursor = _required_dict(data["message_cursor"], "message_cursor")
+    _expect_keys(cursor, {"leaf_message_id"}, "message_cursor")
+    waiting_raw = data["waiting"]
+    waiting: WaitingState | None = None
+    if waiting_raw is not None:
+        waiting_data = _required_dict(waiting_raw, "waiting")
+        _expect_keys(waiting_data, {"kind", "request_id", "payload"}, "waiting")
+        waiting = WaitingState(
+            kind=waiting_data["kind"],
+            request_id=waiting_data["request_id"],
+            payload=_required_dict(waiting_data["payload"], "waiting payload"),
+        )
+    components_raw = data["components"]
+    if not isinstance(components_raw, list):
+        raise ValueError("run checkpoint components must be a list")
+    components: list[ComponentCheckpoint] = []
+    for value in components_raw:
+        component = _required_dict(value, "checkpoint component")
+        _expect_keys(component, {"owner", "schema_version", "state"}, "checkpoint component")
+        components.append(
+            ComponentCheckpoint(
+                owner=component["owner"],
+                schema_version=component["schema_version"],
+                state=_required_dict(component["state"], "component state"),
+            )
+        )
+    workspace_raw = data["workspace"]
+    workspace: WorkspaceCheckpoint | None = None
+    if workspace_raw is not None:
+        workspace_data = _required_dict(workspace_raw, "workspace checkpoint")
+        _expect_keys(
+            workspace_data,
+            {"root", "git_head", "dirty_paths", "tracked_path_hashes"},
+            "workspace checkpoint",
+        )
+        workspace = WorkspaceCheckpoint(
+            root=workspace_data["root"],
+            git_head=workspace_data["git_head"],
+            dirty_paths=workspace_data["dirty_paths"],
+            tracked_path_hashes=_required_dict(
+                workspace_data["tracked_path_hashes"],
+                "tracked_path_hashes",
+            ),
+        )
+    return RunCheckpoint(
+        schema_version=data["schema_version"],
+        checkpoint_id=data["checkpoint_id"],
+        resume_point=data["resume_point"],
+        message_cursor=MessageCursor(leaf_message_id=cursor["leaf_message_id"]),
+        waiting=waiting,
+        components=tuple(components),
+        workspace=workspace,
+        created_at=data["created_at"],
+    )
+
+
+def _expect_keys(data: dict[str, Any], expected: set[str], name: str) -> None:
+    actual = set(data)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unknown = sorted(actual - expected)
+        raise ValueError(f"Invalid {name} fields: missing={missing}, unknown={unknown}")
+
+
+def _required_dict(value: object, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    return dict(value)
+
+
+__all__ = [
+    "message_from_dict",
+    "message_record_from_dict",
+    "message_record_to_dict",
+    "message_to_dict",
+    "run_state_from_dict",
+    "run_state_to_dict",
+    "session_state_from_dict",
+    "session_state_to_dict",
+]

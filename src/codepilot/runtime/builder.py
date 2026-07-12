@@ -13,9 +13,13 @@ from codepilot.core.tool_adapters import (
 from codepilot.llm.adapter import ProviderModelPort
 from codepilot.llm.registry import register_builtin_api_providers
 from codepilot.sessions.contracts import SessionOptions
-from codepilot.sessions.controller import create_session_controller
-from codepilot.sessions.tool_state_store import SessionToolStateStore
-from codepilot.tools import PermissionEngine, ToolRuntime
+from codepilot.runtime.session_controller import create_session_controller
+from codepilot.tools import (
+    InMemoryToolStateStore,
+    PermissionEngine,
+    PermissionRule,
+    ToolRuntime,
+)
 
 from .config import load_runtime_config
 from .hooks import compose_lifecycle_hooks
@@ -100,7 +104,7 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
     tool_port = ToolRuntime(
         registry=tools.registry,
         permission_engine=_permission_engine(config.tool_permission_mode),
-        state_store=SessionToolStateStore(config.workspace, controller.session_id),
+        state_store=InMemoryToolStateStore(),
     )
 
     runtime_session = RuntimeSession(
@@ -151,7 +155,27 @@ def _permission_engine(mode: str) -> PermissionEngine:
         return PermissionEngine(denied_effects=controlled_effects)
     if mode == "ask":
         return PermissionEngine(approval_effects=controlled_effects)
-    return PermissionEngine()
+    workspace_capabilities = (
+        "write",
+        "edit",
+        "apply_patch",
+        "command.inspection",
+        "command.repository_execution",
+        "command.bounded_mutation",
+    )
+    return PermissionEngine(
+        rules=tuple(
+            PermissionRule(
+                action_pattern=action,
+                resource_pattern="workspace:///*",
+                effect="allow",
+                modes=frozenset({"execute"}),
+                source="runtime",
+                priority=100,
+            )
+            for action in workspace_capabilities
+        )
+    )
 
 
 __all__ = [

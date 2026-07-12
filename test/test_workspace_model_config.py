@@ -115,7 +115,7 @@ def test_cli_defaults_leave_runtime_config_unspecified() -> None:
     assert args.current_mode is None
 
 
-def test_cli_interactive_uses_runtime_deferred_approval_path(tmp_path, monkeypatch) -> None:
+def test_cli_interactive_opens_runtime_session_and_runs_repl(tmp_path, monkeypatch) -> None:
     from codepilot.interfaces.cli import main as cli_main
 
     captured = {}
@@ -144,7 +144,7 @@ def test_cli_interactive_uses_runtime_deferred_approval_path(tmp_path, monkeypat
     assert asyncio.run(cli_main._run_from_args(args)) == 0
     assert captured["run_mode"] == "repl"
     assert captured["session_id"] == "session_1"
-    assert captured["intent"].approval_provider is None
+    assert captured["intent"].workspace_dir == tmp_path
     assert captured["closed"] is True
 
 
@@ -191,8 +191,9 @@ def test_config_check_and_show_use_sanitized_human_output(tmp_path, capsys) -> N
 
 
 def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> None:
-    from codepilot.sessions.store import load_session_open_metadata
-    from codepilot.sessions.store import SessionStore
+    from codepilot.runtime.config import load_session_open_metadata
+    from codepilot.sessions.contracts import ModelRef
+    from codepilot.sessions.service import CreateSessionRequest, SessionStateService
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -206,8 +207,15 @@ def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> Non
         ),
         encoding="utf-8",
     )
-    store = SessionStore(tmp_path, "session_restore")
-    store.ensure_initialized(model_id="deepseek-v4-pro", provider="deepseek", system_prompt="restored prompt")
+    SessionStateService(tmp_path).create_session(
+        CreateSessionRequest(
+            workspace_root=str(tmp_path),
+            model=ModelRef(provider="deepseek", model="deepseek-v4-pro"),
+            current_mode="build",
+            system_prompt_hash="test-system-prompt",
+            session_id="session_restore",
+        )
+    )
 
     intent = SessionOpenIntent(workspace_dir=tmp_path, session_id="session_restore")
     config = load_runtime_config(intent)
@@ -228,9 +236,7 @@ def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> 
             {
                 "retry_enabled": True,
                 "tool_permission_mode": "ask",
-                "block_dangerous_bash": True,
                 "prompt_debug_sources": True,
-                "bash_allow_patterns": ["pytest"],
                 "extension_paths": ["workspace-extension"],
             }
         ),
@@ -242,21 +248,28 @@ def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> 
             workspace_dir=tmp_path,
             retry_enabled=False,
             tool_permission_mode="workspace-write",
-            block_dangerous_bash=False,
             prompt_debug_sources=False,
-            bash_allow_patterns=[],
             extension_paths=[],
         ),
     )
 
     assert config.retry_enabled is False
     assert config.tool_permission_mode == "workspace-write"
-    assert config.block_dangerous_bash is False
     assert config.prompt_debug_sources is False
-    assert config.bash_allow_patterns == []
     assert config.extension_paths == []
     assert config.sources["retry_enabled"].kind == "cli"
-    assert config.sources["bash_allow_patterns"].kind == "cli"
+
+
+def test_removed_shell_security_settings_are_rejected(tmp_path) -> None:
+    root = tmp_path / ".codepilot"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "settings.json").write_text(
+        json.dumps({"block_dangerous_bash": False}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Removed tool security settings"):
+        load_runtime_config(SessionOpenIntent(workspace_dir=tmp_path))
 
 
 def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:

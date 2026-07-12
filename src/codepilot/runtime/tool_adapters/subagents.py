@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 import hashlib
 from pathlib import Path
 
-from codepilot.sessions.subagents import SubagentStore
+from codepilot.runtime.subagent_registry import SubagentStore
 from codepilot.tools.codecs import JsonObjectCodec
 from codepilot.tools.contracts import (
     ToolExecutionRequest,

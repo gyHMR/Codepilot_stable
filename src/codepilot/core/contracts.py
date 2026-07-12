@@ -29,6 +29,17 @@ from .plan import RunMode, ensure_run_mode, plan_state_to_dict
 
 ToolExecutionMode = Literal["sequential", "parallel"]
 AgentMessage = Message
+CoreBoundaryKind = Literal[
+    "before_model",
+    "after_model",
+    "before_tools",
+    "after_tools",
+    "waiting_tool_approval",
+    "waiting_user_input",
+    "waiting_plan_confirmation",
+    "before_finalization",
+]
+CoreWaitingKind = Literal["tool_approval", "user_input", "plan_confirmation"]
 
 
 @dataclass
@@ -240,10 +251,72 @@ class AgentResumeInput:
 
 
 @dataclass(frozen=True)
+class CoreWaitingRequest:
+    kind: CoreWaitingKind
+    request_id: str
+    payload: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"tool_approval", "user_input", "plan_confirmation"}:
+            raise ValueError(f"Unknown core waiting kind: {self.kind}")
+        object.__setattr__(self, "request_id", _required_core_text(self.request_id, "request_id"))
+        object.__setattr__(
+            self,
+            "payload",
+            _copy_dict(self.payload, field_name="waiting payload"),
+        )
+
+
+@dataclass(frozen=True)
+class CoreRunBoundary:
+    kind: CoreBoundaryKind
+    core_state: dict[str, object]
+    new_messages: tuple[Message, ...] = ()
+    waiting: CoreWaitingRequest | None = None
+    tool_recovery_state: dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in {
+            "before_model",
+            "after_model",
+            "before_tools",
+            "after_tools",
+            "waiting_tool_approval",
+            "waiting_user_input",
+            "waiting_plan_confirmation",
+            "before_finalization",
+        }:
+            raise ValueError(f"Unknown core boundary kind: {self.kind}")
+        object.__setattr__(
+            self,
+            "core_state",
+            _copy_dict(self.core_state, field_name="core_state"),
+        )
+        object.__setattr__(self, "new_messages", tuple(self.new_messages))
+        object.__setattr__(
+            self,
+            "tool_recovery_state",
+            _copy_optional_dict(
+                self.tool_recovery_state,
+                field_name="tool_recovery_state",
+            ),
+        )
+        waiting_boundary = self.kind.startswith("waiting_")
+        if waiting_boundary != (self.waiting is not None):
+            raise ValueError("Waiting boundaries require exactly one waiting request")
+
+
+class RunStatePort(Protocol):
+    def commit(self, boundary: CoreRunBoundary) -> None | Awaitable[None]:
+        ...
+
+
+@dataclass(frozen=True)
 class AgentLoopPorts:
     model: ModelPort | None
     tools: ToolPort | None
     context: ContextPort | None = None
+    state: RunStatePort | None = None
     events: EventSink | None = None
 
 
@@ -321,6 +394,19 @@ def _optional_core_text(value: object) -> str | None:
     return text or None
 
 
+def _required_core_text(value: object, field_name: str) -> str:
+    text = _clean_core_text(value).strip()
+    if not text:
+        raise ValueError(f"{field_name} is required")
+    return text
+
+
+def _copy_dict(value: object, *, field_name: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise TypeError(f"{field_name} must be a dict")
+    return deepcopy(value)
+
+
 def _copy_messages(value: object, *, field_name: str) -> list[AgentMessage]:
     if not isinstance(value, list):
         raise TypeError(f"AgentContext {field_name} must be a list")
@@ -366,12 +452,17 @@ __all__ = [
     "AgentMessage",
     "ContextPreparationRequest",
     "ContextPort",
+    "CoreBoundaryKind",
+    "CoreRunBoundary",
+    "CoreWaitingKind",
+    "CoreWaitingRequest",
     "EventSink",
     "PreparedAgentContext",
     "PreparedContext",
     "PrepareContextFn",
     "RetryPolicy",
     "RunCorrelation",
+    "RunStatePort",
     "ToolExecutionMode",
     "WorkspaceEffects",
 ]

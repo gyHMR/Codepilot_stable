@@ -19,6 +19,7 @@ def test_runtime_tools_catalog_is_filtered_by_current_mode(tmp_path: Path) -> No
     assert {"ls", "read", "grep", "find", "workspace_status"} <= names
     assert {"propose_plan", "create_build_plan", "update_plan_progress", "close_plan"}.isdisjoint(names)
     assert "write" not in names
+    assert "command" not in names
     assert "bash" not in names
 
 

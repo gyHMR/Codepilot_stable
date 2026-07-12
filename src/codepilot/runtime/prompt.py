@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from codepilot.sessions.store import build_repository_bootstrap, render_repository_context
+from codepilot.sessions.workspace import build_repository_bootstrap, render_repository_context
 
 from .config import RuntimeConfig
 from .tools import RuntimeTools
@@ -128,6 +128,9 @@ def _default_tool_snippets() -> dict[str, str]:
 
 
 __all__ = [
+    "RepositoryBootstrap",
+    "build_repository_bootstrap",
     "build_default_system_prompt",
     "build_system_prompt",
+    "render_repository_context",
 ]

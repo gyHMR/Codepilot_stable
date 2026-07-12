@@ -24,6 +24,8 @@ from ..security import (
 )
 
 _DRAFT = "https://json-schema.org/draft/2020-12/schema"
+_AUTO_APPROVE_MAX_FILES = 20
+_AUTO_APPROVE_MAX_BYTES = 500_000
 
 
 @dataclass(frozen=True)
@@ -165,15 +167,34 @@ class _Resolver:
             if self.mutating
             else frozenset({"filesystem_read"})
         )
+        file_count, estimated_bytes = _mutation_size(self.name, input)
+        bulk = self.mutating and (
+            file_count > _AUTO_APPROVE_MAX_FILES
+            or estimated_bytes > _AUTO_APPROVE_MAX_BYTES
+        )
         return ToolAccessResolution(
             input=input,
             access=ToolAccessRequest(
-                actions=(self.name,),
+                actions=(f"{self.name}.bulk" if bulk else self.name,),
                 resources=tuple(resources),
                 effects=effects,
-                risk="medium" if self.mutating else "low",
+                risk="medium" if bulk else "low",
                 reason=f"{self.name} workspace path(s)",
-                safe_preview={"paths": paths},
+                safe_preview={
+                    "paths": paths,
+                    "file_count": file_count,
+                    "estimated_bytes": estimated_bytes,
+                    "operation_profile": (
+                        "bulk_write"
+                        if bulk
+                        else "workspace_write" if self.mutating else "workspace_read"
+                    ),
+                },
+                approval_scopes=(
+                    frozenset({"once"})
+                    if bulk
+                    else frozenset({"once", "session", "project"})
+                ),
             ),
         )
 
@@ -402,6 +423,20 @@ def _policy(mutating: bool) -> ToolPolicy:
 
 def _resource(sandbox: WorkspaceSandbox, target: Path) -> ToolResource:
     return ToolResource("workspace:///" + sandbox.relative_path(target))
+
+
+def _mutation_size(name: str, input: object) -> tuple[int, int]:
+    if name == "write":
+        return 1, len(input.content.encode("utf-8"))
+    if name == "edit":
+        return 1, len(input.old_text.encode("utf-8")) + len(input.new_text.encode("utf-8"))
+    if name == "apply_patch":
+        return len(input.edits), sum(
+            len(str(item.get("old_text", "")).encode("utf-8"))
+            + len(str(item.get("new_text", "")).encode("utf-8"))
+            for item in input.edits
+        )
+    return 1, 0
 
 
 def _hash_text(text: str) -> str:

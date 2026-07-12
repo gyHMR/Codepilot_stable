@@ -17,12 +17,18 @@ _CANONICAL_BUILTIN_NAMES = {
     "write",
     "edit",
     "apply_patch",
+    "command",
     "bash",
 }
 _CALL_SEQUENCE = itertools.count(1)
 
 
-def _runtime(workspace: Path, *, enabled_names: list[str] | None = None):
+def _runtime(
+    workspace: Path,
+    *,
+    enabled_names: list[str] | None = None,
+    permission_engine=None,
+):
     from codepilot.tools import create_builtin_registrations
     from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.runtime import ToolRuntime
@@ -40,7 +46,8 @@ def _runtime(workspace: Path, *, enabled_names: list[str] | None = None):
     return (
         ToolRuntime(
             registry=registry,
-            permission_engine=PermissionEngine(
+            permission_engine=permission_engine
+            or PermissionEngine(
                 rules=(PermissionRule("*", "*", "allow", priority=100),)
             ),
         ),
@@ -187,3 +194,178 @@ def test_bash_reports_process_effect_and_preserves_nonzero_error_code(tmp_path: 
     assert failed.status == "error"
     assert failed.error is not None
     assert failed.error.code == "shell_exit_nonzero"
+
+
+def test_controlled_command_executes_without_shell_parsing(tmp_path: Path) -> None:
+    runtime, registration_ids = _runtime(tmp_path, enabled_names=["command"])
+
+    result = _execute(
+        runtime,
+        registration_ids,
+        "command",
+        {"argv": [str(Path(sys.executable)), "--version"]},
+    )
+
+    assert result.status == "success"
+    assert result.data["details"]["command_profile"] == "inspection"
+    assert "process_spawn" in {effect.kind for effect in result.effects}
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["git", "diff"], "inspection"),
+        (["python", "-m", "pytest"], "repository_execution"),
+        (["ruff", "format", "src"], "bounded_mutation"),
+        (["python", "-m", "pip", "install", "demo"], "external_effect"),
+        (["git", "reset", "--hard"], "destructive"),
+        (["python", "-c", "print('raw')"], "unknown"),
+    ],
+)
+def test_controlled_command_profiles_are_capability_based(argv, expected) -> None:
+    from codepilot.tools.sandbox import classify_command_argv
+
+    assert classify_command_argv(argv) == expected
+
+
+def test_workspace_write_mode_allows_bounded_work_but_keeps_escape_hatches_gated(
+    tmp_path: Path,
+) -> None:
+    from codepilot.runtime.builder import _permission_engine
+
+    runtime, registration_ids = _runtime(
+        tmp_path,
+        enabled_names=["write", "command", "bash"],
+        permission_engine=_permission_engine("workspace-write"),
+    )
+    (tmp_path / "empty").mkdir()
+
+    write_result = _execute(
+        runtime,
+        registration_ids,
+        "write",
+        {"path": "sample.txt", "content": "safe\n"},
+    )
+    command_result = _execute(
+        runtime,
+        registration_ids,
+        "command",
+        {
+            "argv": [
+                str(Path(sys.executable)),
+                "-m",
+                "compileall",
+                "empty",
+                "-q",
+            ]
+        },
+    )
+    external_result = _execute(
+        runtime,
+        registration_ids,
+        "command",
+        {"argv": [str(Path(sys.executable)), "-m", "pip", "install", "example"]},
+    )
+    bash_result = _execute(
+        runtime,
+        registration_ids,
+        "bash",
+        {"command": "echo raw-shell"},
+    )
+
+    assert write_result.status == "success"
+    assert command_result.status == "success"
+    assert command_result.data["details"]["command_profile"] == "repository_execution"
+    assert external_result.status == "approval_required"
+    assert external_result.approval is not None
+    assert external_result.approval.allowed_scopes == frozenset({"once"})
+    assert bash_result.status == "approval_required"
+    assert bash_result.approval is not None
+    assert bash_result.approval.allowed_scopes == frozenset({"once"})
+
+
+def test_ask_mode_and_bulk_workspace_writes_require_approval(tmp_path: Path) -> None:
+    from codepilot.runtime.builder import _permission_engine
+
+    ask_runtime, ask_ids = _runtime(
+        tmp_path,
+        enabled_names=["write"],
+        permission_engine=_permission_engine("ask"),
+    )
+    ask_result = _execute(
+        ask_runtime,
+        ask_ids,
+        "write",
+        {"path": "ask.txt", "content": "approval\n"},
+    )
+
+    workspace_runtime, workspace_ids = _runtime(
+        tmp_path,
+        enabled_names=["write"],
+        permission_engine=_permission_engine("workspace-write"),
+    )
+    bulk_result = _execute(
+        workspace_runtime,
+        workspace_ids,
+        "write",
+        {"path": "large.txt", "content": "x" * 500_001},
+    )
+
+    assert ask_result.status == "approval_required"
+    assert ask_result.approval is not None
+    assert ask_result.approval.allowed_scopes == frozenset({"once", "session", "project"})
+    assert bulk_result.status == "approval_required"
+    assert bulk_result.approval is not None
+    assert bulk_result.approval.allowed_scopes == frozenset({"once"})
+    assert not (tmp_path / "ask.txt").exists()
+    assert not (tmp_path / "large.txt").exists()
+
+
+def test_controlled_command_rejects_unknown_or_destructive_argv(tmp_path: Path) -> None:
+    runtime, registration_ids = _runtime(tmp_path, enabled_names=["command"])
+
+    unknown = _execute(
+        runtime,
+        registration_ids,
+        "command",
+        {"argv": [str(Path(sys.executable)), "-c", "print('not-controlled')"]},
+    )
+    destructive = _execute(
+        runtime,
+        registration_ids,
+        "command",
+        {"argv": ["git", "reset", "--hard"]},
+    )
+
+    assert unknown.status == "denied"
+    assert unknown.error is not None
+    assert unknown.error.code == "tool.access.invalid"
+    assert destructive.status == "denied"
+    assert destructive.error is not None
+    assert destructive.error.code == "tool.access.invalid"
+
+
+def test_controlled_command_rejects_workspace_escape_in_cwd_or_arguments(
+    tmp_path: Path,
+) -> None:
+    runtime, registration_ids = _runtime(tmp_path, enabled_names=["command"])
+
+    escaped_cwd = _execute(
+        runtime,
+        registration_ids,
+        "command",
+        {"argv": [str(Path(sys.executable)), "--version"], "cwd": ".."},
+    )
+    escaped_argument = _execute(
+        runtime,
+        registration_ids,
+        "command",
+        {"argv": [str(Path(sys.executable)), "--version", "../outside.txt"]},
+    )
+
+    assert escaped_cwd.status == "denied"
+    assert escaped_cwd.error is not None
+    assert escaped_cwd.error.code == "tool.access.invalid"
+    assert escaped_argument.status == "denied"
+    assert escaped_argument.error is not None
+    assert escaped_argument.error.code == "tool.access.invalid"

@@ -140,13 +140,25 @@ def test_security_values_capture_authorized_resources_and_effects() -> None:
         risk="medium",
         reason="Update workspace file",
         safe_preview=preview,
+        approval_scopes=frozenset({"once", "session"}),
     )
     preview["path"] = "changed.py"
     resolution = ToolAccessResolution(input={"path": "src/app.py"}, access=access)
 
     assert effect.resource.uri == "workspace:///src/app.py"
     assert access.safe_preview == {"path": "src/app.py"}
+    assert access.approval_scopes == frozenset({"once", "session"})
     assert resolution.input == {"path": "src/app.py"}
+
+    with pytest.raises(ValueError, match="approval scopes"):
+        ToolAccessRequest(
+            actions=("write",),
+            resources=(resource,),
+            effects=frozenset({"filesystem_write"}),
+            risk="medium",
+            reason="Invalid approval scope test",
+            approval_scopes=frozenset(),
+        )
 
 
 def test_canonical_result_enforces_invariants_and_projects_one_way() -> None:

@@ -6,11 +6,17 @@ import pytest
 
 
 def _session_store(tmp_path: Path, session_id: str = "session_memory"):
-    from codepilot.sessions.store import SessionStore
+    class EventStore:
+        def __init__(self) -> None:
+            self.events = []
 
-    store = SessionStore(tmp_path, session_id)
-    store.ensure_initialized(model_id="test", provider="test", system_prompt="")
-    return store
+        def append_event(self, event):
+            self.events.append(event)
+
+        def load_events(self):
+            return list(self.events)
+
+    return EventStore()
 
 
 def _write_context(session_id: str = "session_memory", run_id: str = "run_1"):
@@ -57,7 +63,9 @@ def _record(memory_id: str, **overrides):
 def test_memory_store_uses_single_workspace_jsonl(tmp_path: Path) -> None:
     from codepilot.sessions.memory import MemoryStore
 
-    store = MemoryStore(_session_store(tmp_path))
+    from codepilot.sessions.memory import MemoryRepository
+
+    store = MemoryStore(MemoryRepository(tmp_path))
     store.append(_record("mem_1"))
 
     assert (tmp_path / ".codepilot" / "memory" / "memories.jsonl").is_file()
@@ -89,7 +97,9 @@ def test_memory_record_v4_rejects_old_schema_and_fields() -> None:
 def test_memory_writer_admits_explicit_and_candidate_correction(tmp_path: Path) -> None:
     from codepilot.sessions.memory import MemoryStore, MemoryWriter
 
-    store = MemoryStore(_session_store(tmp_path))
+    from codepilot.sessions.memory import MemoryRepository
+
+    store = MemoryStore(MemoryRepository(tmp_path))
     writer = MemoryWriter(store=store, workspace_dir=tmp_path)
 
     explicit = writer.admit_prompt_memory(
@@ -116,7 +126,9 @@ def test_memory_writer_admits_explicit_and_candidate_correction(tmp_path: Path) 
 def test_memory_writer_rejects_active_without_source_context(tmp_path: Path) -> None:
     from codepilot.sessions.memory import MemoryStore, MemoryWriteContext, MemoryWriter
 
-    writer = MemoryWriter(store=MemoryStore(_session_store(tmp_path)), workspace_dir=tmp_path)
+    from codepilot.sessions.memory import MemoryRepository
+
+    writer = MemoryWriter(store=MemoryStore(MemoryRepository(tmp_path)), workspace_dir=tmp_path)
 
     with pytest.raises(ValueError, match="source context|requires evidence"):
         writer.admit_prompt_memory(
@@ -160,7 +172,9 @@ def test_verified_experience_becomes_candidate_only(tmp_path: Path) -> None:
             ),
         ],
     )
-    writer = MemoryWriter(store=MemoryStore(_session_store(tmp_path)), workspace_dir=tmp_path)
+    from codepilot.sessions.memory import MemoryRepository
+
+    writer = MemoryWriter(store=MemoryStore(MemoryRepository(tmp_path)), workspace_dir=tmp_path)
 
     records = writer.finalize_run(result, context=_write_context())
 
@@ -171,7 +185,9 @@ def test_verified_experience_becomes_candidate_only(tmp_path: Path) -> None:
 def test_memory_retriever_drops_candidates_conflicts_and_dedupes_subject(tmp_path: Path) -> None:
     from codepilot.sessions.memory import MemoryQuery, MemoryRetriever, MemoryStore
 
-    store = MemoryStore(_session_store(tmp_path))
+    from codepilot.sessions.memory import MemoryRepository
+
+    store = MemoryStore(MemoryRepository(tmp_path))
     store.append(_record("candidate", status="candidate"))
     store.append(_record("low", subject="package_manager", value="pnpm", content="Use pnpm.", priority=1))
     store.append(_record("high", subject="package_manager", value="pnpm", content="Use pnpm.", priority=5))
@@ -191,7 +207,7 @@ def test_memory_retriever_drops_candidates_conflicts_and_dedupes_subject(tmp_pat
 
 
 def test_memory_commands_edit_supersedes_old_record(tmp_path: Path) -> None:
-    from codepilot.sessions.commands import edit_memory
+    from codepilot.runtime.commands import edit_memory
     from codepilot.sessions.memory import MemoryStore, MemoryWriter
 
     class Session:
@@ -199,9 +215,14 @@ def test_memory_commands_edit_supersedes_old_record(tmp_path: Path) -> None:
         workspace_dir = tmp_path
 
         def __init__(self) -> None:
-            self.store = _session_store(tmp_path, self.session_id)
-            self.memory_store = MemoryStore(self.store)
+            self.event_store = _session_store(tmp_path, self.session_id)
+            from codepilot.sessions.memory import MemoryRepository
+
+            self.memory_store = MemoryStore(MemoryRepository(tmp_path))
             self.memory_writer = MemoryWriter(store=self.memory_store, workspace_dir=tmp_path)
+
+        def append_event(self, event):
+            self.event_store.append_event(event)
 
     session = Session()
     session.memory_store.append(_record("mem_old"))
@@ -213,4 +234,4 @@ def test_memory_commands_edit_supersedes_old_record(tmp_path: Path) -> None:
     assert old is not None and old.status == "superseded"
     assert old.superseded_by == new_id
     assert new is not None and new.supersedes == ["mem_old"]
-    assert session.store.load_events()[-1]["type"] == "memory_record_edited"
+    assert session.event_store.load_events()[-1]["type"] == "memory_record_edited"

@@ -2,18 +2,16 @@ from __future__ import annotations
 
 """Session memory: one durable project memory file plus simple read/write policy."""
 
-import json
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Mapping, TYPE_CHECKING, cast
+from typing import Any, Literal, Mapping, cast
 
 from codepilot.protocols import AgentRunResult, ToolResultMessage
 
-if TYPE_CHECKING:
-    from .store import SessionStore
+from .repository import MemoryRepository
 
 
 MEMORY_SCHEMA_VERSION = 4
@@ -323,26 +321,13 @@ class MemoryRecall:
 class MemoryStore:
     """Read and append canonical durable project memory."""
 
-    def __init__(self, session_store: SessionStore) -> None:
-        self.session_store = session_store
-        self.workspace_dir = session_store.workspace_dir
-        self.session_id = session_store.session_id
-        self.project_file = session_store.layout.project_memory_file
+    def __init__(self, repository: MemoryRepository) -> None:
+        self.repository = repository
+        self.workspace_dir = repository.workspace_dir
 
     def all_records(self) -> list[MemoryRecord]:
-        if not self.project_file.exists():
-            return []
         latest: dict[str, MemoryRecord] = {}
-        for line_number, line in enumerate(
-            self.project_file.read_text(encoding="utf-8").splitlines(),
-            start=1,
-        ):
-            if not line.strip():
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"invalid memory JSON on line {line_number}") from exc
+        for raw in self.repository.read_all():
             record = MemoryRecord.from_dict(raw)
             latest[record.id] = record
         return list(latest.values())
@@ -351,9 +336,7 @@ class MemoryStore:
         return [record for record in self.all_records() if record.status == "active"]
 
     def append(self, record: MemoryRecord) -> MemoryRecord:
-        self.project_file.parent.mkdir(parents=True, exist_ok=True)
-        with self.project_file.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
+        self.repository.append(record.to_dict())
         return record
 
     def update(self, record: MemoryRecord) -> MemoryRecord:

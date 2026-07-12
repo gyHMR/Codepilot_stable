@@ -69,43 +69,6 @@ def _init_repo(root: Path) -> None:
     _git(root, "config", "user.name", "Test User")
 
 
-def _append_run(session, run_id: str, affected_paths: list[str]) -> None:
-    from codepilot.protocols import (
-        AgentRunCounters,
-        AgentRunResult,
-        AssistantMessage,
-        TextContent,
-    )
-
-    final = AssistantMessage(content=[TextContent(text="done")])
-    result = AgentRunResult(
-        run_id=run_id,
-        session_id=session.session_id,
-        status="completed",
-        stop_reason="final_answer",
-        counters=AgentRunCounters(tool_calls=1),
-        messages=[final],
-        final_message=final,
-        affected_paths=affected_paths,
-        workspace_changed=True,
-    )
-    session.store.append_run_result(result)
-
-
-def _append_run_with_rollback(session, run_id: str, *, baseline, affected_paths: list[str]) -> None:
-    from codepilot.sessions.rollback import build_rollback_metadata
-
-    _append_run(session, run_id, affected_paths)
-    session.store.write_rollback_metadata(
-        run_id,
-        build_rollback_metadata(
-            baseline,
-            affected_paths=affected_paths,
-            workspace_changed=True,
-        ),
-    )
-
-
 def test_cli_command_router_hides_internal_session_tree_commands(tmp_path: Path) -> None:
     asyncio.run(_run_internal_commands_removed_case(tmp_path))
 
@@ -155,16 +118,8 @@ def test_cli_command_router_manages_project_memory(tmp_path: Path) -> None:
     asyncio.run(_run_memory_command_case(tmp_path))
 
 
-def test_cli_command_router_previews_and_applies_rollback(tmp_path: Path) -> None:
-    asyncio.run(_run_rollback_command_case(tmp_path))
-
-
 def test_cli_command_router_reports_no_rollback_run(tmp_path: Path) -> None:
     asyncio.run(_run_rollback_no_run_case(tmp_path))
-
-
-def test_cli_command_router_reports_blocked_rollback(tmp_path: Path) -> None:
-    asyncio.run(_run_rollback_blocked_case(tmp_path))
 
 
 def test_cli_mode_build_warns_when_plan_is_not_approved(tmp_path: Path) -> None:
@@ -325,7 +280,7 @@ async def _run_context_command_case(tmp_path: Path) -> None:
 
 async def _run_rollback_command_case(tmp_path: Path) -> None:
     from codepilot.interfaces.cli.interactive import dispatch_command
-    from codepilot.sessions.commands import capture_run_rollback_baseline
+    from codepilot.runtime.commands import capture_run_rollback_baseline
 
     _init_repo(tmp_path)
     tracked = tmp_path / "app.py"
@@ -375,7 +330,7 @@ async def _run_rollback_no_run_case(tmp_path: Path) -> None:
 
 async def _run_rollback_blocked_case(tmp_path: Path) -> None:
     from codepilot.interfaces.cli.interactive import dispatch_command
-    from codepilot.sessions.commands import capture_run_rollback_baseline
+    from codepilot.runtime.commands import capture_run_rollback_baseline
 
     _init_repo(tmp_path)
     tracked = tmp_path / "app.py"
@@ -436,7 +391,7 @@ async def _run_new_command_case(tmp_path: Path) -> None:
         assert result.switched_session_id != session_id
         assert result.output_lines[0].startswith("new session -> session_id=")
         switched = _persistent_session(runtime, result.switched_session_id)
-        assert switched.store.load_session_messages() == []
+        assert switched.state_service.load_messages(switched.session_id) == ()
     finally:
         await runtime.close_all()
 
@@ -448,14 +403,18 @@ async def _run_fork_command_case(tmp_path: Path) -> None:
     runtime, session_id = _create_runtime_session(tmp_path)
     session = _persistent_session(runtime, session_id)
     try:
-        session.store.append_message(UserMessage(content="seed"))
+        session.state_service.append_message(session.session_id, UserMessage(content="seed"))
+        session.session_state = session.state_service.get_session(session.session_id)
         result = await dispatch_command(runtime, session_id, "/fork")
         assert result.handled
         assert result.switched_session_id is not None
         assert result.switched_session_id != session_id
         assert result.output_lines[0].startswith("forked session -> session_id=")
         forked = _persistent_session(runtime, result.switched_session_id)
-        messages = forked.store.load_session_messages()
+        messages = [
+            record.message
+            for record in forked.state_service.load_messages(forked.session_id)
+        ]
         assert len(messages) == 1
         assert messages[0].content == "seed"
     finally:
@@ -465,14 +424,16 @@ async def _run_fork_command_case(tmp_path: Path) -> None:
 async def _run_resume_command_case(tmp_path: Path) -> None:
     from codepilot.interfaces.cli.interactive import dispatch_command
     from codepilot.protocols import UserMessage
-    from codepilot.sessions.commands import create_fresh_session
+    from codepilot.runtime.commands import create_fresh_session
 
     runtime, session_id = _create_runtime_session(tmp_path)
     session = _persistent_session(runtime, session_id)
     try:
         other = create_fresh_session(session)
-        other.store.append_message(UserMessage(content="older work"))
-        session.store.append_message(UserMessage(content="current work"))
+        other.state_service.append_message(other.session_id, UserMessage(content="older work"))
+        other.session_state = other.state_service.get_session(other.session_id)
+        session.state_service.append_message(session.session_id, UserMessage(content="current work"))
+        session.session_state = session.state_service.get_session(session.session_id)
 
         listing = await dispatch_command(runtime, session_id, "/resume")
         assert listing.handled

@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def test_repository_bootstrap_recognizes_python_project_without_reading_files(tmp_path: Path) -> None:
-    from codepilot.sessions.store import build_repository_bootstrap, render_repository_context
+    from codepilot.runtime.prompt import build_repository_bootstrap, render_repository_context
 
     (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
     (tmp_path / "src").mkdir()
@@ -25,7 +25,7 @@ def test_repository_bootstrap_recognizes_python_project_without_reading_files(tm
 
 
 def test_repository_bootstrap_limits_top_level_entries(tmp_path: Path) -> None:
-    from codepilot.sessions.store import build_repository_bootstrap
+    from codepilot.runtime.prompt import build_repository_bootstrap
 
     for index in range(40):
         (tmp_path / f"entry_{index:02d}.txt").write_text("x", encoding="utf-8")

@@ -123,7 +123,7 @@ def test_agent_loop_default_tool_iteration_budget_supports_coding_tasks(tmp_path
     from codepilot.core.contracts import AgentLoopLimits
     from codepilot.protocols import Model
     from codepilot.sessions.contracts import SessionOptions
-    from codepilot.sessions.runtime import SessionRuntime
+    from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
 
     defaults = AgentLoopLimits()
     assert defaults.max_model_turns >= 256
@@ -141,16 +141,16 @@ def test_agent_loop_default_tool_iteration_budget_supports_coding_tasks(tmp_path
         context_window=4000,
         max_tokens=500,
     )
-    read_session = SessionRuntime(
+    read_session = RuntimeSessionCoordinator(
         SessionOptions(model=model, workspace_dir=tmp_path / "read", current_mode="read")
     )
-    plan_session = SessionRuntime(
+    plan_session = RuntimeSessionCoordinator(
         SessionOptions(model=model, workspace_dir=tmp_path / "plan", current_mode="plan")
     )
-    build_session = SessionRuntime(
+    build_session = RuntimeSessionCoordinator(
         SessionOptions(model=model, workspace_dir=tmp_path / "build", current_mode="build")
     )
-    wide_build_session = SessionRuntime(
+    wide_build_session = RuntimeSessionCoordinator(
         SessionOptions(
             model=model,
             workspace_dir=tmp_path / "build-wide",
@@ -360,7 +360,7 @@ def test_v2_contract_modules_do_not_import_higher_layers() -> None:
     forbidden = {
         "codepilot.core.contracts": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
         "codepilot.sessions.contracts": ("codepilot.runtime", "codepilot.interfaces"),
-        "codepilot.runtime.actions": ("codepilot.core.agent", "codepilot.sessions.runtime", "codepilot.tools.runtime"),
+        "codepilot.runtime.actions": ("codepilot.core.agent", "codepilot.runtime.session_coordinator", "codepilot.tools.runtime"),
         "codepilot.llm.ports": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
         "codepilot.tools.contracts": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
     }

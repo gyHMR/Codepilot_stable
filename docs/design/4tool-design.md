@@ -603,6 +603,7 @@ class ToolAccessRequest:
     risk: RiskLevel
     reason: str
     safe_preview: Mapping[str, object]
+    approval_scopes: frozenset[ApprovalScope]
 ```
 
 资源统一为规范化 URI，例如：
@@ -648,7 +649,30 @@ class PermissionRule:
 
 Catalog 可见性不能代替执行授权。
 
-### 12.2 ApprovalChallenge
+### 12.2 Runtime 权限模式与能力边界
+
+第一版提供三种 Runtime 权限模式：
+
+| 模式 | workspace 读取 | 普通文件修改 | 受控项目命令 | 原始 Shell / 外部副作用 |
+|---|---|---|---|---|
+| `read-only` | allow | deny | deny | deny |
+| `workspace-write` | allow | allow | allow | ask |
+| `ask` | allow | ask | ask | ask |
+
+`workspace-write` 是 Coding Agent 的默认执行边界。它只通过精确的 action/resource rule 放行工作区内普通 `write`、`edit`、`apply_patch`，以及 `command.inspection`、`command.repository_execution`、`command.bounded_mutation`。涉及超过 20 个文件或估算输入超过 500,000 字节的写入使用独立 `.bulk` action，不继承普通写入授权。
+
+命令执行分为两个入口：
+
+- `command` 使用 argv 和 `create_subprocess_exec`，不解释管道、重定向、命令替换或复合 Shell 语法；只接受已识别的命令 profile。
+- `bash` 使用宿主 Shell，保留为需要审批的复杂命令入口；高风险、内部状态和敏感文件命令仍为不可审批的硬拒绝。
+
+命令 profile 为 `inspection`、`repository_execution`、`bounded_mutation`、`external_effect`、`destructive` 和 `unknown`。前 3 类可在 `workspace-write` 边界内按 capability 放行；`external_effect` 必须审批；`destructive` 和 `unknown` 不进入受控 command handler。
+
+Approval scope 由 AccessResolver 声明。普通结构化 workspace capability 可提供 `once/session/project`；原始 `bash`、`external_effect` 和 `.bulk` 写入只能使用 `once`，避免一次审批扩大为同工作区内任意后续命令或批量修改。
+
+不再提供 `block_dangerous_bash`、`bash_allow_patterns`、`bash_block_patterns` 配置。高风险拒绝属于不可关闭的 Runtime 硬约束；可自动执行的命令范围由结构化 command profile 和 PermissionRule 表达，旧配置键直接报错。
+
+### 12.3 ApprovalChallenge
 
 ```python
 @dataclass(frozen=True)
@@ -680,7 +704,7 @@ project
 
 暂不支持 global。
 
-### 12.3 ApprovalGrant
+### 12.4 ApprovalGrant
 
 批准后生成不可伪造的 Grant，而不是简单设置 `source=approval_resume`：
 
@@ -709,7 +733,7 @@ class ApprovalGrant:
 
 `approve_once` 必须单次消费。
 
-### 12.4 三种暂停语义
+### 12.5 三种暂停语义
 
 必须区分：
 
@@ -1202,7 +1226,7 @@ src/codepilot/
 
 ### 23.3 安全与审批
 
-覆盖路径/符号链接逃逸、敏感文件、Shell 工作区外访问、自授权参数、effect 超范围、审批指纹、过期、单次消费和作用域隔离。
+覆盖路径/符号链接逃逸、敏感文件、受控命令工作区外访问、原始 Shell 审批、自授权参数、effect 超范围、审批指纹、过期、单次消费和作用域隔离。
 
 ### 23.4 timeout、取消、恢复
 
@@ -1230,12 +1254,12 @@ src/codepilot/
 ### 阶段 0：冻结旧协议
 
 - 不继续扩展旧 ToolResult/ToolObservation。
-- 记录当前行为并建立兼容测试。
+- 建立旧协议、旧 Session 和旧事件必须被拒绝的断代测试。
 - 暂不同时修改 Plan 业务语义。
 
 ### 阶段 1：建立新协议对象
 
-在 `contracts.py` 建立 Spec、Registration、ExecutionRequest 和运行 Protocol；在 `results.py` 建立 Result/Error；在 `security.py` 建立 Policy、Resource、Effect 和 AccessRequest。提供新 Result 到旧消息协议的临时适配器。
+在 `contracts.py` 建立 Spec、Registration、ExecutionRequest 和运行 Protocol；在 `results.py` 建立 Result/Error；在 `security.py` 建立 Policy、Resource、Effect 和 AccessRequest。执行结果只允许单向投影为模型消息，不提供旧执行协议适配器。
 
 ### 阶段 2：Registry 与 Codec
 
@@ -1243,7 +1267,7 @@ src/codepilot/
 - 默认禁止覆盖。
 - 增加 Catalog snapshot 和 registration identity。
 - 使用标准 JSON Schema validator。
-- 为旧定义提供临时 LegacyRegistrationAdapter。
+- 不提供 LegacyRegistrationAdapter；非 canonical registration 直接拒绝。
 
 ### 阶段 3：单工具执行闭环
 
@@ -1251,7 +1275,7 @@ src/codepilot/
 
 ### 阶段 4：逐个迁移 Builtins
 
-推荐顺序：workspace_status、read、ls、grep/find、write、edit、apply_patch、bash/PowerShell。
+推荐顺序：workspace_status、read、ls、grep/find、write、edit、apply_patch、command、bash/PowerShell。
 
 每迁移一个工具，同时完成 typed input/output、Schema、access resolver、effect、policy、description 和 compliance tests。
 

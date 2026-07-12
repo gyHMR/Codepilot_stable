@@ -50,7 +50,7 @@ def test_restricted_tool_port_only_exposes_and_executes_read_allowlist(tmp_path)
 
 
 def test_plan_policy_prioritizes_subagents_for_broad_repository_analysis() -> None:
-    from codepilot.sessions.runtime import _mode_policy
+    from codepilot.runtime.session_coordinator import _mode_policy
 
     policy = _mode_policy("plan")
 
@@ -126,7 +126,7 @@ def test_list_exploration_agents_empty_result_points_to_dispatch(tmp_path) -> No
 
 
 def test_mode_policies_keep_one_agent_identity_and_separate_control_from_task() -> None:
-    from codepilot.sessions.runtime import _mode_policy
+    from codepilot.runtime.session_coordinator import _mode_policy
 
     plan = _mode_policy("plan")
     build = _mode_policy("build")
@@ -147,7 +147,7 @@ def test_mode_policies_keep_one_agent_identity_and_separate_control_from_task() 
 
 
 def test_plan_approved_continuation_executes_existing_plan_without_replanning() -> None:
-    from codepilot.sessions.runtime import _continuation_control
+    from codepilot.runtime.session_coordinator import _continuation_control
 
     control = _continuation_control("plan_approved")
 
@@ -162,8 +162,8 @@ def test_plan_approved_continuation_executes_existing_plan_without_replanning() 
     assert "close_plan" in instruction
 
 
-def test_subagent_store_persists_session_scoped_reports_and_marks_stale(tmp_path) -> None:
-    from codepilot.sessions.subagents import SubagentStore
+def test_subagent_registry_keeps_process_local_reports_and_marks_stale(tmp_path) -> None:
+    from codepilot.runtime.subagent_registry import SubagentStore
 
     source = tmp_path / "src" / "app.py"
     source.parent.mkdir()
@@ -193,7 +193,7 @@ def test_subagent_store_persists_session_scoped_reports_and_marks_stale(tmp_path
     assert stored["report_id"]
     assert agents[0]["subagent_id"] == "runtime-reader"
     assert agents[0]["stale"] is False
-    assert (tmp_path / ".codepilot" / "sessions" / "session_a" / "subagents").exists()
+    assert not (tmp_path / ".codepilot" / "sessions" / "session_a" / "subagents").exists()
 
     source.write_text("print('v2')\n", encoding="utf-8")
 
@@ -204,7 +204,7 @@ def test_exploration_coordinator_returns_partial_results_and_skips_duplicates(tm
     async def run_case() -> None:
         from codepilot.llm.ports import ModelDescriptor
         from codepilot.runtime.subagents import ExplorationCoordinator
-        from codepilot.sessions.subagents import SubagentStore
+        from codepilot.runtime.subagent_registry import SubagentStore
 
         class FakeRunner:
             async def run(self, task, *, peer_assignments, previous_report=None):
@@ -411,7 +411,10 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
         ]
         paused = [frame for frame in frames if isinstance(frame, RunPausedFrame)]
         session = gateway._require_session(ref.session_id)._session  # noqa: SLF001
-        messages = session.store.load_session_messages()
+        messages = [
+            record.message
+            for record in session.state_service.load_messages(session.session_id)
+        ]
         completed_plan_events = [
             frame.event
             for frame in frames

@@ -3,18 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_context_compaction_module_is_removed() -> None:
+def test_context_is_an_independent_source_module() -> None:
     import codepilot.sessions.context as context
 
-    assert not hasattr(context, "__path__")
+    assert hasattr(context, "__path__")
 
 
 def test_session_runtime_uses_governor_and_slim_layout(tmp_path: Path) -> None:
     from codepilot.protocols import Model
     from codepilot.sessions.contracts import SessionOptions
-    from codepilot.sessions.runtime import SessionRuntime
+    from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
 
-    session = SessionRuntime(
+    session = RuntimeSessionCoordinator(
         SessionOptions(
             model=Model(
                 id="test",
@@ -36,8 +36,8 @@ def test_session_runtime_uses_governor_and_slim_layout(tmp_path: Path) -> None:
         assert session.context_governor is not None
         assert session.prepare_context == session.context_governor.prepare
         assert (session_dir / "session.json").exists()
-        assert (session_dir / "messages.jsonl").exists()
         assert not (session_dir / "context.jsonl").exists()
+        assert not (session_dir / "context_ledger.jsonl").exists()
         assert not (session_dir / "runs.jsonl").exists()
     finally:
         session.close()
