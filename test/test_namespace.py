@@ -645,13 +645,8 @@ def test_core_namespace_keeps_cross_layer_contracts_out() -> None:
     assert not hasattr(extensions, "AfterToolCallResult")
 
 
-def test_web_interface_package_is_removed() -> None:
-    try:
-        spec = find_spec("codepilot.interfaces.web")
-    except ModuleNotFoundError:
-        spec = None
-
-    assert spec is None
+def test_web_interface_package_is_available() -> None:
+    assert find_spec("codepilot.interfaces.web") is not None
 
 
 def test_dingtalk_namespace_exports_complete_public_contract_types() -> None:

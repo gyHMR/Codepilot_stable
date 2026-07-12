@@ -11,7 +11,11 @@ from codepilot.runtime.actions import (
     PromptSubmitted,
     RunCancelled,
 )
-from codepilot.sessions import delete_session_record, list_session_metadata
+from codepilot.sessions import (
+    delete_session_record,
+    list_session_metadata,
+    load_persisted_session_messages,
+)
 
 from .events import EventHub, runtime_frame_to_event
 from .schemas import AcceptedAction
@@ -136,7 +140,7 @@ class WebService:
         }
 
     def messages(self, session_id: str) -> list[dict[str, Any]]:
-        messages = self.runtime.messages(session_id)
+        messages = load_persisted_session_messages(self.workspace, session_id)
         return [_public_dict(message) for message in messages]
 
     async def submit_prompt(

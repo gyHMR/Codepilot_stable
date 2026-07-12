@@ -809,6 +809,13 @@ def delete_session_record(workspace_dir: str | Path, session_id: str) -> bool:
     return True
 
 
+def load_persisted_session_messages(
+    workspace_dir: str | Path, session_id: str
+) -> tuple[Message, ...]:
+    """Load persisted messages without exposing a live session controller."""
+    return tuple(SessionStore(workspace_dir, session_id).load_session_messages())
+
+
 def build_repository_bootstrap(workspace: Path) -> RepositoryBootstrap:
     root = Path(workspace).resolve()
     entries = _top_level_entries(root)

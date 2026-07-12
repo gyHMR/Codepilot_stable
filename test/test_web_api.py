@@ -33,9 +33,6 @@ class ApiGateway:
         self.actions.append(action)
         yield ProgressFrame(event={"type": "status", "message": "ok"})
 
-    def messages(self, session_id):
-        return ()
-
     def close(self, session_id):
         return None
 

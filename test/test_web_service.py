@@ -40,9 +40,6 @@ class FakeGateway:
         yield ProgressFrame(event={"type": "text_delta", "delta": "hello"})
         yield RunFinishedFrame(record=SimpleNamespace(run_id="r1", final_text="hello"))
 
-    def messages(self, session_id):
-        return ()
-
     def close(self, session_id):
         self.closed.append(session_id)
 

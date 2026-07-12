@@ -33,6 +33,7 @@ from .store import (
     delete_session_record,
     load_session_open_metadata,
     list_session_metadata,
+    load_persisted_session_messages,
     new_session_id,
 )
 
@@ -51,6 +52,7 @@ __all__ = [
     "SessionOpenMetadata",
     "load_session_open_metadata",
     "list_session_metadata",
+    "load_persisted_session_messages",
     "RepositoryBootstrap",
     "build_repository_bootstrap",
     "delete_session_record",
