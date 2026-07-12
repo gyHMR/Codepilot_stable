@@ -11,6 +11,7 @@ from codepilot.runtime.actions import (
     PromptSubmitted,
     RunCancelled,
 )
+from codepilot.sessions import delete_session_record, list_session_metadata
 
 from .events import EventHub, runtime_frame_to_event
 from .schemas import AcceptedAction
@@ -38,20 +39,27 @@ class WebService:
         runtime: RuntimeGateway,
         workspace: Path,
         event_capacity: int = 256,
+        session_open_options: dict[str, Any] | None = None,
     ) -> None:
         self.runtime = runtime
         self.workspace = Path(workspace).resolve()
         self._opened: set[str] = set()
         self._hubs: dict[str, EventHub] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._cancellations: dict[str, asyncio.Task[None]] = {}
         self._sequences: dict[str, int] = {}
         self._event_capacity = event_capacity
+        self._session_open_options = dict(session_open_options or {})
 
     async def ensure_open(self, session_id: str) -> str:
         if session_id in self._opened:
             return session_id
         ref = self.runtime.open_session(
-            SessionOpenIntent(workspace_dir=self.workspace, session_id=session_id)
+            SessionOpenIntent(
+                workspace_dir=self.workspace,
+                session_id=session_id,
+                **self._session_open_options,
+            )
         )
         actual = ref.session_id
         view = self.runtime.describe(actual)
@@ -67,7 +75,9 @@ class WebService:
         return actual
 
     async def create_session(self) -> dict[str, Any]:
-        ref = self.runtime.open_session(SessionOpenIntent(workspace_dir=self.workspace))
+        ref = self.runtime.open_session(
+            SessionOpenIntent(workspace_dir=self.workspace, **self._session_open_options)
+        )
         self._opened.add(ref.session_id)
         self.events_for(ref.session_id)
         return self.session_detail(ref.session_id)
@@ -77,7 +87,32 @@ class WebService:
         return self.session_detail(session_id)
 
     async def list_sessions(self) -> list[dict[str, Any]]:
-        return [self.session_detail(session_id) for session_id in sorted(self._opened)]
+        summaries: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for meta in list_session_metadata(self.workspace):
+            session_id = str(meta["session_id"])
+            seen.add(session_id)
+            if session_id in self._opened:
+                summaries.append(self.session_detail(session_id))
+                continue
+            model = meta.get("model") if isinstance(meta.get("model"), dict) else {}
+            summaries.append({
+                "session_id": session_id,
+                "workspace": str(self.workspace),
+                "model_id": str(model.get("model") or "unknown"),
+                "permission_mode": "workspace-write",
+                "current_mode": str(meta.get("current_mode") or "build"),
+                "is_running": False,
+                "message_count": 0,
+                "pending_approvals": [],
+                "created_at": meta.get("created_at"),
+                "updated_at": meta.get("updated_at"),
+            })
+        summaries.extend(
+            self.session_detail(session_id)
+            for session_id in sorted(self._opened - seen)
+        )
+        return summaries
 
     def events_for(self, session_id: str) -> EventHub:
         return self._hubs.setdefault(
@@ -101,8 +136,7 @@ class WebService:
         }
 
     def messages(self, session_id: str) -> list[dict[str, Any]]:
-        view = self.runtime.describe(session_id)
-        messages = getattr(view.session, "messages", ())
+        messages = self.runtime.messages(session_id)
         return [_public_dict(message) for message in messages]
 
     async def submit_prompt(
@@ -135,7 +169,14 @@ class WebService:
 
     async def cancel(self, session_id: str) -> AcceptedAction:
         await self.ensure_open(session_id)
-        return self._start_dispatch(session_id, RunCancelled(reason="user"), allow_active=True)
+        pending = self._cancellations.get(session_id)
+        if pending is not None and not pending.done():
+            return AcceptedAction(session_id=session_id)
+        task = asyncio.create_task(
+            self._consume_action(session_id, RunCancelled(reason="user"), cancellation=True)
+        )
+        self._cancellations[session_id] = task
+        return AcceptedAction(session_id=session_id)
 
     async def delete_session(self, session_id: str) -> None:
         if session_id in self._tasks:
@@ -144,19 +185,26 @@ class WebService:
             self.runtime.close(session_id)
             self._opened.discard(session_id)
         self._hubs.pop(session_id, None)
+        if not delete_session_record(self.workspace, session_id):
+            raise WebNotFound("web.session_not_found", "Session not found")
 
     async def wait_for_idle(self, session_id: str) -> None:
         task = self._tasks.get(session_id)
         if task is not None:
             await task
+        cancellation = self._cancellations.get(session_id)
+        if cancellation is not None:
+            await cancellation
 
     async def shutdown(self) -> None:
         tasks = tuple(self._tasks.values())
+        tasks += tuple(self._cancellations.values())
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        self._cancellations.clear()
         await self.runtime.close_all()
 
     def _start_dispatch(
@@ -176,6 +224,11 @@ class WebService:
         return AcceptedAction(session_id=session_id)
 
     async def _consume_dispatch(self, session_id: str, action: Any) -> None:
+        await self._consume_action(session_id, action)
+
+    async def _consume_action(
+        self, session_id: str, action: Any, *, cancellation: bool = False
+    ) -> None:
         try:
             await self.ensure_open(session_id)
             async for frame in self.runtime.dispatch(session_id, action):
@@ -188,8 +241,9 @@ class WebService:
                 )
         finally:
             current = asyncio.current_task()
-            if self._tasks.get(session_id) is current:
-                self._tasks.pop(session_id, None)
+            registry = self._cancellations if cancellation else self._tasks
+            if registry.get(session_id) is current:
+                registry.pop(session_id, None)
 
 
 def _public_dict(value: Any) -> dict[str, Any]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import uuid
 from dataclasses import dataclass, field
@@ -777,6 +778,35 @@ def load_session_open_metadata(
         return None
     meta = SessionStore(workspace_dir, session_id).read_meta()
     return SessionOpenMetadata.from_mapping(meta) if meta is not None else None
+
+
+def list_session_metadata(workspace_dir: str | Path) -> tuple[dict[str, Any], ...]:
+    """Return validated persisted session metadata for one workspace."""
+    sessions_dir = Path(workspace_dir).resolve() / ".codepilot" / "sessions"
+    if not sessions_dir.is_dir():
+        return ()
+    rows: list[dict[str, Any]] = []
+    for entry in sessions_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        meta = SessionStore(workspace_dir, entry.name).read_meta()
+        if meta is not None:
+            rows.append(meta)
+    return tuple(sorted(rows, key=lambda item: str(item.get("updated_at", "")), reverse=True))
+
+
+def delete_session_record(workspace_dir: str | Path, session_id: str) -> bool:
+    """Delete one persisted session directory without touching workspace files."""
+    if not session_id or Path(session_id).name != session_id:
+        raise ValueError("Invalid session_id")
+    sessions_dir = (Path(workspace_dir).resolve() / ".codepilot" / "sessions").resolve()
+    target = (sessions_dir / session_id).resolve()
+    if target.parent != sessions_dir:
+        raise ValueError("Session path escapes the sessions directory")
+    if not target.is_dir():
+        return False
+    shutil.rmtree(target)
+    return True
 
 
 def build_repository_bootstrap(workspace: Path) -> RepositoryBootstrap:

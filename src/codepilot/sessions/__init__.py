@@ -30,7 +30,9 @@ from .store import (
     RepositoryBootstrap,
     SessionOpenMetadata,
     build_repository_bootstrap,
+    delete_session_record,
     load_session_open_metadata,
+    list_session_metadata,
     new_session_id,
 )
 
@@ -48,8 +50,10 @@ __all__ = [
     "SessionView",
     "SessionOpenMetadata",
     "load_session_open_metadata",
+    "list_session_metadata",
     "RepositoryBootstrap",
     "build_repository_bootstrap",
+    "delete_session_record",
     "SessionOptions",
     "new_session_id",
 ]

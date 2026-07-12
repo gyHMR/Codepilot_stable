@@ -456,6 +456,33 @@ python -m codepilot.evaluation report .codepilot/evals/<eval_id>
 
 ## 开发验证
 
+### Web 工作台
+
+安装 Web 可选依赖并启动本地服务：
+
+```bash
+pip install -e ".[web]"
+codepilot web
+codepilot web --workspace E:/path/to/repo --port 8000
+```
+
+默认仅监听 `127.0.0.1`，打开 `http://127.0.0.1:8000` 即可使用。当前版本没有登录认证；显式绑定 `0.0.0.0` 或其他非回环地址时会输出安全警告，不建议将服务直接暴露到局域网或公网。
+
+前端开发与构建：
+
+```bash
+cd web
+npm ci
+npm run dev
+npm test -- --run
+npm run typecheck
+npm run build
+```
+
+`npm run dev` 会把 `/api` 代理到本机 8000 端口。发布前在仓库根目录运行 `scripts/build_web.ps1`，它会验证目标路径后将生产构建复制到 FastAPI 托管的包内静态目录。
+
+---
+
 ```bash
 # 编译检查
 python -m compileall -q src/codepilot

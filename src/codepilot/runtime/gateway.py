@@ -174,6 +174,10 @@ class RuntimeGateway:
             pending_approvals=tuple(self._pending_approvals_for(session)),
         )
 
+    def messages(self, session_id: str) -> tuple[Any, ...]:
+        """Return persisted messages through the runtime application boundary."""
+        return tuple(self._sessions.require(session_id).controller.messages())
+
     def close(self, session_id: str) -> None:
         active_run_id = self._active_runs.cancel(session_id)
         self._sessions.close(session_id)

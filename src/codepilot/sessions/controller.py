@@ -59,6 +59,9 @@ class SessionController:
     def describe(self) -> SessionView:
         return self._session.describe(last_run_id=self._last_run_id)
 
+    def messages(self) -> list[Any]:
+        return self._session.store.load_session_messages()
+
     async def prepare_run(self, intent: SessionRunIntent) -> PreparedAgentRun:
         return await self._session.prepare_run(
             intent,
