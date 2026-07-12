@@ -14,6 +14,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
 dingtalk = ["dingtalk-stream>=0.24.3,<0.25"]
+web = [
+  "fastapi>=0.115.0,<1",
+  "uvicorn[standard]>=0.30.0,<1",
+]
 
 [project.scripts]
 codepilot = "codepilot.interfaces.cli.main:main"
@@ -28,6 +32,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"codepilot.interfaces.web" = ["static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

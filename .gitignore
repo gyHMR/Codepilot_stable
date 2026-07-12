@@ -62,6 +62,9 @@ docs/*
 参考文档/
 working/
 .worktrees/
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
 benchmarks/
 scripts/
 agent-test/

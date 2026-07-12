@@ -436,6 +436,12 @@ class SessionStateService:
     def get_session(self, session_id: str) -> SessionState | None:
         return self.repository.load_session(session_id)
 
+    def list_sessions(self) -> tuple[SessionState, ...]:
+        return self.repository.list_sessions()
+
+    def delete_session(self, session_id: str) -> bool:
+        return self.repository.delete_session(session_id)
+
     def update_session_mode(
         self,
         session_id: str,

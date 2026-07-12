@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,31 @@ class FileSessionRepository:
     def load_session(self, session_id: str) -> SessionState | None:
         payload = read_json_object(self.layout.session_file(session_id))
         return session_state_from_dict(payload) if payload is not None else None
+
+    def list_sessions(self) -> tuple[SessionState, ...]:
+        sessions_dir = self.layout.codepilot_dir / "sessions"
+        if not sessions_dir.is_dir():
+            return ()
+        sessions = [
+            session
+            for entry in sessions_dir.iterdir()
+            if entry.is_dir()
+            for session in [self.load_session(entry.name)]
+            if session is not None
+        ]
+        return tuple(sorted(sessions, key=lambda item: item.updated_at, reverse=True))
+
+    def delete_session(self, session_id: str) -> bool:
+        if not session_id or Path(session_id).name != session_id:
+            raise ValueError("Invalid session_id")
+        sessions_dir = (self.layout.codepilot_dir / "sessions").resolve()
+        target = self.layout.session_dir(session_id).resolve()
+        if target.parent != sessions_dir:
+            raise ValueError("Session path escapes the sessions directory")
+        if not target.is_dir():
+            return False
+        shutil.rmtree(target)
+        return True
 
     def update_session(
         self,
