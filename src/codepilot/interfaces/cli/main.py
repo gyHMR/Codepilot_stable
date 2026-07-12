@@ -168,6 +168,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Config key to explain (for 'explain' action)",
     )
     subparsers.add_parser("rpc", help="Start RPC mode (JSONL protocol)")
+    web_parser = subparsers.add_parser("web", help="Start local Web workspace")
+    web_parser.add_argument("--host", default="127.0.0.1")
+    web_parser.add_argument("--port", type=int, default=8000)
+    web_parser.add_argument("--workspace", default=".")
+    web_parser.add_argument("--reload", action="store_true", default=False)
     return parser
 
 
@@ -211,6 +216,19 @@ async def _run_from_args(args: argparse.Namespace) -> int:
     - ``--prompt``：单次提问，运行完即退出。
     - 默认：进入交互式 REPL。
     """
+
+    if args.command == "web":
+        from codepilot.interfaces.web.main import WebServerOptions, run_web_server
+
+        run_web_server(
+            WebServerOptions(
+                host=args.host,
+                port=args.port,
+                workspace=Path(args.workspace),
+                reload=args.reload,
+            )
+        )
+        return 0
 
     intent = build_session_intent(args)
     if args.command == "config":
