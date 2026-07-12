@@ -22,7 +22,7 @@ from codepilot.protocols import (
     ToolResultMessage,
     ensure_runtime_event_type,
 )
-from codepilot.tools.results import ToolResult
+from codepilot.tools.results import ToolResult, to_tool_result_message
 from codepilot.tools.security import ApprovalResponse
 
 from .contracts import (
@@ -40,7 +40,6 @@ from .model_step import ModelTurnResult, run_model_turn
 from .plan import (
     PlanState,
     PlanValidationError,
-    ensure_run_mode,
     load_plan_state,
 )
 from .run_guard import RunGuard
@@ -48,7 +47,6 @@ from .state import RunState
 from .tool_step import (
     approval_results,
     execute_tool_turn,
-    to_tool_result_message,
     tool_end_event,
     verification,
     workspace_effects,
@@ -90,8 +88,20 @@ class _SyntheticControlFrame:
 class _BoundaryCommitter:
     def __init__(self, ports: AgentLoopPorts, new_messages: list[Message]) -> None:
         self._port = ports.state
+        self._tools = ports.tools
         self._messages = new_messages
         self._committed_count = 0
+
+    def tool_checkpoint_state(
+        self,
+        intent: dict[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        if self._tools is None:
+            return dict(intent) if intent else None
+        checkpoint = getattr(self._tools, "checkpoint_state", None)
+        if not callable(checkpoint):
+            return dict(intent) if intent else None
+        return checkpoint(intent=intent)
 
     async def commit(
         self,
@@ -272,11 +282,13 @@ async def resume_agent_loop(
     await committer.commit(
         "before_tools",
         run_state,
-        tool_recovery_state={
-            "approval_id": input.approval_id,
-            "decision": input.decision,
-            "source": "approval_resume",
-        },
+        tool_recovery_state=committer.tool_checkpoint_state(
+            {
+                "approval_id": input.approval_id,
+                "decision": input.decision,
+                "source": "approval_resume",
+            }
+        ),
     )
     observation = await _resume_tool_observation(input, ports)
     recorder.emit(tool_end_event(observation))
@@ -479,16 +491,18 @@ async def _drive_loop(
         await committer.commit(
             "before_tools",
             run_state,
-            tool_recovery_state={
-                "tool_calls": [
-                    {
-                        "id": call.id,
-                        "name": call.name,
-                        "arguments": dict(call.arguments),
-                    }
-                    for call in tool_calls
-                ]
-            },
+            tool_recovery_state=committer.tool_checkpoint_state(
+                {
+                    "tool_calls": [
+                        {
+                            "id": call.id,
+                            "name": call.name,
+                            "arguments": dict(call.arguments),
+                        }
+                        for call in tool_calls
+                    ]
+                }
+            ),
         )
         turn_observations = await execute_tool_turn(
             run_id=input.run_id,
@@ -1229,6 +1243,7 @@ async def _commit_outcome_boundary(
                 request_id=request_id,
                 payload=payload,
             ),
+            tool_recovery_state=committer.tool_checkpoint_state(),
         )
         return
     if outcome.status == "waiting_user":
@@ -1242,6 +1257,7 @@ async def _commit_outcome_boundary(
                     request_id=request_id,
                     payload={"stop_reason": outcome.stop_reason},
                 ),
+                tool_recovery_state=committer.tool_checkpoint_state(),
             )
             return
         await committer.commit_state(
@@ -1252,6 +1268,7 @@ async def _commit_outcome_boundary(
                 request_id=f"{outcome.run_id}:{outcome.stop_reason}",
                 payload={"stop_reason": outcome.stop_reason},
             ),
+            tool_recovery_state=committer.tool_checkpoint_state(),
         )
         return
     await committer.commit_state("before_finalization", outcome.run_state)

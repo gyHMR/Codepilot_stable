@@ -7,34 +7,27 @@ import pytest
 
 
 def test_mcp_config_rejects_removed_legacy_field_aliases() -> None:
-    from codepilot.extensions.mcp import parse_mcp_tool_configs
+    from codepilot.extensions.mcp import parse_mcp_server_configs
 
-    with pytest.raises(ValueError, match="cannot replace 'tool'"):
-        parse_mcp_tool_configs(
+    with pytest.raises(ValueError, match="unknown fields: tools"):
+        parse_mcp_server_configs(
             [
                 {
                     "name": "demo",
-                    "tools": [
-                        {
-                            "name": "echo",
-                            "inputSchema": {"type": "object"},
-                        }
-                    ],
+                    "url": "https://example.test/mcp",
+                    "allow_tools": ["echo"],
+                    "tools": [],
                 }
             ]
         )
 
-    with pytest.raises(ValueError, match="'parameters'.*'inputSchema'"):
-        parse_mcp_tool_configs(
+    with pytest.raises(ValueError, match="requires a non-empty allow_tools"):
+        parse_mcp_server_configs(
             [
                 {
                     "name": "demo",
-                    "tools": [
-                        {
-                            "tool": "echo",
-                            "parameters": {"type": "object"},
-                        }
-                    ],
+                    "url": "https://example.test/mcp",
+                    "allow_tools": [],
                 }
             ]
         )
@@ -92,11 +85,11 @@ def test_skill_loader_produces_canonical_registration_executed_by_runtime() -> N
     from codepilot.extensions import load_skills
 
     root = Path(__file__).resolve().parents[1]
-    skill = root / "docs" / "examples" / "extensions" / "demo_skill.md"
+    skill = root / "docs" / "examples" / "extensions" / "demo-review"
     loaded = load_skills(root, configured_paths=[str(skill)])
 
     assert loaded.errors == []
-    assert [item.spec.name for item in loaded.tools] == ["load_skill"]
+    assert [item.spec.name for item in loaded.tools] == ["load_skill", "read_skill_resource"]
     registration = loaded.tools[0]
     assert registration.source == "skill"
     assert registration.category == "external"
@@ -114,52 +107,54 @@ def test_skill_loader_produces_canonical_registration_executed_by_runtime() -> N
     )
 
     assert result.status == "success"
-    assert result.data["skill"] == "Demo Review Checklist"
+    assert result.data["skill"] == "demo-review"
     assert "Goal:" in result.content[0].text
 
 
 def test_mcp_adapter_builds_canonical_registration_with_policy_and_output_validation() -> None:
-    from codepilot.extensions.mcp import create_mcp_registrations, parse_mcp_tool_configs
-
-    raw = [
-        {
-            "name": "demo",
-            "timeout_ms": 250,
-            "max_parallel": 1,
-            "credential_binding": "demo-token",
-            "allow_tools": ["echo"],
-            "tools": [
-                {
-                    "tool": "echo",
-                    "description": "Echo one value from the demo MCP server.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {"text": {"type": "string"}},
-                        "required": ["text"],
-                        "additionalProperties": False,
-                    },
-                    "outputSchema": {
-                        "type": "object",
-                        "properties": {"echo": {"type": "string"}},
-                        "required": ["echo"],
-                        "additionalProperties": False,
-                    },
-                    "read_only": True,
-                    "requires_approval": False,
-                    "credential_required": True,
-                },
-                {"tool": "blocked", "description": "Must be filtered by allowlist."},
-            ],
-        }
-    ]
+    from codepilot.extensions.mcp import (
+        MCPAuthConfig,
+        MCPRemoteTool,
+        MCPServerConfig,
+        create_mcp_registrations,
+    )
 
     class Client:
         async def call_tool(self, server, tool, arguments):
             assert (server, tool) == ("demo", "echo")
-            return {"echo": arguments["text"]}
+            return {
+                "structuredContent": {"echo": arguments["text"]},
+                "content": [{"type": "text", "text": arguments["text"]}],
+            }
 
-    configs = parse_mcp_tool_configs(raw)
-    registrations = create_mcp_registrations(configs, client=Client())
+    config = MCPServerConfig(
+        name="demo",
+        url="https://example.test/mcp",
+        auth=MCPAuthConfig("bearer_env", "DEMO_TOKEN", "demo-token"),
+        allow_tools=frozenset({"echo"}),
+        timeout_ms=250,
+        max_parallel=1,
+        tool_policies={
+            "echo": {"read_only": True, "requires_approval": False},
+        },
+    )
+    remote = MCPRemoteTool(
+        name="echo",
+        description="Echo one value from the demo MCP server.",
+        input_schema={
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {"echo": {"type": "string"}},
+            "required": ["echo"],
+            "additionalProperties": False,
+        },
+    )
+    registrations = create_mcp_registrations(config, (remote,), client=Client())
 
     assert [item.spec.name for item in registrations] == ["mcp__demo__echo"]
     registration = registrations[0]
@@ -167,6 +162,8 @@ def test_mcp_adapter_builds_canonical_registration_with_policy_and_output_valida
     assert registration.owner == "mcp:demo"
     assert registration.policy.approval == "never"
     assert registration.policy.timeout.default_execution_ms == 250
+    assert registration.policy.concurrency.group == "mcp:demo"
+    assert registration.policy.concurrency.max_parallel == 1
     assert registration.policy.output_trust.default_content_trust == "untrusted"
     assert "credential:demo-token" in registration.policy.required_permissions
     assert registration.policy.declared_effects == frozenset(
@@ -186,7 +183,7 @@ def test_mcp_adapter_builds_canonical_registration_with_policy_and_output_valida
     )
 
     assert result.status == "success"
-    assert result.data["result"]["echo"] == "hello"
+    assert result.data["structured_output"]["echo"] == "hello"
     assert result.output_validation == "schema_validated"
     assert result.content_trust == "untrusted"
     assert {effect.kind for effect in result.effects} == {
@@ -197,29 +194,8 @@ def test_mcp_adapter_builds_canonical_registration_with_policy_and_output_valida
 
 
 def test_mcp_unverified_output_uses_artifact_renderer_and_server_concurrency_limit() -> None:
-    from codepilot.extensions.mcp import create_mcp_registrations, parse_mcp_tool_configs
+    from codepilot.extensions.mcp import MCPRemoteTool, MCPServerConfig, create_mcp_registrations
     from codepilot.tools.results import ArtifactContent
-
-    raw = [
-        {
-            "name": "assets",
-            "max_parallel": 1,
-            "tools": [
-                {
-                    "tool": "fetch",
-                    "description": "Fetch one opaque artifact reference.",
-                    "read_only": True,
-                    "requires_approval": False,
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {"id": {"type": "string"}},
-                        "required": ["id"],
-                        "additionalProperties": False,
-                    },
-                }
-            ],
-        }
-    ]
 
     class Client:
         def __init__(self) -> None:
@@ -244,7 +220,25 @@ def test_mcp_unverified_output_uses_artifact_renderer_and_server_concurrency_lim
             }
 
     client = Client()
-    registrations = create_mcp_registrations(parse_mcp_tool_configs(raw), client=client)
+    config = MCPServerConfig(
+        name="assets",
+        url="https://example.test/mcp",
+        auth=None,
+        allow_tools=frozenset({"fetch"}),
+        max_parallel=1,
+        tool_policies={"fetch": {"read_only": True, "requires_approval": False}},
+    )
+    remote = MCPRemoteTool(
+        name="fetch",
+        description="Fetch one opaque artifact reference.",
+        input_schema={
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+            "additionalProperties": False,
+        },
+    )
+    registrations = create_mcp_registrations(config, (remote,), client=client)
     runtime, ids = _runtime(registrations)
     requests = (
         _request(
@@ -272,22 +266,20 @@ def test_mcp_unverified_output_uses_artifact_renderer_and_server_concurrency_lim
 
 
 def test_mcp_unknown_side_effect_defaults_to_external_write_and_approval() -> None:
-    from codepilot.extensions.mcp import create_mcp_registrations, parse_mcp_tool_configs
+    from codepilot.extensions.mcp import MCPRemoteTool, MCPServerConfig, create_mcp_registrations
 
-    configs = parse_mcp_tool_configs(
-        [
-            {
-                "name": "remote",
-                "tools": [
-                    {
-                        "tool": "change_state",
-                        "description": "Call an MCP operation with unspecified side effects.",
-                    }
-                ],
-            }
-        ]
+    config = MCPServerConfig(
+        name="remote",
+        url="https://example.test/mcp",
+        auth=None,
+        allow_tools=frozenset({"change_state"}),
     )
-    registration = create_mcp_registrations(configs, client=None)[0]
+    remote = MCPRemoteTool(
+        name="change_state",
+        description="Call an MCP operation with unspecified side effects.",
+        input_schema={"type": "object", "properties": {}},
+    )
+    registration = create_mcp_registrations(config, (remote,), client=None)[0]
 
     assert registration.policy.approval == "always"
     assert registration.policy.base_risk == "medium"

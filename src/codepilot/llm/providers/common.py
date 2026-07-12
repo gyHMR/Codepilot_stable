@@ -18,7 +18,6 @@ from codepilot.protocols import (
     AssistantMessage,
     Context,
     ImageContent,
-    Message,
     TextContent,
     Tool,
     ToolCall,
@@ -42,6 +41,22 @@ def parse_partial_json(raw: str) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
     except Exception:
         return {}
+
+
+def finalize_tool_arguments(tool_call: ToolCall, raw: str) -> None:
+    """Strictly finalize one streamed tool argument object without executing it."""
+
+    tool_call.raw_arguments = raw
+    try:
+        value = json.loads(raw or "{}")
+        if not isinstance(value, dict):
+            raise ValueError("Tool arguments must be a JSON object")
+    except (json.JSONDecodeError, ValueError) as exc:
+        tool_call.arguments = {}
+        tool_call.metadata["argument_parse_error"] = f"Invalid tool arguments: {exc}"
+        return
+    tool_call.arguments = value
+    tool_call.metadata.pop("argument_parse_error", None)
 
 
 def empty_assistant_message(api: str, provider: str, model: str) -> AssistantMessage:

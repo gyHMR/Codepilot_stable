@@ -6,19 +6,13 @@ from __future__ import annotations
 """扩展层类型定义：钩子、命令、技能规格和加载结果。"""
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING
 
 from codepilot.protocols.commands import LifecycleHook, RegisteredCommand
 from codepilot.tools import ToolRegistration
 
-@dataclass
-class SkillSpec:
-    """技能规格：从 Markdown 技能文件解析出的结构化信息。"""
-    name: str             # 技能名称
-    command_name: str     # 对应的命令名
-    description: str      # 技能描述
-    content: str          # 技能内容（Markdown 正文）
-    source_path: str      # 源文件路径
+if TYPE_CHECKING:
+    from .skills import SkillPackage
 
 
 @dataclass
@@ -38,7 +32,7 @@ class LoadedExtensions:
     commands: dict[str, RegisteredCommand] = field(default_factory=dict)
     before_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
     after_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
-    skills: list[SkillSpec] = field(default_factory=list)
+    skills: list["SkillPackage"] = field(default_factory=list)
     diagnostics: list[str] = field(default_factory=list)
     loaded_paths: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)

@@ -334,6 +334,8 @@ class ComponentCheckpoint:
 - Tools 保存待执行调用和审批恢复所需信息。
 - Context 保存压缩游标和有长度限制的 compact summary。
 
+Tools component 是 Session 内 Tool 恢复状态的唯一持久化入口。Sessions 不建立或读取独立 `tool_state.json`；Tool Attempt 的编码、解释和内存恢复由 Tools 负责。可复用的 Session/Project Approval Grant 属于 Tools Security 的工作区级策略状态，不进入 Run Checkpoint。
+
 Memory 不参与当前 Run 恢复。Plan 已存在于 `core_state`。Observability 不参与恢复。
 
 Context 第一版不建立 `.codepilot/context/` 持久化目录。
@@ -908,6 +910,8 @@ Fork：
 本节描述重构完成后的目标源码布局，用于指导文件迁移和代码审查。
 
 目录树表达的是职责边界，不要求第一阶段立即创建所有文件。第一版可以合并实现较短、变化一致的文件，但不能跨越本节定义的模块边界。
+
+本节中的 `runtime/` 子树只用于说明 Sessions 的依赖上下文；Runtime 的最终目录、文件职责和迁移顺序以 [7runtime-design.md](7runtime-design.md) 为准。
 
 ```text
 src/codepilot/

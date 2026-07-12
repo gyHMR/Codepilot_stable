@@ -62,12 +62,14 @@ def test_runtime_prompt_includes_skill_index_without_skill_body(tmp_path: Path) 
     from codepilot.runtime.prompt import build_system_prompt
     from codepilot.runtime.tools import build_runtime_tools
 
-    skill_file = tmp_path / "review.md"
-    skill_file.write_text(
+    skill_package = tmp_path / "focused-review"
+    skill_package.mkdir()
+    (skill_package / "SKILL.md").write_text(
         "\n".join(
             [
                 "---",
-                "name: Focused Review",
+                "name: focused-review",
+                "version: 1.0.0",
                 "command: focused-review",
                 "description: Use this when reviewing a focused code change.",
                 "---",
@@ -79,7 +81,7 @@ def test_runtime_prompt_includes_skill_index_without_skill_body(tmp_path: Path) 
     )
     intent = SessionOpenIntent(
         workspace_dir=tmp_path,
-        skill_paths=[str(skill_file)],
+        skill_paths=[str(skill_package)],
         load_workspace_resources=False,
     )
     config = load_runtime_config(intent)

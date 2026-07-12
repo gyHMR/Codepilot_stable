@@ -223,9 +223,9 @@ def test_controlled_command_executes_without_shell_parsing(tmp_path: Path) -> No
     ],
 )
 def test_controlled_command_profiles_are_capability_based(argv, expected) -> None:
-    from codepilot.tools.sandbox import classify_command_argv
+    from codepilot.tools.sandbox import assess_command
 
-    assert classify_command_argv(argv) == expected
+    assert assess_command(argv, requires_shell=False).profile == expected
 
 
 def test_workspace_write_mode_allows_bounded_work_but_keeps_escape_hatches_gated(
@@ -274,8 +274,9 @@ def test_workspace_write_mode_allows_bounded_work_but_keeps_escape_hatches_gated
     )
 
     assert write_result.status == "success"
-    assert command_result.status == "success"
-    assert command_result.data["details"]["command_profile"] == "repository_execution"
+    assert command_result.status == "approval_required"
+    assert command_result.approval is not None
+    assert command_result.approval.safe_preview["command_profile"] == "repository_execution"
     assert external_result.status == "approval_required"
     assert external_result.approval is not None
     assert external_result.approval.allowed_scopes == frozenset({"once"})

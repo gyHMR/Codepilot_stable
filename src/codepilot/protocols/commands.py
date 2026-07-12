@@ -74,7 +74,25 @@ class SessionCommandContext:
             raise TypeError("SessionCommandContext.session_view must be SessionCommandView")
 
 
-CommandHandler = Callable[[SessionCommandContext], str | None | Awaitable[str | None]]
+@dataclass(frozen=True)
+class CommandOutcome:
+    """Structured result for commands that optionally start a normal model run."""
+
+    output: str | None = None
+    prompt: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "output", _optional_command_text(self.output, field_name="command output"))
+        object.__setattr__(self, "prompt", _optional_command_text(self.prompt, field_name="command prompt"))
+        if self.output is None and self.prompt is None:
+            raise ValueError("CommandOutcome requires output or prompt")
+
+
+CommandHandlerResult = str | CommandOutcome | None
+CommandHandler = Callable[
+    [SessionCommandContext],
+    CommandHandlerResult | Awaitable[CommandHandlerResult],
+]
 
 
 @dataclass(frozen=True)
@@ -127,6 +145,8 @@ def _ensure_command_source(value: object) -> CommandSource:
 
 __all__ = [
     "CommandHandler",
+    "CommandHandlerResult",
+    "CommandOutcome",
     "CommandSource",
     "LifecycleHook",
     "RegisteredCommand",

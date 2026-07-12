@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -102,12 +101,89 @@ def test_canonical_runtime_converts_invalid_output_to_standard_error(tmp_path: P
     assert result.error.code == "tool.output.invalid"
 
 
-def test_runtime_rejects_stale_model_call_without_starting_reloaded_handler(
-    tmp_path: Path,
-) -> None:
+def test_runtime_rejects_effect_resource_outside_authorized_scope(tmp_path: Path) -> None:
+    from codepilot.tools.builtins.workspace import create_workspace_status_registration
+    from codepilot.tools.sandbox import WorkspaceSandbox
+    from codepilot.tools.security import ToolAccessRequest, ToolAccessResolution, ToolEffect, ToolResource
+
+    registration = create_workspace_status_registration(WorkspaceSandbox(tmp_path))
+
+    class Resolver:
+        def resolve(self, input, request):
+            _ = request
+            return ToolAccessResolution(
+                input=input,
+                access=ToolAccessRequest(
+                    actions=("workspace_status",),
+                    resources=(ToolResource("session://allowed"),),
+                    effects=frozenset({"filesystem_read"}),
+                    risk="low",
+                    reason="test scope",
+                ),
+            )
+
+    async def handler(input, context):
+        _ = input
+        context.effects.report(
+            ToolEffect(
+                kind="filesystem_read",
+                resource=ToolResource("session://outside"),
+                operation="escape",
+                status="completed",
+                certainty="observed",
+            )
+        )
+        return {"text": "ok", "details": {}}
+
+    runtime, _, registration_id = _workspace_runtime(
+        tmp_path,
+        registration=replace(
+            registration,
+            handler=handler,
+            access_resolver=Resolver(),
+        ),
+    )
+    result = asyncio.run(runtime.execute(_request(registration_id)))
+
+    assert result.status == "error"
+    assert result.error.code == "tool.effect.resource_violation"
+
+
+def test_runtime_requires_policy_opt_in_for_structural_output(tmp_path: Path) -> None:
     from codepilot.tools.builtins.workspace import create_workspace_status_registration
     from codepilot.tools.sandbox import WorkspaceSandbox
 
+    registration = create_workspace_status_registration(WorkspaceSandbox(tmp_path))
+
+    class StructuralCodec:
+        json_schema = None
+
+        def encode(self, value):
+            return dict(value)
+
+    async def handler(input, context):
+        _ = input, context
+        return {"text": "ok", "details": {}}
+
+    runtime, _, registration_id = _workspace_runtime(
+        tmp_path,
+        registration=replace(
+            registration,
+            spec=replace(registration.spec, output_schema=None),
+            handler=handler,
+            output_codec=StructuralCodec(),
+        ),
+    )
+    result = asyncio.run(runtime.execute(_request(registration_id)))
+
+    assert result.status == "error"
+    assert result.error.code == "tool.output.invalid"
+    assert "Structurally validated" in result.error.message
+
+
+def test_runtime_rejects_stale_model_call_without_starting_reloaded_handler(
+    tmp_path: Path,
+) -> None:
     calls = 0
     runtime, registration, stale_id = _workspace_runtime(tmp_path)
 

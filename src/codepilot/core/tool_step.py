@@ -3,10 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from codepilot.protocols import AgentEvent, ToolCall, ToolResultMessage
+from codepilot.protocols import AgentEvent, ToolCall, tool_mode_for_run_mode
 from codepilot.tools.contracts import ToolExecutionRequest, ToolPort
 from codepilot.tools.registry import ToolCatalogSnapshot
-from codepilot.tools.results import ToolResult, to_tool_result_message as project_tool_result_message
+from codepilot.tools.results import ToolResult, workspace_effect_summary
 
 from .contracts import WorkspaceEffects
 
@@ -31,7 +31,13 @@ async def execute_tool_turn(
             tool_call_id=tool_call.id,
             tool_name=tool_call.name,
             arguments=dict(tool_call.arguments),
-            mode=_tool_mode(current_mode),
+            raw_arguments=tool_call.raw_arguments,
+            argument_parse_error=(
+                str(tool_call.metadata.get("argument_parse_error"))
+                if tool_call.metadata.get("argument_parse_error")
+                else None
+            ),
+            mode=tool_mode_for_run_mode(current_mode),
             registration_id=(
                 entries[tool_call.name].registration_id
                 if tool_call.name in entries
@@ -40,10 +46,15 @@ async def execute_tool_turn(
         )
         for tool_call in tool_calls
     ]
-    for tool_call in tool_calls:
-        _emit_tool_start(emit, tool_call)
     results = list(await tools.execute_batch(requests))
     for result in results:
+        if result.error is None or result.error.code != "tool.batch.interrupted":
+            matching_call = next(
+                (item for item in tool_calls if item.id == result.tool_call_id),
+                None,
+            )
+            if matching_call is not None:
+                _emit_tool_start(emit, matching_call)
         if emit is not None:
             emit(tool_end_event(result))
     return results
@@ -53,20 +64,13 @@ def approval_results(results: list[ToolResult]) -> list[ToolResult]:
     return [item for item in results if item.status == "approval_required"]
 
 
-def to_tool_result_message(result: ToolResult) -> ToolResultMessage:
-    return project_tool_result_message(result)
-
-
 def workspace_effects(results: list[ToolResult]) -> WorkspaceEffects:
     paths: list[str] = []
     changed = False
     for result in results:
-        for effect in result.effects:
-            if effect.resource.uri.startswith("workspace:///"):
-                path = effect.resource.uri.removeprefix("workspace:///") or "."
-                paths.append(path)
-            if effect.kind in {"filesystem_write", "filesystem_delete"}:
-                changed = True
+        uris, result_changed = workspace_effect_summary(result.effects)
+        paths.extend(uri.removeprefix("workspace:///") or "." for uri in uris)
+        changed = changed or result_changed
     return WorkspaceEffects(
         affected_paths=tuple(dict.fromkeys(paths)),
         changed=changed,
@@ -159,15 +163,10 @@ def _emit_tool_start(
     )
 
 
-def _tool_mode(mode: str) -> str:
-    return "plan" if mode in {"read", "plan"} else "execute"
-
-
 __all__ = [
     "approval_results",
     "execute_tool_turn",
     "merge_workspace_effects",
-    "to_tool_result_message",
     "tool_end_event",
     "verification",
     "workspace_effects",

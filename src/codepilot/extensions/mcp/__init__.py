@@ -3,16 +3,27 @@
 
 """MCP（Model Context Protocol）canonical tool adapter."""
 
-from .adapter import (
-    MCPClient,
-    MCPToolConfig,
-    create_mcp_registrations,
-    parse_mcp_tool_configs,
+from .adapter import MCPClient, create_mcp_registrations
+from .client import MCPManager, create_mcp_manager, parse_mcp_server_configs
+from .transport import (
+    MCPAuthConfig,
+    MCPRemoteTool,
+    MCPServerConfig,
+    MCPTransport,
+    MCPTransportError,
+    StreamableHttpTransport,
 )
 
 __all__ = [
     "MCPClient",
-    "MCPToolConfig",
-    "parse_mcp_tool_configs",
+    "MCPAuthConfig",
+    "MCPManager",
+    "MCPRemoteTool",
+    "MCPServerConfig",
+    "MCPTransport",
+    "MCPTransportError",
+    "StreamableHttpTransport",
+    "create_mcp_manager",
     "create_mcp_registrations",
+    "parse_mcp_server_configs",
 ]

@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 from codepilot.tools import (
     ArtifactContent,
@@ -29,175 +28,62 @@ from codepilot.tools import (
     UnverifiedJsonCodec,
 )
 
+from .transport import MCPRemoteTool, MCPServerConfig, MCPTransportError
+
 
 class MCPClient(Protocol):
     async def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> Any:
         ...
 
 
-@dataclass(frozen=True)
-class MCPToolConfig:
-    name: str
-    description: str
-    input_schema: dict[str, Any]
-    output_schema: dict[str, Any] | None
-    server: str
-    tool: str
-    configured_name: str
-    read_only: bool
-    risk_level: str
-    requires_approval: bool
-    network_access: bool
-    credential_required: bool
-    credential_binding: str | None
-    output_trust: str
-    timeout_ms: int
-    max_parallel: int
-    max_output_bytes: int
-    max_image_bytes: int
-
-
-def parse_mcp_tool_configs(raw_servers: list[dict[str, Any]] | None) -> list[MCPToolConfig]:
-    if not raw_servers:
-        return []
-    configs: list[MCPToolConfig] = []
-    for raw_server in raw_servers:
-        if not isinstance(raw_server, dict):
-            continue
-        server = _required_name(raw_server.get("name"))
-        tools = raw_server.get("tools")
-        if server is None or not isinstance(tools, list):
-            continue
-        timeout_ms = _bounded_int(raw_server.get("timeout_ms"), default=30_000, minimum=100, maximum=120_000)
-        max_parallel = _bounded_int(raw_server.get("max_parallel"), default=4, minimum=1, maximum=16)
-        max_output_bytes = _bounded_int(
-            raw_server.get("max_output_bytes"),
-            default=1_000_000,
-            minimum=1_024,
-            maximum=8_000_000,
-        )
-        max_image_bytes = _bounded_int(
-            raw_server.get("max_image_bytes"),
-            default=4_000_000,
-            minimum=1_024,
-            maximum=16_000_000,
-        )
-        credential_binding = _optional_text(raw_server.get("credential_binding"))
-        allow_tools = _string_set(raw_server.get("allow_tools"))
-        for raw_tool in tools:
-            if not isinstance(raw_tool, dict):
-                continue
-            if "parameters" in raw_tool:
-                raise ValueError(
-                    "MCP tool field 'parameters' is no longer supported; use 'inputSchema'"
-                )
-            if "tool" not in raw_tool and "name" in raw_tool:
-                raise ValueError(
-                    "MCP tool field 'name' cannot replace 'tool'; declare the remote tool explicitly"
-                )
-            tool = _required_name(raw_tool.get("tool"))
-            if tool is None or (allow_tools and tool not in allow_tools):
-                continue
-            configured_name = _optional_text(raw_tool.get("name")) or tool
-            read_only = raw_tool.get("read_only") is True
-            risk_level = _risk_level(
-                raw_tool.get("risk_level"),
-                default="low" if read_only else "medium",
-            )
-            requires_approval = _bool(
-                raw_tool.get("requires_approval"),
-                default=not read_only,
-            )
-            input_schema = _object_schema(raw_tool.get("inputSchema"))
-            output_schema = raw_tool.get("outputSchema")
-            if not isinstance(output_schema, dict):
-                output_schema = None
-            description = _optional_text(raw_tool.get("description")) or (
-                f"Call MCP tool {server}.{tool} and return its normalized result."
-            )
-            configs.append(
-                MCPToolConfig(
-                    name=_mcp_name(server, tool),
-                    description=description,
-                    input_schema=input_schema,
-                    output_schema=output_schema,
-                    server=server,
-                    tool=tool,
-                    configured_name=configured_name,
-                    read_only=read_only,
-                    risk_level=risk_level,
-                    requires_approval=requires_approval,
-                    network_access=_bool(raw_tool.get("network_access"), default=True),
-                    credential_required=_bool(
-                        raw_tool.get("credential_required"),
-                        default=False,
-                    ),
-                    credential_binding=credential_binding,
-                    output_trust=_output_trust(raw_tool.get("output_trust")),
-                    timeout_ms=timeout_ms,
-                    max_parallel=max_parallel,
-                    max_output_bytes=max_output_bytes,
-                    max_image_bytes=max_image_bytes,
-                )
-            )
-    return configs
-
-
 def create_mcp_registrations(
-    configs: list[MCPToolConfig],
+    config: MCPServerConfig,
+    tools: tuple[MCPRemoteTool, ...],
     *,
     client: MCPClient | None,
 ) -> list[ToolRegistration]:
-    semaphores: dict[str, asyncio.Semaphore] = {}
-    limits: dict[str, int] = {}
-    registrations: list[ToolRegistration] = []
-    for config in configs:
-        previous = limits.setdefault(config.server, config.max_parallel)
-        if previous != config.max_parallel:
-            raise ValueError(f"MCP server {config.server} has inconsistent max_parallel values")
-        semaphore = semaphores.setdefault(config.server, asyncio.Semaphore(config.max_parallel))
-        registrations.append(_registration(config, client=client, semaphore=semaphore))
-    return registrations
+    return [_registration(config, tool, client=client) for tool in tools]
 
 
 def _registration(
-    config: MCPToolConfig,
+    config: MCPServerConfig,
+    remote: MCPRemoteTool,
     *,
     client: MCPClient | None,
-    semaphore: asyncio.Semaphore,
 ) -> ToolRegistration:
-    input_codec = JsonObjectCodec(config.input_schema)
-    if config.output_schema is None:
+    policy_values = _resolved_policy(config, remote)
+    input_schema = _object_schema(remote.input_schema)
+    input_codec = JsonObjectCodec(input_schema)
+    if remote.output_schema is None:
         output_codec = UnverifiedJsonCodec(max_bytes=config.max_output_bytes)
         spec_output_schema = None
     else:
         wrapper_schema = {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "type": "object",
-            "properties": {"result": config.output_schema},
-            "required": ["result"],
+            "properties": {
+                "result": {},
+                "structured_output": dict(remote.output_schema),
+            },
+            "required": ["result", "structured_output"],
             "additionalProperties": False,
         }
         output_codec = JsonObjectCodec(wrapper_schema)
         spec_output_schema = wrapper_schema
 
-    effects = {"external_state_read" if config.read_only else "external_state_write"}
-    if config.network_access:
-        effects.add("network_access")
-    if config.credential_required:
+    effects = {
+        "external_state_read" if policy_values["read_only"] else "external_state_write",
+        "network_access",
+    }
+    if config.auth is not None:
         effects.add("credential_access")
     declared_effects = frozenset(effects)
     resource = ToolResource(
-        f"mcp://{config.server}/{config.tool}",
+        f"mcp://{config.name}/{remote.name}",
         metadata={
-            "server": config.server,
-            "tool": config.tool,
-            "configured_name": config.configured_name,
-            **(
-                {"credential_binding": config.credential_binding}
-                if config.credential_binding is not None
-                else {}
-            ),
+            "server": config.name,
+            "tool": remote.name,
+            **({"credential_binding": config.auth.binding} if config.auth else {}),
         },
     )
 
@@ -207,16 +93,16 @@ def _registration(
             return ToolAccessResolution(
                 input=input,
                 access=ToolAccessRequest(
-                    actions=("mcp.call", f"mcp.{config.server}.{config.tool}"),
+                    actions=("mcp.call", f"mcp.{config.name}.{remote.name}"),
                     resources=(resource,),
                     effects=declared_effects,
-                    risk=config.risk_level,
-                    reason=f"Call MCP server {config.server} tool {config.tool}",
+                    risk=policy_values["risk_level"],
+                    reason=f"Call MCP server {config.name} tool {remote.name}",
                     safe_preview={
-                        "server": config.server,
-                        "tool": config.tool,
-                        "read_only": config.read_only,
-                        "credential_binding": config.credential_binding or "",
+                        "server": config.name,
+                        "tool": remote.name,
+                        "read_only": policy_values["read_only"],
+                        "credential_binding": config.auth.binding if config.auth else "",
                     },
                 ),
             )
@@ -227,17 +113,22 @@ def _registration(
         context.cancellation.raise_if_cancelled()
         await context.progress.report(
             "mcp_call_started",
-            data={"server": config.server, "tool": config.tool},
+            data={"server": config.name, "tool": remote.name},
         )
         try:
-            async with semaphore:
-                raw_result = await client.call_tool(config.server, config.tool, dict(input))
+            raw_result = await client.call_tool(config.name, remote.name, dict(input))
         except asyncio.CancelledError:
             raise
+        except MCPTransportError as exc:
+            raise ToolHandlerError(
+                exc.code,
+                exc.message,
+                retryable=exc.retryable,
+            ) from exc
         except Exception as exc:
             raise ToolHandlerError(
                 "mcp.call_failed",
-                f"MCP call failed for {config.server}.{config.tool}",
+                f"MCP call failed for {config.name}.{remote.name}",
                 details={"error_type": type(exc).__name__},
             ) from exc
         context.cancellation.raise_if_cancelled()
@@ -246,42 +137,41 @@ def _registration(
                 ToolEffect(
                     kind=kind,
                     resource=resource,
-                    operation=f"call {config.server}.{config.tool}",
+                    operation=f"call {config.name}.{remote.name}",
                     status="completed",
-                    certainty="observed",
+                    certainty="observed" if kind == "network_access" else "reported",
                 )
             )
         await context.progress.report(
             "mcp_call_completed",
-            data={"server": config.server, "tool": config.tool},
+            data={"server": config.name, "tool": remote.name},
         )
         normalized = _json_safe_result(raw_result)
-        encoded_size = len(
-            json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if remote.output_schema is None:
+            return {"result": normalized}
+        structured = (
+            raw_result.get("structuredContent")
+            if isinstance(raw_result, Mapping)
+            else None
         )
-        if encoded_size > config.max_output_bytes:
-            raise ToolHandlerError(
-                "mcp.output_too_large",
-                f"MCP result exceeds the configured {config.max_output_bytes} byte limit",
-            )
-        return {"result": normalized}
+        return {"result": normalized, "structured_output": structured}
 
     return ToolRegistration(
         version="1.0.0",
         implementation_version="1",
         spec=ToolSpec(
-            config.name,
-            config.description,
-            config.input_schema,
+            _mcp_name(config.name, remote.name),
+            remote.description,
+            input_schema,
             spec_output_schema,
         ),
         category="external",
         source="mcp",
-        owner=f"mcp:{config.server}",
+        owner=f"mcp:{config.name}",
         policy=ToolPolicy(
             allowed_modes=(
                 frozenset({"plan", "execute"})
-                if config.read_only
+                if policy_values["read_only"]
                 else frozenset({"execute"})
             ),
             declared_effects=declared_effects,
@@ -289,24 +179,28 @@ def _registration(
                 {
                     "mcp.call",
                     *(
-                        {f"credential:{config.credential_binding}"}
-                        if config.credential_required and config.credential_binding
+                        {f"credential:{config.auth.binding}"}
+                        if config.auth is not None
                         else set()
                     ),
                 }
             ),
-            base_risk=config.risk_level,
-            approval="always" if config.requires_approval else "never",
+            base_risk=policy_values["risk_level"],
+            approval="always" if policy_values["requires_approval"] else "never",
             timeout=TimeoutPolicy(config.timeout_ms, config.timeout_ms),
-            concurrency=ConcurrencyPolicy(mode="parallel"),
+            concurrency=ConcurrencyPolicy(
+                mode="parallel",
+                group=f"mcp:{config.name}",
+                max_parallel=config.max_parallel,
+            ),
             output_limits=OutputLimits(
                 max_data_bytes=config.max_output_bytes,
                 max_content_bytes=min(config.max_output_bytes, 256_000),
                 max_artifact_bytes=config.max_output_bytes,
             ),
             output_trust=OutputTrustPolicy(
-                default_content_trust=config.output_trust,
-                allow_structurally_validated=config.output_schema is None,
+                default_content_trust=policy_values["output_trust"],
+                allow_structurally_validated=remote.output_schema is None,
             ),
         ),
         input_codec=input_codec,
@@ -318,7 +212,7 @@ def _registration(
 
 
 class _MCPRenderer:
-    def __init__(self, config: MCPToolConfig) -> None:
+    def __init__(self, config: MCPServerConfig) -> None:
         self.config = config
 
     def render(self, data):
@@ -406,45 +300,51 @@ def _slug(value: str) -> str:
 
 
 def _object_schema(value: object) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        value = {"type": "object", "properties": {}, "additionalProperties": True}
+    if not isinstance(value, Mapping):
+        raise ValueError("MCP input schema must be an object")
     schema = dict(value)
     schema.setdefault("$schema", "https://json-schema.org/draft/2020-12/schema")
-    schema.setdefault("type", "object")
+    if schema.get("type") != "object":
+        raise ValueError("MCP input schema must declare type=object")
     return schema
 
 
-def _required_name(value: object) -> str | None:
-    return _optional_text(value)
+def _resolved_policy(
+    config: MCPServerConfig,
+    remote: MCPRemoteTool,
+) -> dict[str, Any]:
+    override = config.tool_policies.get(remote.name, {})
+    read_only = override.get("read_only")
+    if read_only is None:
+        read_only = remote.annotations.get("readOnlyHint") is True
+    elif not isinstance(read_only, bool):
+        raise ValueError(f"MCP tool '{remote.name}' read_only must be bool")
+    risk = override.get("risk_level")
+    if risk is None:
+        risk = "high" if remote.annotations.get("destructiveHint") is True else (
+            "low" if read_only else "medium"
+        )
+    if risk not in {"low", "medium", "high", "critical"}:
+        raise ValueError(f"MCP tool '{remote.name}' has invalid risk_level")
+    approval = override.get("requires_approval")
+    if approval is None:
+        approval = not read_only
+    elif not isinstance(approval, bool):
+        raise ValueError(f"MCP tool '{remote.name}' requires_approval must be bool")
+    trust = override.get("output_trust", "untrusted")
+    if trust not in {"trusted", "untrusted"}:
+        raise ValueError(f"MCP tool '{remote.name}' has invalid output_trust")
+    return {
+        "read_only": read_only,
+        "risk_level": risk,
+        "requires_approval": approval,
+        "output_trust": trust,
+    }
 
 
 def _optional_text(value: object) -> str | None:
     text = str(value).strip() if value is not None else ""
     return text or None
-
-
-def _string_set(value: object) -> set[str]:
-    if not isinstance(value, (list, tuple)):
-        return set()
-    return {text for item in value if (text := _optional_text(item)) is not None}
-
-
-def _bool(value: object, *, default: bool) -> bool:
-    return value if isinstance(value, bool) else default
-
-
-def _risk_level(value: object, *, default: str) -> str:
-    return str(value) if value in {"low", "medium", "high", "critical"} else default
-
-
-def _output_trust(value: object) -> str:
-    return str(value) if value in {"trusted", "untrusted"} else "untrusted"
-
-
-def _bounded_int(value: object, *, default: int, minimum: int, maximum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return default
-    return max(minimum, min(maximum, value))
 
 
 def _estimated_base64_bytes(value: str) -> int:
@@ -465,7 +365,5 @@ def _omission_text(value: dict[str, object]) -> str:
 
 __all__ = [
     "MCPClient",
-    "MCPToolConfig",
     "create_mcp_registrations",
-    "parse_mcp_tool_configs",
 ]

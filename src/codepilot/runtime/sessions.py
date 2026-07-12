@@ -29,6 +29,7 @@ class RuntimeSession:
     tool_port: Any | None = None
     status: RuntimeStatusInfo | None = None
     commands: dict[str, Any] | None = None
+    mcp_manager: Any | None = None
 
     @property
     def session_id(self) -> str:
@@ -48,14 +49,18 @@ class RuntimeSessionRegistry:
         except KeyError as exc:
             raise KeyError(f"Session not found: {session_id}") from exc
 
-    def close(self, session_id: str) -> None:
+    def close(self, session_id: str) -> RuntimeSession | None:
         entry = self._items.pop(session_id, None)
         if entry is not None:
             entry.controller.close()
+        return entry
 
     def close_all(self) -> None:
         for session_id in list(self._items):
             self.close(session_id)
+
+    def values(self) -> tuple[RuntimeSession, ...]:
+        return tuple(self._items.values())
 
     def derive(
         self,
@@ -76,6 +81,7 @@ class RuntimeSessionRegistry:
             tool_port=source.tool_port,
             status=status,
             commands=dict(source.commands or {}),
+            mcp_manager=source.mcp_manager,
         )
         self.add(session)
         return session

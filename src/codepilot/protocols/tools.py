@@ -40,6 +40,10 @@ _TOOL_RESULT_STATUSES = frozenset(
     }
 )
 
+
+def tool_mode_for_run_mode(mode: str) -> Literal["plan", "execute"]:
+    return "plan" if mode in {"read", "plan"} else "execute"
+
 # Task Plan tool names shared by tools execution and core plan state.
 PROPOSE_PLAN_TOOL = "propose_plan"
 CREATE_BUILD_PLAN_TOOL = "create_build_plan"
@@ -109,4 +113,5 @@ __all__ = [
     "PROPOSE_PLAN_TOOL",
     "UPDATE_PLAN_PROGRESS_TOOL",
     "ensure_tool_result_status",
+    "tool_mode_for_run_mode",
 ]

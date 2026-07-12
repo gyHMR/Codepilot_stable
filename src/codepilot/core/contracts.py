@@ -27,7 +27,6 @@ from codepilot.tools.security import ApprovalChallenge
 from .plan import RunMode, ensure_run_mode, plan_state_to_dict
 
 
-ToolExecutionMode = Literal["sequential", "parallel"]
 AgentMessage = Message
 CoreBoundaryKind = Literal[
     "before_model",
@@ -463,6 +462,5 @@ __all__ = [
     "RetryPolicy",
     "RunCorrelation",
     "RunStatePort",
-    "ToolExecutionMode",
     "WorkspaceEffects",
 ]

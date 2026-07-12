@@ -139,13 +139,13 @@ def _plan_registration(
     async def handler(input, context):
         try:
             snapshot = _snapshot_from_input(operation, input)
-            state = service.submit(operation, snapshot, _request_from_input_context(input))
+            state = service.submit(operation, snapshot, context.request)
         except PlanValidationError as exc:
             raise ToolHandlerError("plan.invalid", str(exc)) from exc
         context.effects.report(
             ToolEffect(
                 kind="session_state_write",
-                resource=ToolResource(f"session://{_request_from_input_context(input).session_id}/task-plan"),
+                resource=ToolResource(f"session://{context.request.session_id}/task-plan"),
                 operation=operation,
                 status="completed",
                 certainty="observed",
@@ -156,18 +156,6 @@ def _plan_registration(
             "plan_snapshot": _snapshot_to_dict(snapshot),
             "plan_state": dict(state),
         }
-
-    class BoundResolver:
-        def resolve(self, input, request):
-            resolved = Resolver().resolve(input, request)
-            bound = dict(resolved.input)
-            bound["__run_id__"] = request.run_id
-            bound["__session_id__"] = request.session_id
-            bound["__tool_call_id__"] = request.tool_call_id
-            bound["__tool_name__"] = request.tool_name
-            bound["__mode__"] = request.mode
-            bound["__registration_id__"] = request.registration_id
-            return ToolAccessResolution(input=bound, access=resolved.access)
 
     class Renderer:
         def render(self, data):
@@ -195,35 +183,12 @@ def _plan_registration(
         output_codec=output_codec,
         handler=handler,
         renderer=Renderer(),
-        access_resolver=BoundResolver(),
+        access_resolver=Resolver(),
     )
 
 
-def _request_from_input_context(input: Mapping[str, object]) -> ToolExecutionRequest:
-    internal = {
-        "__run_id__",
-        "__session_id__",
-        "__tool_call_id__",
-        "__tool_name__",
-        "__mode__",
-        "__registration_id__",
-    }
-    try:
-        return ToolExecutionRequest(
-            run_id=str(input["__run_id__"]),
-            session_id=str(input["__session_id__"]),
-            tool_call_id=str(input["__tool_call_id__"]),
-            tool_name=str(input["__tool_name__"]),
-            arguments={key: value for key, value in input.items() if key not in internal},
-            mode=str(input["__mode__"]),
-            registration_id=str(input["__registration_id__"]),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise PlanValidationError("Plan request context is missing") from exc
-
-
 def _snapshot_from_input(operation: PlanOperation, input: Mapping[str, object]) -> PlanSnapshot:
-    raw = {key: value for key, value in input.items() if not key.startswith("__")}
+    raw = dict(input)
     items = raw.get("items")
     if operation == PROPOSE_PLAN_TOOL and isinstance(items, list):
         raw["items"] = [{**item, "status": "pending"} for item in items]

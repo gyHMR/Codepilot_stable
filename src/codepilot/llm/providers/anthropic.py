@@ -32,7 +32,7 @@ from codepilot.protocols import (
     ThinkingContent,
     ToolCall,
 )
-from .common import empty_assistant_message, normalize_usage, parse_partial_json, to_anthropic_messages, to_anthropic_tools
+from .common import empty_assistant_message, finalize_tool_arguments, normalize_usage, parse_partial_json, to_anthropic_messages, to_anthropic_tools
 
 
 def _map_stop_reason(reason: str | None) -> str:
@@ -172,6 +172,7 @@ def stream_anthropic(
                             elif delta_type == "input_json_delta" and idx in tool_blocks:
                                 piece = delta.get("partial_json", "")
                                 tool_partial_json[idx] += piece
+                                tool_blocks[idx].raw_arguments = tool_partial_json[idx]
                                 tool_blocks[idx].arguments = parse_partial_json(tool_partial_json[idx])
                                 stream.push(
                                     llm_event(
@@ -206,6 +207,7 @@ def stream_anthropic(
                                 )
                             elif idx in tool_blocks:
                                 block = tool_blocks[idx]
+                                finalize_tool_arguments(block, tool_partial_json[idx])
                                 stream.push(
                                     llm_event(
                                         "toolcall_end",

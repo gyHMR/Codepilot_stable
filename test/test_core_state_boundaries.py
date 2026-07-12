@@ -117,6 +117,14 @@ def test_before_tools_commit_failure_prevents_tool_execution() -> None:
                 self.execute_calls += 1
                 return []
 
+            def checkpoint_state(self, *, intent=None):
+                return {
+                    "schema_version": 1,
+                    "session_id": "session_1",
+                    "attempts": [],
+                    "intent": dict(intent) if intent is not None else None,
+                }
+
         tools = Tools()
         state = RecordingStatePort(fail_on="before_tools")
 
@@ -132,5 +140,19 @@ def test_before_tools_commit_failure_prevents_tool_execution() -> None:
             "after_model",
             "before_tools",
         ]
+        assert state.boundaries[-1].tool_recovery_state == {
+            "schema_version": 1,
+            "session_id": "session_1",
+            "attempts": [],
+            "intent": {
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "name": "shell",
+                        "arguments": {"command": "pytest"},
+                    }
+                ]
+            },
+        }
 
     asyncio.run(run_case())

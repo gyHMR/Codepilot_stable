@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from codepilot.sessions.workspace import build_repository_bootstrap, render_repository_context
 
@@ -107,28 +106,7 @@ def _runtime_facts(workspace: Path) -> str:
     return f"当前日期：{date}\n当前工作目录：{cwd_text}"
 
 
-def _default_tool_snippets() -> dict[str, str]:
-    return {
-        "ls": "列出目录内容（文件名、目录、大小）。",
-        "find": "按 glob 查找文件路径。",
-        "read": "读取文本文件内容。",
-        "grep": "按正则在文件中搜索内容。",
-        "edit": "对文件做精确文本替换。",
-        "apply_patch": "对一个或多个文件执行结构化 old_text -> new_text 精确补丁；多处/多文件小改优先使用它。",
-        "write": "写入新文件或重写文件。",
-        "bash": "执行命令行命令（需注意风险）。",
-        "workspace_status": "查看工作区 git 状态、变更路径和当前分支。",
-        "propose_plan": "plan 模式发布或修订待批准的详细 Task Plan。",
-        "create_build_plan": "build 模式在无 current Task Plan 且任务复杂时创建轻量 active Task Plan。",
-        "update_plan_progress": "build 模式更新当前 active Task Plan 的步骤状态或受控修订。",
-        "close_plan": "build 模式最终答复前检查并收尾当前 Task Plan。",
-        "list_exploration_agents": "列出当前会话中已保存的只读探索 Subagent 报告。",
-        "dispatch_exploration": "在 plan 模式为多文件、长文件或跨模块任务优先派发只读 Subagent，收集结构化代码事实、风险和验证建议。",
-    }
-
-
 __all__ = [
-    "RepositoryBootstrap",
     "build_repository_bootstrap",
     "build_default_system_prompt",
     "build_system_prompt",

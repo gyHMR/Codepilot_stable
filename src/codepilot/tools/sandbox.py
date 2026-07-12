@@ -1,7 +1,4 @@
-from __future__ import annotations
-
-"""
-工作区和 Shell 安全辅助模块（供工具系统使用）。
+"""工作区和 Shell 安全辅助模块（供工具系统使用）。
 
 =============================================================================
 模块概述
@@ -13,7 +10,7 @@ from __future__ import annotations
 1. 工作区沙箱（WorkspaceSandbox）
    —— 将所有文件路径操作限制在工作区目录内，防止路径遍历攻击和越权访问。
 
-2. Shell 命令分类（classify_shell_command）
+2. Shell/argv 命令解析与统一 CommandAssessment
    —— 对用户/LLM 提交的 Shell 命令进行安全分级，分为验证类、只读类、
       变更类、高风险类和未知类五类，以决定命令的执行策略和审批流程。
 
@@ -31,6 +28,9 @@ from __future__ import annotations
 
 7. 文件状态采集（file_state_for_path）
    —— 以工作区相对路径为键，收集文件的元数据（大小、修改时间、SHA256 哈希）。
+
+8. 敏感路径检查（is_sensitive_workspace_path, command_mentions_sensitive_path）
+   —— 保护 .env、SSH 密钥、AWS 凭据等敏感文件不被工具读取或修改。
 
 =============================================================================
 安全设计原则
@@ -67,6 +67,26 @@ CommandProfile = Literal[
     "destructive",
     "unknown",
 ]
+
+
+@dataclass(frozen=True)
+class CommandAssessment:
+    """命令评估结果 —— 对命令的安全等级、风险和副作用的综合评估。
+
+    参数:
+        profile: 命令的执行画像分类
+        risk: 风险级别（low / medium / high / critical）
+        effects: 命令可能产生的副作用集合
+        requires_shell: 是否需要通过 Shell 执行（True=Shell命令，False=受控命令）
+        destructive: 是否具有破坏性
+        network: 是否需要网络访问
+    """
+    profile: CommandProfile
+    risk: Literal["low", "medium", "high", "critical"]
+    effects: frozenset[str]
+    requires_shell: bool
+    destructive: bool
+    network: bool
 
 # ---------------------------------------------------------------------------
 # 内部保留目录名集合
@@ -231,10 +251,14 @@ _SAFE_ENV_NAMES = {
 _SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "CREDENTIAL", "COOKIE")
 
 
+# =========================================================================
+# WorkspaceSandbox —— 工作区沙箱
+# =========================================================================
+
+
 @dataclass(frozen=True)
 class WorkspaceSandbox:
-    """
-    工作区沙箱 —— 将所有文件路径操作限制在工作区目录内。
+    """工作区沙箱 —— 将所有文件路径操作限制在工作区目录内。
 
     核心职责：
     1. 路径解析（resolve_path）：将相对路径或绝对路径解析为工作区内的
@@ -245,28 +269,33 @@ class WorkspaceSandbox:
        工作区根目录的 POSIX 风格路径字符串。
     4. 可变路径检查（ensure_mutable_path）：在边界检查基础上，额外禁止
        修改 .codepilot 内部目录下的文件。
+    5. 可读路径检查（ensure_readable_path）：在边界检查基础上，额外禁止
+       读取敏感文件（如 .env、SSH 密钥等）。
 
     使用示例:
         sandbox = WorkspaceSandbox("/home/user/project")
         safe = sandbox.resolve_path("../outside")  # 抛出 ValueError
+
+    参数:
+        workspace_dir: 工作区根目录的路径（字符串或 Path 对象）
     """
 
-    #: 工作区根目录的绝对路径（字符串或 Path 对象）
     workspace_dir: str | Path
 
     @property
     def root(self) -> Path:
-        """
-        返回工作区根目录的规范化绝对路径。
+        """获取工作区根目录的规范化绝对路径。
 
         每次访问都会调用 Path.resolve() 以确保符号链接和相对路径
         都被展开为真实的绝对路径，作为后续所有路径检查的基准。
+
+        返回:
+            规范化后的工作区绝对路径
         """
         return Path(self.workspace_dir).resolve()
 
     def resolve_path(self, path_text: str | Path) -> Path:
-        """
-        将用户输入的路径解析为工作区内的安全绝对路径。
+        """将用户输入的路径解析为工作区内的安全绝对路径。
 
         解析逻辑：
         1. 如果是绝对路径，直接规范化（resolve）
@@ -280,32 +309,30 @@ class WorkspaceSandbox:
             验证通过的工作区内绝对路径
 
         抛出:
-            ValueError: 如果路径逃逸到工作区之外
+            ValueError: 如果路径逃逸到工作区之外（如 "../../etc/passwd"）
         """
         path = Path(path_text)
         target = path.resolve() if path.is_absolute() else (self.root / path).resolve()
         return self.ensure_within_workspace(target)
 
     def ensure_within_workspace(self, path: str | Path) -> Path:
-        """
-        验证给定路径是否在工作区边界内。
+        """验证给定路径是否在工作区边界内。
 
         使用 Path.relative_to() 来判断目标路径是否以工作区根目录为前缀。
-        如果 relative_to 抛出 ValueError，说明路径逃逸到了工作区外部，
-        此时会重新抛出带有明确错误消息的 ValueError。
+        如果 relative_to 抛出 ValueError，说明路径逃逸到了工作区外部。
 
-        注：Path.relative_to() 不解析 ".." 符号 —— 但在此之前
-        resolve_path() 已经对路径做了 resolve() 处理，将 ".." 展开为
-        实际目录，因此这里的检查是可靠的。
+        注意：Path.relative_to() 不解析 ".." 符号 —— 但在此之前
+        resolve_path() 已经对路径做了 resolve() 处理（展开 ".."），
+        因此这里的检查是可靠的。
 
         参数:
             path: 待验证的路径
 
         返回:
-            规范化后的路径（与输入相同，仅做类型保证）
+            规范化后的路径（与输入路径相同，仅做类型保证）
 
         抛出:
-            ValueError: 如果路径不在工作区内（"Path escapes workspace boundary"）
+            ValueError: 如果路径不在工作区内（消息为 "Path escapes workspace boundary"）
         """
         target = Path(path).resolve()
         try:
@@ -315,30 +342,32 @@ class WorkspaceSandbox:
         return target
 
     def relative_path(self, path: str | Path) -> str:
-        """
-        将工作区内的路径转换为相对于工作区根目录的 POSIX 风格路径字符串。
+        """将工作区内的路径转换为相对路径的 POSIX 风格字符串。
 
         先通过 ensure_within_workspace 做边界检查，然后将路径转换为
         相对于工作区根目录的相对路径，最后用 as_posix() 统一为正斜杠格式
-        （跨平台兼容）。
+        （跨平台兼容，Windows 上反斜杠会被转为正斜杠）。
 
         参数:
             path: 工作区内的绝对路径或相对路径
 
         返回:
-            相对于工作区根目录的 POSIX 风格路径字符串，例如 "src/main.py"
+            相对于工作区根目录的 POSIX 风格路径字符串，如 "src/main.py"
+
+        抛出:
+            ValueError: 如果路径不在工作区内
         """
         return self.ensure_within_workspace(path).relative_to(self.root).as_posix()
 
     def ensure_mutable_path(self, path: str | Path) -> Path:
-        """
-        验证路径是否在可修改的范围内 —— 在边界检查基础上，
-        额外禁止修改 .codepilot 内部目录中的文件。
+        """验证路径是否在可修改的范围内。
 
-        设计原因：
-        .codepilot 目录存储会话状态、工具审批记录等关键内部数据，
-        必须通过 Session Store API 进行修改以保证数据一致性，
-        不允许外部 Shell 命令直接操作。
+        在 ensure_within_workspace 边界检查基础上，额外限制：
+        1. 不能修改 .codepilot 内部目录中的文件
+           （.codepilot 存储会话状态、工具审批记录等内部数据，
+           必须通过 Session Store API 修改）
+        2. 不能修改敏感文件（如 .env、SSH 密钥等）
+        3. 不能直接修改 .git 目录下的文件
 
         参数:
             path: 待验证的路径
@@ -347,7 +376,7 @@ class WorkspaceSandbox:
             验证通过的可修改路径
 
         抛出:
-            ValueError: 如果路径在工作区外，或指向 .codepilot 内部文件
+            ValueError: 如果路径在工作区外、指向内部状态目录或敏感文件
         """
         target = self.ensure_within_workspace(path)
         relative = target.relative_to(self.root)
@@ -357,22 +386,48 @@ class WorkspaceSandbox:
         return target
 
     def ensure_readable_path(self, path: str | Path) -> Path:
-        """Validate a workspace path and reject credential-like sensitive files."""
+        """验证路径是否可读 —— 在工作区内且非敏感文件。
 
+        用于只读操作（如 read、ls），确保路径在工作区内，
+        且不指向 .env、SSH 密钥等敏感文件。
+
+        参数:
+            path: 待验证的路径
+
+        返回:
+            验证通过的可读路径
+
+        抛出:
+            ValueError: 如果路径在工作区外或指向敏感文件
+        """
         target = self.ensure_within_workspace(path)
         self._ensure_not_sensitive(target.relative_to(self.root))
         return target
 
     @staticmethod
     def _ensure_not_sensitive(relative: Path) -> None:
+        """静态方法 —— 检查路径是否指向敏感文件。
+
+        通过 is_sensitive_workspace_path() 检测是否匹配敏感文件模式。
+
+        参数:
+            relative: 工作区相对路径
+
+        抛出:
+            ValueError: 如果路径被识别为敏感文件
+        """
         if is_sensitive_workspace_path(relative):
             raise ValueError(f"Sensitive workspace file is protected: {relative.as_posix()}")
 
 
+# =========================================================================
+# ShellExecutionPolicy —— Shell 执行策略
+# =========================================================================
+
+
 @dataclass(frozen=True)
 class ShellExecutionPolicy:
-    """
-    Shell 命令执行的运行时策略配置。
+    """Shell 命令执行的运行时策略配置。
 
     定义了 Shell 命令执行的各项限制参数：
     - timeout_seconds: 默认超时时间（秒），如果用户未指定超时则使用此值
@@ -380,36 +435,33 @@ class ShellExecutionPolicy:
     - stdout_limit: 标准输出最大字符数，超过则截断
     - stderr_limit: 标准错误输出最大字符数，超过则截断
     - allowed_env: 额外允许传递给子进程的环境变量名元组
+
+    参数:
+        timeout_seconds: 默认超时时间，默认 30 秒
+        max_timeout_seconds: 最大允许超时时间，默认 120 秒
+        stdout_limit: 标准输出截断限制，默认 20,000 字符
+        stderr_limit: 标准错误截断限制，默认 10,000 字符
+        allowed_env: 额外允许的环境变量名元组
     """
 
-    #: 默认超时时间（秒），用户未指定超时时的回退值
     timeout_seconds: int = 30
-    #: 允许的最大超时时间（秒），防止用户设置过长超时导致资源占用
     max_timeout_seconds: int = 120
-    #: 标准输出最大保留字符数
     stdout_limit: int = 20_000
-    #: 标准错误输出最大保留字符数
     stderr_limit: int = 10_000
-    #: 除了 _SAFE_ENV_NAMES 白名单之外额外允许的环境变量名
     allowed_env: tuple[str, ...] = ()
 
     def validate_timeout(self, requested: object) -> tuple[int | None, str | None]:
-        """
-        验证用户请求的超时值是否合法。
+        """验证用户请求的超时值是否合法。
 
         验证规则（按顺序）：
         1. 如果 requested 为 None，返回默认超时时间
         2. 如果 requested 是布尔值，这显然是错误类型，返回 "invalid_timeout"
-        3. 尝试将 requested 转为整数，如果失败（如字符串、浮点数等），返回 "invalid_timeout"
+        3. 尝试将 requested 转为整数，如果失败返回 "invalid_timeout"
         4. 如果整数值 < 1 或 > max_timeout_seconds，返回 "invalid_timeout"
         5. 所有检查通过，返回 (验证后的超时值, None)
 
-        返回值是一个元组 (timeout_value, error_message)：
-        - 成功时 error_message 为 None，timeout_value 为有效的超时秒数
-        - 失败时 timeout_value 为 None，error_message 为 "invalid_timeout"
-
         参数:
-            requested: 用户请求的超时值（可以是 None、int、或其他类型）
+            requested: 用户请求的超时值（None、int 或其他类型）
 
         返回:
             (有效的超时秒数 | None, 错误消息 | None)
@@ -427,28 +479,28 @@ class ShellExecutionPolicy:
         return value, None
 
 
+# =========================================================================
+# TruncatedOutput —— 截断输出
+# =========================================================================
+
+
 @dataclass(frozen=True)
 class TruncatedOutput:
-    """
-    截断后的输出描述。
+    """截断后的输出描述。
 
     当 Shell 命令的输出超过指定长度限制时，输出会被截断，
     此类记录截断前后的元信息，以便上层了解输出是否完整。
 
-    属性:
+    参数:
         text: 截断后的文本内容（如果未截断则为完整原文）
         truncated: 是否发生了截断
         original_chars: 原始输出的总字符数
         returned_chars: 截断后返回的字符数（包含截断标记文本）
     """
 
-    #: 截断后（或未截断的原始）文本
     text: str
-    #: 是否发生了输出截断
     truncated: bool
-    #: 原始输出的字符总数
     original_chars: int
-    #: 截断后实际返回的字符总数（包含截断提示标记）
     returned_chars: int
 
 
@@ -458,45 +510,35 @@ class TruncatedOutput:
 
 
 def file_state_for_path(workspace_dir: str | Path, path: str | Path) -> dict[str, Any]:
-    """
-    收集指定路径文件的状态元数据。
+    """收集指定路径文件的状态元数据。
 
     此函数在工作区沙箱内安全地解析路径，并返回文件的元数据字典，
     包括文件是否存在、大小、修改时间（纳秒精度）和 SHA256 哈希值。
 
-    使用场景：
-    - 在执行 Shell 命令前后采集文件状态快照，用于变更检测
-    - 为工具调用的文件参数提供元数据（如确认文件是否已有内容）
-    - 计算文件内容哈希用于去重或完整性验证
-
     SHA256 计算使用流式读取（1MB 块），适用于大文件。
 
-    如果文件不存在或不是常规文件，返回的字典中 "exists" 为 False，
-    且不包含 size/mtime_ns/sha256 字段。
+    如果文件不存在或不是常规文件，返回的字典中 "exists" 为 False。
 
     参数:
         workspace_dir: 工作区根目录路径
-        path: 要检查的文件路径（可以是绝对路径或相对路径）
+        path: 要检查的文件路径（绝对或相对路径）
 
     返回:
         包含以下键的字典：
-        - "path": 文件相对于工作区根目录的路径（POSIX 风格）
+        - "path": 文件相对于工作区根目录的 POSIX 路径
         - "exists": 文件是否存在且为常规文件
-        - "size": 文件大小（字节），仅当 exists=True 时存在
-        - "mtime_ns": 最后修改时间（纳秒时间戳），仅当 exists=True 时存在
-        - "sha256": 文件内容的 SHA256 十六进制哈希，仅当 exists=True 时存在
+        - "size": 文件大小（字节），仅当 exists=True
+        - "mtime_ns": 最后修改时间（纳秒），仅当 exists=True
+        - "sha256": 文件内容的 SHA256 哈希，仅当 exists=True
         - "workspace_path": 工作区根目录的字符串表示
     """
-    # 使用 WorkspaceSandbox 确保路径在工作区内
     sandbox = WorkspaceSandbox(workspace_dir)
     target = sandbox.resolve_path(path)
     relative = target.relative_to(sandbox.root).as_posix()
 
-    # 文件不存在或不是常规文件：返回最小化信息
     if not target.exists() or not target.is_file():
         return {"path": relative, "exists": False, "workspace_path": str(sandbox.root)}
 
-    # 收集文件元数据：大小、修改时间、内容哈希
     stat = target.stat()
     return {
         "path": relative,
@@ -508,52 +550,40 @@ def file_state_for_path(workspace_dir: str | Path, path: str | Path) -> dict[str
     }
 
 
-def classify_shell_command(command: str) -> ShellCommandClass:
-    """
-    对 Shell 命令进行安全分级。
+def _classify_shell_syntax(command: str) -> ShellCommandClass:
+    """Shell 命令安全分级 —— 对 Shell 命令进行安全分类。
 
     分类流程（按优先级从高到低）：
-    1. 高风险检测 —— 用正则模式匹配检查命令是否包含高风险操作
-       （如 rm -rf、强制推送等），匹配到则返回 "high_risk"
-    2. 提取第一条有效命令 —— 通过 _first_command() 处理命令链
-       （&&、||、;、换行）和环境设置前缀
+    1. 高风险检测 —— 用正则模式匹配检查是否包含 rm -rf、强制推送等操作
+    2. 提取第一条有效命令 —— 处理命令链（&&、||、;、换行）和环境设置前缀
     3. 如果无法提取有效命令，返回 "unknown"
     4. 如果命令包含 Shell 重定向/管道（>、>>、<、|），返回 "unknown"
-       （因为有副作用的可能性增加，白名单匹配不再可靠）
-    5. 按顺序匹配白名单前缀：
-       a. 验证类前缀 → "verification"
-       b. 只读类前缀 → "read_only"
-       c. 变更类前缀 → "mutation"
-       d. Python 工作区脚本 → "mutation"
+       （这些操作使白名单匹配不可靠，因为重定向目标可能产生副作用）
+    5. 按顺序匹配白名单前缀：verification → read_only → mutation
     6. 都不匹配 → "unknown"
-
-    命令预处理：去除首尾空格、全部转小写、压缩连续空格为单个空格，
-    以确保匹配的一致性。
 
     参数:
         command: 用户提交的原始 Shell 命令字符串
 
     返回:
-        ShellCommandClass 分类标签（"verification" | "read_only" |
-        "mutation" | "high_risk" | "unknown"）
+        "verification" | "read_only" | "mutation" | "high_risk" | "unknown"
     """
-    # 规范化：去首尾空格 → 小写 → 压缩连续空格
     normalized = " ".join(command.strip().lower().split())
 
-    # 第一关：高风险模式匹配（优先级最高，直接返回）
+    # 第一关：高风险模式匹配（优先级最高）
     if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _HIGH_RISK_PATTERNS):
         return "high_risk"
 
-    # 第二关：提取第一条有效命令（剥离环境变量设置和目录切换前缀）
+    # 第二关：提取第一条有效命令
     first = _first_command(normalized)
     if not first:
         return "unknown"
 
-    # 第三关：Shell 重定向/管道检测 —— 有这些操作则放弃白名单匹配
+    # 第三关：Shell 重定向/管道检测
     if _has_shell_redirection(first):
         return "unknown"
 
-    # 第四关：按顺序匹配安全命令白名单
+    # 第四关：白名单匹配
     if any(_matches_command_prefix(first, prefix) for prefix in _VERIFICATION_PREFIXES):
         return "verification"
     if any(_matches_command_prefix(first, prefix) for prefix in _READ_ONLY_PREFIXES):
@@ -561,30 +591,52 @@ def classify_shell_command(command: str) -> ShellCommandClass:
     if any(_matches_command_prefix(first, prefix) for prefix in _MUTATION_PREFIXES):
         return "mutation"
 
-    # 第五关：检测是否为工作区内的 Python 脚本调用（如 python src/script.py）
+    # 第五关：工作区内 Python 脚本检测
     if _is_python_workspace_script(first):
         return "mutation"
 
-    # 无法匹配任何已知安全模式，标记为未知
     return "unknown"
 
 
-def validate_shell_command(command: str) -> ShellCommandClass:
-    """Apply non-bypassable Shell safety checks before permission approval."""
+def validate_shell_command(command: str) -> CommandAssessment:
+    """验证 Shell 命令 —— 执行不可绕过的安全检查并返回评估结果。
 
-    shell_class = classify_shell_command(command)
-    if shell_class == "high_risk":
+    三步检查：
+    1. 调用 assess_command 进行安全分级
+    2. 如果命令被归类为 destructive（破坏性），抛出异常
+    3. 检查命令是否涉及内部状态文件或敏感文件
+
+    参数:
+        command: Shell 命令字符串
+
+    返回:
+        CommandAssessment 评估结果
+
+    抛出:
+        ValueError: 命令是高风险的、涉及内部状态或敏感文件
+    """
+    assessment = assess_command(command, requires_shell=True)
+    if assessment.destructive:
         raise ValueError("Shell command is high-risk and cannot be approved")
     if command_mentions_internal_state(command):
         raise ValueError("Shell command targets internal workspace state")
     if command_mentions_sensitive_path(command):
         raise ValueError("Shell command targets a sensitive workspace file")
-    return shell_class
+    return assessment
 
 
-def classify_command_argv(argv: Sequence[str]) -> CommandProfile:
-    """Classify one argv-based command without interpreting Shell syntax."""
+def _parse_argv_profile(argv: Sequence[str]) -> CommandProfile:
+    """解析 argv 命令的执行画像 —— 基于参数列表分类命令。
 
+    适用于受控命令工具（如 "command" 工具），
+    通过检视 argv[0]（可执行文件）和参数来分类。
+
+    参数:
+        argv: 命令参数序列（如 ["git", "status"]）
+
+    返回:
+        CommandProfile 执行画像分类
+    """
     if isinstance(argv, (str, bytes)) or not argv:
         return "unknown"
     parts = tuple(str(item).strip() for item in argv)
@@ -593,8 +645,10 @@ def classify_command_argv(argv: Sequence[str]) -> CommandProfile:
     executable = _command_executable(parts[0])
     args = tuple(item.lower() for item in parts[1:])
 
+    # 破坏性命令
     if executable in {"rm", "rmdir", "del", "format", "mkfs", "shutdown", "reboot"}:
         return "destructive"
+    # Git 子命令分类
     if executable in {"git"} and args:
         action = args[0]
         if action == "reset" and "--hard" in args:
@@ -610,26 +664,27 @@ def classify_command_argv(argv: Sequence[str]) -> CommandProfile:
         if action == "add":
             return "external_effect"
 
+    # 网络命令
     if executable in {"curl", "wget"}:
         return "external_effect"
+    # pip
     if executable in {"pip", "pip3"}:
         if args and args[0] in {"install", "uninstall", "download", "wheel"}:
             return "external_effect"
         if args and args[0] in {"--version", "-v", "list", "show"}:
             return "inspection"
+    # npm/pnpm/yarn
     if executable in {"npm", "pnpm", "yarn"}:
         if args and args[0] in {"install", "uninstall", "update", "publish", "ci"}:
             return "external_effect"
         if args and args[0] == "run" and len(args) > 1:
-            if args[1] in {"format", "generate"}:
-                return "bounded_mutation"
-            if args[1] in {"test", "lint", "build"}:
+            if args[1] in {"format", "generate", "test", "lint", "build"}:
                 return "repository_execution"
         if args and args[0] == "test":
             return "repository_execution"
         if args and args[0] in {"--version", "-v"}:
             return "inspection"
-
+    # 测试/检查工具
     if executable in {"pytest", "mypy", "pyright"}:
         return "repository_execution"
     if executable == "ruff":
@@ -645,6 +700,7 @@ def classify_command_argv(argv: Sequence[str]) -> CommandProfile:
         return "repository_execution"
     if executable in {"rg", "grep", "findstr"}:
         return "inspection"
+    # Python 调用
     if executable in {"python", "python3", "py"}:
         if args and args[0] in {"--version", "-v"}:
             return "inspection"
@@ -653,7 +709,7 @@ def classify_command_argv(argv: Sequence[str]) -> CommandProfile:
             if module in {"pytest", "compileall"}:
                 return "repository_execution"
             if module == "build":
-                return "bounded_mutation"
+                return "repository_execution"
             if module == "pip" and len(args) >= 3:
                 if args[2] in {"install", "uninstall", "download", "wheel"}:
                     return "external_effect"
@@ -669,18 +725,34 @@ def validate_controlled_command(
     *,
     sandbox: WorkspaceSandbox,
     cwd: str | Path = ".",
-) -> tuple[tuple[str, ...], Path, CommandProfile]:
-    """Validate one argv command and its explicit path arguments."""
+) -> tuple[tuple[str, ...], Path, CommandAssessment]:
+    """验证受控命令 —— 对一个参数式命令及其路径参数做全面安全验证。
 
+    受控命令（command 工具）相比完整的 Shell 命令更安全，
+    因为参数是显式提供的，不需要 Shell 解析。本函数：
+    1. 过滤空参数
+    2. 评估命令的 SecurityProfile
+    3. 拒绝破坏性命令和未知命令
+    4. 验证工作目录在工作区内
+    5. 对每个路径参数做沙箱检查
+
+    参数:
+        argv: 命令参数序列
+        sandbox: 工作区沙箱实例
+        cwd: 命令的工作目录（默认当前目录）
+
+    返回:
+        (规范化后的参数元组, 验证通过的工作目录, 命令评估结果)
+    """
     if isinstance(argv, (str, bytes)) or not argv:
         raise ValueError("Controlled command argv must be a non-empty string array")
     normalized = tuple(str(item).strip() for item in argv)
     if any(not item for item in normalized):
         raise ValueError("Controlled command argv cannot contain empty values")
-    profile = classify_command_argv(normalized)
-    if profile == "destructive":
+    assessment = assess_command(normalized, requires_shell=False)
+    if assessment.destructive:
         raise ValueError("Destructive commands are not available through the command tool")
-    if profile == "unknown":
+    if assessment.profile == "unknown":
         raise ValueError("Unsupported controlled command; use bash with approval")
 
     working_dir = sandbox.ensure_mutable_path(sandbox.resolve_path(cwd))
@@ -691,12 +763,85 @@ def validate_controlled_command(
             raw,
             sandbox=sandbox,
             cwd=working_dir,
-            mutating=profile != "inspection",
+            mutating=assessment.profile != "inspection",
         )
-    return normalized, working_dir, profile
+    return normalized, working_dir, assessment
+
+
+def assess_command(
+    command: str | Sequence[str],
+    *,
+    requires_shell: bool,
+) -> CommandAssessment:
+    """统一命令评估函数 —— 对 Shell 命令和 argv 命令都适用的安全评估。
+
+    根据 requires_shell 参数选择不同的评估路径：
+    - True: 使用 Shell 语法分类（_classify_shell_syntax）
+    - False: 使用 argv 画像解析（_parse_argv_profile）
+
+    然后统一计算风险等级、副作用集合和网络需求。
+
+    参数:
+        command: Shell 命令字符串（requires_shell=True）或参数序列（requires_shell=False）
+        requires_shell: True=Shell 命令评估，False=argv 命令评估
+
+    返回:
+        CommandAssessment 包含完整的安全评估结果
+    """
+    if requires_shell:
+        if not isinstance(command, str):
+            raise TypeError("Shell command assessment expects a string")
+        shell_class = _classify_shell_syntax(command)
+        profile: CommandProfile = {
+            "verification": "repository_execution",
+            "read_only": "inspection",
+            "mutation": "repository_execution",
+            "high_risk": "destructive",
+            "unknown": "unknown",
+        }[shell_class]
+    else:
+        if isinstance(command, (str, bytes)):
+            raise TypeError("argv command assessment expects a sequence")
+        profile = _parse_argv_profile(command)
+    effects = {"process_spawn", "filesystem_read"}
+    if profile in {"repository_execution", "bounded_mutation", "external_effect", "unknown"}:
+        effects.add("filesystem_write")
+    network = profile in {"repository_execution", "external_effect", "unknown"}
+    if network:
+        effects.update({"network_access", "external_state_write"})
+    risk = (
+        "low" if profile == "inspection"
+        else "medium" if profile in {"repository_execution", "bounded_mutation"}
+        else "high"
+    )
+    return CommandAssessment(
+        profile=profile,
+        risk=risk,
+        effects=frozenset(effects),
+        requires_shell=requires_shell,
+        destructive=profile == "destructive",
+        network=network,
+    )
 
 
 def is_sensitive_workspace_path(path: str | Path) -> bool:
+    """检查路径是否是敏感的工作区文件。
+
+    敏感文件包括：
+    - .env 及其变体（.env.local 等，但 .env.example 不算）
+    - SSH 密钥文件（id_rsa, id_ed25519 等）
+    - 凭据文件（credentials, credentials.json）
+    - 证书文件（*.key, *.p12, *.pfx）
+    - SSH 配置目录下的文件（.ssh/）
+    - AWS 凭据文件（.aws/credentials）
+    - Git 配置文件（.git/config, .git/credentials）
+
+    参数:
+        path: 待检查的路径（字符串或 Path）
+
+    返回:
+        True 表示路径是敏感文件
+    """
     relative = Path(path)
     name = relative.name.lower()
     parts = tuple(part.lower() for part in relative.parts)
@@ -715,6 +860,16 @@ def is_sensitive_workspace_path(path: str | Path) -> bool:
 
 
 def command_mentions_sensitive_path(command: str) -> bool:
+    """检查 Shell 命令是否引用了敏感文件路径。
+
+    通过字符串匹配检测常见的敏感文件路径模式。
+
+    参数:
+        command: 原始 Shell 命令字符串
+
+    返回:
+        True 表示命令中出现了敏感路径
+    """
     text = command.replace("\\", "/").lower()
     markers = (
         "/.env",
@@ -729,87 +884,71 @@ def command_mentions_sensitive_path(command: str) -> bool:
 
 
 def build_shell_environment(extra_allowed: tuple[str, ...] = ()) -> dict[str, str]:
-    """
-    构建安全的 Shell 子进程环境变量字典。
+    """构建安全的 Shell 子进程环境变量字典。
 
-    过滤逻辑（按顺序对每个系统环境变量执行）：
-    1. 变量名必须在 _SAFE_ENV_NAMES 白名单中，或者是 extra_allowed 中的额外变量
-       （比较时均转换为大写进行大小写不敏感匹配）
-    2. 变量名（大写形式）不能包含任何 _SECRET_ENV_MARKERS 中的敏感关键字
-       （如 TOKEN、SECRET、PASSWORD 等），即使在白名单中也会被排除
-    3. 通过上述两层检查的值原样保留（变量名保持原始大小写）
+    过滤逻辑（对每个系统环境变量依次检查）：
+    1. 变量名必须在 _SAFE_ENV_NAMES 白名单或 extra_allowed 中
+    2. 变量名不能包含 _SECRET_ENV_MARKERS 中的敏感关键字
+    3. 通过检查的值原样保留
 
     安全考量：
     - 白名单策略确保不会意外将包含密钥的环境变量传给子进程
-    - 敏感关键字过滤作为第二道防线，防止通过命名规范绕过白名单
-      （例如某个名为 "BUILD_TOKEN" 的变量因包含 "TOKEN" 而被排除）
-    - 使用 set 和 tuple 作为不可变参数类型，防止运行时篡改
+    - 敏感关键字过滤作为第二道防线
+    - 返回的字典仅包含安全且非敏感的变量
 
     参数:
-        extra_allowed: 除了默认白名单之外，额外允许传递的变量名元组
-                       （名称将自动转为大写进行匹配）
+        extra_allowed: 额外允许的变量名元组（自动转为大写匹配）
 
     返回:
-        过滤后的环境变量字典，仅包含安全且非敏感的变量
+        过滤后的安全环境变量字典
     """
-    # 合并默认白名单和额外允许的变量（统一转大写以支持不区分大小写匹配）
     names = _SAFE_ENV_NAMES | {name.upper() for name in extra_allowed}
 
     result: dict[str, str] = {}
     for name, value in os.environ.items():
         upper = name.upper()
 
-        # 第一道过滤：白名单检查
         if upper not in names:
             continue
 
-        # 第二道过滤：敏感关键字检查（在白名单内也可能包含敏感变量）
         if any(marker in upper for marker in _SECRET_ENV_MARKERS):
             continue
 
-        # 通过所有检查，保留此变量
         result[name] = value
 
     return result
 
 
 def truncate_output(text: str, limit: int) -> TruncatedOutput:
-    """
-    对过长的输出文本进行截断处理。
+    """对过长的输出文本进行截断处理（head-tail 截断策略）。
 
-    截断策略（head-tail 截断）：
-    - 如果原始文本长度 <= limit，不截断，直接返回原文本
-    - 如果原始文本长度 > limit：
-      1. 保留前 head_size = max(1, limit // 2) 个字符
-      2. 保留后 tail_size = max(1, limit - head_size) 个字符
-      3. 中间插入截断标记 "...<truncated N chars>..." 并独占一行
-    - 截断标记的长度不计入 limit 限制，因此返回的总长度会略大于 limit
+    截断策略：
+    - 如果文本长度 <= limit，直接返回
+    - 如果长度 > limit：
+      1. 保留前 head_size 个字符
+      2. 保留后 tail_size 个字符
+      3. 中间插入截断标记 "...<truncated N chars>..."
+    - 截断标记的长度不计入 limit
 
-    这种 "保留头尾、标记中间" 的策略确保：
-    - 用户能看到输出的开头（通常包含最重要的信息）
-    - 用户能看到输出的结尾（通常包含总结或错误信息）
-    - 中间被省略部分的大小被明确告知
+    这种策略确保用户能看到输出的开头（关键信息）和结尾（错误信息）。
 
-    注意：此截断是字符级别（len()）而非字节级别的，
-    因此对于包含多字节字符（如中文）的文本也适用。
+    注意：此截断是字符级别，适用于中文等多字节字符。
 
     参数:
         text: 原始输出文本
-        limit: 允许的最大字符数（不含截断标记）
+        limit: 允许的最大字符数
 
     返回:
-        TruncatedOutput 对象，包含截断后的文本和元数据
+        TruncatedOutput 对象（含截断后的文本和元数据）
     """
     original = len(text)
     if original <= limit:
         return TruncatedOutput(text, False, original, original)
 
-    # 计算头部和尾部保留的字符数
     head_size = max(1, limit // 2)
     tail_size = max(1, limit - head_size)
     omitted = max(0, original - head_size - tail_size)
 
-    # 构造截断提示标记并拼接最终文本
     marker = f"\n...<truncated {omitted} chars>...\n"
     rendered = text[:head_size] + marker + text[-tail_size:]
 
@@ -817,31 +956,19 @@ def truncate_output(text: str, limit: int) -> TruncatedOutput:
 
 
 def command_mentions_internal_state(command: str) -> bool:
-    """
-    检测 Shell 命令是否试图修改 .codepilot 内部状态文件。
+    """检测 Shell 命令是否试图修改 .codepilot 内部状态文件。
 
-    检测条件（两个条件必须同时满足）：
-    1. 命令文本中包含 ".codepilot/" 路径引用
-       （先将反斜杠统一替换为斜杠、转小写后检查）
-    2. 命令中包含写入或修改操作的关键字：
-       - 重定向操作符：>> 或 >（追加/覆盖写入）
-       - 文件操作命令：copy, move, mv（复制/移动）
-       - 原地编辑命令：sed -i（sed 的原地修改模式）
-
-    使用场景：
-    - 在允许 Shell 命令执行前调用此函数，如有匹配则拒绝执行
-    - .codepilot 内部文件必须通过 Session Store API 操作以保证数据一致性
+    两个条件必须同时满足：
+    1. 命令文本中包含 ".codepilot/"
+    2. 命令中包含写入/修改操作（>>、>、copy、move、mv、sed -i）
 
     参数:
-        command: 用户提交的原始 Shell 命令字符串
+        command: 原始 Shell 命令
 
     返回:
-        True: 命令可能修改 .codepilot 内部状态，应被阻止
-        False: 命令不涉及 .codepilot 内部状态的修改
+        True 表示命令可能修改内部状态，应被阻止
     """
-    # 统一路径分隔符为斜杠，转小写以便不区分大小写匹配
     text = command.replace("\\", "/").lower()
-    # 两个条件：提到了 .codepilot/ 目录 + 包含写入/修改操作
     return ".codepilot/" in text and bool(re.search(r"(?:>>?|copy|move|mv|sed\s+-i)", text))
 
 
@@ -851,28 +978,35 @@ def command_mentions_internal_state(command: str) -> bool:
 
 
 def _sha256_file(path: Path) -> str:
-    """
-    计算文件的 SHA256 哈希值（十六进制字符串）。
+    """计算文件的 SHA256 哈希值（流式读取，适用于大文件）。
 
-    使用流式读取（每次读取 1MB 大小的块），内存占用恒定，
-    不会因为大文件导致内存溢出。适用于任意大小的文件。
+    使用 iter(lambda: f.read(1MB), b"") 的惯用法实现流式读取，
+    内存占用恒定（约 1MB），不会因为大文件导致 OOM。
 
     参数:
-        path: 目标文件的 Path 对象
+        path: 目标文件 Path
 
     返回:
-        文件内容的 SHA256 十六进制摘要字符串（64 个字符）
+        SHA256 十六进制摘要字符串（64 字符）
     """
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        # iter(lambda: f.read(chunk_size), b"") 是 Python 中流式读取文件的标准惯用法
-        # 当 handle.read(1MB) 返回空字节串 b"" 时，迭代终止
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
 
 def _command_executable(value: str) -> str:
+    """从命令字符串中提取规范化后的可执行文件名。
+
+    去除扩展名（.exe, .cmd, .bat）并转小写。
+
+    参数:
+        value: 可执行文件路径字符串
+
+    返回:
+        规范化的可执行文件名
+    """
     name = Path(value).name.lower()
     for suffix in (".exe", ".cmd", ".bat"):
         if name.endswith(suffix):
@@ -887,6 +1021,25 @@ def _validate_command_path_argument(
     cwd: Path,
     mutating: bool,
 ) -> None:
+    """验证受控命令的一个路径参数是否在沙箱内。
+
+    验证逻辑：
+    1. 去除 Shell 引号
+    2. 跳过以 "-" 开头的标志（除非有 "=" 的值绑定）
+    3. 跳过 URL 格式的参数
+    4. 跳过看起来不像路径的参数
+    5. 对看起来像路径的参数（绝对路径、含 ".."、含 "/" 或 "\"）
+       执行沙箱边界检查
+
+    参数:
+        raw: 原始参数值
+        sandbox: 工作区沙箱
+        cwd: 当前工作目录
+        mutating: 是否为可变操作
+
+    抛出:
+        ValueError: 路径参数逃逸出工作区或涉及内部状态
+    """
     value = _strip_shell_quotes(raw.strip())
     if not value or value.startswith("-") and "=" not in value:
         return
@@ -912,86 +1065,53 @@ def _validate_command_path_argument(
 
 
 def _matches_command_prefix(command: str, prefix: str) -> bool:
-    """
-    检查命令是否以指定前缀开头（精确前缀匹配）。
+    """检查命令是否以指定前缀开头（精确前缀匹配）。
 
     匹配规则：
-    1. 将 prefix 规范化为去除首尾空格 → 小写 → 压缩空格的形式
-    2. 如果 command 恰好等于 prefix，返回 True（完全匹配）
-    3. 如果 command 以 "prefix + 空格" 开头，返回 True（前缀后跟参数）
-    4. 否则返回 False
-
-    这种匹配方式确保：
-    - "git status" 匹配 "git status" 和 "git status --short"，但不匹配 "git statuscheck"
-    - 对于带有子命令的命令（如 "npm run test"），只有当完整前缀匹配时才生效
+    - 规范前缀后（去空格、小写、压缩空格）匹配命令
+    - 完全匹配或前缀后跟空格都视为匹配
+    - "git status" 匹配 "git status" 和 "git status --short"
+    - "git status" 不匹配 "git statuscheck"
 
     参数:
-        command: 规范化后的命令字符串
-        prefix: 白名单中的命令前缀
+        command: 规范化后的命令
+        prefix: 白名单前缀
 
     返回:
-        True: 匹配成功
+        True 表示匹配成功
     """
-    # 规范化前缀（与 classify_shell_command 中的规范化方式一致）
     prefix = " ".join(prefix.strip().lower().split())
-    # 精确匹配或前缀后跟空格（即后跟参数）
     return command == prefix or command.startswith(prefix + " ")
 
 
 def _has_shell_redirection(command: str) -> bool:
-    """
-    检测命令是否包含 Shell 重定向或管道操作。
+    """检测命令是否包含 Shell 重定向或管道操作。
 
-    检测以下三种 Shell 操作符：
-    - >> 或 > : 输出重定向（追加或覆盖写入文件）
-    - < : 输入重定向（从文件读取输入）
-    - | : 管道（将一个命令的输出传给另一个命令）
-
-    如果命令包含这些操作符，说明其行为无法仅通过第一个命令的白名单来
-    准确判定（重定向到的目标文件、管道后的命令都可能引入未知行为），
-    因此 classify_shell_command 会将其标记为 "unknown"。
+    检测操作符：>>、>（输出重定向）、<（输入重定向）、|（管道）
 
     参数:
-        command: 规范化后的命令字符串
+        command: 规范化后的命令
 
     返回:
-        True: 命令包含重定向或管道操作
+        True 表示包含重定向或管道
     """
     return bool(re.search(r"(?:>>?|<|\|)", command))
 
 
 def _first_command(command: str) -> str:
-    """
-    从命令链中提取第一条有效的非环境设置命令。
+    """从命令链中提取第一条有效命令。
 
-    提取策略（三层处理）：
-
-    第 1 层：按命令分隔符拆分
-    - 使用正则 ``(?:&&|\\|\\||;|\\r?\\n)`` 将命令链拆分为独立段
-      （&& = 逻辑与，|| = 逻辑或，; = 顺序执行，换行 = 自然分隔）
-    - 跳过空段
-
-    第 2 层：过滤安全的前置设置命令
-    - 如果只有一个命令段，直接返回该段
-    - 如果有多个命令段，剥离前置的环境变量设置（set PYTHONPATH=...）
-      和目录切换命令（cd，chdir，pushd），因为它们不影响后续命令的安全性
-
-    第 3 层：复合命令的安全性综合判定
-    - 对所有剩余的命令段逐一递归进行分类
-    - 如果所有段都属于 {verification, read_only, mutation} 中的某一类：
-      * 如果有 mutation 类命令，返回第一个 mutation 命令（最严格的）
-      * 否则如果有 verification 类命令，返回第一个 verification 命令
-      * 否则返回第一个命令
-    - 如果有任何段不属于这三类（即 unknown 或 high_risk），
-      返回特殊标记 "<compound>"，导致 classify_shell_command 返回 "unknown"
+    处理流程：
+    1. 按 &&、||、;、换行拆分为命令段
+    2. 过滤安全的前置设置命令（set PATH=..., cd, export 等）
+    3. 对剩余命令段做递归分类，综合判定安全性
 
     参数:
         command: 规范化后的命令字符串
 
     返回:
-        提取出的第一个有效命令字符串，或 "<compound>" 表示无法判定
+        提取的第一个有效命令，或 "<compound>" 表示无法判定
     """
-    # 第 1 层：按 Shell 命令分隔符拆分
     segments = [
         segment.strip()
         for segment in re.split(r"(?:&&|\|\||;|\r?\n)", command)
@@ -1000,56 +1120,43 @@ def _first_command(command: str) -> str:
     if not segments:
         return ""
 
-    # 只有一个命令段，直接返回
     if len(segments) == 1:
         return segments[0]
 
-    # 第 2 层：过滤掉安全的环境设置和目录切换前缀命令
     command_segments = [
         segment
         for segment in segments
         if not _is_safe_env_setup(segment) and not _is_safe_directory_setup(segment)
     ]
 
-    # 如果过滤后没有剩余命令（全是环境设置），无法确定安全类别
     if not command_segments:
         return "unknown"
 
-    # 第 3 层：对每个剩余命令递归分类，综合判定安全性
-    # 注意：此处递归调用 classify_shell_command，但每个段已经被确认不含命令分隔符，
-    # 所以不会无限递归
-    classes = [classify_shell_command(segment) for segment in command_segments]
+    classes = [_classify_shell_syntax(segment) for segment in command_segments]
 
-    # 检查是否所有段的分类都在安全范围内
     if all(item in {"verification", "read_only", "mutation"} for item in classes):
-        # 取最严格的分类作为代表命令
         if "mutation" in classes:
             return command_segments[classes.index("mutation")]
         if "verification" in classes:
             return command_segments[classes.index("verification")]
         return command_segments[0]
 
-    # 存在不在安全类别中的段，返回特殊标记
     return "<compound>"
 
 
 def _is_safe_env_setup(command: str) -> bool:
-    """
-    检查命令是否仅为安全的环境变量设置操作。
+    """检查命令是否仅为安全的环境变量设置。
 
-    支持三种 Shell 环境变量设置语法：
-    - Windows CMD: set PYTHONPATH=...
-    - PowerShell:  $env:PYTHONPATH = ...
-    - Unix Shell:  export PYTHONPATH=...
-
-    这些操作被认为是安全的，因为它们仅修改 PYTHONPATH，
-    不会产生文件系统副作用，也不会泄露敏感信息。
+    支持的语法：
+    - set PYTHONPATH=...（CMD）
+    - $env:PYTHONPATH = ...（PowerShell）
+    - export PYTHONPATH=...（Unix）
 
     参数:
-        command: 规范化后的命令字符串
+        command: 规范化后的命令
 
     返回:
-        True: 命令是安全的环境变量设置
+        True 表示是安全的环境变量设置
     """
     normalized = " ".join(command.strip().lower().split())
     return bool(
@@ -1060,104 +1167,61 @@ def _is_safe_env_setup(command: str) -> bool:
 
 
 def _is_safe_directory_setup(command: str) -> bool:
-    """
-    检查命令是否仅为安全的目录切换操作。
-
-    使用两步验证：
-    1. 用 _directory_setup_target() 从命令中提取目标目录路径
-    2. 用 _is_safe_relative_shell_path() 验证提取出的路径是否安全
-       （相对路径、不包含特殊字符、不包含 ".." 回溯）
-
-    安全的目录切换不会导致路径逃逸到工作区之外。
+    """检查命令是否仅为安全的目录切换。
 
     参数:
-        command: 规范化后的命令字符串
+        command: 规范化后的命令
 
     返回:
-        True: 命令是安全的目录切换操作
+        True 表示是安全的目录切换
     """
     target = _directory_setup_target(command)
     return target is not None and _is_safe_relative_shell_path(target)
 
 
 def _directory_setup_target(command: str) -> str | None:
-    """
-    从目录切换命令中提取目标路径。
+    """从目录切换命令中提取目标路径。
 
-    支持的命令：
-    - cd <path>
-    - chdir <path>
-    - pushd <path>
-    - cd /d <path>（Windows CMD 切换驱动器并切换目录）
-    - 相应的 PowerShell 变体
-
-    提取步骤：
-    1. 用正则匹配命令前缀并提取路径参数
-    2. 用 _strip_shell_quotes() 去除路径周围的 Shell 引号（单引号或双引号）
+    支持：cd、chdir、pushd 及 PowerShell 变体。
 
     参数:
-        command: 规范化后的命令字符串
+        command: 规范化后的命令
 
     返回:
-        提取出的目标路径字符串，如果不是目录切换命令则返回 None
+        提取的路径字符串，或 None
     """
     normalized = " ".join(command.strip().lower().split())
-    # 匹配 cd / chdir / pushd，可选 /d 参数，后跟路径
     match = re.fullmatch(r"(?:cd|chdir|pushd)\s+(?:/d\s+)?(.+)", normalized)
     if match is None:
         return None
-    # 去除 Shell 引号（如 cd "my dir" → my dir）
     return _strip_shell_quotes(match.group(1))
 
 
 def _is_python_workspace_script(command: str) -> bool:
-    """
-    检查命令是否是对工作区内 Python 脚本的调用。
+    """检查命令是否是对工作区内 Python 脚本的调用。
 
-    匹配模式：python/python3/py 后跟一个 .py 文件路径，可选参数。
-
-    安全验证使用两步法：
-    1. 用正则提取 .py 脚本的路径
-    2. 用 _is_safe_relative_shell_path() 验证：
-       - 是相对路径（非绝对路径，非驱动器路径，非 ~ 路径）
-       - 不包含路径回溯 ".."
-       - 不包含 Shell 特殊字符（$、%、管道等）
-
-    这种命令被视为 "mutation" 类，因为 Python 脚本可能会修改文件。
-    实际上执行的脚本路径是经过安全验证的相对路径。
+    匹配模式：python/python3/py 后跟 .py 文件路径。
 
     参数:
-        command: 规范化后的命令字符串
+        command: 规范化后的命令
 
     返回:
-        True: 命令是对工作区内 Python 脚本的安全调用
+        True 表示是工作区内的 Python 脚本调用
     """
     normalized = " ".join(command.strip().lower().split())
-    # 匹配 python/python3/py 后跟 .py 文件路径
     match = re.fullmatch(r"(?:python|python3|py)\s+([^\s]+\.py)(?:\s+.*)?", normalized)
     if match is None:
         return False
-    # 去除 Shell 引号后验证路径安全性
     return _is_safe_relative_shell_path(_strip_shell_quotes(match.group(1)))
 
 
 def _strip_shell_quotes(value: str) -> str:
-    """
-    去除字符串两端的 Shell 引号（单引号或双引号）。
+    """去除字符串两端的 Shell 引号（单引号或双引号）。
 
-    规则：
-    - 如果字符串以相同的引号字符开头和结尾（' 或 "），则去除这对引号
-    - 去除后再次 strip 空白字符以处理引号内可能的空格
-    - 如果两端引号不同（不匹配），则不做处理
-    - 字符串长度必须 >= 2 才可能被引号包裹
-
-    示例：
-        '"hello"'  → "hello"
-        "'hello'"  → "hello"
-        "noquotes" → "noquotes"
+    如 '"hello"' → "hello", "'hello'" → "hello"
 
     参数:
-        value: 可能带有 Shell 引号的字符串
+        value: 可能含引号的字符串
 
     返回:
         去除引号后的字符串
@@ -1169,40 +1233,31 @@ def _strip_shell_quotes(value: str) -> str:
 
 
 def _is_safe_relative_shell_path(value: str) -> bool:
-    """
-    验证字符串是否为安全的相对 Shell 路径。
+    """验证字符串是否为安全的相对 Shell 路径。
 
-    安全检查（任一项不通过则返回 False）：
-    1. 空字符串：不安全
-    2. 以 "/" 开头：绝对 Unix 路径，不安全
-    3. 以 "~" 开头：用户主目录路径，不安全
-    4. 匹配驱动器号模式（如 "C:"）：Windows 绝对路径，不安全
-    5. 包含 Shell 特殊字符（$、%、`、|、&、;、<、>）：不安全，
-       这些字符可能被 Shell 解释执行，导致命令注入
-    6. 路径部分中包含 ".."：路径回溯，不安全
-    7. 路径必须至少有一个有效部分
-
-    此函数用于验证从命令参数中提取的文件路径，
-    确保它们不会逃逸到工作区之外。
+    安全检查：
+    1. 不能为空
+    2. 不能以 "/" 开头（Unix 绝对路径）
+    3. 不能以 "~" 开头（用户主目录）
+    4. 不能匹配驱动器号（如 "C:"）
+    5. 不能含 Shell 特殊字符（$、%、`、|、&、;、<、>）
+    6. 不能含 ".."（路径回溯）
+    7. 必须至少有一个有效部分
 
     参数:
         value: 待验证的路径字符串
 
     返回:
-        True: 路径是安全的相对路径
+        True 表示是安全的相对路径
     """
-    # 统一路径分隔符为斜杠
     text = value.strip().replace("\\", "/")
 
-    # 空路径 或 绝对路径（Unix / 开头、~ 开头、Windows 驱动器号开头）
     if not text or text.startswith(("/", "~")) or re.match(r"^[a-z]:", text):
         return False
 
-    # Shell 特殊字符检查：防止命令注入
     if any(marker in text for marker in ("$", "%", "`", "|", "&", ";", "<", ">")):
         return False
 
-    # 路径回溯检查：防止 .. 逃逸出工作区
     parts = [part for part in text.split("/") if part]
     return bool(parts) and ".." not in parts
 
@@ -1211,14 +1266,14 @@ def _is_safe_relative_shell_path(value: str) -> bool:
 # 模块导出列表
 # ---------------------------------------------------------------------------
 __all__ = [
+    "CommandAssessment",
     "CommandProfile",
     "ShellCommandClass",
     "ShellExecutionPolicy",
     "TruncatedOutput",
     "WorkspaceSandbox",
     "build_shell_environment",
-    "classify_command_argv",
-    "classify_shell_command",
+    "assess_command",
     "command_mentions_internal_state",
     "file_state_for_path",
     "truncate_output",

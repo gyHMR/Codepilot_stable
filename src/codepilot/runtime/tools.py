@@ -7,8 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from codepilot.extensions import load_extensions, load_skills
-from codepilot.extensions.mcp import create_mcp_registrations, parse_mcp_tool_configs
-from codepilot.protocols import Tool
+from codepilot.extensions.mcp import MCPManager, create_mcp_manager
 from codepilot.protocols.commands import RegisteredCommand
 from codepilot.tools.builtins import create_builtin_registrations
 from codepilot.tools.contracts import ToolRegistration
@@ -22,7 +21,7 @@ from .opening import SessionOpenIntent
 @dataclass
 class RuntimeTools:
     registry: ToolRegistry
-    specs: list[Tool]
+    mcp_manager: MCPManager | None = None
     commands: dict[str, RegisteredCommand] = field(default_factory=dict)
     before_prompt_hooks: list[Any] = field(default_factory=list)
     after_prompt_hooks: list[Any] = field(default_factory=list)
@@ -43,12 +42,10 @@ def build_runtime_tools(
     warnings.extend(f"skill: {error}" for error in loaded_skills.errors)
     warnings.extend(f"skill: {item}" for item in loaded_skills.diagnostics)
 
-    mcp_tools = create_mcp_registrations(
-        parse_mcp_tool_configs(config.mcp_servers),
-        client=intent.mcp_client,
+    mcp_manager = create_mcp_manager(
+        config.mcp_servers,
+        transport_factory=intent.mcp_transport_factory,
     )
-    if config.mcp_servers and intent.mcp_client is None:
-        warnings.append("MCP servers configured but no MCP client was provided")
 
     builtin_tools = create_builtin_registrations(
         workspace,
@@ -64,6 +61,17 @@ def build_runtime_tools(
     )
 
     registry = ToolRegistry()
+    registry.reserve(
+        {
+            "propose_plan",
+            "create_build_plan",
+            "update_plan_progress",
+            "close_plan",
+            "request_user_input",
+            "list_exploration_agents",
+            "dispatch_exploration",
+        }
+    )
     _register_registration_groups(
         registry,
         builtin_tools,
@@ -88,26 +96,19 @@ def build_runtime_tools(
         source="extension",
         warnings=warnings,
     )
-    _register_registration_groups(
-        registry,
-        mcp_tools,
-        source="mcp",
+    _validate_skill_requirements(
+        loaded_skills.skills,
+        registry=registry,
+        configured_mcp_servers={
+            str(item.get("name") or "").strip()
+            for item in config.mcp_servers or []
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        },
         warnings=warnings,
     )
-
-    canonical_mode = "plan" if config.current_mode in {"read", "plan"} else "execute"
-    canonical_specs = [
-        Tool(
-            name=item.spec.name,
-            description=item.spec.description,
-            parameters=_plain_json(item.spec.input_schema),
-        )
-        for item in registry.catalog_snapshot(mode=canonical_mode).entries
-    ]
-
     return RuntimeTools(
         registry=registry,
-        specs=canonical_specs,
+        mcp_manager=mcp_manager if mcp_manager.configured else None,
         commands={**loaded_skills.commands, **loaded_extensions.commands},
         before_prompt_hooks=[*loaded_extensions.before_prompt_hooks, *loaded_skills.before_prompt_hooks],
         after_prompt_hooks=[*loaded_extensions.after_prompt_hooks, *loaded_skills.after_prompt_hooks],
@@ -148,10 +149,16 @@ def _register_registration_groups(
         groups.setdefault(registration.owner, []).append(registration)
 
     for owner, items in groups.items():
-        try:
+        if source == "builtin":
             registry.register_batch(items, owner=owner)
-        except Exception as exc:
-            warnings.append(f"{source} owner '{owner}' registration failed: {exc}")
+            continue
+        for item in items:
+            try:
+                registry.register(item)
+            except Exception as exc:
+                warnings.append(
+                    f"{source} owner '{owner}' tool '{item.spec.name}' registration failed: {exc}"
+                )
 
 
 def _debug_prompt_sources(extensions: Any, skills: Any) -> list[str]:
@@ -169,12 +176,30 @@ def _debug_prompt_sources(extensions: Any, skills: Any) -> list[str]:
     return ["\n".join(lines)]
 
 
-def _plain_json(value: Any) -> Any:
-    if isinstance(value, dict) or hasattr(value, "items"):
-        return {str(key): _plain_json(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain_json(item) for item in value]
-    return value
+def _validate_skill_requirements(
+    skills: list[Any],
+    *,
+    registry: ToolRegistry,
+    configured_mcp_servers: set[str],
+    warnings: list[str],
+) -> None:
+    available_tools = {
+        entry.spec.name for entry in registry.catalog_snapshot().entries
+    }
+    for package in skills:
+        manifest = package.manifest
+        missing_tools = sorted(set(manifest.required_tools) - available_tools)
+        missing_mcp = sorted(set(manifest.required_mcp) - configured_mcp_servers)
+        if missing_tools:
+            warnings.append(
+                f"skill '{manifest.name}' requires unavailable tools: "
+                + ", ".join(missing_tools)
+            )
+        if missing_mcp:
+            warnings.append(
+                f"skill '{manifest.name}' requires unconfigured MCP servers: "
+                + ", ".join(missing_mcp)
+            )
 
 
 __all__ = ["RuntimeTools", "build_runtime_tools"]

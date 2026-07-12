@@ -22,7 +22,6 @@ from .contracts import (
     RetryPolicy,
     RunCorrelation,
     RunStatePort,
-    ToolExecutionMode,
     WorkspaceEffects,
 )
 from .model_step import convert_to_llm
@@ -61,7 +60,6 @@ __all__ = [
     "RetryPolicy",
     "RunCorrelation",
     "RunStatePort",
-    "ToolExecutionMode",
     "WorkspaceEffects",
     "convert_to_llm",
     "PlanItem",

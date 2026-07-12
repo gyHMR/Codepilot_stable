@@ -22,7 +22,9 @@ from codepilot.protocols import (
     ToolResultMessage,
     Usage,
     UserMessage,
+    tool_mode_for_run_mode,
 )
+from codepilot.tools.codecs import json_value
 from codepilot.tools.registry import ToolCatalogSnapshot
 
 from .context_preflight import TOOL_RESULT_MAX_CHARS, prepare_messages_for_model
@@ -217,7 +219,7 @@ def tool_catalog_snapshot_for_request(
         return None
     if ports.tools is None:
         return None
-    return ports.tools.catalog_snapshot(mode=_tool_mode(input.mode))
+    return ports.tools.catalog_snapshot(mode=tool_mode_for_run_mode(input.mode))
 
 
 def tool_catalog_for_request(
@@ -233,22 +235,10 @@ def tool_catalog_for_request(
         Tool(
             name=item.spec.name,
             description=item.spec.description,
-            parameters=_plain_json(item.spec.input_schema),
+            parameters=json_value(item.spec.input_schema),
         )
         for item in snapshot.entries
     ]
-
-
-def _plain_json(value: Any) -> Any:
-    if isinstance(value, dict) or hasattr(value, "items"):
-        return {str(key): _plain_json(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain_json(item) for item in value]
-    return value
-
-
-def _tool_mode(mode: str) -> str:
-    return "plan" if mode in {"read", "plan"} else "execute"
 
 
 def convert_to_llm(

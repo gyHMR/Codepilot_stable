@@ -119,6 +119,9 @@ class SessionController:
     def runtime_checkpoint(self) -> dict[str, Any] | None:
         return self._session.runtime_checkpoint()
 
+    def component_checkpoint_state(self, owner: str) -> dict[str, object] | None:
+        return self._session.component_checkpoint_state(owner)
+
     def current_plan_state(self) -> dict[str, Any] | None:
         return self._session.plan_state.current()
 

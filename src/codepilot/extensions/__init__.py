@@ -4,15 +4,23 @@
 """
 扩展与技能加载模块。
 
-本包负责从工作区和配置路径加载 Python 扩展和 Markdown 技能文件，
+本包负责从工作区和配置路径加载 Python 扩展和 Skill Package，
 将它们的能力（工具、钩子、命令、提示词）统一归一化为 LoadedExtensions。
 """
 
 from .api import ExtensionAPI
 from .loader import discover_extension_paths, load_extensions
-from .skills import discover_skill_paths, load_skills
+from .skill_runtime import load_skills
+from .skills import (
+    SkillCatalog,
+    SkillManifest,
+    SkillPackage,
+    SkillPackageError,
+    load_skill_catalog,
+)
 from codepilot.protocols.commands import (
     CommandHandler,
+    CommandOutcome,
     LifecycleHook,
     RegisteredCommand,
     SessionCommandContext,
@@ -20,21 +28,25 @@ from codepilot.protocols.commands import (
     SessionLifecycleContext,
     SessionLifecycleView,
 )
-from .types import LoadedExtensions, SkillSpec
+from .types import LoadedExtensions
 
 __all__ = [
     "CommandHandler",
+    "CommandOutcome",
     "RegisteredCommand",
     "SessionCommandContext",
     "SessionCommandView",
     "SessionLifecycleContext",
     "SessionLifecycleView",
     "LifecycleHook",
-    "SkillSpec",
+    "SkillCatalog",
+    "SkillManifest",
+    "SkillPackage",
+    "SkillPackageError",
     "LoadedExtensions",
     "ExtensionAPI",
     "discover_extension_paths",
     "load_extensions",
-    "discover_skill_paths",
+    "load_skill_catalog",
     "load_skills",
 ]

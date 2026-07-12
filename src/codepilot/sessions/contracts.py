@@ -14,7 +14,6 @@ from codepilot.core.contracts import (
     ContextPort,
     PrepareContextFn,
     RunStatePort,
-    ToolExecutionMode,
 )
 from codepilot.core.plan import PlanningBudgetProfile, RunMode
 from codepilot.llm.provider_types import ProviderSimpleStreamFn
@@ -456,7 +455,6 @@ class SessionOptions:
     session_id: Optional[str] = None
     messages: list[AgentMessage] = field(default_factory=list)
     thinking_level: str = "off"
-    tool_execution: ToolExecutionMode = "parallel"
     max_tool_calls_per_turn: int = 16
     memory_enabled: bool = True
     current_mode: RunMode = "build"

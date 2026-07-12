@@ -1,302 +1,340 @@
 from __future__ import annotations
 
-# 新手导读：skills.py 负责发现 Markdown skill，并把它们变成命令、索引和按需加载工具。
-# 关注点：skill 是轻量扩展方式，不需要写 Python 代码。
+"""Static Skill Package discovery, validation, and resource boundaries."""
 
-"""技能加载器：发现工作区中的 .md 技能文件，启动时只暴露索引，正文按需加载。"""
-
+import hashlib
 import re
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
+from typing import Literal, Mapping, cast
 
-from codepilot.protocols.commands import RegisteredCommand
-from codepilot.tools import (
-    ConcurrencyPolicy,
-    DataclassCodec,
-    OutputLimits,
-    OutputTrustPolicy,
-    TextContent,
-    TimeoutPolicy,
-    ToolAccessRequest,
-    ToolAccessResolution,
-    ToolHandlerError,
-    ToolPolicy,
-    ToolRegistration,
-    ToolSpec,
+import yaml
+
+
+SkillSource = Literal["workspace", "external"]
+SkillTrust = Literal["workspace", "explicitly_configured"]
+
+_ENTRYPOINT = "SKILL.md"
+_RESOURCE_DIRS = frozenset({"references", "scripts", "assets"})
+_MANIFEST_FIELDS = frozenset(
+    {
+        "name",
+        "version",
+        "description",
+        "command",
+        "allowed_modes",
+        "required_tools",
+        "required_mcp",
+    }
 )
+_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
+_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+_CAPABILITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_MAX_ENTRYPOINT_BYTES = 256_000
+_MAX_RESOURCE_BYTES = 256_000
+_MAX_RESOURCE_FILES = 256
 
-from .types import LoadedExtensions, SkillSpec
 
-SKILL_LOADER_TOOL_NAME = "load_skill"
+class SkillPackageError(ValueError):
+    """Raised when a Skill Package violates its static contract."""
 
 
-def discover_skill_paths(workspace_dir: str | Path, configured_paths: list[str] | None = None) -> list[Path]:
-    """发现技能文件路径：扫描默认目录和配置路径中的 .md 文件。"""
-    workspace = Path(workspace_dir)
-    paths: list[Path] = []
+@dataclass(frozen=True)
+class SkillManifest:
+    name: str
+    version: str
+    description: str
+    command: str | None = None
+    allowed_modes: frozenset[str] = frozenset({"plan", "execute"})
+    required_tools: tuple[str, ...] = ()
+    required_mcp: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SkillPackage:
+    manifest: SkillManifest
+    root: Path
+    entrypoint: Path
+    source: SkillSource
+    trust: SkillTrust
+    digest: str
+
+    def read_instructions(self) -> str:
+        _meta, body = _read_entrypoint(self.entrypoint)
+        return body
+
+    def list_resources(self) -> tuple[str, ...]:
+        resources: list[str] = []
+        for directory in sorted(_RESOURCE_DIRS):
+            base = self.root / directory
+            if not base.exists():
+                continue
+            if not base.is_dir() or base.is_symlink():
+                raise SkillPackageError(
+                    f"skill resource directory must be a real directory: {base}"
+                )
+            for candidate in sorted(base.rglob("*")):
+                if candidate.is_symlink():
+                    raise SkillPackageError(
+                        f"skill resources cannot contain symbolic links: {candidate}"
+                    )
+                if candidate.is_file():
+                    resources.append(candidate.relative_to(self.root).as_posix())
+                    if len(resources) > _MAX_RESOURCE_FILES:
+                        raise SkillPackageError(
+                            f"skill {self.manifest.name} contains more than "
+                            f"{_MAX_RESOURCE_FILES} resource files"
+                        )
+        return tuple(resources)
+
+    def resolve_resource(self, raw_path: str) -> Path:
+        normalized = str(raw_path or "").strip().replace("\\", "/")
+        relative = PurePosixPath(normalized)
+        if (
+            not normalized
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or relative.parts[0] not in _RESOURCE_DIRS
+        ):
+            raise SkillPackageError(
+                "skill resource path must be relative to references/, scripts/, or assets/"
+            )
+        candidate = self.root.joinpath(*relative.parts)
+        resolved_root = self.root.resolve(strict=True)
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(resolved_root)
+        except (FileNotFoundError, ValueError) as exc:
+            raise SkillPackageError(f"skill resource not found: {normalized}") from exc
+        if not resolved.is_file() or candidate.is_symlink():
+            raise SkillPackageError(f"skill resource is not a regular file: {normalized}")
+        return resolved
+
+    def read_resource(self, raw_path: str) -> str:
+        path = self.resolve_resource(raw_path)
+        return _read_utf8_file(path, max_bytes=_MAX_RESOURCE_BYTES, label="skill resource")
+
+
+@dataclass
+class SkillCatalog:
+    packages: list[SkillPackage] = field(default_factory=list)
+    diagnostics: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    loaded_paths: list[str] = field(default_factory=list)
+    _by_name: dict[str, SkillPackage] = field(default_factory=dict, init=False, repr=False)
+    _by_command: dict[str, SkillPackage] = field(default_factory=dict, init=False, repr=False)
+
+    def add(self, package: SkillPackage) -> None:
+        name = package.manifest.name
+        command = package.manifest.command
+        if name in self._by_name:
+            raise SkillPackageError(f"duplicate skill name: {name}")
+        if command and command in self._by_command:
+            raise SkillPackageError(f"duplicate skill command: /{command}")
+        self.packages.append(package)
+        self._by_name[name] = package
+        if command:
+            self._by_command[command] = package
+        self.loaded_paths.append(str(package.root))
+
+    def find(self, value: str) -> SkillPackage | None:
+        key = str(value or "").strip().lstrip("/").lower()
+        return self._by_name.get(key) or self._by_command.get(key)
+
+
+def load_skill_catalog(
+    workspace_dir: str | Path,
+    configured_paths: list[str] | None = None,
+) -> SkillCatalog:
+    """Discover package directories and load only their validated manifests."""
+
+    workspace = Path(workspace_dir).resolve()
+    default_root = workspace / ".codepilot" / "skills"
+    catalog = SkillCatalog()
+    candidates: list[tuple[Path, SkillSource, SkillTrust]] = []
     seen: set[str] = set()
 
-    def _add(path: Path) -> None:
-        resolved = path.resolve()
-        key = str(resolved).lower()
+    def add_candidate(path: Path, source: SkillSource, trust: SkillTrust) -> None:
+        try:
+            resolved = path.resolve(strict=True)
+        except FileNotFoundError:
+            catalog.errors.append(f"skill path does not exist: {path}")
+            return
+        key = str(resolved).casefold()
         if key in seen:
             return
         seen.add(key)
-        paths.append(resolved)
+        candidates.append((resolved, source, trust))
 
-    default_dir = workspace / ".codepilot" / "skills"
-    if default_dir.exists() and default_dir.is_dir():
-        for path in sorted(default_dir.glob("*.md")):
-            _add(path)
+    if default_root.exists():
+        if not default_root.is_dir():
+            catalog.errors.append(f"workspace skill root is not a directory: {default_root}")
+        else:
+            for path in sorted(default_root.iterdir()):
+                if path.is_dir() and (path / _ENTRYPOINT).exists():
+                    add_candidate(path, "workspace", "workspace")
 
     for raw in configured_paths or []:
         target = Path(raw)
         if not target.is_absolute():
-            target = workspace / raw
-        if target.exists() and target.is_dir():
-            for path in sorted(target.glob("*.md")):
-                _add(path)
-        elif target.exists() and target.is_file() and target.suffix.lower() == ".md":
-            _add(target)
+            target = workspace / target
+        if target.is_file():
+            catalog.errors.append(
+                f"flat skill files are not supported; configure a package directory: {target}"
+            )
+            continue
+        if not target.exists():
+            catalog.errors.append(f"skill path does not exist: {target}")
+            continue
+        if not target.is_dir():
+            catalog.errors.append(f"skill path is not a directory: {target}")
+            continue
+        if (target / _ENTRYPOINT).is_file():
+            add_candidate(target, "external", "explicitly_configured")
+            continue
+        for path in sorted(target.iterdir()):
+            if path.is_dir() and (path / _ENTRYPOINT).exists():
+                add_candidate(path, "external", "explicitly_configured")
 
-    return paths
-
-
-def load_skills(workspace_dir: str | Path, configured_paths: list[str] | None = None) -> LoadedExtensions:
-    """加载所有技能：解析 .md 文件，注册命令，并生成紧凑技能索引。"""
-    result = LoadedExtensions()
-    seen_cmds: dict[str, str] = {}
-    for path in discover_skill_paths(workspace_dir, configured_paths=configured_paths):
+    for root, source, trust in candidates:
         try:
-            raw_text = path.read_text(encoding="utf-8").strip()
-            if not raw_text:
-                continue
-            meta, text = _parse_skill_frontmatter(raw_text)
-            title = str(meta.get("name") or _extract_title(text) or path.stem).strip()
-            if not title:
-                title = path.stem
-            cmd = str(meta.get("command") or f"skill:{_slugify(title)}").strip().lstrip("/")
-            if not cmd:
-                cmd = f"skill:{_slugify(path.stem)}"
-            desc = str(meta.get("description") or f"Run skill: {title}").strip()
-            skill = SkillSpec(
-                name=title,
-                command_name=cmd,
-                description=desc,
-                content=text,
-                source_path=str(path),
-            )
-            if cmd in seen_cmds:
-                result.diagnostics.append(f"skill command conflict: /{cmd} from {path} overrides {seen_cmds[cmd]}")
-            seen_cmds[cmd] = str(path)
-
-            result.skills.append(skill)
-            result.commands[cmd] = RegisteredCommand(
-                name=cmd,
-                description=desc,
-                source="skill",
-                handler=lambda ctx, _skill=skill: _render_skill_prompt(_skill, ctx.raw_text),
-            )
-            result.loaded_paths.append(str(path))
+            catalog.add(_load_package(root, source=source, trust=trust))
         except Exception as exc:
-            result.errors.append(f"{path}: {exc}")
-    if result.skills:
-        result.prompt_guidelines.append(
-            "Skills are available in the Available Skills index; use load_skill "
-            "with a listed name or command before following a skill workflow."
+            catalog.errors.append(f"{root}: {exc}")
+    return catalog
+
+
+def _load_package(root: Path, *, source: SkillSource, trust: SkillTrust) -> SkillPackage:
+    if root.is_symlink():
+        raise SkillPackageError(f"skill package root cannot be a symbolic link: {root}")
+    entrypoint = root / _ENTRYPOINT
+    if not entrypoint.is_file() or entrypoint.is_symlink():
+        raise SkillPackageError(f"skill package must contain a regular {_ENTRYPOINT}")
+    meta, body = _read_entrypoint(entrypoint)
+    manifest = _parse_manifest(meta)
+    if root.name != manifest.name:
+        raise SkillPackageError(
+            f"skill directory name '{root.name}' must match manifest name '{manifest.name}'"
         )
-        result.append_prompts.append(_render_skill_index(result.skills))
-        result.tools.append(_create_skill_loader_tool(result.skills))
-    return result
-
-
-def _render_skill_index(skills: list[SkillSpec]) -> str:
-    """渲染启动提示词中的紧凑技能目录，不包含 skill 正文。"""
-
-    lines = [
-        "## Available Skills",
-        (
-            "These skills are discoverable capabilities. When a task clearly matches "
-            "one, call load_skill with its name or command to load the full workflow."
-        ),
-    ]
-    for skill in skills:
-        lines.append(f"- /{skill.command_name}: {skill.name} - {skill.description}")
-    return "\n".join(lines)
-
-
-@dataclass(frozen=True)
-class _SkillLoadInput:
-    name: str
-
-
-@dataclass(frozen=True)
-class _SkillLoadOutput:
-    skill: str
-    command: str
-    content: str
-
-
-def _create_skill_loader_tool(skills: list[SkillSpec]) -> ToolRegistration:
-    """创建模型可调用的 canonical skill 正文加载工具。"""
-
-    lookup: dict[str, SkillSpec] = {}
-    for skill in skills:
-        lookup[_skill_lookup_key(skill.name)] = skill
-        lookup[_skill_lookup_key(skill.command_name)] = skill
-
-    input_schema = {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Skill name or slash command from the Available Skills index.",
-            }
-        },
-        "required": ["name"],
-        "additionalProperties": False,
-    }
-    output_schema = {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-            "skill": {"type": "string"},
-            "command": {"type": "string"},
-            "content": {"type": "string"},
-        },
-        "required": ["skill", "command", "content"],
-        "additionalProperties": False,
-    }
-
-    class Resolver:
-        def resolve(self, input, request):
-            _ = request
-            return ToolAccessResolution(
-                input=input,
-                access=ToolAccessRequest(
-                    actions=("skill.load",),
-                    resources=(),
-                    effects=frozenset(),
-                    risk="low",
-                    reason="Load one already discovered skill workflow",
-                ),
-            )
-
-    async def handler(input: _SkillLoadInput, context) -> _SkillLoadOutput:
-        context.cancellation.raise_if_cancelled()
-        skill = lookup.get(_skill_lookup_key(input.name))
-        if skill is None:
-            raise ToolHandlerError(
-                "skill.not_found",
-                f"Skill not found: {input.name}",
-                details={
-                    "requested": input.name,
-                    "available": [item.command_name for item in skills],
-                },
-            )
-        return _SkillLoadOutput(
-            skill=skill.name,
-            command=skill.command_name,
-            content=_render_loaded_skill(skill),
-        )
-
-    class Renderer:
-        def render(self, data):
-            return (TextContent(text=data["content"]),)
-
-    input_codec = DataclassCodec(_SkillLoadInput, input_schema)
-    output_codec = DataclassCodec(_SkillLoadOutput, output_schema)
-    return ToolRegistration(
-        version="1.0.0",
-        implementation_version="1",
-        spec=ToolSpec(
-            SKILL_LOADER_TOOL_NAME,
-            (
-                "Load the full Markdown workflow for one discovered skill. Use when the current task "
-                "matches an entry in the Available Skills index. The name must identify a listed skill "
-                "or slash command. Returns the selected skill name, command, and workflow content."
-            ),
-            input_schema,
-            output_schema,
-        ),
-        category="external",
-        source="skill",
-        owner="skill:loader",
-        policy=ToolPolicy(
-            allowed_modes=frozenset({"plan", "execute", "unrestricted"}),
-            declared_effects=frozenset(),
-            required_permissions=frozenset(),
-            base_risk="low",
-            approval="never",
-            timeout=TimeoutPolicy(5_000, 5_000),
-            concurrency=ConcurrencyPolicy(mode="parallel"),
-            output_limits=OutputLimits(max_content_bytes=256_000),
-            output_trust=OutputTrustPolicy(),
-        ),
-        input_codec=input_codec,
-        output_codec=output_codec,
-        handler=handler,
-        renderer=Renderer(),
-        access_resolver=Resolver(),
+    digest = hashlib.sha256(
+        (manifest.name + "\0" + manifest.version + "\0" + body).encode("utf-8")
+    ).hexdigest()
+    return SkillPackage(
+        manifest=manifest,
+        root=root,
+        entrypoint=entrypoint,
+        source=source,
+        trust=trust,
+        digest="sha256:" + digest,
     )
 
 
-def _extract_title(text: str) -> str | None:
-    first_line = text.splitlines()[0].strip() if text else ""
-    if first_line.startswith("#"):
-        return first_line.lstrip("#").strip()
-    return None
-
-
-def _parse_skill_frontmatter(text: str) -> tuple[dict[str, str], str]:
+def _read_entrypoint(path: Path) -> tuple[Mapping[str, object], str]:
+    text = _read_utf8_file(path, max_bytes=_MAX_ENTRYPOINT_BYTES, label="SKILL.md")
     lines = text.splitlines()
     if len(lines) < 3 or lines[0].strip() != "---":
-        return {}, text
-    end = -1
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            end = i
-            break
-    if end < 0:
-        return {}, text
-    meta: dict[str, str] = {}
-    for line in lines[1:end]:
-        if ":" not in line:
-            continue
-        k, v = line.split(":", 1)
-        key = k.strip().lower()
-        val = v.strip().strip("'").strip('"')
-        if key and val:
-            meta[key] = val
+        raise SkillPackageError("SKILL.md must begin with YAML frontmatter")
+    try:
+        end = next(index for index in range(1, len(lines)) if lines[index].strip() == "---")
+    except StopIteration as exc:
+        raise SkillPackageError("SKILL.md frontmatter is not closed") from exc
+    try:
+        raw_meta = yaml.safe_load("\n".join(lines[1:end]))
+    except yaml.YAMLError as exc:
+        raise SkillPackageError(f"invalid SKILL.md YAML frontmatter: {exc}") from exc
+    if not isinstance(raw_meta, dict):
+        raise SkillPackageError("SKILL.md frontmatter must be a YAML object")
+    if any(not isinstance(key, str) for key in raw_meta):
+        raise SkillPackageError("SKILL.md frontmatter keys must be strings")
     body = "\n".join(lines[end + 1 :]).strip()
-    return meta, body
+    if not body:
+        raise SkillPackageError("SKILL.md instruction body cannot be empty")
+    return cast(Mapping[str, object], raw_meta), body
 
 
-def _slugify(text: str) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9_-]+", "-", text.strip().lower())
-    normalized = normalized.strip("-")
-    return normalized or "skill"
-
-
-def _skill_lookup_key(value: object) -> str:
-    return str(value or "").strip().lstrip("/").lower()
-
-
-def _render_loaded_skill(skill: SkillSpec) -> str:
-    return (
-        f"Loaded skill {skill.name} (command: /{skill.command_name}).\n"
-        "Follow the skill content below and produce actionable results.\n\n"
-        f"{skill.content}"
+def _parse_manifest(raw: Mapping[str, object]) -> SkillManifest:
+    unknown = sorted(set(raw) - _MANIFEST_FIELDS)
+    if unknown:
+        raise SkillPackageError(f"unknown skill manifest fields: {', '.join(unknown)}")
+    name = _manifest_identifier(raw.get("name"), "name", _NAME_RE)
+    version = _manifest_identifier(raw.get("version"), "version", _VERSION_RE)
+    description = _required_string(raw.get("description"), "description")
+    if len(description) > 500 or "\n" in description:
+        raise SkillPackageError("skill description must be one line and at most 500 characters")
+    command_value = raw.get("command")
+    command = (
+        _manifest_identifier(command_value, "command", _NAME_RE)
+        if command_value is not None
+        else None
+    )
+    allowed_modes = frozenset(_string_list(raw.get("allowed_modes"), "allowed_modes", default=("plan", "execute")))
+    if not allowed_modes or not allowed_modes <= {"plan", "execute"}:
+        raise SkillPackageError("allowed_modes must contain only plan and/or execute")
+    required_tools = _capability_list(raw.get("required_tools"), "required_tools")
+    required_mcp = _capability_list(raw.get("required_mcp"), "required_mcp")
+    return SkillManifest(
+        name=name,
+        version=version,
+        description=description,
+        command=command,
+        allowed_modes=allowed_modes,
+        required_tools=required_tools,
+        required_mcp=required_mcp,
     )
 
 
-def _render_skill_prompt(skill: SkillSpec, raw_text: str) -> str:
-    cmd_text = raw_text.strip() if raw_text else f"/{skill.command_name}"
-    return (
-        f"Applied skill {skill.name} (command: {cmd_text}).\n"
-        "Follow the skill content below and produce actionable results.\n\n"
-        f"{skill.content}"
-    )
+def _required_string(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise SkillPackageError(f"skill manifest {field_name} must be a non-empty string")
+    return value.strip()
+
+
+def _manifest_identifier(value: object, field_name: str, pattern: re.Pattern[str]) -> str:
+    text = _required_string(value, field_name)
+    if not pattern.fullmatch(text):
+        raise SkillPackageError(f"invalid skill manifest {field_name}: {text}")
+    return text
+
+
+def _string_list(
+    value: object,
+    field_name: str,
+    *,
+    default: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise SkillPackageError(f"skill manifest {field_name} must be a list of strings")
+    cleaned = tuple(item.strip() for item in value)
+    if any(not item for item in cleaned) or len(set(cleaned)) != len(cleaned):
+        raise SkillPackageError(f"skill manifest {field_name} contains empty or duplicate values")
+    return cleaned
+
+
+def _capability_list(value: object, field_name: str) -> tuple[str, ...]:
+    values = _string_list(value, field_name)
+    if any(not _CAPABILITY_RE.fullmatch(item) for item in values):
+        raise SkillPackageError(f"skill manifest {field_name} contains an invalid capability name")
+    return values
+
+
+def _read_utf8_file(path: Path, *, max_bytes: int, label: str) -> str:
+    size = path.stat().st_size
+    if size > max_bytes:
+        raise SkillPackageError(f"{label} exceeds the {max_bytes}-byte limit: {path}")
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise SkillPackageError(f"{label} must be UTF-8 text: {path}") from exc
+
+
+__all__ = [
+    "SkillCatalog",
+    "SkillManifest",
+    "SkillPackage",
+    "SkillPackageError",
+    "SkillSource",
+    "SkillTrust",
+    "load_skill_catalog",
+]

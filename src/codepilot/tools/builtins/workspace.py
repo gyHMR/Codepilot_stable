@@ -1,6 +1,11 @@
-from __future__ import annotations
+"""规范的工作区状态工具 —— workspace_status。
 
-"""Canonical workspace status tool."""
+本文件实现了一个简单的工作区状态查询工具，用于向 LLM 提供
+工作区根目录的基本信息：目录中的条目数、是否为 Git 仓库等。
+
+该工具是只读的，在 plan 和 execute 模式下均可使用，
+不需要审批，可以并行执行。
+"""
 
 from dataclasses import dataclass
 from typing import Any
@@ -24,19 +29,51 @@ from ..security import (
 _DRAFT = "https://json-schema.org/draft/2020-12/schema"
 
 
+# ── 输入输出类型 ──────────────────────────────────────────────────────────────
+
+
 @dataclass(frozen=True)
 class WorkspaceStatusInput:
+    """workspace_status 工具的输入参数。
+
+    参数:
+        include_hidden: 是否包含隐藏文件（以 "." 开头的文件），默认 False
+    """
     include_hidden: bool = False
 
 
 @dataclass(frozen=True)
 class WorkspaceStatusOutput:
+    """workspace_status 工具的输出类型。
+
+    参数:
+        text: 给 LLM 看的文本摘要
+        details: 结构化详情（工作区路径、条目数、条目列表、Git 状态）
+        metadata: 元数据
+    """
     text: str
     details: dict[str, Any]
     metadata: dict[str, Any]
 
 
+# ── 注册创建函数 ──────────────────────────────────────────────────────────────
+
+
 def create_workspace_status_registration(sandbox: WorkspaceSandbox) -> ToolRegistration:
+    """创建工作区状态工具注册。
+
+    该工具用于查询工作区根目录的基本信息：
+    - 工作区路径
+    - 可见条目数（可包含隐藏文件）
+    - 前 100 个条目名称
+    - 是否为 Git 仓库
+
+    参数:
+        sandbox: 工作区沙箱
+
+    返回:
+        workspace_status 工具的 ToolRegistration
+    """
     input_schema = {
         "$schema": _DRAFT,
         "type": "object",
@@ -56,6 +93,7 @@ def create_workspace_status_registration(sandbox: WorkspaceSandbox) -> ToolRegis
     }
 
     class Resolver:
+        """工作区状态工具的访问解析器。"""
         def resolve(self, input, request):
             _ = request
             return ToolAccessResolution(
@@ -70,6 +108,22 @@ def create_workspace_status_registration(sandbox: WorkspaceSandbox) -> ToolRegis
             )
 
     async def handler(input: WorkspaceStatusInput, context: ToolExecutionContext):
+        """workspace_status 处理器 —— 列出工作区根目录内容。
+
+        处理流程:
+        1. 检查取消信号
+        2. 列出工作区根目录的所有条目
+        3. 根据 include_hidden 过滤隐藏文件
+        4. 报告副作用
+        5. 返回文本摘要和结构化详情
+
+        参数:
+            input: WorkspaceStatusInput
+            context: 执行上下文
+
+        返回:
+            WorkspaceStatusOutput 包含工作区状态信息
+        """
         context.cancellation.raise_if_cancelled()
         entries = sorted(
             item.name

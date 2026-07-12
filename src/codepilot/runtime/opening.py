@@ -36,7 +36,6 @@ class SessionOpenIntent:
     enabled_builtin_tools: list[str] | None = None
     stream_fn: Any | None = None
     thinking_level: str | None = None
-    tool_execution: str | None = None
     max_tool_calls_per_turn: int | None = None
     retry_enabled: bool | None = None
     max_retries: int | None = None
@@ -46,12 +45,11 @@ class SessionOpenIntent:
     edit_require_unique_match: bool | None = None
     prompt_guidelines: list[str] | None = None
     append_system_prompt: str | None = None
-    tool_snippets: dict[str, str] | None = None
     extension_paths: list[str] | None = None
     skill_paths: list[str] | None = None
     prompt_debug_sources: bool | None = None
     mcp_servers: list[dict[str, Any]] | None = None
-    mcp_client: Any | None = None
+    mcp_transport_factory: Any | None = None
     shell_timeout_seconds: int | None = None
     shell_max_timeout_seconds: int | None = None
     shell_stdout_limit: int | None = None

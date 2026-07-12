@@ -513,6 +513,7 @@ python -m pytest test/test_evaluation_v2.py -q
 | [docs/design/4tool-design.md](docs/design/4tool-design.md) | 工具安全 |
 | [docs/design/5eval-design.md](docs/design/5eval-design.md) | Evaluation v2 |
 | [docs/design/6sessions-design.md](docs/design/6sessions-design.md) | Sessions 状态、Checkpoint 与恢复 |
+| [docs/design/7runtime-design.md](docs/design/7runtime-design.md) | Runtime 执行编排与恢复 |
 
 ---
 

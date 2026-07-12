@@ -8,7 +8,7 @@ from typing import Any
 
 from codepilot.core.plan import RunMode
 from codepilot.protocols import AssistantMessage
-from codepilot.protocols.commands import SessionCommandContext, SessionCommandView
+from codepilot.protocols.commands import CommandOutcome, SessionCommandContext, SessionCommandView
 
 from codepilot.sessions.contracts import SessionCommandIntent, SessionCommandRecord, SessionOptions
 from codepilot.sessions.rollback import (
@@ -397,6 +397,13 @@ async def apply_session_command(
         )
         if inspect.isawaitable(value):
             value = await value
+        if isinstance(value, CommandOutcome):
+            return _record(
+                session_id,
+                text,
+                output_lines=[value.output] if value.output else [],
+                data={"prompt": value.prompt} if value.prompt else {},
+            )
         return _record(session_id, text, output_lines=[str(value)] if value else [])
 
     return SessionCommandRecord(session_id=session_id, command=text, handled=False)
@@ -948,7 +955,6 @@ def _open_derived_runtime(session: Any, session_id: str) -> Any:
             system_prompt_builder=getattr(session, "_system_prompt_builder", None),
             session_id=session_id,
             thinking_level=session.conversation.thinking_level,
-            tool_execution=session.tool_execution,
             max_tool_calls_per_turn=session.max_tool_calls_per_turn,
             memory_enabled=session.memory_enabled,
             current_mode=_stored_session_mode(session.workspace_dir, session_id) or session.current_mode,

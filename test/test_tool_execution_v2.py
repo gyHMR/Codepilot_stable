@@ -90,6 +90,32 @@ def test_runtime_cancel_sets_token_and_runs_cleanup() -> None:
     assert cleaned == ["done"]
 
 
+def test_requested_timeout_can_extend_default_up_to_policy_maximum() -> None:
+    from codepilot.tools.execution import ExecutionController
+
+    async def handler(input, context):
+        _ = input, context
+        await asyncio.sleep(0.08)
+        return SampleOutput("finished")
+
+    runtime, registration_id = _runtime(
+        _registration(
+            "requested_timeout",
+            handler,
+            timeout_ms=20,
+            max_timeout_ms=200,
+            requested_timeout_ms=120,
+        ),
+        controller=ExecutionController(),
+    )
+
+    result = asyncio.run(
+        runtime.execute(_request("requested_timeout", registration_id, "run"))
+    )
+
+    assert result.status == "success"
+
+
 def test_execute_batch_runs_parallel_tools_and_preserves_input_order() -> None:
     from codepilot.tools.execution import ExecutionController, ToolRuntimeLimits
 
@@ -179,7 +205,11 @@ def test_execute_batch_serializes_same_group_and_stops_at_approval_barrier() -> 
         )
     )
 
-    assert [result.status for result in barrier_results] == ["approval_required"]
+    assert [result.status for result in barrier_results] == [
+        "approval_required",
+        "interrupted",
+    ]
+    assert barrier_results[1].error.code == "tool.batch.interrupted"
     assert after_barrier_called is False
 
 
@@ -297,6 +327,8 @@ def _registration(
     concurrency="parallel",
     group=None,
     approval="never",
+    max_timeout_ms=None,
+    requested_timeout_ms=None,
 ):
     from codepilot.tools.codecs import DataclassCodec
     from codepilot.tools.contracts import ToolRegistration, ToolSpec
@@ -341,6 +373,7 @@ def _registration(
                     risk="low",
                     reason="execution test",
                 ),
+                execution_timeout_ms=requested_timeout_ms,
             )
 
     class Renderer:
@@ -362,7 +395,10 @@ def _registration(
             required_permissions=frozenset(),
             base_risk="low",
             approval=approval,
-            timeout=TimeoutPolicy(default_execution_ms=timeout_ms, max_execution_ms=timeout_ms),
+            timeout=TimeoutPolicy(
+                default_execution_ms=timeout_ms,
+                max_execution_ms=max_timeout_ms or timeout_ms,
+            ),
             concurrency=ConcurrencyPolicy(mode=concurrency, group=group),
             output_limits=OutputLimits(),
             output_trust=OutputTrustPolicy(),

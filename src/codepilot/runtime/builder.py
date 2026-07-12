@@ -15,7 +15,8 @@ from codepilot.llm.registry import register_builtin_api_providers
 from codepilot.sessions.contracts import SessionOptions
 from codepilot.runtime.session_controller import create_session_controller
 from codepilot.tools import (
-    InMemoryToolStateStore,
+    CheckpointToolStateStore,
+    FileToolGrantStore,
     PermissionEngine,
     PermissionRule,
     ToolRuntime,
@@ -73,7 +74,6 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         session_id=intent.session_id,
         messages=list(intent.messages),
         thinking_level=config.thinking_level,
-        tool_execution=config.tool_execution,
         max_tool_calls_per_turn=config.max_tool_calls_per_turn,
         memory_enabled=intent.memory_enabled,
         current_mode=config.current_mode,
@@ -101,11 +101,18 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         convert_messages=effective_options.convert_to_llm,
         get_api_key=effective_options.get_api_key,
     )
+    tool_state_store = CheckpointToolStateStore(
+        session_id=controller.session_id,
+        grant_store=FileToolGrantStore(config.workspace / ".codepilot" / "tool_grants.json"),
+    )
     tool_port = ToolRuntime(
         registry=tools.registry,
         permission_engine=_permission_engine(config.tool_permission_mode),
-        state_store=InMemoryToolStateStore(),
+        state_store=tool_state_store,
     )
+    tool_checkpoint = controller.component_checkpoint_state("tools")
+    if tool_checkpoint is not None:
+        tool_port.restore_checkpoint_state(tool_checkpoint)
 
     runtime_session = RuntimeSession(
         controller=controller,
@@ -123,6 +130,7 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
             **intent.extension_commands,
             **tools.commands,
         },
+        mcp_manager=tools.mcp_manager,
     )
     tools.registry.extend(
         create_plan_registrations(
@@ -143,7 +151,7 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
 
 
 def _permission_engine(mode: str) -> PermissionEngine:
-    controlled_effects = frozenset(
+    mutating_effects = frozenset(
         {
             "filesystem_write",
             "filesystem_delete",
@@ -151,19 +159,32 @@ def _permission_engine(mode: str) -> PermissionEngine:
             "external_state_write",
         }
     )
+    sensitive_read_effects = frozenset(
+        {"network_access", "credential_access", "external_state_read"}
+    )
     if mode == "read-only":
-        return PermissionEngine(denied_effects=controlled_effects)
+        return PermissionEngine(
+            denied_effects=mutating_effects | frozenset({"credential_access"}),
+            approval_effects=frozenset({"network_access", "external_state_read"}),
+            granted_permissions=frozenset(
+                {"workspace.read", "session.*", "mcp.call"}
+            ),
+        )
     if mode == "ask":
-        return PermissionEngine(approval_effects=controlled_effects)
+        return PermissionEngine(
+            approval_effects=mutating_effects | sensitive_read_effects,
+            granted_permissions=frozenset({"*"}),
+        )
     workspace_capabilities = (
         "write",
         "edit",
         "apply_patch",
         "command.inspection",
-        "command.repository_execution",
         "command.bounded_mutation",
     )
     return PermissionEngine(
+        approval_effects=sensitive_read_effects,
+        granted_permissions=frozenset({"*"}),
         rules=tuple(
             PermissionRule(
                 action_pattern=action,

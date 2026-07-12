@@ -1,0 +1,46 @@
+{
+  "mcp_servers": [
+    {
+      "name": "github",
+      "transport": "streamable_http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "auth": {
+        "type": "bearer_env",
+        "env": "GITHUB_MCP_TOKEN",
+        "binding": "github"
+      },
+      "allow_tools": [
+        "get_file_contents",
+        "search_code",
+        "list_commits",
+        "get_issue",
+        "create_issue"
+      ],
+      "timeout_ms": 30000,
+      "max_parallel": 4,
+      "tool_policies": {
+        "get_file_contents": {
+          "read_only": true,
+          "requires_approval": false
+        },
+        "search_code": {
+          "read_only": true,
+          "requires_approval": false
+        },
+        "list_commits": {
+          "read_only": true,
+          "requires_approval": false
+        },
+        "get_issue": {
+          "read_only": true,
+          "requires_approval": false
+        },
+        "create_issue": {
+          "read_only": false,
+          "risk_level": "medium",
+          "requires_approval": true
+        }
+      }
+    }
+  ]
+}

@@ -53,6 +53,8 @@ from .context import (
 )
 from .commands import (
     CommandHandler,
+    CommandHandlerResult,
+    CommandOutcome,
     CommandSource,
     LifecycleHook,
     RegisteredCommand,
@@ -110,6 +112,7 @@ from .tools import (
     Tool,
     ToolResultStatus,
     UPDATE_PLAN_PROGRESS_TOOL,
+    tool_mode_for_run_mode,
 )
 
 
@@ -144,6 +147,8 @@ __all__ = [
     "RunnerPreflightReport",
     # ── 命令与生命周期能力 ──
     "CommandHandler",
+    "CommandHandlerResult",
+    "CommandOutcome",
     "CommandSource",
     "LifecycleHook",
     "RegisteredCommand",
@@ -155,6 +160,7 @@ __all__ = [
     "Tool",
     "ToolCall",
     "ToolResultStatus",
+    "tool_mode_for_run_mode",
     "CLOSE_PLAN_TOOL",
     "CREATE_BUILD_PLAN_TOOL",
     "PLAN_TOOL_NAMES",

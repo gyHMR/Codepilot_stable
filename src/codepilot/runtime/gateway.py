@@ -3,14 +3,14 @@ from __future__ import annotations
 """Runtime gateway: receive interface actions and stream runtime frames."""
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable
-from typing import Any, Callable
+from collections.abc import AsyncIterator
+from typing import Any
 from typing import TYPE_CHECKING
 
-from codepilot.core.contracts import AgentLoopOutcome, AgentLoopPorts, ContextPort
-from codepilot.core.runner import resume_agent_loop, run_agent_loop
+from codepilot.core.contracts import AgentLoopOutcome
 from codepilot.sessions.contracts import (
     PreparedAgentRun,
+    SessionCommandRecord,
     SessionCommandIntent,
     SessionContinuationIntent,
     SessionResumeIntent,
@@ -19,7 +19,6 @@ from codepilot.sessions.contracts import (
     SessionView,
 )
 from codepilot.runtime.session_controller import SessionController
-from codepilot.protocols import RunSignalsSummary
 
 from .actions import (
     ApprovalDecided,
@@ -36,11 +35,12 @@ from .actions import (
     RuntimeFrame,
     UserAction,
 )
-from .approvals import ApprovalRegistry, ApprovalView
+from .approvals import ApprovalView
 from .builder import build_runtime_session
 from .opening import AppSessionView, SessionRef
 from .sessions import ActiveRunRegistry, RuntimeSession, RuntimeSessionRegistry
 from .views import CommandDescriptor, SessionStatus, builtin_commands
+from .executor import RunEnvironment, RunExecutor
 
 if TYPE_CHECKING:
     from .opening import SessionOpenIntent
@@ -61,9 +61,9 @@ class RuntimeGateway:
         self._sessions = RuntimeSessionRegistry()
         self._model_port = model_port
         self._tool_port = tool_port
-        self._approvals = ApprovalRegistry()
         self._active_runs = ActiveRunRegistry()
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._executor = RunExecutor()
 
     def open_session(self, intent: "SessionOpenIntent") -> SessionRef:
         session = build_runtime_session(intent)
@@ -105,6 +105,7 @@ class RuntimeGateway:
         action: UserAction,
     ) -> AsyncIterator[RuntimeFrame]:
         if isinstance(action, PromptSubmitted):
+            await self._ensure_mcp_ready(session)
             checkpoint = session.controller.runtime_checkpoint()
             if _is_plan_wait_checkpoint(checkpoint):
                 plan_command = _explicit_plan_command(session, action.text)
@@ -138,6 +139,8 @@ class RuntimeGateway:
                 yield frame
             return
         if isinstance(action, CommandSubmitted):
+            if action.text.strip().partition(" ")[0] == "/tools":
+                await self._ensure_mcp_ready(session)
             plan_command = _explicit_plan_command(session, action.text)
             record = await self._run_command(
                 session,
@@ -176,16 +179,33 @@ class RuntimeGateway:
 
     def close(self, session_id: str) -> None:
         active_run_id = self._active_runs.cancel(session_id)
-        self._sessions.close(session_id)
-        self._approvals.remove_session(session_id)
+        closed = self._sessions.close(session_id)
+        if (
+            closed is not None
+            and closed.mcp_manager is not None
+            and all(
+                item.mcp_manager is not closed.mcp_manager
+                for item in self._sessions.values()
+            )
+        ):
+            _schedule_close(closed.mcp_manager)
         if active_run_id is None or not self._active_runs.has_attached_task(session_id):
             self._active_runs.finish(session_id)
         self._session_locks.pop(session_id, None)
 
     async def close_all(self) -> None:
         self._active_runs.cancel_all()
+        managers = {
+            id(session.mcp_manager): session.mcp_manager
+            for session in self._sessions.values()
+            if session.mcp_manager is not None
+        }
         self._sessions.close_all()
-        self._approvals.clear()
+        if managers:
+            await asyncio.gather(
+                *(manager.aclose() for manager in managers.values()),
+                return_exceptions=True,
+            )
         self._session_locks.clear()
 
     def _require_session(self, session_id: str) -> SessionController:
@@ -206,7 +226,6 @@ class RuntimeGateway:
         async for frame in self._run_agent_loop(
             session,
             prepared,
-            lambda ports: run_agent_loop(prepared.loop_input, ports),
         ):
             yield frame
 
@@ -234,6 +253,11 @@ class RuntimeGateway:
         session: RuntimeSession,
         record: SessionCommandRecord,
     ) -> AsyncIterator[RuntimeFrame]:
+        prompt = _optional_text(record.data.get("prompt"))
+        if prompt is not None:
+            async for frame in self._run_prompt(session, PromptSubmitted(prompt)):
+                yield frame
+            return
         kind = _optional_text(record.data.get("continuation_kind"))
         run_id = _optional_text(record.data.get("continuation_run_id"))
         if kind is None or run_id is None:
@@ -254,12 +278,7 @@ class RuntimeGateway:
         intent: SessionContinuationIntent,
     ) -> AsyncIterator[RuntimeFrame]:
         prepared = await session.controller.prepare_continuation(intent)
-        run_loop = (
-            (lambda ports: resume_agent_loop(prepared.resume_input, ports))
-            if prepared.resume_input is not None
-            else (lambda ports: run_agent_loop(prepared.loop_input, ports))
-        )
-        async for frame in self._run_agent_loop(session, prepared, run_loop):
+        async for frame in self._run_agent_loop(session, prepared):
             yield frame
 
     async def _resume_after_approval(
@@ -311,10 +330,8 @@ class RuntimeGateway:
         async for frame in self._run_agent_loop(
             session,
             prepared,
-            lambda ports: resume_agent_loop(prepared.resume_input, ports),
         ):
             yield frame
-        self._approvals.pop(action.approval_id)
 
     def _cancel_run(self, session_id: str, action: RunCancelled) -> CancelledFrame:
         active = self._active_runs.cancel(session_id)
@@ -328,7 +345,6 @@ class RuntimeGateway:
         self,
         session: RuntimeSession,
         prepared: PreparedAgentRun,
-        run_loop: Callable[[AgentLoopPorts], Awaitable[AgentLoopOutcome]],
     ) -> AsyncIterator[RuntimeFrame]:
         self._active_runs.start(session.session_id, prepared.run_id)
         event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -339,13 +355,16 @@ class RuntimeGateway:
             event_queue.put_nowait(payload)
 
         try:
-            ports = self._ports_for(
-                session.session_id,
-                context_port=prepared.context_port,
-                state_port=prepared.state_port,
+            environment = RunEnvironment(
+                run_id=prepared.run_id,
+                session_id=prepared.session_id,
+                model=session.model_port or self._model_port,
+                tools=session.tool_port or self._tool_port,
+                context=prepared.context_port,
+                state=prepared.state_port,
                 event_sink=event_sink,
             )
-            task = asyncio.create_task(run_loop(ports))
+            task = asyncio.create_task(self._executor.execute(environment, prepared))
             self._active_runs.attach_task(session.session_id, task)
             while not task.done() or not event_queue.empty():
                 try:
@@ -354,37 +373,20 @@ class RuntimeGateway:
                     continue
                 yield ProgressFrame(event=event)
             outcome = await task
-            record = await session.controller.commit_run(prepared, outcome)
         except asyncio.CancelledError:
-            outcome = AgentLoopOutcome(
-                run_id=prepared.run_id,
-                status="aborted",
-                stop_reason="aborted",
-                signals=RunSignalsSummary(cancelled=True),
-                error={
-                    "code": "runtime.cancelled",
-                    "message": "Run cancelled by user",
-                },
-            )
-            record = await session.controller.commit_run(prepared, outcome)
-        except Exception as exc:
-            error = _runtime_error_payload(exc)
-            outcome = AgentLoopOutcome(
-                run_id=prepared.run_id,
-                status="failed",
-                stop_reason="internal_error",
-                error=error,
-            )
-            try:
-                await session.controller.commit_run(prepared, outcome)
-            except Exception as commit_exc:
-                details = dict(error.get("details") or {})
-                details["commit_error"] = str(commit_exc)
-                error["details"] = details
-            yield FailedFrame(error=error)
-            return
+            self._active_runs.finish(session.session_id, run_id=prepared.run_id)
+            raise
         finally:
             self._active_runs.finish(session.session_id, run_id=prepared.run_id)
+
+        try:
+            record = await session.controller.commit_run(prepared, outcome)
+        except Exception as exc:
+            yield FailedFrame(error=_runtime_error_payload(exc))
+            return
+        if outcome.status == "failed":
+            yield FailedFrame(error=_runtime_error_payload(outcome.error))
+            return
 
         async for frame in self._frames_from_outcome(session.controller, outcome, record):
             yield frame
@@ -397,7 +399,6 @@ class RuntimeGateway:
     ) -> AsyncIterator[RuntimeFrame]:
         if outcome.status == "waiting_approval":
             for interruption in outcome.interruptions:
-                self._approvals.add(controller.session_id, interruption)
                 yield ApprovalRequiredFrame(approval=interruption)
             yield RunPausedFrame(
                 record=record,
@@ -415,23 +416,6 @@ class RuntimeGateway:
             return
         yield RunFinishedFrame(record=record)
 
-    def _ports_for(
-        self,
-        session_id: str,
-        *,
-        context_port: ContextPort | None,
-        state_port: Any | None = None,
-        event_sink: Callable[[dict[str, Any]], None] | None = None,
-    ) -> AgentLoopPorts:
-        session = self._sessions.require(session_id)
-        return AgentLoopPorts(
-            model=session.model_port or self._model_port,
-            tools=session.tool_port or self._tool_port,
-            context=context_port,
-            state=state_port,
-            events=event_sink,
-        )
-
     def _tool_catalog_for(self, session_id: str) -> list[Any]:
         session = self._sessions.require(session_id)
         tool_port = session.tool_port or self._tool_port
@@ -444,25 +428,32 @@ class RuntimeGateway:
         return [entry.spec for entry in snapshot.entries]
 
     def _pending_approvals_for(self, session: RuntimeSession) -> list[ApprovalView]:
-        by_id = {
-            view.approval_id: view
-            for view in self._approvals.list(session.session_id)
-        }
         tool_port = session.tool_port or self._tool_port
         challenges = tuple(tool_port.pending_challenges()) if tool_port is not None else ()
-        for challenge in challenges:
-            if challenge.approval_id in by_id:
-                continue
-            by_id[challenge.approval_id] = ApprovalView(
+        views = [
+            ApprovalView(
                 approval_id=challenge.approval_id,
-                session_id=session.session_id,
+                session_id=challenge.session_id,
                 run_id=challenge.run_id,
                 tool_call_id=challenge.tool_call_id,
                 tool_name=challenge.tool_name,
                 reason=challenge.reason,
                 risk_level=challenge.risk,
             )
-        return sorted(by_id.values(), key=lambda item: item.approval_id)
+            for challenge in challenges
+            if challenge.session_id == session.session_id
+        ]
+        return sorted(views, key=lambda item: item.approval_id)
+
+    async def _ensure_mcp_ready(self, session: RuntimeSession) -> None:
+        manager = session.mcp_manager
+        if manager is None:
+            return
+        tool_port = session.tool_port or self._tool_port
+        registry = getattr(tool_port, "registry", None)
+        if registry is None:
+            raise RuntimeError("MCP discovery requires the canonical ToolRuntime registry")
+        await manager.ensure_ready(registry)
 
     def _register_derived_controller(
         self,
@@ -507,7 +498,18 @@ class RuntimeGateway:
             current_mode=view.current_mode,  # type: ignore[arg-type]
             is_running=self._active_runs.is_running(session.session_id),
             credential_source=info.credential_source,
-            warnings=info.warnings,
+            warnings=tuple(
+                dict.fromkeys(
+                    [
+                        *info.warnings,
+                        *(
+                            session.mcp_manager.diagnostics
+                            if session.mcp_manager is not None
+                            else ()
+                        ),
+                    ]
+                )
+            ),
             plan_summary=_plan_summary_from_view(view),
         )
 
@@ -532,6 +534,18 @@ class RuntimeGateway:
 def _optional_text(value: object) -> str | None:
     text = str(value).strip() if value is not None else ""
     return text or None
+
+
+def _schedule_close(manager: object) -> None:
+    async def close() -> None:
+        await manager.aclose()
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(close())
+    else:
+        loop.create_task(close())
 
 
 def _is_plan_wait_checkpoint(checkpoint: object) -> bool:

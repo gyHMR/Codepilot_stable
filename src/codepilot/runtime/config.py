@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TYPE_CHECKING, cast
 
-from codepilot.core.contracts import ToolExecutionMode
 from codepilot.core.plan import (
     PlanningBudgetProfile,
     RunMode,
@@ -46,11 +45,12 @@ RuntimePermissionMode = Literal["read-only", "workspace-write", "ask"]
 ConfigSourceKind = Literal["cli", "session", "project", "default"]
 SUPPORTED_MODEL_APIS = {"openai-compatible", "anthropic-messages"}
 _PERMISSION_MODES = {"read-only", "workspace-write", "ask"}
-_TOOL_EXECUTION_MODES = {"parallel", "sequential"}
 _REMOVED_TOOL_SECURITY_KEYS = {
     "block_dangerous_bash",
     "bash_allow_patterns",
     "bash_block_patterns",
+    "tool_execution",
+    "tool_snippets",
 }
 
 
@@ -143,7 +143,6 @@ class WorkspaceSettings:
     model_id: str | None = None
     system_prompt: str | None = None
     thinking_level: str | None = None
-    tool_execution: ToolExecutionMode | None = None
     current_mode: RunMode | None = None
     planning_budget_profile: PlanningBudgetProfile | None = None
     max_tool_calls_per_turn: int | None = None
@@ -154,7 +153,6 @@ class WorkspaceSettings:
     edit_require_unique_match: bool | None = None
     prompt_guidelines: list[str] | None = None
     append_system_prompt: str | None = None
-    tool_snippets: dict[str, str] | None = None
     extension_paths: list[str] | None = None
     skill_paths: list[str] | None = None
     prompt_debug_sources: bool | None = None
@@ -182,7 +180,6 @@ class RuntimeConfig:
     restored: SessionOpenMetadata | None
     system_prompt: str
     thinking_level: str
-    tool_execution: ToolExecutionMode
     current_mode: RunMode
     planning_budget_profile: PlanningBudgetProfile
     max_tool_calls_per_turn: int
@@ -193,7 +190,6 @@ class RuntimeConfig:
     edit_require_unique_match: bool
     prompt_guidelines: list[str] | None
     append_system_prompt: str | None
-    tool_snippets: dict[str, str] | None
     extension_paths: list[str] | None
     skill_paths: list[str] | None
     prompt_debug_sources: bool
@@ -233,11 +229,10 @@ class WorkspaceResourceLoader:
         removed_keys = sorted(_REMOVED_TOOL_SECURITY_KEYS & raw.keys())
         if removed_keys:
             raise ValueError(
-                "Removed tool security settings are not supported: "
+                "Removed runtime settings are not supported: "
                 + ", ".join(removed_keys)
             )
 
-        tool_execution = raw.get("tool_execution")
         current_mode = raw.get("current_mode")
         planning_budget_profile = raw.get("planning_budget_profile")
         permission_mode = raw.get("tool_permission_mode")
@@ -247,9 +242,6 @@ class WorkspaceResourceLoader:
             model_id=_string(raw.get("model_id")),
             system_prompt=_string(raw.get("system_prompt")),
             thinking_level=_string(raw.get("thinking_level")),
-            tool_execution=cast(ToolExecutionMode, tool_execution)
-            if tool_execution in _TOOL_EXECUTION_MODES
-            else None,
             current_mode=cast(RunMode, current_mode)
             if current_mode in {"read", "plan", "build"}
             else None,
@@ -266,7 +258,6 @@ class WorkspaceResourceLoader:
             edit_require_unique_match=_bool(raw.get("edit_require_unique_match")),
             prompt_guidelines=_string_list(raw.get("prompt_guidelines")),
             append_system_prompt=_string(raw.get("append_system_prompt")),
-            tool_snippets=_string_map(raw.get("tool_snippets")),
             extension_paths=_string_list(raw.get("extension_paths")),
             skill_paths=_string_list(raw.get("skill_paths")),
             prompt_debug_sources=_bool(raw.get("prompt_debug_sources")),
@@ -405,14 +396,6 @@ def load_runtime_config(intent: "SessionOpenIntent") -> RuntimeConfig:
                 default="off",
             )
         ),
-        tool_execution=_tool_execution_mode(
-            choose(
-                "tool_execution",
-                (_cli_source(), intent.tool_execution),
-                (_project_source("settings.json"), settings.tool_execution),
-                default="parallel",
-            )
-        ),
         current_mode=current_mode,
         planning_budget_profile=planning_budget_profile,
         max_tool_calls_per_turn=_positive_int(
@@ -469,12 +452,6 @@ def load_runtime_config(intent: "SessionOpenIntent") -> RuntimeConfig:
             "append_system_prompt",
             (_cli_source(), intent.append_system_prompt),
             (_project_source("settings.json"), settings.append_system_prompt),
-            default=None,
-        ),
-        tool_snippets=choose(
-            "tool_snippets",
-            (_cli_source(), intent.tool_snippets),
-            (_project_source("settings.json"), settings.tool_snippets),
             default=None,
         ),
         extension_paths=choose(
@@ -688,12 +665,6 @@ def _permission_mode(value: object) -> RuntimePermissionMode:
     if value not in _PERMISSION_MODES:
         raise ValueError(f"Unknown permission mode: {value}")
     return cast(RuntimePermissionMode, value)
-
-
-def _tool_execution_mode(value: object) -> ToolExecutionMode:
-    if value not in _TOOL_EXECUTION_MODES:
-        raise ValueError(f"Unknown tool execution mode: {value}")
-    return cast(ToolExecutionMode, value)
 
 
 def _string(value: object) -> str | None:

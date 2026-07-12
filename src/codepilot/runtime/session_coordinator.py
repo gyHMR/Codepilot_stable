@@ -19,17 +19,14 @@ from codepilot.core.contracts import (
     RetryPolicy,
     RunCorrelation,
 )
-from codepilot.core.plan import PlanState, ensure_planning_budget_profile, ensure_run_mode
+from codepilot.core.plan import ensure_planning_budget_profile, ensure_run_mode
 from codepilot.core.plan_state import PlanStateManager
 from codepilot.core.runner import maybe_await
 from codepilot.llm.ports import ModelDescriptor
 from codepilot.protocols import (
     AgentRunResult,
-    AssistantMessage,
     Message,
     TextContent,
-    ToolCall,
-    ToolResultMessage,
     UserMessage,
 )
 from codepilot.protocols.commands import SessionLifecycleContext, SessionLifecycleView
@@ -192,7 +189,6 @@ class RuntimeSessionCoordinator:
         self.prepare_context = self._custom_prepare_context or self.context_governor.prepare
         self.latest_context_report: dict[str, Any] | None = None
 
-        self.tool_execution = options.tool_execution
         self.max_tool_calls_per_turn = options.max_tool_calls_per_turn
         self.retry_enabled = options.retry_enabled
         self.max_retries = options.max_retries
@@ -664,6 +660,18 @@ class RuntimeSessionCoordinator:
             "waiting_kind": waiting.kind if waiting is not None else None,
             "run_state": dict(run.core_state),
         }
+
+    def component_checkpoint_state(self, owner: str) -> dict[str, object] | None:
+        run_id = self.session_state.current_run_id
+        if run_id is None:
+            return None
+        run = self.state_service.get_run(run_id)
+        if run is None or run.checkpoint is None:
+            return None
+        for component in run.checkpoint.components:
+            if component.owner == owner:
+                return dict(component.state)
+        return None
 
     def _checkpoint_run_state(self, run_id: str) -> dict[str, object] | None:
         run = self.state_service.get_run(run_id)

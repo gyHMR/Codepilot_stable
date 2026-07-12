@@ -160,7 +160,7 @@ def test_interaction_is_an_execute_batch_admission_barrier() -> None:
         )
     )
 
-    assert [item.status for item in results] == ["user_input_required"]
+    assert [item.status for item in results] == ["user_input_required", "interrupted"]
     assert called is False
 
 

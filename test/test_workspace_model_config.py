@@ -268,7 +268,7 @@ def test_removed_shell_security_settings_are_rejected(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="Removed tool security settings"):
+    with pytest.raises(ValueError, match="Removed runtime settings"):
         load_runtime_config(SessionOpenIntent(workspace_dir=tmp_path))
 
 
@@ -276,17 +276,15 @@ def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
     (root / "settings.json").write_text(
-        json.dumps({"max_tool_calls_per_turn": 3, "tool_execution": "sequential"}),
+        json.dumps({"max_tool_calls_per_turn": 3}),
         encoding="utf-8",
     )
 
     config = load_runtime_config(SessionOpenIntent(workspace_dir=tmp_path))
 
     assert config.max_tool_calls_per_turn == 3
-    assert config.tool_execution == "sequential"
     assert config.max_retries == 2
     assert config.sources["max_tool_calls_per_turn"].kind == "project"
-    assert config.sources["tool_execution"].kind == "project"
     assert config.sources["max_retries"].kind == "default"
 
 

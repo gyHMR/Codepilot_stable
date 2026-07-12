@@ -32,7 +32,7 @@ from codepilot.protocols import (
     ThinkingContent,
     ToolCall,
 )
-from .common import empty_assistant_message, normalize_usage, parse_partial_json, to_openai_messages, to_openai_tools
+from .common import empty_assistant_message, finalize_tool_arguments, normalize_usage, parse_partial_json, to_openai_messages, to_openai_tools
 
 
 def _map_stop_reason(finish_reason: str | None) -> str:
@@ -168,6 +168,7 @@ def stream_openai_compatible(
                                 tc.name = fn["name"]
                             if fn.get("arguments"):
                                 tool_call_partial_json[index] += fn["arguments"]
+                                tc.raw_arguments = tool_call_partial_json[index]
                                 tc.arguments = parse_partial_json(tool_call_partial_json[index])
                                 stream.push(
                                     llm_event(
@@ -204,7 +205,8 @@ def stream_openai_compatible(
                                 partial=out,
                             )
                         )
-                    for tc in tool_call_index_map.values():
+                    for index, tc in tool_call_index_map.items():
+                        finalize_tool_arguments(tc, tool_call_partial_json[index])
                         stream.push(
                             llm_event(
                                 "toolcall_end",

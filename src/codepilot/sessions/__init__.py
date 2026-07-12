@@ -62,7 +62,6 @@ from .service import (
     SessionStateService,
     new_session_id,
 )
-
 __all__ = [
     "CHECKPOINT_SCHEMA_VERSION",
     "MESSAGE_RECORD_SCHEMA_VERSION",

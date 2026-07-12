@@ -1,6 +1,8 @@
-from __future__ import annotations
+"""Codepilot 工具子系统的公开 API。"""
 
-"""Canonical public API for Codepilot's tool subsystem."""
+# 本文件是 tools 包的统一导出入口。
+# 所有外部模块（runtime、core、extensions 等）都通过此文件导入工具子系统类型，
+# 而不直接引用内部模块，以保持清晰的依赖边界。
 
 from .builtins import create_builtin_registrations
 from .codecs import (
@@ -87,6 +89,7 @@ from .state import (
     ToolStateConflictError,
     ToolStateStore,
 )
+from .state_store import CheckpointToolStateStore, FileToolGrantStore
 
 __all__ = [
     "ApprovalChallenge",
@@ -96,10 +99,12 @@ __all__ = [
     "ArtifactRef",
     "CancellationToken",
     "CleanupStack",
+    "CheckpointToolStateStore",
     "ConcurrencyPolicy",
     "DataclassCodec",
     "EffectReporter",
     "ExecutionController",
+    "FileToolGrantStore",
     "ImageContent",
     "InMemoryToolStateStore",
     "InteractionRequest",
