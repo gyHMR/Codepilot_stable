@@ -9,8 +9,8 @@ import pytest
 from prompt_toolkit.document import Document
 
 from codepilot.interfaces.cli.shell import CODEPILOT_STYLE, InteractiveShell
-from codepilot.runtime.views import builtin_commands
-from codepilot.runtime.views import SessionStatus
+from codepilot.runtime.actions import SessionStatus
+from codepilot.runtime.commands import builtin_commands
 
 
 def test_shell_uses_coding_agent_prompt_and_visual_styles() -> None:

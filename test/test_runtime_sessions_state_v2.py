@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from codepilot.llm.ports import LLMCompleted
-from codepilot.protocols import AssistantMessage, Model, TextContent, ToolCall
+from codepilot.llm.ports import LLMCompleted, ModelDescriptor
+from codepilot.protocols import AssistantMessage, ImageContent, Model, TextContent, ToolCall
 from codepilot.runtime import SessionOpenIntent
 from codepilot.runtime.actions import (
     ApprovalDecided,
@@ -87,6 +87,48 @@ def test_runtime_prompt_commits_terminal_state_through_sessions_v2(tmp_path: Pat
     asyncio.run(run_case())
 
 
+def test_runtime_prompt_preserves_images_in_model_and_session_messages(tmp_path: Path) -> None:
+    async def run_case() -> None:
+        observed = None
+
+        class ModelPort:
+            async def stream(self, request):
+                nonlocal observed
+                observed = request.messages[-1]
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text="seen")])
+                )
+
+        gateway = RuntimeGateway(model_port=ModelPort())
+        opened = gateway.open_session(
+            SessionOpenIntent(
+                workspace_dir=tmp_path,
+                model=_model(),
+                memory_enabled=False,
+            )
+        )
+        frames = [
+            frame
+            async for frame in gateway.dispatch(
+                opened.session_id,
+                PromptSubmitted(
+                    text="inspect image",
+                    images=["data:image/jpeg;base64,aW1hZ2U="],
+                    request_id="request_image",
+                ),
+            )
+        ]
+
+        assert any(isinstance(frame, RunFinishedFrame) for frame in frames)
+        assert observed is not None
+        assert any(isinstance(block, ImageContent) for block in observed.content)
+        coordinator = _coordinator(gateway, opened.session_id)
+        stored = coordinator.state_service.load_messages(opened.session_id)[0].message
+        assert any(isinstance(block, ImageContent) for block in stored.content)
+
+    asyncio.run(run_case())
+
+
 def test_context_projection_event_waits_for_run_boundary(tmp_path: Path) -> None:
     async def run_case() -> None:
         started = asyncio.Event()
@@ -125,6 +167,8 @@ def test_context_projection_event_waits_for_run_boundary(tmp_path: Path) -> None
 
 
 def test_opening_session_restores_active_plan_and_context_checkpoint(tmp_path: Path) -> None:
+    from codepilot.core.plan import load_plan_state
+    from codepilot.core.state import CoreState, TaskState
     from codepilot.protocols import UserMessage
     from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
     from codepilot.sessions.contracts import ComponentCheckpoint, SessionOptions, WaitingState
@@ -169,6 +213,8 @@ def test_opening_session_restores_active_plan_and_context_checkpoint(tmp_path: P
         "completed_at": None,
         "completion_source": None,
     }
+    migrated_plan = load_plan_state(plan)
+    assert migrated_plan is not None
     begun = original.state_service.begin_run(
         BeginRunRequest(
             session_id=original.session_id,
@@ -200,7 +246,13 @@ def test_opening_session_restores_active_plan_and_context_checkpoint(tmp_path: P
             expected_session_revision=started.session.revision,
             phase="model",
             resume_point="after_model",
-            core_state={"plan_state": plan},
+            core_state=CoreState(
+                task=TaskState(
+                    original_request="制定方案",
+                    current_goal="执行修改",
+                    plan=migrated_plan,
+                )
+            ).to_dict(),
             waiting=WaitingState(
                 kind="plan_confirmation",
                 request_id="plan_restore",
@@ -221,7 +273,7 @@ def test_opening_session_restores_active_plan_and_context_checkpoint(tmp_path: P
 
     reopened = RuntimeSessionCoordinator(options)
 
-    assert reopened.plan_state.current() == plan
+    assert reopened.current_plan_state() == migrated_plan.to_dict()
     assert reopened.context_governor.checkpoint_state() == {
         "compacted_until_message_id": "msg_10",
         "compact_summary": "saved summary",
@@ -299,8 +351,396 @@ def test_reopened_progress_checkpoint_continues_same_run(tmp_path: Path) -> None
     asyncio.run(run_case())
 
 
-def test_tool_approval_resumes_same_v2_run_without_repeating_effect(tmp_path: Path) -> None:
+def test_reopened_after_model_checkpoint_finishes_without_repeating_model_call(
+    tmp_path: Path,
+) -> None:
     async def run_case() -> None:
+        from codepilot.protocols import UserMessage
+        from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
+        from codepilot.sessions.contracts import SessionOptions
+        from codepilot.sessions.service import BeginRunRequest, CommitRunBoundaryRequest
+        from codepilot.sessions.workspace import capture_workspace_checkpoint
+
+        options = SessionOptions(
+            model=_model(),
+            workspace_dir=tmp_path,
+            session_id="session_after_model_resume",
+            memory_enabled=False,
+        )
+        original = RuntimeSessionCoordinator(options)
+        workspace = capture_workspace_checkpoint(tmp_path)
+        begun = original.state_service.begin_run(
+            BeginRunRequest(
+                session_id=original.session_id,
+                request_id="request_after_model",
+                run_id="run_after_model_resume",
+                user_message=UserMessage(content="same request"),
+                workspace=workspace,
+            ),
+            expected_session_revision=original.session_state.revision,
+        )
+        original.state_service.commit_run_boundary(
+            CommitRunBoundaryRequest(
+                commit_id="after-model-progress",
+                kind="progress",
+                session_id=original.session_id,
+                run_id=begun.run.run_id,
+                expected_run_revision=begun.run.revision,
+                expected_session_revision=begun.session.revision,
+                phase="model",
+                resume_point="after_model",
+                core_state={"counters": {"model_attempts": 1}},
+                new_messages=(
+                    AssistantMessage(content=[TextContent(text="already complete")]),
+                ),
+                workspace=workspace,
+            )
+        )
+        original.close()
+
+        class ModelPort:
+            calls = 0
+
+            async def stream(self, _request):
+                self.calls += 1
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text="repeated")])
+                )
+
+        model = ModelPort()
+        gateway = RuntimeGateway(model_port=model)
+        opened = gateway.open_session(
+            SessionOpenIntent(
+                workspace_dir=tmp_path,
+                session_id=options.session_id,
+                model=_model(),
+                memory_enabled=False,
+            )
+        )
+        frames = [
+            frame
+            async for frame in gateway.dispatch(
+                opened.session_id,
+                PromptSubmitted(text="same request"),
+            )
+        ]
+
+        finished = next(frame for frame in frames if isinstance(frame, RunFinishedFrame))
+        assert finished.record.run_id == "run_after_model_resume"
+        assert finished.record.final_text == "already complete"
+        assert model.calls == 0
+
+    asyncio.run(run_case())
+
+
+def test_reopened_progress_run_restores_durable_rollback_baseline(tmp_path: Path) -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import CoreBoundary
+        from codepilot.core.state import CoreCounters, CoreState, RunFacts
+        from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
+        from codepilot.sessions.contracts import SessionContinuationIntent, SessionOptions, SessionRunIntent
+
+        options = SessionOptions(
+            model=_model(),
+            workspace_dir=tmp_path,
+            session_id="session_rollback_resume",
+            memory_enabled=False,
+        )
+        original = RuntimeSessionCoordinator(options)
+        prepared = await original._prepare_run(  # noqa: SLF001
+            SessionRunIntent(text="inspect", request_id="request_rollback"),
+            run_id="run_rollback_resume",
+            model=ModelDescriptor(provider="unit-test", model_id="runtime-state-v2"),
+        )
+        assert prepared.state_port is not None
+        await prepared.state_port.commit(
+            CoreBoundary(
+                kind="after_model",
+                state=CoreState(
+                    task=CoreState.new("inspect").task,
+                    facts=RunFacts(counters=CoreCounters(model_turns=1)),
+                ),
+                new_messages=(
+                    AssistantMessage(content=[TextContent(text="already complete")]),
+                ),
+            )
+        )
+        original.close()
+
+        reopened = RuntimeSessionCoordinator(options)
+        resumed = await reopened._prepare_continuation(  # noqa: SLF001
+            SessionContinuationIntent(
+                kind="automatic_continuation",
+                run_id="run_rollback_resume",
+            ),
+            run_id="run_rollback_resume",
+            model=ModelDescriptor(provider="unit-test", model_id="runtime-state-v2"),
+        )
+
+        assert resumed.rollback_baseline is not None
+        baseline = reopened._rollback_baseline(resumed.rollback_baseline)  # noqa: SLF001
+        assert baseline.reason != "missing_rollback_baseline"
+
+    asyncio.run(run_case())
+
+
+def test_after_tools_checkpoint_clears_tool_intent_but_keeps_rollback_baseline(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import CoreBoundary
+        from codepilot.core.state import CoreState
+        from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
+        from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
+
+        coordinator = RuntimeSessionCoordinator(
+            SessionOptions(
+                model=_model(),
+                workspace_dir=tmp_path,
+                session_id="session_component_merge",
+                memory_enabled=False,
+            )
+        )
+        prepared = await coordinator._prepare_run(  # noqa: SLF001
+            SessionRunIntent(text="inspect", request_id="request_components"),
+            run_id="run_component_merge",
+            model=ModelDescriptor(provider="unit-test", model_id="runtime-state-v2"),
+        )
+        adapter = prepared.state_port
+        assert adapter is not None
+        tool_state = {"intent": {"tool_calls": [{"id": "call_1"}]}}
+        adapter.bind_tool_state(lambda: tool_state)
+        state = CoreState.new("inspect")
+        await adapter.commit(
+            CoreBoundary(
+                kind="before_tools",
+                state=state,
+            )
+        )
+        tool_state = None
+        await adapter.commit(CoreBoundary(kind="after_tools", state=state))
+
+        run = coordinator.state_service.get_run("run_component_merge")
+        assert run is not None and run.checkpoint is not None
+        assert {component.owner for component in run.checkpoint.components} == {
+            "context",
+            "rollback",
+        }
+
+    asyncio.run(run_case())
+
+
+def test_target_boundary_collects_component_checkpoints_in_runtime(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import CoreBoundary
+        from codepilot.core.events import CoreDomainEvent
+        from codepilot.core.state import CoreState, RunFacts, WorkspaceFacts
+        from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
+        from codepilot.sessions.contracts import (
+            SessionOptions,
+            SessionRunIntent,
+            WorkspaceCheckpoint,
+        )
+
+        coordinator = RuntimeSessionCoordinator(
+            SessionOptions(
+                model=_model(),
+                workspace_dir=tmp_path,
+                session_id="session_target_boundary",
+                memory_enabled=False,
+            )
+        )
+        prepared = await coordinator._prepare_run(  # noqa: SLF001
+            SessionRunIntent(text="inspect", request_id="request_target_boundary"),
+            run_id="run_target_boundary",
+            model=ModelDescriptor(provider="unit-test", model_id="runtime-state-v2"),
+        )
+        adapter = prepared.state_port
+        assert adapter is not None
+        workspace_inputs = []
+        adapter.bind_tool_state(lambda: {"pending_attempt": "attempt_1"})
+        adapter.context_state = lambda: {"context_cursor": "message_1"}
+        adapter.workspace_state = lambda core_state: (
+            workspace_inputs.append(core_state)
+            or WorkspaceCheckpoint(root=str(tmp_path))
+        )
+        state = CoreState(
+            task=CoreState.new("inspect").task,
+            facts=RunFacts(
+                workspace=WorkspaceFacts(
+                    revision=1,
+                    changed=True,
+                    affected_paths=("src/app.py",),
+                )
+            ),
+        )
+
+        await adapter.commit(
+            CoreBoundary(
+                kind="before_tools",
+                state=state,
+                domain_events=(
+                    CoreDomainEvent("workspace_changed", {"path": "src/app.py"}),
+                ),
+            )
+        )
+
+        run = coordinator.state_service.get_run("run_target_boundary")
+        assert run is not None and run.checkpoint is not None
+        assert run.core_state == state.to_dict()
+        assert {component.owner for component in run.checkpoint.components} == {
+            "tools",
+            "context",
+            "rollback",
+        }
+        assert workspace_inputs == [state.to_dict()]
+        events = coordinator.state_service.load_events(
+            "session_target_boundary",
+            run_id="run_target_boundary",
+        )
+        domain_event = next(
+            event for event in events if event["type"] == "workspace_changed"
+        )
+        assert domain_event["path"] == "src/app.py"
+        assert domain_event["run_id"] == "run_target_boundary"
+        assert domain_event["session_id"] == "session_target_boundary"
+
+    asyncio.run(run_case())
+
+
+def test_target_waiting_boundary_maps_to_sessions_waiting_state(tmp_path: Path) -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import CoreBoundary, CoreReason, CoreWait
+        from codepilot.core.state import CoreState
+        from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
+        from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
+
+        coordinator = RuntimeSessionCoordinator(
+            SessionOptions(
+                model=_model(),
+                workspace_dir=tmp_path,
+                session_id="session_target_waiting",
+                memory_enabled=False,
+            )
+        )
+        prepared = await coordinator._prepare_run(  # noqa: SLF001
+            SessionRunIntent(text="inspect", request_id="request_target_waiting"),
+            run_id="run_target_waiting",
+            model=ModelDescriptor(provider="unit-test", model_id="runtime-state-v2"),
+        )
+        adapter = prepared.state_port
+        assert adapter is not None
+        wait = CoreWait(
+            "user_input",
+            "question_1",
+            CoreReason("task.user_input_required", recoverable=True),
+            {"question": "Which file?"},
+        )
+        state = CoreState.new("inspect")
+
+        await adapter.commit(CoreBoundary(kind="after_model", state=state))
+        await adapter.commit(
+            CoreBoundary(
+                kind="waiting",
+                state=state,
+                wait=wait,
+            )
+        )
+
+        run = coordinator.state_service.get_run("run_target_waiting")
+        assert run is not None and run.status == "waiting"
+        assert run.phase == "model"
+        assert run.checkpoint is not None
+        assert run.checkpoint.resume_point == "after_model"
+        assert run.checkpoint.waiting is not None
+        assert run.checkpoint.waiting.kind == "user_input"
+        assert run.checkpoint.waiting.request_id == "question_1"
+
+    asyncio.run(run_case())
+
+
+def test_legacy_core_payload_is_rewritten_as_target_schema_on_boundary(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import CoreBoundary
+        from codepilot.core.state import CORE_STATE_SCHEMA_VERSION, load_core_state
+        from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
+        from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
+        from codepilot.sessions.service import CommitRunBoundaryRequest
+
+        coordinator = RuntimeSessionCoordinator(
+            SessionOptions(
+                model=_model(),
+                workspace_dir=tmp_path,
+                session_id="session_core_upgrade",
+                memory_enabled=False,
+            )
+        )
+        prepared = await coordinator._prepare_run(  # noqa: SLF001
+            SessionRunIntent(text="fix app", request_id="request_core_upgrade"),
+            run_id="run_core_upgrade",
+            model=ModelDescriptor(provider="unit-test", model_id="runtime-state-v2"),
+        )
+        adapter = prepared.state_port
+        assert adapter is not None
+        legacy = coordinator.state_service.commit_run_boundary(
+            CommitRunBoundaryRequest(
+                commit_id="legacy-core-progress",
+                kind="progress",
+                session_id=coordinator.session_id,
+                run_id="run_core_upgrade",
+                expected_run_revision=adapter.run.revision,
+                expected_session_revision=adapter.session.revision,
+                phase="model",
+                resume_point="after_model",
+                core_state={
+                    "counters": {"model_attempts": 1},
+                    "workspace_changed": False,
+                },
+            )
+        )
+        adapter.run = legacy.run
+        adapter.session = legacy.session
+        state = load_core_state(legacy.run.core_state, original_request="fix app")
+
+        await adapter.commit(CoreBoundary(kind="after_model", state=state))
+
+        upgraded = coordinator.state_service.get_run("run_core_upgrade")
+        assert upgraded is not None
+        assert upgraded.core_state["schema_version"] == CORE_STATE_SCHEMA_VERSION
+        assert "workspace_changed" not in upgraded.core_state
+        assert "plan_state" not in upgraded.core_state
+
+    asyncio.run(run_case())
+
+
+def test_tool_approval_resumes_same_v2_run_without_repeating_effect(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import ModelEntry, ToolResultEntry
+        from codepilot.runtime import executor as executor_module
+
+        original_run_core = __import__(
+            "codepilot.core.driver", fromlist=["run_core"]
+        ).run_core
+        entries = []
+
+        async def recording_run_core(input_value, ports):
+            entries.append(input_value.entry)
+            return await original_run_core(input_value, ports)
+
+        monkeypatch.setattr(
+            executor_module,
+            "run_core",
+            recording_run_core,
+            raising=False,
+        )
+
         class ModelPort:
             def __init__(self) -> None:
                 self.calls = 0
@@ -374,6 +814,7 @@ def test_tool_approval_resumes_same_v2_run_without_repeating_effect(tmp_path: Pa
         assert run is not None and run.status == "completed"
         assert run.resume_count == 1
         assert (tmp_path / "approval.txt").read_text(encoding="utf-8").strip() == "ok"
+        assert [type(entry) for entry in entries] == [ModelEntry, ToolResultEntry]
 
     asyncio.run(run_case())
 
@@ -423,6 +864,155 @@ def test_user_cancel_uses_terminal_cancelled_commit(tmp_path: Path) -> None:
     asyncio.run(run_case())
 
 
+def test_dispatch_consumer_cancellation_still_commits_cancelled_terminal_state(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        started = asyncio.Event()
+        stopped = asyncio.Event()
+
+        class ModelPort:
+            async def stream(self, _request):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                    if False:  # pragma: no cover
+                        yield LLMCompleted(message=AssistantMessage(content=[]))
+                finally:
+                    stopped.set()
+
+        gateway = RuntimeGateway(model_port=ModelPort())
+        opened = gateway.open_session(
+            SessionOpenIntent(
+                workspace_dir=tmp_path,
+                model=_model(),
+                memory_enabled=False,
+            )
+        )
+        prompt_task = asyncio.create_task(
+            _collect_frames(gateway, opened.session_id, PromptSubmitted(text="cancel stream"))
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        coordinator = _coordinator(gateway, opened.session_id)
+        original_commit = coordinator.state_service.commit_run_boundary
+
+        def commit(request):
+            if request.kind == "terminal":
+                assert stopped.is_set()
+            return original_commit(request)
+
+        coordinator.state_service.commit_run_boundary = commit  # type: ignore[method-assign]
+        prompt_task.cancel()
+        result = await asyncio.gather(prompt_task, return_exceptions=True)
+
+        assert isinstance(result[0], asyncio.CancelledError)
+        run_id = coordinator.session_state.last_run_id
+        run = coordinator.state_service.get_run(run_id) if run_id else None
+        assert run is not None and run.status == "cancelled"
+
+    asyncio.run(run_case())
+
+
+def test_dispatch_consumer_cancellation_does_not_interrupt_terminal_commit(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        commit_started = asyncio.Event()
+        allow_commit = asyncio.Event()
+
+        class ModelPort:
+            async def stream(self, _request):
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text="done")])
+                )
+
+        gateway = RuntimeGateway(model_port=ModelPort())
+        opened = gateway.open_session(
+            SessionOpenIntent(
+                workspace_dir=tmp_path,
+                model=_model(),
+                memory_enabled=False,
+            )
+        )
+        session = gateway._sessions.require(opened.session_id)  # noqa: SLF001
+        original_commit = session.controller.runs.commit
+
+        async def delayed_commit(prepared, outcome, *, events=()):
+            commit_started.set()
+            await allow_commit.wait()
+            return await original_commit(prepared, outcome, events=events)
+
+        session.controller.runs.commit = delayed_commit  # type: ignore[method-assign]
+        prompt_task = asyncio.create_task(
+            _collect_frames(gateway, opened.session_id, PromptSubmitted(text="finish"))
+        )
+        await asyncio.wait_for(commit_started.wait(), timeout=5)
+
+        late_cancel = [
+            frame
+            async for frame in gateway.dispatch(
+                opened.session_id,
+                RunCancelled(reason="too_late"),
+            )
+        ]
+        assert isinstance(late_cancel[0], CancelledFrame)
+        assert late_cancel[0].cancelled is False
+
+        prompt_task.cancel()
+        await asyncio.sleep(0)
+        assert gateway._active_runs.is_running(opened.session_id)  # noqa: SLF001
+        allow_commit.set()
+        result = await asyncio.gather(prompt_task, return_exceptions=True)
+
+        assert isinstance(result[0], asyncio.CancelledError)
+        coordinator = _coordinator(gateway, opened.session_id)
+        run_id = coordinator.session_state.last_run_id
+        run = coordinator.state_service.get_run(run_id) if run_id else None
+        assert run is not None and run.status == "completed"
+        assert not gateway._active_runs.is_running(opened.session_id)  # noqa: SLF001
+
+    asyncio.run(run_case())
+
+
+def test_active_run_remains_registered_until_terminal_commit(tmp_path: Path) -> None:
+    async def run_case() -> None:
+        class ModelPort:
+            async def stream(self, _request):
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text="done")])
+                )
+
+        gateway = RuntimeGateway(model_port=ModelPort())
+        opened = gateway.open_session(
+            SessionOpenIntent(
+                workspace_dir=tmp_path,
+                model=_model(),
+                memory_enabled=False,
+            )
+        )
+        coordinator = _coordinator(gateway, opened.session_id)
+        original_commit = coordinator.state_service.commit_run_boundary
+
+        def commit(request):
+            if request.kind == "terminal":
+                assert gateway._active_runs.is_running(opened.session_id)  # noqa: SLF001
+            return original_commit(request)
+
+        coordinator.state_service.commit_run_boundary = commit  # type: ignore[method-assign]
+        frames = [
+            frame
+            async for frame in gateway.dispatch(
+                opened.session_id,
+                PromptSubmitted(text="finish"),
+            )
+        ]
+
+        assert any(isinstance(frame, RunFinishedFrame) for frame in frames)
+        assert not gateway._active_runs.is_running(opened.session_id)  # noqa: SLF001
+
+    asyncio.run(run_case())
+
+
 def test_run_deadline_commits_failed_timeout(tmp_path: Path) -> None:
     async def run_case() -> None:
         started = asyncio.Event()
@@ -456,6 +1046,9 @@ def test_run_deadline_commits_failed_timeout(tmp_path: Path) -> None:
         assert run is not None
         assert run.status == "failed"
         assert run.stop_reason == "deadline_exceeded"
+        result = coordinator.conversation.last_run_result
+        assert result is not None and result.error is not None
+        assert result.error.code == "runtime.deadline_exceeded"
 
     asyncio.run(run_case())
 

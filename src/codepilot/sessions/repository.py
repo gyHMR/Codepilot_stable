@@ -190,6 +190,21 @@ class FileSessionRepository:
         payload = read_json_object(self.layout.run_file(run_id))
         return run_state_from_dict(payload) if payload is not None else None
 
+    def list_runs(self, *, session_id: str | None = None) -> tuple[RunState, ...]:
+        """List persisted Runs, optionally restricted to one Session."""
+
+        runs_dir = self.layout.codepilot_dir / "runs"
+        if not runs_dir.is_dir():
+            return ()
+        runs = [
+            run
+            for entry in runs_dir.iterdir()
+            if entry.is_dir()
+            for run in [self.load_run(entry.name)]
+            if run is not None and (session_id is None or run.session_id == session_id)
+        ]
+        return tuple(sorted(runs, key=lambda item: item.created_at))
+
     def update_run(
         self,
         state: RunState,

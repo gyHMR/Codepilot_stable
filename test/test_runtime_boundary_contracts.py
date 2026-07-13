@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import inspect
 
 
@@ -114,6 +115,35 @@ def test_runtime_package_does_not_export_legacy_runtime_service() -> None:
     assert not hasattr(runtime, "assemble_runtime")
     assert not hasattr(runtime, "create_session_controller")
     assert not hasattr(runtime, "explain_runtime_config")
+
+
+def test_runtime_uses_compact_module_layout() -> None:
+    removed_modules = {
+        "codepilot.runtime.approvals",
+        "codepilot.runtime.hooks",
+        "codepilot.runtime.live_conversation",
+        "codepilot.runtime.opening",
+        "codepilot.runtime.prompt",
+        "codepilot.runtime.session_controller",
+        "codepilot.runtime.sessions",
+        "codepilot.runtime.subagent_registry",
+        "codepilot.runtime.tool_adapters",
+        "codepilot.runtime.tools",
+        "codepilot.runtime.views",
+    }
+    for module_name in sorted(removed_modules):
+        assert importlib.util.find_spec(module_name) is None, module_name
+
+    required_modules = {
+        "codepilot.runtime.actions",
+        "codepilot.runtime.builder",
+        "codepilot.runtime.coordinator",
+        "codepilot.runtime.registry",
+        "codepilot.runtime.subagents.runner",
+        "codepilot.runtime.subagents.tools",
+    }
+    for module_name in sorted(required_modules):
+        assert importlib.util.find_spec(module_name) is not None, module_name
 
 
 def test_runtime_gateway_public_surface_is_v2_spine_only() -> None:

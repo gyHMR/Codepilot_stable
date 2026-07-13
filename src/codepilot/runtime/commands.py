@@ -22,6 +22,29 @@ from codepilot.sessions.rollback import (
 from codepilot.sessions.memory import MemoryRecord, MemoryWriteContext, render_memory
 from codepilot.sessions.service import new_session_id
 
+from .actions import CommandDescriptor
+
+
+def builtin_commands() -> list[CommandDescriptor]:
+    """Return built-in application commands rendered by interfaces."""
+
+    return [
+        CommandDescriptor(name="help", description="显示可用命令", source="builtin", group="core"),
+        CommandDescriptor(name="status", description="查看模型、工作区、会话、权限和计划摘要", source="builtin", group="core"),
+        CommandDescriptor(name="resume", description="列出历史会话或切换到指定会话", source="builtin", usage="/resume [number|session_id]", group="session"),
+        CommandDescriptor(name="new", description="创建空白新会话并切换", source="builtin", group="session"),
+        CommandDescriptor(name="fork", description="从当前会话复制一份新会话并切换", source="builtin", group="session"),
+        CommandDescriptor(name="mode", description="查看或切换运行模式：read/plan/build", source="builtin", usage="/mode [read|plan|build]", group="workflow"),
+        CommandDescriptor(name="plan", description="查看、批准、拒绝或清除当前计划", source="builtin", usage="/plan [approve|reject|clear]", group="workflow"),
+        CommandDescriptor(name="tools", description="查看当前可用工具", source="builtin", group="workflow"),
+        CommandDescriptor(name="model", description="查看当前模型信息", source="builtin", group="system"),
+        CommandDescriptor(name="usage", description="查看 token 用量和费用", source="builtin", group="system"),
+        CommandDescriptor(name="rollback", description="预览或执行最近一次 run 的 Git 回退", source="builtin", usage="/rollback [apply] [run_id]", group="system"),
+        CommandDescriptor(name="memory", description="查看、添加、提升或删除结构化记忆", source="builtin", usage="/memory [list|search|add|approve|edit|disable|delete]", group="system"),
+        CommandDescriptor(name="context", description="查看最近一次上下文投影治理报告", source="builtin", group="system"),
+        CommandDescriptor(name="exit", description="退出 Codepilot", source="builtin", group="core"),
+    ]
+
 
 def cumulative_usage(session: Any) -> dict[str, Any]:
     total_input = 0
@@ -528,6 +551,24 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
                 output_lines=["No proposed plan to approve."],
                 data={"status": None},
             )
+        pending_revision = before.get("pending_revision") is not None
+        if before.get("status") == "active" and pending_revision:
+            continuation_run_id = session.continuation_run_id()
+            state = session.approve_current_plan_revision()
+            return _record(
+                session_id,
+                text,
+                output_lines=[
+                    "Plan revision approved. Continuing implementation.",
+                    *_format_plan_lines(state),
+                ],
+                data={
+                    "status": state.get("status") if isinstance(state, dict) else None,
+                    "current_mode": session.current_mode,
+                    "continuation_kind": "plan_approved",
+                    "continuation_run_id": continuation_run_id,
+                },
+            )
         if before.get("status") in {"active", "completed"}:
             return _record(
                 session_id,
@@ -548,8 +589,8 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
                 ],
                 data={"status": before.get("status")},
             )
+        continuation_run_id = session.continuation_run_id()
         state = session.approve_current_plan(switch_to_build=True)
-        continuation_run_id = str(before.get("owner_run_id") or "").strip()
         return _record(
             session_id,
             text,
@@ -567,6 +608,27 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
         )
     if action == "reject":
         before = session.current_plan_state()
+        if (
+            isinstance(before, dict)
+            and before.get("status") == "active"
+            and before.get("pending_revision") is not None
+        ):
+            continuation_run_id = session.continuation_run_id()
+            state = session.reject_current_plan_revision()
+            return _record(
+                session_id,
+                text,
+                output_lines=[
+                    "Plan revision rejected. Continuing the approved plan.",
+                    *_format_plan_lines(state),
+                ],
+                data={
+                    "status": state.get("status") if isinstance(state, dict) else None,
+                    "current_mode": session.current_mode,
+                    "continuation_kind": "plan_approved",
+                    "continuation_run_id": continuation_run_id,
+                },
+            )
         if not isinstance(before, dict) or before.get("status") != "proposed":
             return _record(
                 session_id,
@@ -575,7 +637,6 @@ def _plan_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
                 data={"status": before.get("status") if isinstance(before, dict) else None},
             )
         state = session.reject_current_plan()
-        continuation_run_id = str(before.get("owner_run_id") or "").strip()
         return _record(
             session_id,
             text,
@@ -884,8 +945,6 @@ def _rollback_result_to_view(result: GitRollbackResult) -> dict[str, Any]:
 
 
 def _format_help(session: Any) -> str:
-    from codepilot.runtime.views import builtin_commands
-
     commands = [command for command in builtin_commands() if command.visible]
     lines = ["可用命令："]
     for command in commands:
@@ -899,15 +958,16 @@ def _format_help(session: Any) -> str:
 def _format_plan_lines(state: Any) -> list[str]:
     if not isinstance(state, dict):
         return ["No plan."]
+    definition = state.get("definition")
+    definition = definition if isinstance(definition, dict) else {}
     lines = [
         "=== Plan ===",
         f"  Plan ID    : {state.get('plan_id', '')}",
         f"  Status     : {state.get('status', '')}",
-        f"  Mode       : {state.get('origin_mode', '')}",
-        f"  User Input : {state.get('raw_user_request', '')}",
-        f"  Goal       : {state.get('interpreted_goal', '')}",
+        f"  Mode       : {state.get('origin', '')}",
+        f"  Summary    : {definition.get('summary', '')}",
     ]
-    explanation = str(state.get("explanation") or "").strip()
+    explanation = str(definition.get("explanation") or "").strip()
     if explanation:
         lines.append(f"  Note       : {explanation}")
     for label, key in [
@@ -917,18 +977,18 @@ def _format_plan_lines(state: Any) -> list[str]:
         ("Impact", "impact_scope"),
         ("Verification", "verification_plan"),
     ]:
-        value = str(state.get(key) or "").strip()
+        value = str(definition.get(key) or "").strip()
         if value:
             lines.append(f"  {label:<11}: {value}")
-    risks = state.get("risks_and_open_questions")
+    risks = definition.get("risks_and_open_questions")
     if isinstance(risks, list) and risks:
         lines.append("  Risks / questions:")
         lines.extend(f"    - {item}" for item in risks if str(item).strip())
-    criteria = state.get("completion_criteria")
+    criteria = definition.get("completion_criteria")
     if isinstance(criteria, list) and criteria:
         lines.append("  Completion criteria:")
         lines.extend(f"    - {criterion}" for criterion in criteria if str(criterion).strip())
-    items = state.get("items")
+    items = state.get("steps")
     if isinstance(items, list) and items:
         lines.append("  Items:")
         for index, item in enumerate(items, start=1):
@@ -1176,6 +1236,7 @@ __all__ = [
     "add_project_memory",
     "apply_session_command",
     "approve_memory",
+    "builtin_commands",
     "capture_run_rollback_baseline",
     "context_command_view",
     "create_fresh_session",

@@ -43,6 +43,7 @@ def _begin(service: SessionStateService, session_revision: int):
     return service.begin_run(
         BeginRunRequest(
             session_id="session_1",
+            request_id="request_1",
             run_id="run_1",
             message_id="message_user",
             user_message=UserMessage(content="inspect repository"),
@@ -50,6 +51,90 @@ def _begin(service: SessionStateService, session_revision: int):
         ),
         expected_session_revision=session_revision,
     )
+
+
+def test_begin_run_retry_repairs_partial_admission_without_duplicate_message(
+    tmp_path: Path,
+) -> None:
+    service, session = _service(tmp_path)
+    request = BeginRunRequest(
+        session_id="session_1",
+        request_id="request_retry",
+        run_id="run_retry",
+        message_id="message_retry",
+        user_message=UserMessage(content="retry the same prompt"),
+    )
+    original_update = service.repository.update_session
+    failed_once = False
+
+    def fail_after_run_created(state, *, expected_revision):
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise OSError("simulated crash before session update")
+        return original_update(state, expected_revision=expected_revision)
+
+    service.repository.update_session = fail_after_run_created  # type: ignore[method-assign]
+    with pytest.raises(OSError, match="simulated crash"):
+        service.begin_run(request, expected_session_revision=session.revision)
+
+    reopened = SessionStateService(tmp_path)
+    repaired = reopened.begin_run(request, expected_session_revision=session.revision)
+
+    assert repaired.reused is True
+    assert repaired.session.current_run_id == "run_retry"
+    assert repaired.run.request_id == "request_retry"
+    assert len(reopened.load_messages("session_1")) == 1
+
+
+def test_begin_run_rejects_request_id_reuse_with_different_input(tmp_path: Path) -> None:
+    service, session = _service(tmp_path)
+    first = BeginRunRequest(
+        session_id="session_1",
+        request_id="request_same",
+        user_message=UserMessage(content="first"),
+    )
+    service.begin_run(first, expected_session_revision=session.revision)
+
+    with pytest.raises(SessionStateConflictError, match="request_id"):
+        service.begin_run(
+            BeginRunRequest(
+                session_id="session_1",
+                request_id="request_same",
+                user_message=UserMessage(content="different"),
+            ),
+            expected_session_revision=session.revision + 1,
+        )
+
+
+def test_begin_run_blocks_a_new_request_when_an_orphan_active_run_exists(tmp_path: Path) -> None:
+    service, session = _service(tmp_path)
+    original_update = service.repository.update_session
+
+    def fail_session_update(_state, *, expected_revision):
+        raise OSError(f"simulated crash at revision {expected_revision}")
+
+    service.repository.update_session = fail_session_update  # type: ignore[method-assign]
+    with pytest.raises(OSError, match="simulated crash"):
+        service.begin_run(
+            BeginRunRequest(
+                session_id="session_1",
+                request_id="request_orphan",
+                user_message=UserMessage(content="orphan"),
+            ),
+            expected_session_revision=session.revision,
+        )
+    service.repository.update_session = original_update  # type: ignore[method-assign]
+
+    with pytest.raises(SessionStateConflictError, match="orphan active run"):
+        service.begin_run(
+            BeginRunRequest(
+                session_id="session_1",
+                request_id="request_new",
+                user_message=UserMessage(content="new prompt"),
+            ),
+            expected_session_revision=session.revision,
+        )
 
 
 def _start(service: SessionStateService, begun):

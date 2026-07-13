@@ -70,14 +70,6 @@ class PlanTrace:
 
 
 @dataclass(frozen=True)
-class RunGuardTrace:
-    action: str = ""
-    reason: str = ""
-    verification_status: str = ""
-    workspace_changed: bool = False
-
-
-@dataclass(frozen=True)
 class MemoryTrace:
     memory_ids: list[str] = field(default_factory=list)
     action: str = ""
@@ -96,7 +88,6 @@ class RunTrace:
     contexts: list[ContextTrace] = field(default_factory=list)
     tool_calls: list[ToolCallTrace] = field(default_factory=list)
     plans: list[PlanTrace] = field(default_factory=list)
-    run_guards: list[RunGuardTrace] = field(default_factory=list)
     memories: list[MemoryTrace] = field(default_factory=list)
     affected_paths: list[str] = field(default_factory=list)
     workspace_changed: bool = False
@@ -140,7 +131,6 @@ def build_run_trace(
     contexts: list[ContextTrace] = []
     tool_calls: list[ToolCallTrace] = []
     plans: list[PlanTrace] = []
-    run_guards: list[RunGuardTrace] = []
     memories: list[MemoryTrace] = []
     errors: list[dict[str, Any]] = []
     pending_tool_args: dict[str, dict[str, Any]] = {}
@@ -188,8 +178,6 @@ def build_run_trace(
             "plan_abandoned",
         }:
             plans.append(_plan(event))
-        elif event_type == "run_guard_checked":
-            run_guards.append(_run_guard(event))
         elif event_type in {"memory_retrieved", "memory_written"}:
             memories.append(_memory(event))
         elif event_type == "error":
@@ -229,7 +217,6 @@ def build_run_trace(
         contexts=contexts,
         tool_calls=tool_calls,
         plans=plans,
-        run_guards=run_guards,
         memories=memories,
         affected_paths=affected,
         workspace_changed=workspace_changed,
@@ -361,10 +348,6 @@ def load_run_trace(path: str | Path) -> RunTrace:
             PlanTrace(**item)
             for item in _list_of_dicts(payload.get("plans"))
         ],
-        run_guards=[
-            RunGuardTrace(**item)
-            for item in _list_of_dicts(payload.get("run_guards"))
-        ],
         memories=[
             MemoryTrace(**item)
             for item in _list_of_dicts(payload.get("memories"))
@@ -480,15 +463,6 @@ def _plan(event: dict[str, Any]) -> PlanTrace:
     )
 
 
-def _run_guard(event: dict[str, Any]) -> RunGuardTrace:
-    return RunGuardTrace(
-        action=str(event.get("action", "")),
-        reason=str(event.get("reason", "")),
-        verification_status=str(event.get("verification_status", "")),
-        workspace_changed=bool(event.get("workspace_changed", False)),
-    )
-
-
 def _memory(event: dict[str, Any]) -> MemoryTrace:
     return MemoryTrace(
         memory_ids=[
@@ -595,7 +569,6 @@ __all__ = [
     "ModelCallTrace",
     "RunTrace",
     "PlanTrace",
-    "RunGuardTrace",
     "ToolCallTrace",
     "build_run_trace",
     "load_audit_bundle",

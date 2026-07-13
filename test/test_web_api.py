@@ -136,9 +136,14 @@ def test_static_assets_and_spa_fallback(tmp_path) -> None:
     (frontend / "assets").mkdir(parents=True)
     (frontend / "index.html").write_text("<html>web deck</html>", encoding="utf-8")
     (frontend / "assets" / "app.js").write_text("console.log('ok')", encoding="utf-8")
+    (frontend / "assets" / "app.css").write_text("body {}", encoding="utf-8")
     app = create_app(workspace=tmp_path, runtime=ApiGateway(), frontend_dir=frontend)
 
     with TestClient(app) as client:
-        assert client.get("/assets/app.js").status_code == 200
+        script = client.get("/assets/app.js")
+        stylesheet = client.get("/assets/app.css")
+        assert script.status_code == 200
+        assert script.headers["content-type"].startswith("text/javascript")
+        assert stylesheet.headers["content-type"].startswith("text/css")
         assert "web deck" in client.get("/sessions/s1").text
         assert client.get("/api/missing").status_code == 404

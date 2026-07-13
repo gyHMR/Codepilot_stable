@@ -21,7 +21,7 @@ from codepilot.interfaces.cli.render import (
     SimpleRenderer,
 )
 from codepilot.interfaces.cli.render import CliStartupState, build_startup_state
-from codepilot.runtime.views import SessionStatus
+from codepilot.runtime.actions import SessionStatus
 from codepilot.sessions.contracts import SessionCommandRecord
 from codepilot.protocols import AssistantMessage, LLMErrorInfo, TextContent, Usage, Cost
 

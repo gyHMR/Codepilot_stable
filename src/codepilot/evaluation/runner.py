@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from codepilot.core.contracts import (
+from codepilot.sessions.contracts import (
     AgentContext,
     ContextPreparationRequest,
     PreparedAgentContext,

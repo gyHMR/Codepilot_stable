@@ -3,11 +3,11 @@ from __future__ import annotations
 """Runtime gateway: receive interface actions and stream runtime frames."""
 
 import asyncio
-from collections.abc import AsyncIterator
-from typing import Any
+from collections.abc import AsyncIterator, Awaitable
+from typing import Any, TypeVar
 from typing import TYPE_CHECKING
 
-from codepilot.core.contracts import AgentLoopOutcome
+from codepilot.core.contracts import CoreOutcome, CoreReason
 from codepilot.sessions.contracts import (
     PreparedAgentRun,
     SessionCommandRecord,
@@ -18,12 +18,13 @@ from codepilot.sessions.contracts import (
     SessionRunRecord,
     SessionView,
 )
-from codepilot.runtime.session_controller import SessionController
-
 from .actions import (
+    AppSessionView,
     ApprovalDecided,
     ApprovalRequiredFrame,
+    ApprovalView,
     CancelledFrame,
+    CommandDescriptor,
     CommandFinishedFrame,
     CommandSubmitted,
     FailedFrame,
@@ -33,20 +34,23 @@ from .actions import (
     RunFinishedFrame,
     RunPausedFrame,
     RuntimeFrame,
+    SessionOpenIntent,
+    SessionRef,
+    SessionStatus,
     UserAction,
 )
-from .approvals import ApprovalView
 from .builder import build_runtime_session
-from .opening import AppSessionView, SessionRef
-from .sessions import ActiveRunRegistry, RuntimeSession, RuntimeSessionRegistry
-from .views import CommandDescriptor, SessionStatus, builtin_commands
+from .commands import builtin_commands
+from .coordinator import SessionController
+from .contracts import external_stop_reason, terminal_outcome_for_status
+from .registry import ActiveRunRegistry, RuntimeSession, RuntimeSessionRegistry
 from .executor import RunExecutionCompleted, RunExecutionEvent
-
-if TYPE_CHECKING:
-    from .opening import SessionOpenIntent
-
+from .errors import runtime_error_payload
 
 __all__ = ["RuntimeGateway"]
+
+
+T = TypeVar("T")
 
 
 class RuntimeGateway:
@@ -63,6 +67,7 @@ class RuntimeGateway:
         self._tool_port = tool_port
         self._active_runs = ActiveRunRegistry()
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     def open_session(self, intent: "SessionOpenIntent") -> SessionRef:
         session = build_runtime_session(intent)
@@ -99,7 +104,7 @@ class RuntimeGateway:
                 async for frame in self._dispatch_action(session, action):
                     yield frame
             except Exception as exc:
-                yield FailedFrame(error=_runtime_error_payload(exc))
+                yield FailedFrame(error=runtime_error_payload(exc))
 
     async def _dispatch_action(
         self,
@@ -203,6 +208,7 @@ class RuntimeGateway:
         )
 
     def close(self, session_id: str) -> None:
+        active_scope = self._active_runs.resources(session_id)
         active_run_id = self._active_runs.cancel(session_id, "session_closed")
         closed = self._sessions.close(session_id)
         if (
@@ -213,7 +219,7 @@ class RuntimeGateway:
                 for item in self._sessions.values()
             )
         ):
-            _schedule_close(closed.mcp_manager)
+            self._schedule_manager_close(closed.mcp_manager, after=active_scope)
         if active_run_id is None or not self._active_runs.has_active_tasks(session_id):
             self._active_runs.finish(session_id)
         self._session_locks.pop(session_id, None)
@@ -221,7 +227,13 @@ class RuntimeGateway:
     async def close_all(self) -> None:
         scopes = self._active_runs.cancel_all()
         if scopes:
-            await asyncio.gather(*(scope.release() for scope in scopes))
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(scope.wait_released() for scope in scopes)),
+                    timeout=5,
+                )
+            except asyncio.TimeoutError:
+                await asyncio.gather(*(scope.release() for scope in scopes))
             self._active_runs.clear()
         managers = {
             id(session.mcp_manager): session.mcp_manager
@@ -234,7 +246,29 @@ class RuntimeGateway:
                 *(manager.aclose() for manager in managers.values()),
                 return_exceptions=True,
             )
+        if self._background_tasks:
+            await asyncio.gather(*tuple(self._background_tasks), return_exceptions=True)
         self._session_locks.clear()
+
+    def _schedule_manager_close(
+        self,
+        manager: object,
+        *,
+        after: object | None = None,
+    ) -> None:
+        async def close() -> None:
+            if after is not None:
+                await after.wait_released()
+            await manager.aclose()
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(close())
+            return
+        task = loop.create_task(close(), name="runtime-manager-close")
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def _require_session(self, session_id: str) -> SessionController:
         return self._sessions.require(session_id).controller
@@ -247,12 +281,14 @@ class RuntimeGateway:
         prepared = await session.controller.runs.prepare(
             SessionRunIntent(
                 text=action.text,
+                request_id=action.request_id,
                 images=action.images,
                 mode_hint=action.mode_hint,
             ),
             model=session.controller.model,
+            tools=session.tool_port or self._tool_port,
         )
-        async for frame in self._run_agent_loop(
+        async for frame in self._execute_prepared_run(
             session,
             prepared,
         ):
@@ -309,8 +345,9 @@ class RuntimeGateway:
         prepared = await session.controller.runs.prepare(
             intent,
             model=session.controller.model,
+            tools=session.tool_port or self._tool_port,
         )
-        async for frame in self._run_agent_loop(session, prepared):
+        async for frame in self._execute_prepared_run(session, prepared):
             yield frame
 
     async def _resume_after_approval(
@@ -350,8 +387,9 @@ class RuntimeGateway:
                 run_id=challenge.run_id,
             ),
             model=session.controller.model,
+            tools=tool_port,
         )
-        async for frame in self._run_agent_loop(
+        async for frame in self._execute_prepared_run(
             session,
             prepared,
         ):
@@ -365,7 +403,7 @@ class RuntimeGateway:
             reason=action.reason,
         )
 
-    async def _run_agent_loop(
+    async def _execute_prepared_run(
         self,
         session: RuntimeSession,
         prepared: PreparedAgentRun,
@@ -380,59 +418,142 @@ class RuntimeGateway:
             prepared.run_id,
             environment.resources,
         )
-        outcome: AgentLoopOutcome | None = None
+        outcome: CoreOutcome | None = None
+        outcome_events: tuple[dict[str, object], ...] = ()
+        released = False
+        lifecycle = environment.lifecycle
+        if lifecycle is None:  # pragma: no cover - RunEnvironment guarantees it
+            raise RuntimeError("RunEnvironment lifecycle is required")
         try:
-            async for update in session.controller.runs.execute(environment, prepared):
-                if isinstance(update, RunExecutionEvent):
-                    yield ProgressFrame(event=update.event)
-                elif isinstance(update, RunExecutionCompleted):
-                    outcome = update.outcome
-        finally:
+            try:
+                async for update in session.controller.runs.execute(environment, prepared):
+                    if isinstance(update, RunExecutionEvent):
+                        yield ProgressFrame(event=update.event)
+                    elif isinstance(update, RunExecutionCompleted):
+                        outcome = update.outcome
+                        outcome_events = update.events
+            except asyncio.CancelledError:
+                environment.resources.cancel("runtime_stream_cancelled")
+                lifecycle.transition("cancelling")
+                await environment.resources.quiesce()
+                cancelled = CoreOutcome(
+                    status="cancelled",
+                    reason=CoreReason(
+                        "runtime.stream_cancelled",
+                        message="Runtime stream consumer cancelled",
+                        source="runtime",
+                    ),
+                    state=prepared.loop_input.state,
+                    error={
+                        "code": "runtime.cancelled",
+                        "message": "Runtime stream consumer cancelled",
+                    },
+                )
+                lifecycle.transition("finalizing")
+                try:
+                    await asyncio.shield(
+                        session.controller.runs.commit(
+                            prepared,
+                            cancelled,
+                            events=outcome_events,
+                        )
+                    )
+                except Exception:
+                    lifecycle.transition("terminal", terminal_outcome="failed")
+                    raise
+                lifecycle.transition("terminal", terminal_outcome="cancelled")
+                await asyncio.shield(environment.resources.release())
+                lifecycle.mark_released()
+                released = True
+                self._active_runs.finish(session.session_id, run_id=prepared.run_id)
+                raise
+
+            if outcome is None:
+                return
+
+            waiting = outcome.status == "waiting"
+            environment.resources.seal_cancellation()
+            if not waiting:
+                lifecycle.transition("finalizing")
+            stream_cancellation: asyncio.CancelledError | None = None
+            try:
+                record, stream_cancellation = await _complete_critical(
+                    session.controller.runs.commit(
+                        prepared,
+                        outcome,
+                        events=outcome_events,
+                    )
+                )
+            except Exception as exc:
+                if lifecycle.state == "executing":
+                    lifecycle.transition("finalizing")
+                lifecycle.transition("terminal", terminal_outcome="failed")
+                yield FailedFrame(error=runtime_error_payload(exc))
+                return
+
+            if waiting:
+                lifecycle.transition("waiting")
+            else:
+                lifecycle.transition(
+                    "terminal",
+                    terminal_outcome=terminal_outcome_for_status(outcome.status),
+                )
+
+            _, release_cancellation = await _complete_critical(
+                environment.resources.release()
+            )
+            stream_cancellation = stream_cancellation or release_cancellation
+            lifecycle.mark_released()
+            released = True
             self._active_runs.finish(session.session_id, run_id=prepared.run_id)
 
-        if outcome is None:
-            return
+            if stream_cancellation is not None:
+                raise stream_cancellation
 
-        try:
-            record = await session.controller.runs.commit(prepared, outcome)
-        except Exception as exc:
-            yield FailedFrame(error=_runtime_error_payload(exc))
-            return
-        if outcome.status == "failed":
-            yield FailedFrame(error=_runtime_error_payload(outcome.error))
-            return
-
-        async for frame in self._frames_from_outcome(session.controller, outcome, record):
-            yield frame
+            async for frame in self._frames_from_outcome(session, outcome, record):
+                yield frame
+        finally:
+            cleanup_cancellation: asyncio.CancelledError | None = None
+            if not released:
+                _, cleanup_cancellation = await _complete_critical(
+                    environment.resources.release()
+                )
+                if lifecycle.state in {"terminal", "waiting"}:
+                    lifecycle.mark_released()
+            self._active_runs.finish(session.session_id, run_id=prepared.run_id)
+            if cleanup_cancellation is not None:
+                raise cleanup_cancellation
 
     async def _frames_from_outcome(
         self,
-        controller: SessionController,
-        outcome: AgentLoopOutcome,
+        session: RuntimeSession,
+        outcome: CoreOutcome,
         record: SessionRunRecord,
     ) -> AsyncIterator[RuntimeFrame]:
-        if outcome.status == "waiting_approval":
-            for interruption in outcome.interruptions:
-                yield ApprovalRequiredFrame(approval=interruption)
-            yield RunPausedFrame(
-                record=record,
-                checkpoint=controller.runtime_checkpoint() or {},
-            )
-            return
-        if outcome.status == "waiting_user":
+        controller = session.controller
+        if outcome.status == "waiting" and outcome.wait is not None:
+            if outcome.wait.kind == "tool_approval":
+                tool_port = session.tool_port or self._tool_port
+                challenge = (
+                    tool_port.approval_challenge(outcome.wait.request_id)
+                    if tool_port is not None
+                    else None
+                )
+                if challenge is not None:
+                    yield ApprovalRequiredFrame(approval=challenge)
             yield RunPausedFrame(
                 record=record,
                 checkpoint=controller.runtime_checkpoint() or {},
             )
             return
         if outcome.status == "failed":
-            yield FailedFrame(error=_runtime_error_payload(outcome.error))
+            yield FailedFrame(error=runtime_error_payload(outcome.error))
             return
         if outcome.status == "cancelled":
             yield CancelledFrame(
                 session_id=controller.session_id,
                 cancelled=True,
-                reason=outcome.stop_reason,
+                reason=external_stop_reason(outcome.reason),
             )
             return
         yield RunFinishedFrame(record=record)
@@ -557,16 +678,16 @@ def _optional_text(value: object) -> str | None:
     return text or None
 
 
-def _schedule_close(manager: object) -> None:
-    async def close() -> None:
-        await manager.aclose()
+async def _complete_critical(
+    awaitable: Awaitable[T],
+) -> tuple[T, asyncio.CancelledError | None]:
+    """Finish a commit or release before propagating transport cancellation."""
 
+    task = asyncio.ensure_future(awaitable)
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        asyncio.run(close())
-    else:
-        loop.create_task(close())
+        return await asyncio.shield(task), None
+    except asyncio.CancelledError as exc:
+        return await asyncio.shield(task), exc
 
 
 def _is_plan_wait_checkpoint(checkpoint: object) -> bool:
@@ -604,30 +725,3 @@ def _normalize_plan_command_text(text: str) -> str:
 def _plan_summary_from_view(view: SessionView) -> dict[str, object] | None:
     value = (view.context or {}).get("plan_summary")
     return dict(value) if isinstance(value, dict) else None
-
-
-def _runtime_error_payload(error: Any) -> dict[str, Any]:
-    if isinstance(error, dict):
-        code = error.get("code")
-        message = error.get("message")
-        details = error.get("details")
-        return {
-            "code": code if isinstance(code, str) and code else "runtime.dispatch_failed",
-            "message": message if isinstance(message, str) and message else "Runtime dispatch failed",
-            "details": details if isinstance(details, dict) else {},
-        }
-    message = str(error)
-    details: dict[str, Any] = {}
-    error_info = getattr(error, "error", None)
-    if error_info is not None:
-        message = getattr(error_info, "message", message)
-        details["cause_code"] = getattr(error_info, "code", "")
-    if hasattr(error, "run_id"):
-        details["run_id"] = getattr(error, "run_id")
-    if hasattr(error, "status"):
-        details["status"] = getattr(error, "status")
-    return {
-        "code": "runtime.dispatch_failed",
-        "message": message,
-        "details": details,
-    }

@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
-from codepilot.core.contracts import CoreRunBoundary, RunStatePort
+from codepilot.core.contracts import CoreBoundary
+from codepilot.runtime.contracts import project_core_domain_event
 from codepilot.sessions.contracts import (
     ComponentCheckpoint,
     RunState,
@@ -14,7 +15,7 @@ from codepilot.sessions.contracts import (
 from codepilot.sessions.service import CommitRunBoundaryRequest, SessionStateService
 
 
-class RuntimeSessionStateAdapter(RunStatePort):
+class RuntimeSessionStateAdapter:
     """Map Core execution boundaries to authoritative Sessions v2 commits."""
 
     def __init__(
@@ -22,18 +23,28 @@ class RuntimeSessionStateAdapter(RunStatePort):
         service: SessionStateService,
         session: SessionState,
         run: RunState,
+        tool_state: Callable[[], dict[str, object] | None] | None = None,
         context_state: Callable[[], dict[str, object]] | None = None,
-        plan_state: Callable[[], dict[str, object] | None] | None = None,
-        workspace_state: Callable[[dict[str, object]], WorkspaceCheckpoint] | None = None,
+        workspace_state: (
+            Callable[[dict[str, object]], WorkspaceCheckpoint] | None
+        ) = None,
     ) -> None:
         self.service = service
         self.session = session
         self.run = run
+        self.tool_state = tool_state
         self.context_state = context_state
-        self.plan_state = plan_state
         self.workspace_state = workspace_state
         self.committed_message_ids: dict[int, str] = {}
         self._pending_events: list[dict[str, object]] = []
+
+    def bind_tool_state(
+        self,
+        tool_state: Callable[[], dict[str, object] | None] | None,
+    ) -> None:
+        """Bind the Runtime-owned Tool checkpoint reader for target boundaries."""
+
+        self.tool_state = tool_state
 
     def queue_durable_event(self, event: dict[str, object]) -> None:
         """Queue a run event until the next authoritative boundary commit."""
@@ -47,24 +58,41 @@ class RuntimeSessionStateAdapter(RunStatePort):
         payload.setdefault("session_id", self.session.session_id)
         self._pending_events.append(payload)
 
-    async def commit(self, boundary: CoreRunBoundary) -> None:
-        _, phase, resume_point = _boundary_state(boundary.kind)
+    async def commit(self, boundary: CoreBoundary) -> None:
+        _, phase, resume_point = _target_boundary_state(boundary)
+        wait = boundary.wait
+        core_state = boundary.state.to_dict()
+        new_messages = boundary.new_messages
+        durable_events = tuple(
+            project_core_domain_event(
+                event,
+                event_id=(
+                    f"{self.run.run_id}:core:{self.run.revision}:"
+                    f"{index + len(self._pending_events)}"
+                ),
+                run_id=self.run.run_id,
+                session_id=self.session.session_id,
+            )
+            for index, event in enumerate(boundary.domain_events, start=1)
+        )
+        tool_checkpoint = self.tool_state() if self.tool_state is not None else None
+        commit_kind = "waiting" if boundary.kind == "waiting" else "progress"
         waiting = (
             WaitingState(
-                kind=boundary.waiting.kind,
-                request_id=boundary.waiting.request_id,
-                payload=boundary.waiting.payload,
+                kind=wait.kind,
+                request_id=wait.request_id,
+                payload=dict(wait.payload),
             )
-            if boundary.waiting is not None
+            if wait is not None
             else None
         )
         components: list[ComponentCheckpoint] = []
-        if boundary.tool_recovery_state is not None:
+        if tool_checkpoint is not None:
             components.append(
                 ComponentCheckpoint(
                     owner="tools",
                     schema_version=1,
-                    state=boundary.tool_recovery_state,
+                    state=tool_checkpoint,
                 )
             )
         if self.context_state is not None:
@@ -75,12 +103,14 @@ class RuntimeSessionStateAdapter(RunStatePort):
                     state=self.context_state(),
                 )
             )
-        core_state = dict(boundary.core_state)
-        if self.plan_state is not None:
-            current_plan = self.plan_state()
-            if current_plan is not None:
-                core_state["plan_state"] = current_plan
-        commit_kind = "waiting" if boundary.kind.startswith("waiting_") else "progress"
+        existing_owners = {component.owner for component in components}
+        if self.run.checkpoint is not None:
+            components.extend(
+                component
+                for component in self.run.checkpoint.components
+                if component.owner == "rollback"
+                and component.owner not in existing_owners
+            )
         request = CommitRunBoundaryRequest(
             commit_id=f"{self.run.run_id}:{commit_kind}:{self.run.revision}",
             kind=commit_kind,
@@ -91,8 +121,8 @@ class RuntimeSessionStateAdapter(RunStatePort):
             phase=phase,
             resume_point=resume_point,
             core_state=core_state,
-            new_messages=boundary.new_messages,
-            durable_events=tuple([*self._pending_events, *boundary.durable_events]),
+            new_messages=new_messages,
+            durable_events=tuple([*self._pending_events, *durable_events]),
             waiting=waiting,
             components=tuple(components),
             workspace=(
@@ -112,25 +142,30 @@ class RuntimeSessionStateAdapter(RunStatePort):
         self.session = result.session
         self.run = result.run
         self._pending_events.clear()
-        for message, record in zip(boundary.new_messages, result.committed_messages, strict=True):
+        for message, record in zip(
+            new_messages, result.committed_messages, strict=True
+        ):
             self.committed_message_ids[id(message)] = record.message_id
 
 
-def _boundary_state(kind: str) -> tuple[str, str, str]:
+def _target_boundary_state(boundary: CoreBoundary) -> tuple[str, str, str]:
+    if boundary.kind == "waiting":
+        if boundary.wait is None:  # pragma: no cover - CoreBoundary validates this
+            raise ValueError("Waiting Core boundary requires wait")
+        if boundary.wait.kind == "tool_approval":
+            return "waiting", "tools", "before_tools"
+        return "waiting", "model", "after_model"
     mapping = {
         "before_model": ("running", "model", "before_model"),
         "after_model": ("running", "model", "after_model"),
         "before_tools": ("running", "tools", "before_tools"),
         "after_tools": ("running", "tools", "after_tools"),
-        "waiting_tool_approval": ("waiting", "tools", "before_tools"),
-        "waiting_user_input": ("waiting", "model", "after_model"),
-        "waiting_plan_confirmation": ("waiting", "model", "after_model"),
-        "before_finalization": ("running", "finalizing", "before_finalization"),
+        "before_terminal": ("running", "finalizing", "before_finalization"),
     }
     try:
-        return mapping[kind]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported Core boundary: {kind}") from exc
+        return mapping[boundary.kind]
+    except KeyError as exc:  # pragma: no cover - CoreBoundary validates this
+        raise ValueError(f"Unsupported Core boundary: {boundary.kind}") from exc
 
 
 __all__ = ["RuntimeSessionStateAdapter"]

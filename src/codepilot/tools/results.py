@@ -425,6 +425,15 @@ def to_tool_result_message(result: ToolResult) -> ToolResultMessage:
         metadata["timing"] = timing
     effects = tuple(result.effects)
     affected_paths, workspace_changed = workspace_effect_summary(effects)
+    verification_value = result.data.get("verification")
+    verification = (
+        {
+            str(key): _plain_json(value)
+            for key, value in verification_value.items()
+        }
+        if isinstance(verification_value, Mapping)
+        else None
+    )
     return ToolResultMessage(
         tool_call_id=result.tool_call_id,
         tool_name=result.tool_name,
@@ -440,6 +449,7 @@ def to_tool_result_message(result: ToolResult) -> ToolResultMessage:
         exit_code=_optional_int(result.data.get("exit_code")),
         affected_paths=list(affected_paths),
         workspace_changed=workspace_changed,
+        verification=verification,
         details=_plain_json(result.error.details) if result.error is not None else None,
         metadata=metadata,
     )

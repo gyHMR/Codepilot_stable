@@ -9,7 +9,7 @@ def test_restricted_tool_port_only_exposes_and_executes_read_allowlist(tmp_path)
         from codepilot.tools.builtins import create_builtin_registrations
         from codepilot.tools.contracts import ToolExecutionRequest
         from codepilot.tools.registry import ToolRegistry
-        from codepilot.runtime.tool_adapters.subagents import RestrictedToolPort
+        from codepilot.runtime.subagents.tools import RestrictedToolPort
         from codepilot.tools.runtime import ToolRuntime
 
         (tmp_path / "sample.py").write_text("value = 1\n", encoding="utf-8", newline="\n")
@@ -65,7 +65,7 @@ def test_plan_policy_prioritizes_subagents_for_broad_repository_analysis() -> No
 
 
 def test_exploration_tool_descriptions_explain_preferred_and_reuse_behavior(tmp_path) -> None:
-    from codepilot.runtime.tool_adapters.subagents import create_subagent_registrations
+    from codepilot.runtime.subagents.tools import create_subagent_registrations
 
     tools = {
         tool.spec.name: tool
@@ -90,7 +90,7 @@ def test_list_exploration_agents_empty_result_points_to_dispatch(tmp_path) -> No
     async def run_case() -> None:
         from types import SimpleNamespace
 
-        from codepilot.runtime.tool_adapters.subagents import create_subagent_registrations
+        from codepilot.runtime.subagents.tools import create_subagent_registrations
         from codepilot.tools.contracts import ToolExecutionRequest
         from codepilot.tools.registry import ToolRegistry
         from codepilot.tools.runtime import ToolRuntime
@@ -163,7 +163,7 @@ def test_plan_approved_continuation_executes_existing_plan_without_replanning() 
 
 
 def test_subagent_registry_keeps_process_local_reports_and_marks_stale(tmp_path) -> None:
-    from codepilot.runtime.subagent_registry import SubagentStore
+    from codepilot.runtime.subagents.runner import SubagentStore
 
     source = tmp_path / "src" / "app.py"
     source.parent.mkdir()
@@ -203,8 +203,7 @@ def test_subagent_registry_keeps_process_local_reports_and_marks_stale(tmp_path)
 def test_exploration_coordinator_returns_partial_results_and_skips_duplicates(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.llm.ports import ModelDescriptor
-        from codepilot.runtime.subagents import ExplorationCoordinator
-        from codepilot.runtime.subagent_registry import SubagentStore
+        from codepilot.runtime.subagents.runner import ExplorationCoordinator, SubagentStore
 
         class FakeRunner:
             async def run(self, task, *, peer_assignments, previous_report=None):
@@ -356,8 +355,6 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
                                 id="plan1",
                                 name="propose_plan",
                                 arguments={
-                                    "raw_user_request": "完善 src/app.py，给我一个方案",
-                                    "interpreted_goal": "完善 src/app.py 的实现并完成验证。",
                                     "task_understanding": "用户希望先审批完善 src/app.py 的方案。",
                                     "current_implementation": "探索报告已定位 src/app.py 的当前实现。",
                                     "target_design": "按探索结果完善 src/app.py 的实现。",
@@ -423,11 +420,14 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
         ]
         assert completed_plan_events
         assert completed_plan_events[0]["result"]["data"]["plan_operation"] == "propose_plan"
-        assert completed_plan_events[0]["result"]["data"]["plan_state"]["status"] == "proposed"
+        assert completed_plan_events[0]["result"]["data"]["core_command"]["kind"] == "submit_plan"
 
         assert paused
         assert paused[-1].record.stop_reason == "plan_approval_required"
-        assert session.plan_state.current()["interpreted_goal"] == "完善 src/app.py 的实现并完成验证。"
+        current_plan = session.current_plan_state()
+        assert current_plan is not None
+        assert current_plan["status"] == "proposed"
+        assert current_plan["definition"]["summary"] == "Use exploration evidence to edit src/app.py."
         dispatch_data = next(
             frame.event["result"]["data"]
             for frame in frames

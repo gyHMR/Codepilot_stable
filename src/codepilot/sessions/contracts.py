@@ -37,18 +37,26 @@ import json
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal, Mapping, Optional
+from uuid import uuid4
 
 from codepilot.core.contracts import (
-    AgentMessage,
-    AgentLoopInput,
-    AgentLoopOutcome,
+    BoundaryPort,
+    CoreOutcome,
+    CoreRunInput,
     ContextPort,
-    PrepareContextFn,
-    RunStatePort,
 )
-from codepilot.core.plan import PlanningBudgetProfile, RunMode
+from codepilot.core.plan import PlanningBudgetProfile, RunMode, ensure_run_mode
 from codepilot.llm.provider_types import ProviderSimpleStreamFn
-from codepilot.protocols import AgentEvent, AgentRunStatus, Message
+from codepilot.protocols import (
+    AgentEvent,
+    AgentRunStatus,
+    AssistantMessage,
+    ContextReport,
+    Message,
+    Tool,
+    ToolResultMessage,
+    UserMessage,
+)
 from codepilot.protocols import Model
 from codepilot.protocols.commands import LifecycleHook, RegisteredCommand
 
@@ -116,7 +124,7 @@ WaitingKind = Literal["tool_approval", "user_input", "plan_confirmation"]
 # CheckpointOwner: 检查点所有者
 #   - tools:   工具子系统
 #   - context: 上下文子系统
-CheckpointOwner = Literal["tools", "context"]
+CheckpointOwner = Literal["tools", "context", "rollback"]
 
 # RecoveryStatus: 恢复状态
 #   - ready:             准备就绪，可以直接恢复
@@ -140,7 +148,7 @@ _RESUME_POINTS = frozenset(
     {"before_model", "after_model", "before_tools", "after_tools", "before_finalization"}
 )
 _WAITING_KINDS = frozenset({"tool_approval", "user_input", "plan_confirmation"})
-_CHECKPOINT_OWNERS = frozenset({"tools", "context"})
+_CHECKPOINT_OWNERS = frozenset({"tools", "context", "rollback"})
 _RECOVERY_STATUSES = frozenset({"ready", "needs_validation", "blocked", "not_found"})
 _WORKSPACE_RECOVERY_STATUSES = frozenset({"unchanged", "changed", "missing", "unknown"})
 
@@ -284,10 +292,10 @@ class WaitingState:
 
 @dataclass(frozen=True)
 class ComponentCheckpoint:
-    """组件检查点 —— 子系统（tools/context）在检查点时的状态快照。
+    """组件检查点 —— 子系统在检查点时的状态快照。
 
     参数:
-        owner: 组件所有者（"tools" 或 "context"）
+        owner: 组件所有者（"tools"、"context" 或 "rollback"）
         schema_version: 组件状态的 Schema 版本
         state: 组件状态数据（JSON 可序列化）
     """
@@ -477,6 +485,8 @@ class RunState:
     phase: RunPhase
     input_message_id: str
     core_state: dict[str, object]
+    request_id: str | None = None
+    request_digest: str | None = None
     workspace_effects: WorkspaceEffectsSnapshot = field(default_factory=WorkspaceEffectsSnapshot)
     stop_reason: str | None = None
     latest_message_id: str | None = None
@@ -509,6 +519,8 @@ class RunState:
             _require_text(self.input_message_id, "input_message_id"),
         )
         object.__setattr__(self, "core_state", _serializable_mapping(self.core_state, "core_state"))
+        object.__setattr__(self, "request_id", _optional_text(self.request_id))
+        object.__setattr__(self, "request_digest", _optional_text(self.request_digest))
         object.__setattr__(self, "stop_reason", _optional_text(self.stop_reason))
         object.__setattr__(self, "latest_message_id", _optional_text(self.latest_message_id))
         object.__setattr__(self, "result_ref", _optional_text(self.result_ref))
@@ -745,7 +757,56 @@ def validate_run_transition(previous: RunState, current: RunState) -> None:
 # ── 意图类型（会话层接收的外部请求） ──────────────────────────────────────────
 
 
-ConvertToLlmFn = Callable[[list[AgentMessage]], list[Message] | Awaitable[list[Message]]]
+@dataclass
+class AgentContext:
+    """Sessions-owned model context before projection and compression."""
+
+    system_prompt: str
+    messages: list[Message]
+    tools: list[Tool] = field(default_factory=list)
+    mode: RunMode = "build"
+    plan_state: dict[str, object] | None = None
+    run_signals: dict[str, object] | None = None
+    runtime_state: dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        self.system_prompt = str(self.system_prompt or "")
+        self.messages = list(self.messages)
+        if any(
+            not isinstance(message, (UserMessage, AssistantMessage, ToolResultMessage))
+            for message in self.messages
+        ):
+            raise TypeError("AgentContext messages must contain Message values")
+        self.tools = list(self.tools)
+        if any(not isinstance(tool, Tool) for tool in self.tools):
+            raise TypeError("AgentContext tools must contain Tool values")
+        self.mode = ensure_run_mode(self.mode)
+        self.plan_state = _optional_mapping_copy(self.plan_state, "plan_state")
+        self.run_signals = _optional_mapping_copy(self.run_signals, "run_signals")
+        self.runtime_state = _optional_mapping_copy(self.runtime_state, "runtime_state")
+
+
+@dataclass(frozen=True)
+class ContextPreparationRequest:
+    session_id: str | None
+    model_context_window: int
+    model_max_output_tokens: int
+    signal: Any | None = None
+
+
+@dataclass
+class PreparedAgentContext:
+    system_prompt: str
+    messages: list[Message]
+    tools: list[Tool]
+    report: ContextReport
+
+
+PrepareContextFn = Callable[
+    [AgentContext, ContextPreparationRequest],
+    PreparedAgentContext | Awaitable[PreparedAgentContext],
+]
+ConvertToLlmFn = Callable[[list[Message]], list[Message] | Awaitable[list[Message]]]
 SystemPromptBuilder = Callable[[RunMode], str]
 SessionContinuationKind = Literal[
     "plan_approved",
@@ -801,7 +862,7 @@ class SessionOptions:
     system_prompt: str = ""
     system_prompt_builder: Optional[SystemPromptBuilder] = None
     session_id: Optional[str] = None
-    messages: list[AgentMessage] = field(default_factory=list)
+    messages: list[Message] = field(default_factory=list)
     thinking_level: str = "off"
     max_tool_calls_per_turn: int = 16
     memory_enabled: bool = True
@@ -831,12 +892,15 @@ class SessionRunIntent:
         run_id: 运行 ID（可选，不提供则自动生成）
     """
     text: str
+    request_id: str = field(default_factory=lambda: f"request_{uuid4().hex}")
     images: tuple[str, ...] = ()
     mode_hint: str | None = None
     run_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "text", _require_text(self.text, "run text"))
+        object.__setattr__(self, "request_id", _require_text(self.request_id, "request_id"))
+        object.__setattr__(self, "images", _text_tuple(self.images, "run images"))
         object.__setattr__(self, "mode_hint", _optional_text(self.mode_hint))
         object.__setattr__(self, "run_id", _optional_text(self.run_id))
 
@@ -1007,9 +1071,9 @@ class PreparedAgentRun:
     """
     run_id: str
     session_id: str
-    loop_input: AgentLoopInput
+    loop_input: CoreRunInput
     context_port: ContextPort | None = None
-    state_port: RunStatePort | None = None
+    state_port: BoundaryPort | None = None
     input_messages: list[Message] = field(default_factory=list)
     rollback_baseline: RollbackBaselineRef | None = None
     context_refs: dict[str, Any] = field(default_factory=dict)
@@ -1039,7 +1103,7 @@ class SessionRunRecord:
     new_messages: list[Message] = field(default_factory=list)
     final_text: str = ""
     events: list[AgentEvent] = field(default_factory=list)
-    outcome: AgentLoopOutcome | None = None
+    outcome: CoreOutcome | None = None
     snapshots: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1126,17 +1190,30 @@ def _serializable_mapping(value: object, field_name: str) -> dict[str, object]:
     return result
 
 
+def _optional_mapping_copy(
+    value: Mapping[str, object] | None,
+    field_name: str,
+) -> dict[str, object] | None:
+    if value is None:
+        return None
+    return _serializable_mapping(value, field_name)
+
+
 __all__ = [
+    "AgentContext",
     "CHECKPOINT_SCHEMA_VERSION",
     "CancelRunIntent",
     "CheckpointOwner",
     "ComponentCheckpoint",
+    "ContextPreparationRequest",
     "ConvertToLlmFn",
     "MESSAGE_RECORD_SCHEMA_VERSION",
     "MessageCursor",
     "MessageRecord",
     "ModelRef",
     "PreparedAgentRun",
+    "PreparedAgentContext",
+    "PrepareContextFn",
     "RUN_STATE_SCHEMA_VERSION",
     "RecoveryBundle",
     "RecoveryIssue",

@@ -73,7 +73,6 @@ def build_run_report(
         "tool_calls": [asdict(item) for item in trace.tool_calls],
         "contexts": [asdict(item) for item in trace.contexts],
         "plans": [asdict(item) for item in trace.plans],
-        "run_guards": [asdict(item) for item in trace.run_guards],
         "memories": [asdict(item) for item in trace.memories],
         "errors": list(trace.errors),
     }

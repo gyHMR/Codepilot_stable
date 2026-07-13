@@ -38,7 +38,7 @@ def load_session_open_metadata(
     return SessionOpenMetadata(provider=state.model.provider, model_id=state.model.model)
 
 if TYPE_CHECKING:
-    from .opening import SessionOpenIntent
+    from .actions import SessionOpenIntent
 
 
 RuntimePermissionMode = Literal["read-only", "workspace-write", "ask"]
@@ -561,7 +561,7 @@ def resolve_workspace_session_intent(
     if bool(provider) != bool(model_id):
         raise ValueError("--provider and --model must be provided together")
 
-    from .opening import SessionOpenIntent
+    from .actions import SessionOpenIntent
 
     workspace_path = Path(workspace)
     if provider and model_id:

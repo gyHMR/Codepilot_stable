@@ -4,26 +4,13 @@ import asyncio
 from dataclasses import dataclass
 
 
-def test_plan_adapter_submits_through_plan_service_with_separate_plan_policy() -> None:
+def test_plan_adapter_returns_core_command_without_writing_plan_state() -> None:
     from codepilot.core.tool_adapters.plan import create_plan_registrations
     from codepilot.tools.registry import ToolRegistry
     from codepilot.tools.runtime import ToolRuntime
 
-    class RecordingPlanService:
-        def __init__(self) -> None:
-            self.calls = []
-
-        def submit(self, operation, snapshot, request):
-            self.calls.append((operation, snapshot, request))
-            return {
-                "plan_id": "plan-stage-7",
-                "status": "active",
-                "summary": snapshot.summary,
-            }
-
-    service = RecordingPlanService()
     registration = {
-        item.spec.name: item for item in create_plan_registrations(service=service)
+        item.spec.name: item for item in create_plan_registrations()
     }["create_build_plan"]
     assert registration.category == "plan"
     assert registration.policy.approval == "never"
@@ -45,10 +32,16 @@ def test_plan_adapter_submits_through_plan_service_with_separate_plan_policy() -
     assert result.status == "success"
     assert result.approval is None
     assert result.data["plan_operation"] == "create_build_plan"
-    assert result.data["plan_state"]["plan_id"] == "plan-stage-7"
-    assert len(service.calls) == 1
-    assert service.calls[0][0] == "create_build_plan"
-    assert service.calls[0][2] == request
+    command = result.data["core_command"]
+    assert command["kind"] == "submit_plan"
+    assert command["command_id"] == "call-create_build_plan"
+    assert command["definition"]["summary"] == "Migrate the remaining tool adapters."
+    assert command["definition"]["completion_criteria"] == (
+        "Special tools use canonical registrations.",
+    )
+    assert command["steps"][0]["step"] == "Migrate special tools"
+    assert result.effects == ()
+    assert registration.policy.declared_effects == frozenset()
 
 
 def test_interaction_pauses_and_resumes_same_attempt_once_without_rerunning_handler() -> None:
@@ -165,7 +158,7 @@ def test_interaction_is_an_execute_batch_admission_barrier() -> None:
 
 
 def test_subagent_adapter_registers_runtime_owned_tools_and_executes_through_runtime(tmp_path) -> None:
-    from codepilot.runtime.tool_adapters.subagents import create_subagent_registrations
+    from codepilot.runtime.subagents.tools import create_subagent_registrations
 
     class Session:
         session_id = "session-stage-7"
@@ -234,8 +227,6 @@ def test_runtime_composition_registers_all_canonical_special_adapters(tmp_path) 
 
 def _build_plan_snapshot() -> dict[str, object]:
     return {
-        "raw_user_request": "Refactor the tool system.",
-        "interpreted_goal": "Complete the canonical tool migration.",
         "summary": "Migrate the remaining tool adapters.",
         "completion_criteria": ["Special tools use canonical registrations."],
         "items": [
@@ -243,7 +234,6 @@ def _build_plan_snapshot() -> dict[str, object]:
                 "step": "Migrate special tools",
                 "details": "Register Plan, Interaction, and Subagent adapters.",
                 "verification": "Run focused tool tests.",
-                "status": "pending",
             }
         ],
     }

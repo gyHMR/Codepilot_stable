@@ -15,7 +15,7 @@ if str(SRC) not in sys.path:
 def test_context_governor_prepares_linear_context_with_memory_and_artifacts(
     tmp_path: Path,
 ) -> None:
-    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.sessions.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
     from codepilot.sessions.context import ContextGovernor
     from codepilot.sessions.context import SessionContextState
@@ -133,7 +133,7 @@ def test_context_governor_prepares_linear_context_with_memory_and_artifacts(
 
 
 def test_context_governor_filters_archived_plan_from_agent_context(tmp_path: Path) -> None:
-    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.sessions.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
     from codepilot.sessions.context import ContextGovernor
 
@@ -193,7 +193,7 @@ def test_context_governor_filters_archived_plan_from_agent_context(tmp_path: Pat
 
 
 def test_context_governor_renders_synthetic_control_separately(tmp_path: Path) -> None:
-    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.sessions.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
     from codepilot.sessions.context import ContextGovernor
 
@@ -237,7 +237,7 @@ def test_context_governor_renders_synthetic_control_separately(tmp_path: Path) -
 def test_context_governor_surfaces_recent_read_paths_in_working_set(
     tmp_path: Path,
 ) -> None:
-    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.sessions.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import TextContent, ToolResultMessage, UserMessage
     from codepilot.sessions.context import ContextGovernor
     from codepilot.sessions.context import SessionContextState
@@ -284,7 +284,7 @@ def test_context_governor_surfaces_recent_read_paths_in_working_set(
 def test_context_governor_counts_tool_schemas_in_budget_estimates(
     tmp_path: Path,
 ) -> None:
-    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.sessions.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import Tool, UserMessage
     from codepilot.sessions.context import ContextGovernor
     from codepilot.sessions.context import ContextPressurePolicy
@@ -329,7 +329,7 @@ def test_context_governor_counts_tool_schemas_in_budget_estimates(
 
 
 def test_context_report_is_returned_without_context_state_file(tmp_path: Path) -> None:
-    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.sessions.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
     from codepilot.sessions.context import ContextGovernor
 
@@ -359,7 +359,7 @@ def test_context_report_is_returned_without_context_state_file(tmp_path: Path) -
 def test_context_governor_compacts_old_conversation_on_critical_pressure(
     tmp_path: Path,
 ) -> None:
-    from codepilot.core.contracts import AgentContext, ContextPreparationRequest
+    from codepilot.sessions.contracts import AgentContext, ContextPreparationRequest
     from codepilot.protocols import UserMessage
     from codepilot.sessions.context import ContextGovernor
 

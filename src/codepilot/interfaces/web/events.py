@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from collections import deque
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import uuid4
@@ -133,14 +134,17 @@ def _json_dict(value: Any) -> dict[str, Any]:
 def _json_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {str(key): _json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [_json_value(item) for item in value]
     if hasattr(value, "model_dump"):
         return _json_value(value.model_dump())
     if is_dataclass(value):
-        return _json_value(asdict(value))
+        return {
+            item.name: _json_value(getattr(value, item.name))
+            for item in fields(value)
+        }
     if hasattr(value, "to_dict"):
         return _json_value(value.to_dict())
     if hasattr(value, "__dict__"):

@@ -11,7 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Mapping, cast
 
-from codepilot.core.contracts import AgentContext, ContextPreparationRequest, PreparedAgentContext
+from codepilot.sessions.contracts import (
+    AgentContext,
+    ContextPreparationRequest,
+    PreparedAgentContext,
+)
 from codepilot.llm.estimation import (
     ContextUsageCalibrator,
     estimate_context,
@@ -645,7 +649,7 @@ class ContextGovernor:
             latest_user_message=_latest_user_text(context.messages),
             raw_user_request=_plan_raw_user_request(plan_state),
             goal=_plan_interpreted_goal(plan_state),
-            current_mode=_plan_string(plan_state, "origin_mode") or _context_mode(context),
+            current_mode=_plan_mode(plan_state) or _context_mode(context),
             verification_status=_signal_text(run_signals, "verification_status"),
             blocked_reason=_signal_error_text(run_signals),
             active_paths=sorted(self.state.active_files),
@@ -1027,7 +1031,8 @@ def _plan_items(
         return []
     approved = _plan_string(plan_state, "status") == "active"
     status = _plan_string(plan_state, "status") or "none"
-    origin = _plan_string(plan_state, "origin_mode") or "build"
+    origin = _plan_string(plan_state, "origin") or "build_mode"
+    definition = _plan_definition(plan_state)
     verification = _signal_text(run_signals, "verification_status") or "unknown"
     lines = [
         (
@@ -1036,9 +1041,8 @@ def _plan_items(
             else "Current Workflow Plan: proposed or soft progress for the current task."
         ),
         f"Plan meta: status={status}; origin={origin}; verification={verification}",
-        f"Request: {_short_plan_text(_plan_raw_user_request(plan_state), 220)}",
         f"Goal: {_short_plan_text(_plan_interpreted_goal(plan_state), 220)}",
-        f"Summary: {_short_plan_text(_plan_string(plan_state, 'summary') or '(none)', 220)}",
+        f"Summary: {_short_plan_text(_mapping_string(definition, 'summary') or '(none)', 220)}",
     ]
     for label, key in [
         ("Understand", "task_understanding"),
@@ -1047,10 +1051,10 @@ def _plan_items(
         ("Impact", "impact_scope"),
         ("Verify", "verification_plan"),
     ]:
-        value = _plan_string(plan_state, key)
+        value = _mapping_string(definition, key)
         if value:
             lines.append(f"{label}: {_short_plan_text(value, 260)}")
-    risks = plan_state.get("risks_and_open_questions") if isinstance(plan_state, Mapping) else None
+    risks = definition.get("risks_and_open_questions")
     if isinstance(risks, list):
         lines.extend(
             f"Risk/question: {_short_plan_text(item, 180)}"
@@ -1060,14 +1064,14 @@ def _plan_items(
     last_error = _signal_error_text(run_signals)
     if last_error:
         lines.append(f"Last error: {last_error}")
-    criteria = plan_state.get("completion_criteria") if isinstance(plan_state, Mapping) else None
+    criteria = definition.get("completion_criteria")
     if isinstance(criteria, list):
         lines.extend(
             f"Criterion: {_short_plan_text(criterion, 180)}"
             for criterion in criteria
             if str(criterion).strip()
         )
-    items = plan_state.get("items") if isinstance(plan_state, Mapping) else None
+    items = plan_state.get("steps") if isinstance(plan_state, Mapping) else None
     if isinstance(items, list):
         proposed = _plan_string(plan_state, "status") == "proposed"
         active_items = [
@@ -1085,7 +1089,7 @@ def _plan_items(
             if isinstance(item, Mapping):
                 prefix = "Proposed build step" if proposed else "Step"
                 lines.append(
-                    f"{prefix} {item.get('id')}: "
+                    f"{prefix} {item.get('step_id')}: "
                     f"[{item.get('status')}] {_short_plan_text(item.get('step'), 160)}; "
                     f"do={_short_plan_text(item.get('details') or '(none)', 220)}; "
                     f"check={_short_plan_text(item.get('verification') or '(none)', 180)}"
@@ -1094,7 +1098,7 @@ def _plan_items(
             lines.append(
                 "Completed steps: "
                 + ", ".join(
-                    f"{item.get('id')}={item.get('step')}"
+                    f"{item.get('step_id')}={item.get('step')}"
                     for item in completed_items
                 )
             )
@@ -1388,17 +1392,35 @@ def _run_signals_from_context(context: AgentContext) -> Mapping[str, object] | N
 
 
 def _plan_raw_user_request(plan_state: Mapping[str, object] | None) -> str:
-    if plan_state is None:
-        return ""
-    value = plan_state.get("raw_user_request")
-    return value if isinstance(value, str) else ""
+    del plan_state
+    return ""
 
 
 def _plan_interpreted_goal(plan_state: Mapping[str, object] | None) -> str:
+    return _mapping_string(_plan_definition(plan_state), "summary") or ""
+
+
+def _plan_definition(
+    plan_state: Mapping[str, object] | None,
+) -> Mapping[str, object]:
     if plan_state is None:
-        return ""
-    value = plan_state.get("interpreted_goal")
-    return value if isinstance(value, str) else ""
+        return {}
+    value = plan_state.get("definition")
+    return value if isinstance(value, Mapping) else {}
+
+
+def _mapping_string(value: Mapping[str, object], key: str) -> str | None:
+    item = value.get(key)
+    return item if isinstance(item, str) and item else None
+
+
+def _plan_mode(plan_state: Mapping[str, object] | None) -> str | None:
+    origin = _plan_string(plan_state, "origin")
+    if origin == "plan_mode":
+        return "plan"
+    if origin == "build_mode":
+        return "build"
+    return None
 
 
 def _plan_string(plan_state: Mapping[str, object] | None, key: str) -> str | None:

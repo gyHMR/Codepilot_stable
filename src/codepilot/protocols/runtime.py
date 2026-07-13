@@ -49,7 +49,7 @@ AgentRunStopReason = Literal[
     "repeated_tool_call",    # 检测到重复的工具调用（可能陷入循环）
     "tool_call_limit",       # 工具调用数量超出限制
     "tool_unavailable",      # 模型请求了不可用工具
-    "run_guard",             # 运行护栏要求继续处理或等待用户
+    "completion_blocked",    # Core 完成策略判定任务尚不可结束
     "missing_tool_port",     # 内部工具端口缺失
     "missing_approval_decision",  # approval resume 缺少审批决定
     "internal_error",        # 内部错误
@@ -84,7 +84,7 @@ _STOP_REASONS = frozenset(
         "repeated_tool_call",
         "tool_call_limit",
         "tool_unavailable",
-        "run_guard",
+        "completion_blocked",
         "missing_tool_port",
         "missing_approval_decision",
         "internal_error",
@@ -269,7 +269,7 @@ class PlanSummary:
 
 @dataclass
 class RunSignalsSummary:
-    """Observable run facts used by RunGuard and context reporting."""
+    """Observable run facts used by Runtime projections and context reporting."""
 
     workspace_changed: bool = False
     affected_paths: list[str] = field(default_factory=list)
@@ -597,7 +597,6 @@ RuntimeEventType = Literal[
     "tool_failed",
     "tool_interrupted",
     "context_projected",
-    "context_preflight",
     "context_compacted",
     "context_projection_failed",
     "context_freshness_checked",
@@ -622,7 +621,6 @@ RuntimeEventType = Literal[
     "plan_completed",
     "plan_abandoned",
     "plan_state_warning",
-    "run_guard_checked",
     "file_diff",
     "error",
 ]
@@ -641,7 +639,6 @@ _RUNTIME_EVENT_TYPES = frozenset(
         "tool_failed",
         "tool_interrupted",
         "context_projected",
-        "context_preflight",
         "context_compacted",
         "context_projection_failed",
         "context_freshness_checked",
@@ -666,7 +663,6 @@ _RUNTIME_EVENT_TYPES = frozenset(
         "plan_completed",
         "plan_abandoned",
         "plan_state_warning",
-        "run_guard_checked",
         "file_diff",
         "error",
     }

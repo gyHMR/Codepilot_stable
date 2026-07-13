@@ -149,6 +149,29 @@ def test_execute_batch_runs_parallel_tools_and_preserves_input_order() -> None:
     assert [result.data["label"] for result in results] == ["first", "second"]
 
 
+def test_prepare_batch_does_not_run_handler_before_execute_prepared() -> None:
+    calls: list[str] = []
+
+    async def handler(input, context):
+        _ = context
+        calls.append(input.label)
+        return SampleOutput(input.label)
+
+    runtime, registration_id = _runtime(_registration("prepared", handler))
+    request = _request("prepared", registration_id, "ready")
+
+    preparation = runtime.prepare_batch((request,))
+
+    assert preparation.batch_id is not None
+    assert preparation.results == ()
+    assert calls == []
+
+    results = asyncio.run(runtime.execute_prepared(preparation.batch_id))
+
+    assert calls == ["ready"]
+    assert [result.data["label"] for result in results] == ["ready"]
+
+
 def test_execute_batch_serializes_same_group_and_stops_at_approval_barrier() -> None:
     from codepilot.tools.execution import ExecutionController
 
@@ -173,8 +196,12 @@ def test_execute_batch_serializes_same_group_and_stops_at_approval_barrier() -> 
 
     runtime, ids = _multi_runtime(
         (
-            _registration("serial_a", serial_handler, concurrency="serial", group="workspace"),
-            _registration("serial_b", serial_handler, concurrency="serial", group="workspace"),
+            _registration(
+                "serial_a", serial_handler, concurrency="serial", group="workspace"
+            ),
+            _registration(
+                "serial_b", serial_handler, concurrency="serial", group="workspace"
+            ),
         ),
         controller=ExecutionController(),
     )
@@ -214,9 +241,21 @@ def test_execute_batch_serializes_same_group_and_stops_at_approval_barrier() -> 
 
 
 def test_core_delegates_tool_turn_batch_to_tool_port() -> None:
-    from codepilot.core.tool_step import execute_tool_turn
-    from codepilot.protocols import ToolCall
-    from codepilot.tools.contracts import ToolSpec
+    from codepilot.core.contracts import (
+        CorePorts,
+        CoreReason,
+        CoreRunInput,
+        ExecuteTools,
+        ModelEntry,
+    )
+    from codepilot.core.state import CoreState
+    from codepilot.core.tool_step import (
+        execute_core_tool_batch,
+        prepare_core_tool_batch,
+    )
+    from codepilot.llm.ports import ModelDescriptor
+    from codepilot.protocols import ToolCall, UserMessage
+    from codepilot.tools.contracts import ToolBatchPreparation, ToolSpec
     from codepilot.tools.registry import ToolCatalogEntry, ToolCatalogSnapshot
     from codepilot.tools.results import TextContent, ToolResult
     from codepilot.tools.security import (
@@ -240,7 +279,9 @@ def test_core_delegates_tool_turn_batch_to_tool_port() -> None:
     )
     entries = tuple(
         ToolCatalogEntry(
-            spec=ToolSpec(name, name, {"type": "object", "additionalProperties": False}),
+            spec=ToolSpec(
+                name, name, {"type": "object", "additionalProperties": False}
+            ),
             category="external",
             source="builtin",
             policy=policy,
@@ -255,17 +296,20 @@ def test_core_delegates_tool_turn_batch_to_tool_port() -> None:
     class BatchPort:
         def __init__(self) -> None:
             self.batch_calls = 0
+            self.requests = ()
 
         def catalog_snapshot(self, *, mode=None):
             _ = mode
             return snapshot
 
-        async def execute(self, request):
-            raise AssertionError("Core must not schedule individual tool calls")
+        def prepare_batch(self, requests):
+            self.requests = tuple(requests)
+            return ToolBatchPreparation(batch_id="batch-1")
 
-        async def execute_batch(self, requests):
+        async def execute_prepared(self, batch_id):
+            assert batch_id == "batch-1"
             self.batch_calls += 1
-            return [
+            return tuple(
                 ToolResult(
                     tool_call_id=item.tool_call_id,
                     tool_name=item.tool_name,
@@ -273,39 +317,141 @@ def test_core_delegates_tool_turn_batch_to_tool_port() -> None:
                     content=(TextContent(text=item.tool_name),),
                     registration_id=item.registration_id,
                 )
-                for item in requests
-            ]
+                for item in self.requests
+            )
+
+    class ModelPort:
+        async def stream(self, _request):
+            if False:
+                yield None
+
+    class ContextPort:
+        def prepare(self, request):
+            return request
+
+    class BoundaryPort:
+        def commit(self, _boundary):
+            return None
 
     port = BatchPort()
+    input_value = CoreRunInput(
+        run_id="run-core-batch",
+        entry=ModelEntry(),
+        messages=(UserMessage(content="inspect"),),
+        state=CoreState.new("inspect"),
+        mode="build",
+        model=ModelDescriptor(provider="unit", model_id="unit"),
+        context_seed={"session_id": "session-core-batch"},
+    )
+    ports = CorePorts(
+        model=ModelPort(),
+        tools=port,
+        context=ContextPort(),
+        boundary=BoundaryPort(),
+    )
+    decision = ExecuteTools(
+        calls=(
+            ToolCall(id="call-a", name="a", arguments={}),
+            ToolCall(id="call-b", name="b", arguments={}),
+        ),
+        reason=CoreReason("tool.calls_requested"),
+    )
+    prepared = prepare_core_tool_batch(input_value, ports, decision, snapshot)
     observations = asyncio.run(
-        execute_tool_turn(
-            run_id="run-core-batch",
-            session_id="session-core-batch",
-            current_mode="build",
-            tools=port,
-            tool_calls=[
-                ToolCall(id="call-a", name="a", arguments={}),
-                ToolCall(id="call-b", name="b", arguments={}),
-            ],
-            catalog_snapshot=snapshot,
-        )
+        execute_core_tool_batch(ports, prepared)
     )
 
     assert port.batch_calls == 1
     assert [item.tool_name for item in observations] == ["a", "b"]
 
-    with pytest.raises(TypeError, match="unexpected keyword argument"):
-        asyncio.run(
-            execute_tool_turn(
-                run_id="run-old-call-shape",
-                session_id="session-core-batch",
-                current_mode="build",
-                tools=port,
-                tool_calls=[],
-                catalog_snapshot=snapshot,
-                assistant_message=None,
+
+def test_core_emits_tool_started_before_batch_execution() -> None:
+    from codepilot.core.contracts import (
+        CorePorts,
+        CoreReason,
+        CoreRunInput,
+        ExecuteTools,
+        ModelEntry,
+    )
+    from codepilot.core.state import CoreState
+    from codepilot.core.tool_step import (
+        execute_core_tool_batch,
+        prepare_core_tool_batch,
+    )
+    from codepilot.llm.ports import ModelDescriptor
+    from codepilot.protocols import ToolCall, UserMessage
+    from codepilot.tools.contracts import ToolBatchPreparation
+    from codepilot.tools.registry import ToolCatalogSnapshot
+    from codepilot.tools.results import TextContent, ToolResult
+
+    events: list[dict] = []
+
+    class BatchPort:
+        requests = ()
+
+        def catalog_snapshot(self, *, mode=None):
+            del mode
+            return ToolCatalogSnapshot("catalog", (), 1)
+
+        def prepare_batch(self, requests):
+            self.requests = tuple(requests)
+            return ToolBatchPreparation(batch_id="batch-1")
+
+        async def execute_prepared(self, batch_id):
+            assert batch_id == "batch-1"
+            assert [event["type"] for event in events] == ["tool_started"]
+            request = self.requests[0]
+            return (
+                ToolResult(
+                    tool_call_id=request.tool_call_id,
+                    tool_name=request.tool_name,
+                    status="success",
+                    content=(TextContent(text="done"),),
+                    registration_id=request.registration_id,
+                ),
             )
-        )
+
+    class ModelPort:
+        async def stream(self, _request):
+            if False:
+                yield None
+
+    class ContextPort:
+        def prepare(self, request):
+            return request
+
+    class BoundaryPort:
+        def commit(self, _boundary):
+            return None
+
+    tool_port = BatchPort()
+    ports = CorePorts(
+        model=ModelPort(),
+        tools=tool_port,
+        context=ContextPort(),
+        boundary=BoundaryPort(),
+        live_events=events.append,
+    )
+    prepared = prepare_core_tool_batch(
+        CoreRunInput(
+            run_id="run-start-order",
+            entry=ModelEntry(),
+            messages=(UserMessage(content="inspect"),),
+            state=CoreState.new("inspect"),
+            mode="build",
+            model=ModelDescriptor(provider="unit", model_id="unit"),
+            context_seed={"session_id": "session-start-order"},
+        ),
+        ports,
+        ExecuteTools(
+            calls=(ToolCall(id="call-1", name="shell", arguments={}),),
+            reason=CoreReason("tool.calls_requested"),
+        ),
+        ToolCatalogSnapshot("catalog", (), 1),
+    )
+    asyncio.run(execute_core_tool_batch(ports, prepared))
+
+    assert [event["type"] for event in events] == ["tool_started", "tool_completed"]
 
 
 @dataclass(frozen=True)
@@ -385,7 +531,12 @@ def _registration(
     return ToolRegistration(
         version="1.0.0",
         implementation_version="1",
-        spec=ToolSpec(name, f"Execution test tool {name}.", input_codec.json_schema, output_codec.json_schema),
+        spec=ToolSpec(
+            name,
+            f"Execution test tool {name}.",
+            input_codec.json_schema,
+            output_codec.json_schema,
+        ),
         category="external",
         source="builtin",
         owner="test",

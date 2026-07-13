@@ -3,14 +3,25 @@ from __future__ import annotations
 """Resolve the model and credentials for an opened runtime session."""
 
 import os
+import asyncio
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
 from codepilot.llm.catalog import get_env_api_key_name, get_model
-from codepilot.protocols import Model
+from codepilot.llm.ports import LLMFailed
+from codepilot.protocols import (
+    AssistantMessage,
+    Message,
+    Model,
+    TextContent,
+    ThinkingContent,
+    ToolCall,
+    ToolResultMessage,
+)
 
 from .config import ConfigValueSource, RuntimeConfig
-from .opening import SessionOpenIntent
+from .actions import SessionOpenIntent
 
 
 @dataclass(frozen=True)
@@ -24,6 +35,145 @@ class RuntimeModel:
     @property
     def display_name(self) -> str:
         return f"{self.model.provider}/{self.model.id}" if self.model.provider else self.model.id
+
+
+@dataclass(frozen=True)
+class RetryingModelPort:
+    """Runtime-owned provider retry wrapper; Core still observes one model action."""
+
+    base: Any
+    enabled: bool = True
+    max_retries: int = 0
+    base_delay_ms: int = 0
+
+    async def stream(self, request):
+        retries = max(0, self.max_retries) if self.enabled else 0
+        for attempt in range(retries + 1):
+            retry = False
+            async for event in self.base.stream(request):
+                if (
+                    isinstance(event, LLMFailed)
+                    and attempt < retries
+                    and _retryable_error(event.error)
+                ):
+                    retry = True
+                    break
+                yield event
+            if not retry:
+                return
+            if self.base_delay_ms > 0:
+                await asyncio.sleep(self.base_delay_ms / 1000)
+
+
+def convert_to_llm(
+    messages: list[Message],
+    *,
+    strip_thinking: bool = False,
+    thinking_to_text: bool = False,
+) -> list[Message]:
+    """Apply provider-facing message transforms without Core context governance."""
+
+    converted: list[Message] = []
+    for message in messages:
+        if not isinstance(message, AssistantMessage):
+            converted.append(message)
+            continue
+        content: list[Any] = []
+        for block in message.content:
+            if isinstance(block, ThinkingContent):
+                if strip_thinking:
+                    continue
+                if thinking_to_text and block.thinking:
+                    content.append(
+                        TextContent(
+                            text=f"[thinking]\n{block.thinking}\n[/thinking]"
+                        )
+                    )
+                    continue
+            content.append(block)
+        converted.append(
+            _assistant_with_content(
+                message,
+                content or [TextContent(text="(no content)")],
+            )
+        )
+    return _repair_tool_boundaries(converted)
+
+
+def _repair_tool_boundaries(messages: list[Message]) -> list[Message]:
+    """Keep only provider-valid ToolCall/ToolResult pairs."""
+
+    remaining_results = Counter(
+        message.tool_call_id
+        for message in messages
+        if isinstance(message, ToolResultMessage) and message.tool_call_id
+    )
+    pending: dict[str, ToolCall] = {}
+    repaired: list[Message] = []
+    for message in messages:
+        if isinstance(message, ToolResultMessage):
+            if message.tool_call_id:
+                remaining_results[message.tool_call_id] -= 1
+            if message.tool_call_id not in pending:
+                continue
+            pending.pop(message.tool_call_id, None)
+            repaired.append(message)
+            continue
+        if isinstance(message, AssistantMessage):
+            content = [
+                block
+                for block in message.content
+                if not isinstance(block, ToolCall)
+                or remaining_results[block.id] > 0
+            ]
+            if not content:
+                continue
+            paired = _assistant_with_content(
+                message,
+                content,
+                stop_reason=(
+                    message.stop_reason
+                    if any(isinstance(block, ToolCall) for block in content)
+                    else "stop"
+                ),
+            )
+            pending.update(
+                (block.id, block)
+                for block in paired.content
+                if isinstance(block, ToolCall) and block.id
+            )
+            repaired.append(paired)
+            continue
+        repaired.append(message)
+    return repaired
+
+
+def _assistant_with_content(
+    message: AssistantMessage,
+    content: list[Any],
+    *,
+    stop_reason: str | None = None,
+) -> AssistantMessage:
+    return AssistantMessage(
+        role=message.role,
+        content=content,
+        api=message.api,
+        provider=message.provider,
+        model=message.model,
+        usage=message.usage,
+        stop_reason=message.stop_reason if stop_reason is None else stop_reason,
+        response_id=message.response_id,
+        error_message=message.error_message,
+        error_info=message.error_info,
+        timestamp=message.timestamp,
+        metadata=dict(message.metadata),
+    )
+
+
+def _retryable_error(error: object) -> bool:
+    if isinstance(error, dict):
+        return bool(error.get("retryable", False))
+    return bool(getattr(error, "retryable", False))
 
 
 def resolve_runtime_model(
@@ -138,6 +288,8 @@ def _credential_source(
 
 
 __all__ = [
+    "RetryingModelPort",
     "RuntimeModel",
+    "convert_to_llm",
     "resolve_runtime_model",
 ]

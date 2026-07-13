@@ -45,7 +45,7 @@ from .contracts import (
     WorkspaceRecoveryState,
 )
 from .repository import FileSessionRepository
-from .serde import run_state_to_dict
+from .serde import message_to_dict, run_state_to_dict
 from .workspace import validate_workspace_checkpoint
 
 
@@ -90,8 +90,10 @@ class BeginRunRequest:
     """
     session_id: str
     user_message: UserMessage
+    request_id: str = field(default_factory=lambda: _new_id("request"))
     initial_core_state: dict[str, object] = field(default_factory=dict)
     workspace: WorkspaceCheckpoint | None = None
+    components: tuple[ComponentCheckpoint, ...] = ()
     run_id: str | None = None
     message_id: str | None = None
 
@@ -108,6 +110,7 @@ class BeginRunResult:
     session: SessionState
     run: RunState
     message: MessageRecord
+    reused: bool = False
 
 
 @dataclass(frozen=True)
@@ -269,6 +272,38 @@ class SessionStateService:
             BeginRunResult（更新后的会话、新运行、消息记录）
         """
         session = self._require_session(request.session_id)
+        request_id = _required_text(request.request_id, "request_id")
+        request_digest = _begin_run_request_digest(request)
+        session_runs = self.repository.list_runs(session_id=session.session_id)
+        existing = next(
+            (
+                run
+                for run in session_runs
+                if run.request_id == request_id
+            ),
+            None,
+        )
+        if existing is not None:
+            return self._reuse_begin_run(
+                session,
+                existing,
+                request=request,
+                request_digest=request_digest,
+                expected_session_revision=expected_session_revision,
+            )
+
+        orphan_runs = [
+            run
+            for run in session_runs
+            if run.status not in {"completed", "failed", "cancelled"}
+            and run.run_id != session.current_run_id
+        ]
+        if orphan_runs:
+            raise SessionStateConflictError(
+                "Session has an orphan active run: "
+                + ", ".join(run.run_id for run in orphan_runs)
+            )
+
         self._require_revision(session.revision, expected_session_revision, "Session")
         if session.current_run_id is not None:
             raise SessionStateConflictError(
@@ -276,8 +311,8 @@ class SessionStateService:
             )
 
         now = _utc_now_iso()
-        run_id = request.run_id or _new_id("run")
-        message_id = request.message_id or _new_id("msg")
+        run_id = request.run_id or _request_scoped_id("run", session.session_id, request_id)
+        message_id = request.message_id or _request_scoped_id("msg", session.session_id, request_id)
         message = MessageRecord(
             message_id=message_id,
             session_id=session.session_id,
@@ -292,6 +327,7 @@ class SessionStateService:
             resume_point="before_model",
             message_cursor=MessageCursor(message_id),
             workspace=request.workspace,
+            components=request.components,
             created_at=now,
         )
         run = RunState(
@@ -302,6 +338,8 @@ class SessionStateService:
             input_message_id=message_id,
             latest_message_id=message_id,
             core_state=request.initial_core_state,
+            request_id=request_id,
+            request_digest=request_digest,
             checkpoint=checkpoint,
             created_at=now,
             updated_at=now,
@@ -321,6 +359,53 @@ class SessionStateService:
         )
         self._append_event("run_created", updated_session, run)
         return BeginRunResult(session=updated_session, run=run, message=message)
+
+    def _reuse_begin_run(
+        self,
+        session: SessionState,
+        run: RunState,
+        *,
+        request: BeginRunRequest,
+        request_digest: str,
+        expected_session_revision: int,
+    ) -> BeginRunResult:
+        if run.request_digest != request_digest:
+            raise SessionStateConflictError(
+                f"request_id was already used with different input: {request.request_id}"
+            )
+        records = {
+            record.message_id: record
+            for record in self.repository.load_message_records(session.session_id)
+        }
+        message = records.get(run.input_message_id)
+        if message is None:
+            raise SessionStateConflictError(
+                f"Run input message is missing for request_id: {request.request_id}"
+            )
+        if run.status in {"completed", "failed", "cancelled"}:
+            raise SessionStateConflictError(
+                f"request_id already reached a terminal Run: {request.request_id}"
+            )
+        if session.current_run_id not in {None, run.run_id}:
+            raise SessionStateConflictError(
+                f"Session already has an active run: {session.current_run_id}"
+            )
+        if session.current_run_id == run.run_id:
+            return BeginRunResult(session=session, run=run, message=message, reused=True)
+
+        self._require_revision(session.revision, expected_session_revision, "Session")
+        now = _utc_now_iso()
+        repaired = replace(
+            session,
+            current_run_id=run.run_id,
+            last_run_id=run.run_id,
+            leaf_message_id=run.latest_message_id or run.input_message_id,
+            updated_at=now,
+            revision=session.revision + 1,
+        )
+        self.repository.update_session(repaired, expected_revision=expected_session_revision)
+        self._append_event("run_admission_repaired", repaired, run)
+        return BeginRunResult(session=repaired, run=run, message=message, reused=True)
 
     # ── 提交阶段边界 ────────────────────────────────────────────────────────
 
@@ -1104,6 +1189,33 @@ def _commit_request_digest(request: CommitRunBoundaryRequest) -> str:
 def _commit_child_id(prefix: str, commit_id: str, index: int) -> str:
     digest = hashlib.sha256(f"{commit_id}:{index}".encode("utf-8")).hexdigest()[:16]
     return f"{prefix}_{digest}"
+
+
+def _request_scoped_id(prefix: str, session_id: str, request_id: str) -> str:
+    digest = hashlib.sha256(f"{session_id}\0{request_id}".encode("utf-8")).hexdigest()
+    return f"{prefix}_{digest[:24]}"
+
+
+def _begin_run_request_digest(request: BeginRunRequest) -> str:
+    payload = {
+        "session_id": request.session_id,
+        "message": message_to_dict(request.user_message),
+        "initial_core_state": request.initial_core_state,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _required_text(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} is required")
+    return value.strip()
 
 
 def new_session_id() -> str:

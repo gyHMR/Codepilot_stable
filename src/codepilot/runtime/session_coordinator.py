@@ -4,29 +4,44 @@ import asyncio
 import inspect
 import hashlib
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from codepilot.core.contracts import (
-    AgentContext,
-    AgentLoopInput,
-    AgentLoopLimits,
-    AgentLoopOutcome,
-    ContextPreparationRequest,
-    PreparedContext,
-    RetryPolicy,
-    RunCorrelation,
+    CoreLimits,
+    CoreOutcome,
+    CoreRunInput,
+    ModelEntry,
+    ToolResultEntry,
 )
-from codepilot.core.plan import ensure_planning_budget_profile, ensure_run_mode
-from codepilot.core.plan_state import PlanStateManager
-from codepilot.core.runner import maybe_await
+from codepilot.core.commands import (
+    AbandonPlan,
+    ApprovePlan,
+    ApprovePlanRevision,
+    CoreCommand,
+    RejectPlan,
+    RejectPlanRevision,
+)
+from codepilot.core.plan import (
+    ensure_planning_budget_profile,
+    ensure_run_mode,
+    load_plan_state,
+)
+from codepilot.core.reducer import ReductionContext, apply_core_command
+from codepilot.core.state import CoreState, load_core_state
+from codepilot.core.tool_step import interrupted_tool_results
 from codepilot.llm.ports import ModelDescriptor
 from codepilot.protocols import (
     AgentRunResult,
+    AssistantMessage,
+    ImageContent,
     Message,
     TextContent,
+    ToolCall,
+    ToolResultMessage,
     UserMessage,
 )
 from codepilot.protocols.commands import SessionLifecycleContext, SessionLifecycleView
@@ -37,6 +52,9 @@ from codepilot.sessions.context import (
     calibrate_context_usage,
 )
 from codepilot.sessions.contracts import (
+    AgentContext,
+    ComponentCheckpoint,
+    ContextPreparationRequest,
     ModelRef,
     PreparedAgentRun,
     RecoveryRequest,
@@ -49,7 +67,7 @@ from codepilot.sessions.contracts import (
     SessionView,
     WorkspaceEffectsSnapshot,
 )
-from .live_conversation import SessionConversationState
+from .registry import SessionConversationState
 from codepilot.sessions.rollback import GitRollbackBaseline, build_rollback_metadata, capture_git_baseline
 from codepilot.sessions.memory import (
     MemoryRepository,
@@ -67,7 +85,9 @@ from codepilot.sessions.service import (
     SessionStateService,
     new_session_id,
 )
+from codepilot.tools.security import ApprovalResponse
 from .session_state_adapter import RuntimeSessionStateAdapter
+from .contracts import project_core_domain_event
 
 
 logger = logging.getLogger("codepilot.runtime.session_coordinator")
@@ -103,17 +123,6 @@ _CONTINUE_REQUESTS = {
     "go on",
     "resume",
 }
-_PLAN_STATE_EVENT_TYPES = {
-    "plan_proposed",
-    "plan_approval_required",
-    "plan_approved",
-    "plan_rejected",
-    "plan_updated",
-    "plan_completed",
-    "plan_abandoned",
-}
-
-
 class RuntimeSessionCoordinator:
     """Live session object.
 
@@ -172,7 +181,6 @@ class RuntimeSessionCoordinator:
         )
 
         self.memory_enabled = bool(options.memory_enabled)
-        self.plan_state = PlanStateManager()
         self.memory_store = MemoryStore(MemoryRepository(self.workspace_dir))
         self.memory_writer = MemoryWriter(
             store=self.memory_store,
@@ -182,6 +190,7 @@ class RuntimeSessionCoordinator:
             store=self.memory_store,
             workspace_dir=self.workspace_dir,
         )
+        self._rollback_baselines: dict[str, GitRollbackBaseline] = {}
         self.context_governor = self._new_context_governor()
         self._restore_active_checkpoint()
         self._custom_prepare_context = options.prepare_context
@@ -199,8 +208,6 @@ class RuntimeSessionCoordinator:
         self.stream_fn = options.stream_fn
         self.convert_to_llm = options.convert_to_llm
 
-        self._rollback_baselines: dict[str, GitRollbackBaseline] = {}
-
     async def _prepare_run(
         self,
         intent: SessionRunIntent,
@@ -213,36 +220,64 @@ class RuntimeSessionCoordinator:
         if pending_plan is not None:
             effective_mode = "plan"
         self.archive_plan_for_mode_switch(effective_mode, run_id=run_id)
-        is_continue = effective_mode != "plan" and self._is_continue_run(intent.text)
-        rollback = await self._begin_run(
+        run_plan_state = self._plan_state_for_run(
             text=intent.text,
             run_id=run_id,
-            is_continue=is_continue,
+            mode=effective_mode,
+            pending_plan=pending_plan,
         )
-        user_message = UserMessage(content=intent.text)
+        initial_core_state = _core_state_for_run(intent.text, run_plan_state)
+        is_continue = effective_mode != "plan" and self._is_continue_run(intent.text)
+        rollback = capture_git_baseline(self.workspace_dir)
+        user_message = _user_message(intent)
         begun = self.state_service.begin_run(
             BeginRunRequest(
                 session_id=self.session_id,
+                request_id=intent.request_id,
                 run_id=run_id,
                 user_message=user_message,
-                initial_core_state={},
+                initial_core_state=initial_core_state.to_dict(),
                 workspace=capture_workspace_checkpoint(self.workspace_dir),
+                components=(
+                    ComponentCheckpoint(
+                        owner="rollback",
+                        schema_version=1,
+                        state=_rollback_baseline_state(rollback),
+                    ),
+                ),
             ),
             expected_session_revision=self.session_state.revision,
         )
         self.session_state = begun.session
+        if not begun.reused:
+            await self._run_lifecycle_hooks(
+                text=intent.text,
+                is_continue=is_continue,
+                hooks=self.before_prompt_hooks,
+            )
         user_message_id = begun.message.message_id
+        if isinstance(begun.message.message, UserMessage):
+            user_message = begun.message.message
+        if begun.reused:
+            self._restore_rollback_checkpoint(begun.run)
+            rollback_ref = self._rollback_baseline_ref(run_id)
+        else:
+            rollback_ref = self._remember_rollback_baseline(run_id, rollback)
         user_message.metadata["session_message_id"] = user_message_id
-        self.conversation.append_messages([user_message])
+        if begun.reused:
+            self.conversation.set_messages(
+                [record.message for record in self.state_service.load_messages(self.session_id)]
+            )
+        else:
+            self.conversation.append_messages([user_message])
         state_port = RuntimeSessionStateAdapter(
             self.state_service,
             begun.session,
             begun.run,
             context_state=self.context_governor.checkpoint_state,
-            plan_state=self.plan_state.current,
             workspace_state=self._capture_workspace_checkpoint,
         )
-        if not is_continue:
+        if not is_continue and not begun.reused:
             if self.memory_enabled:
                 self._admit_prompt_memory(
                     intent.text,
@@ -250,33 +285,27 @@ class RuntimeSessionCoordinator:
                     source_message_id=user_message_id,
                     state_port=state_port,
                 )
-        run_plan_state = self._plan_state_for_run(
-            text=intent.text,
-            run_id=run_id,
-            mode=effective_mode,
-            pending_plan=pending_plan,
-        )
         messages = self._messages_for_loop()
         return PreparedAgentRun(
             run_id=run_id,
             session_id=self.session_id,
-            loop_input=AgentLoopInput(
+            loop_input=CoreRunInput(
                 run_id=run_id,
-                correlation=RunCorrelation(session_id=self.session_id),
-                messages=messages,
-                user_prompt=intent.text,
-                context=self._loop_context(effective_mode),
+                entry=ModelEntry(),
+                messages=tuple(messages),
+                state=load_core_state(
+                    begun.run.core_state,
+                    original_request=intent.text,
+                ),
                 model=model,
-                tools=[],
                 mode=effective_mode,
-                plan_state=run_plan_state,
-                limits=self.loop_limits(effective_mode),
-                retry_policy=self.retry_policy(),
+                limits=self.core_limits(effective_mode),
+                context_seed=self._loop_context(effective_mode),
             ),
             context_port=RuntimeSessionContextPort(self, state_port),
             state_port=state_port,
-            input_messages=[user_message],
-            rollback_baseline=self._remember_rollback_baseline(run_id, rollback),
+            input_messages=[] if begun.reused else [user_message],
+            rollback_baseline=rollback_ref,
             context_refs={"context": "session_context"},
             memory_refs={"enabled": self.memory_enabled},
             plan_refs={"plan_state": run_plan_state},
@@ -288,6 +317,7 @@ class RuntimeSessionCoordinator:
         *,
         run_id: str,
         model: ModelDescriptor,
+        tools: Any | None = None,
     ) -> PreparedAgentRun:
         recovery = self.state_service.inspect_recovery(
             RecoveryRequest(
@@ -298,9 +328,16 @@ class RuntimeSessionCoordinator:
         )
         if recovery.bundle is None:
             raise ValueError(f"Run is not recoverable: {run_id}")
+        if tools is None:
+            raise ValueError("Tool approval recovery requires a Tool port")
+        challenge = tools.approval_challenge(intent.approval_id)
+        if challenge is None:
+            raise ValueError(f"Approval not found: {intent.approval_id}")
+        if challenge.run_id != run_id or challenge.session_id != self.session_id:
+            raise ValueError("Approval does not belong to the recovered Run")
         self._ensure_workspace_recovery(recovery.bundle.workspace_status)
         self._restore_context_checkpoint(recovery.bundle.run)
-        self._restore_plan_state(recovery.bundle.run)
+        self._restore_rollback_checkpoint(recovery.bundle.run)
         resumed_run = self.state_service.resume_run(
             ResumeRunRequest(
                 session_id=self.session_id,
@@ -316,31 +353,29 @@ class RuntimeSessionCoordinator:
             self.session_state,
             resumed_run,
             context_state=self.context_governor.checkpoint_state,
-            plan_state=self.plan_state.current,
             workspace_state=self._capture_workspace_checkpoint,
         )
         messages = [record.message for record in recovery.bundle.messages]
         self.conversation.set_messages(messages)
-        event_start_seq, turn_start_seq = self._run_sequence_offsets(run_id)
-        run_state = dict(resumed_run.core_state)
-        loop_input = AgentLoopInput(
+        result = tools.resume(
+            ApprovalResponse(
+                approval_id=intent.approval_id,
+                request_fingerprint=challenge.request_fingerprint,
+                decision=intent.decision,
+                reason=intent.reason,
+            )
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        loop_input = CoreRunInput(
             run_id=run_id,
-            correlation=RunCorrelation(session_id=self.session_id),
-            entry="resume",
-            messages=messages,
-            context=self._loop_context(),
+            entry=ToolResultEntry((result,)),
+            messages=tuple(messages),
+            state=resumed_run.core_state,
             model=model,
-            tools=[],
-            approval_id=intent.approval_id,
-            decision=intent.decision,
-            reason=intent.reason,
             mode=self.current_mode,
-            plan_state=self.active_plan_state(),
-            limits=self.loop_limits(),
-            retry_policy=self.retry_policy(),
-            event_start_seq=event_start_seq,
-            turn_start_seq=turn_start_seq,
-            run_state=run_state,
+            limits=self.core_limits(),
+            context_seed=self._loop_context(),
         )
         return PreparedAgentRun(
             run_id=run_id,
@@ -358,6 +393,7 @@ class RuntimeSessionCoordinator:
         *,
         run_id: str,
         model: ModelDescriptor,
+        tools: Any | None = None,
     ) -> PreparedAgentRun:
         if intent.kind in {"tool_approved", "tool_denied"}:
             return await self._prepare_resume(
@@ -369,6 +405,7 @@ class RuntimeSessionCoordinator:
                 ),
                 run_id=run_id,
                 model=model,
+                tools=tools,
             )
 
         recovery = self.state_service.inspect_recovery(
@@ -378,7 +415,7 @@ class RuntimeSessionCoordinator:
             raise ValueError(f"No resumable checkpoint for run: {run_id}")
         self._ensure_workspace_recovery(recovery.bundle.workspace_status)
         self._restore_context_checkpoint(recovery.bundle.run)
-        self._restore_plan_state(recovery.bundle.run)
+        self._restore_rollback_checkpoint(recovery.bundle.run)
         checkpoint = recovery.bundle.run.checkpoint
         waiting = checkpoint.waiting
         resumed_run = self.state_service.resume_run(
@@ -419,36 +456,26 @@ class RuntimeSessionCoordinator:
             self.session_state,
             resumed_run,
             context_state=self.context_governor.checkpoint_state,
-            plan_state=self.plan_state.current,
             workspace_state=self._capture_workspace_checkpoint,
         )
-        run_state = dict(resumed_run.core_state)
-
-        event_start_seq, turn_start_seq = self._run_sequence_offsets(run_id)
         mode = ensure_run_mode(intent.target_mode or self.current_mode)
         plan = self.context_plan_state_for_mode(mode)
         synthetic_control = _continuation_control(intent.kind)
         messages = [record.message for record in self.state_service.load_messages(self.session_id)]
         self.conversation.set_messages(messages)
-        loop_input = AgentLoopInput(
+        loop_input = CoreRunInput(
             run_id=run_id,
-            correlation=RunCorrelation(session_id=self.session_id),
-            messages=messages,
-            user_prompt=intent.text or _plan_goal(plan) or "",
-            context=self._loop_context(
+            entry=_continuation_entry(checkpoint, waiting, messages),
+            messages=tuple(messages),
+            state=resumed_run.core_state,
+            model=model,
+            mode=mode,
+            limits=self.core_limits(mode),
+            context_seed=self._loop_context(
                 mode,
                 synthetic_control=synthetic_control,
                 checkpoint_phase=waiting.kind if waiting is not None else intent.kind,
             ),
-            model=model,
-            tools=[],
-            mode=mode,
-            plan_state=plan,
-            limits=self.loop_limits(mode),
-            retry_policy=self.retry_policy(),
-            event_start_seq=event_start_seq,
-            turn_start_seq=turn_start_seq,
-            run_state=run_state,
         )
         return PreparedAgentRun(
             run_id=run_id,
@@ -466,9 +493,10 @@ class RuntimeSessionCoordinator:
     async def _commit_run(
         self,
         prepared: PreparedAgentRun,
-        outcome: AgentLoopOutcome,
+        outcome: CoreOutcome,
         result: AgentRunResult,
         *,
+        events: tuple[dict[str, object], ...] = (),
         store_outcome: bool,
     ) -> SessionRunRecord:
         state_port = (
@@ -477,7 +505,7 @@ class RuntimeSessionCoordinator:
             else None
         )
         if state_port is not None:
-            if outcome.status not in {"waiting_approval", "waiting_user"}:
+            if outcome.status != "waiting":
                 terminal_status = {
                     "completed": "completed",
                     "failed": "failed",
@@ -522,9 +550,8 @@ class RuntimeSessionCoordinator:
                     state_port.committed_message_ids[id(message)] = record.message_id
             self.session_state = state_port.session
         if store_outcome:
-            for event in outcome.events:
+            for event in events:
                 payload = dict(event)
-                self._apply_plan_event(payload)
                 await self.conversation.dispatch_event(payload)
             committed_messages = list(outcome.new_messages)
             self.conversation.append_messages(committed_messages)
@@ -541,8 +568,6 @@ class RuntimeSessionCoordinator:
             )
             if _is_terminal_outcome(outcome):
                 self._discard_rollback_baseline(prepared.rollback_baseline)
-        self._finalize_plan_state(outcome)
-        self._close_plan_for_terminal_outcome(outcome)
         self._calibrate_context_usage(result)
         if self.memory_enabled:
             self._finalize_memory(result)
@@ -560,7 +585,7 @@ class RuntimeSessionCoordinator:
             stop_reason=result.stop_reason,
             new_messages=list(result.messages),
             final_text=outcome.final_text,
-            events=list(outcome.events),
+            events=[dict(event) for event in events],
             outcome=outcome,
             snapshots={
                 "context": prepared.context_refs,
@@ -598,7 +623,7 @@ class RuntimeSessionCoordinator:
         state = self.workflow_plan_state()
         if not isinstance(state, dict):
             return None
-        items = state.get("items")
+        items = state.get("steps")
         items = items if isinstance(items, list) else []
         total = len([item for item in items if isinstance(item, dict)])
         done = len([
@@ -619,7 +644,14 @@ class RuntimeSessionCoordinator:
         return {
             "plan_id": state.get("plan_id"),
             "status": state.get("status"),
-            "goal_preview": _short_text(state.get("interpreted_goal"), limit=72),
+            "goal_preview": _short_text(
+                (
+                    state.get("definition", {}).get("summary")
+                    if isinstance(state.get("definition"), dict)
+                    else ""
+                ),
+                limit=72,
+            ),
             "total_items": total,
             "done_items": done,
             "active_item_preview": _short_text(active, limit=72),
@@ -692,10 +724,20 @@ class RuntimeSessionCoordinator:
         return None
 
     def current_plan_state(self) -> dict[str, Any] | None:
-        state = self.plan_state.current()
-        if not isinstance(state, dict):
+        run_id = self.session_state.current_run_id
+        run = self.state_service.get_run(run_id) if run_id is not None else None
+        if run is None:
             return None
-        return dict(state)
+        try:
+            core = load_core_state(
+                run.core_state,
+                original_request=self._last_substantive_user_request()
+                or "Continue the current task",
+            )
+        except (TypeError, ValueError):
+            return None
+        plan = core.task.plan
+        return plan.to_dict() if plan is not None else None
 
     def workflow_plan_state(self) -> dict[str, Any] | None:
         state = self.current_plan_state()
@@ -725,16 +767,9 @@ class RuntimeSessionCoordinator:
             return None
         return self.active_plan_state()
 
-    def retry_policy(self) -> RetryPolicy:
-        return RetryPolicy(
-            enabled=bool(self.retry_enabled),
-            max_retries=_int_or_default(self.max_retries, default=0),
-            base_delay_ms=_int_or_default(self.retry_base_delay_ms, default=0),
-        )
-
-    def loop_limits(self, mode: str | None = None) -> AgentLoopLimits:
+    def core_limits(self, mode: str | None = None) -> CoreLimits:
         normalized = ensure_run_mode(mode or self.current_mode)
-        return AgentLoopLimits(
+        return CoreLimits(
             max_model_turns=self._model_turn_budget(normalized),
             max_tool_iterations=self._tool_iteration_budget(normalized),
             max_tool_calls_per_turn=self.max_tool_calls_per_turn,
@@ -778,6 +813,7 @@ class RuntimeSessionCoordinator:
         *,
         run_id: str | None = None,
     ) -> dict[str, Any] | None:
+        del run_id
         normalized = ensure_run_mode(target_mode)
         current = self.current_plan_state()
         if not isinstance(current, dict):
@@ -786,24 +822,28 @@ class RuntimeSessionCoordinator:
             return current
         if normalized != "plan" or current.get("status") != "active":
             return current
-        owner_run_id = _optional_text(current.get("owner_run_id"))
-        state = self.plan_state.abandon_current(
-            run_id=run_id if run_id == owner_run_id else None,
-            source="mode_switch",
+        state = self._apply_plan_command(
+            AbandonPlan(
+                command_id=self._plan_command_id("abandon_mode_switch"),
+                expected_revision=int(current["revision"]),
+                reason="mode_switch",
+            ),
+            mode=self.current_mode,
         )
-        if state is not None:
-            self._record_plan_event("plan_abandoned", state, run_id=run_id)
+        self._finish_current_plan_run("plan.abandoned_for_mode_switch")
         return state
 
     def approve_current_plan(self, *, switch_to_build: bool = True) -> dict[str, Any] | None:
         before = self.workflow_plan_state()
         if not isinstance(before, dict) or before.get("status") != "proposed":
             return before
-        run_id = _optional_text(before.get("owner_run_id"))
-        state = self.plan_state.approve_current(run_id=run_id)
-        if state is None:
-            return None
-        self._record_plan_event("plan_approved", state, run_id=run_id)
+        state = self._apply_plan_command(
+            ApprovePlan(
+                command_id=self._plan_command_id("approve"),
+                expected_revision=int(before["revision"]),
+            ),
+            mode="plan",
+        )
         if switch_to_build:
             self.set_current_mode("build")
         return state
@@ -812,11 +852,14 @@ class RuntimeSessionCoordinator:
         before = self.workflow_plan_state()
         if not isinstance(before, dict) or before.get("status") != "proposed":
             return before
-        run_id = _optional_text(before.get("owner_run_id"))
-        state = self.plan_state.reject_current(run_id=run_id)
-        if state is None:
-            return None
-        self._record_plan_event("plan_rejected", state, run_id=run_id)
+        state = self._apply_plan_command(
+            RejectPlan(
+                command_id=self._plan_command_id("reject"),
+                expected_revision=int(before["revision"]),
+            ),
+            mode="plan",
+        )
+        self._finish_current_plan_run("plan.rejected")
         self.set_current_mode("plan")
         return state
 
@@ -824,11 +867,123 @@ class RuntimeSessionCoordinator:
         before = self.current_plan_state()
         if not isinstance(before, dict):
             return before
-        state = self.plan_state.abandon_current(source="user_abandoned")
-        if state is None:
-            return None
-        self._record_plan_event("plan_abandoned", state, run_id=None)
+        state = self._apply_plan_command(
+            AbandonPlan(
+                command_id=self._plan_command_id("abandon"),
+                expected_revision=int(before["revision"]),
+                reason="user_abandoned",
+            ),
+            mode=self.current_mode,
+        )
+        self._finish_current_plan_run("plan.abandoned")
         return state
+
+    def approve_current_plan_revision(self) -> dict[str, Any] | None:
+        before = self.workflow_plan_state()
+        if not isinstance(before, dict) or before.get("pending_revision") is None:
+            return before
+        return self._apply_plan_command(
+            ApprovePlanRevision(
+                command_id=self._plan_command_id("approve_revision"),
+                expected_revision=int(before["revision"]),
+            ),
+            mode=self.current_mode,
+        )
+
+    def reject_current_plan_revision(self) -> dict[str, Any] | None:
+        before = self.workflow_plan_state()
+        if not isinstance(before, dict) or before.get("pending_revision") is None:
+            return before
+        return self._apply_plan_command(
+            RejectPlanRevision(
+                command_id=self._plan_command_id("reject_revision"),
+                expected_revision=int(before["revision"]),
+            ),
+            mode=self.current_mode,
+        )
+
+    def _apply_plan_command(
+        self,
+        command: CoreCommand,
+        *,
+        mode: str,
+    ) -> dict[str, Any] | None:
+        run_id = self.session_state.current_run_id
+        run = self.state_service.get_run(run_id) if run_id is not None else None
+        if run is None or run.checkpoint is None:
+            raise ValueError("No active Core run owns the current Task Plan")
+        core = load_core_state(
+            run.core_state,
+            original_request=self._last_substantive_user_request()
+            or "Continue the current task",
+        )
+        reduction = apply_core_command(
+            core,
+            command,
+            ReductionContext(
+                run_id=run.run_id,
+                mode=ensure_run_mode(mode),
+                now_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+            ),
+        )
+        result = reduction.command_results[0] if reduction.command_results else None
+        if result is not None and result.status == "rejected":
+            raise ValueError(f"Plan command rejected: {result.reason}")
+        durable_events = tuple(
+            project_core_domain_event(
+                event,
+                event_id=f"{run.run_id}:runtime_plan:{run.revision}:{index}",
+                run_id=run.run_id,
+                session_id=self.session_id,
+            )
+            for index, event in enumerate(reduction.events, start=1)
+        )
+        committed = self.state_service.commit_run_boundary(
+            CommitRunBoundaryRequest(
+                commit_id=(
+                    f"{run.run_id}:core_command:{command.command_id}:{run.revision}"
+                ),
+                kind="progress",
+                session_id=self.session_id,
+                run_id=run.run_id,
+                expected_run_revision=run.revision,
+                expected_session_revision=self.session_state.revision,
+                phase="tools",
+                resume_point="after_tools",
+                core_state=reduction.state.to_dict(),
+                durable_events=durable_events,
+                components=run.checkpoint.components,
+                workspace=run.checkpoint.workspace,
+            )
+        )
+        self.session_state = committed.session
+        plan = reduction.state.task.plan
+        return plan.to_dict() if plan is not None else None
+
+    def _finish_current_plan_run(self, stop_reason: str) -> None:
+        run_id = self.session_state.current_run_id
+        run = self.state_service.get_run(run_id) if run_id is not None else None
+        if run is None:
+            return
+        committed = self.state_service.commit_run_boundary(
+            CommitRunBoundaryRequest(
+                commit_id=f"{run.run_id}:plan_terminal:{run.revision}",
+                kind="terminal",
+                session_id=self.session_id,
+                run_id=run.run_id,
+                expected_run_revision=run.revision,
+                expected_session_revision=self.session_state.revision,
+                terminal_status="cancelled",
+                stop_reason=stop_reason,
+            )
+        )
+        self.session_state = committed.session
+
+    def _plan_command_id(self, action: str) -> str:
+        run_id = self.session_state.current_run_id or "no_run"
+        run = self.state_service.get_run(run_id) if run_id != "no_run" else None
+        revision = run.revision if run is not None else 0
+        return f"runtime:{run_id}:{action}:{revision}"
 
     def close(self) -> None:
         self.conversation.clear_listeners()
@@ -955,43 +1110,6 @@ class RuntimeSessionCoordinator:
                 }
             )
 
-    def _finalize_plan_state(self, outcome: AgentLoopOutcome) -> None:
-        try:
-            payload = _plan_payload(outcome.plan)
-            if payload is None:
-                return
-            previous = self.current_plan_state()
-            state = self.plan_state.save(payload)
-            if previous == state:
-                return
-            self._record_plan_event(
-                _plan_event_type(previous, state),
-                state,
-                run_id=outcome.run_id,
-            )
-        except Exception as exc:
-            logger.warning("failed to finalize plan state: %s", exc)
-            self.append_event(
-                {
-                    "type": "plan_state_warning",
-                    "operation": "plan_state_finalize",
-                    "message": str(exc),
-                }
-            )
-
-    def _close_plan_for_terminal_outcome(self, outcome: AgentLoopOutcome) -> None:
-        if outcome.status not in {"failed", "cancelled"}:
-            return
-        state = self.current_plan_state()
-        if not isinstance(state, dict) or state.get("status") != "active":
-            return
-        abandoned = self.plan_state.abandon_current(
-            run_id=outcome.run_id,
-            source=f"run_{outcome.status}",
-        )
-        if abandoned is not None:
-            self._record_plan_event("plan_abandoned", abandoned, run_id=outcome.run_id)
-
     def _calibrate_context_usage(self, result: AgentRunResult) -> None:
         try:
             usage = getattr(result, "usage", None)
@@ -1054,34 +1172,13 @@ class RuntimeSessionCoordinator:
             *self.conversation.drain_steering_messages(),
         ]
 
-    def _apply_plan_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
-        if event.get("type") not in _PLAN_STATE_EVENT_TYPES:
-            return None
-        payload = _plan_payload(event.get("plan"))
-        if payload is None:
-            return None
-        try:
-            state = self.plan_state.save(payload)
-        except Exception as exc:
-            logger.warning("failed to apply plan event: %s", exc)
-            self.append_event(
-                {
-                    "type": "plan_state_warning",
-                    "operation": "plan_event_apply",
-                    "message": str(exc),
-                }
-            )
-            return None
-        event["plan"] = state
-        return state
-
     def _loop_context(
         self,
         mode: str | None = None,
         *,
         synthetic_control: dict[str, object] | None = None,
         checkpoint_phase: str = "",
-    ) -> PreparedContext:
+    ) -> dict[str, object]:
         normalized = ensure_run_mode(mode or self.current_mode)
         values: dict[str, Any] = {
             "system_prompt": self.conversation.system_prompt,
@@ -1092,7 +1189,7 @@ class RuntimeSessionCoordinator:
             values["synthetic_control"] = dict(synthetic_control)
         if checkpoint_phase:
             values["checkpoint_phase"] = checkpoint_phase
-        return PreparedContext(values)
+        return values
 
     def _tool_iteration_budget(self, mode: str | None = None) -> int:
         normalized = ensure_run_mode(mode or self.current_mode)
@@ -1108,30 +1205,6 @@ class RuntimeSessionCoordinator:
         if self._system_prompt_builder is None:
             return str(fallback or "")
         return str(self._system_prompt_builder(ensure_run_mode(mode)) or "")
-
-    def _approve_proposed_plan(self) -> None:
-        before = self.workflow_plan_state()
-        if not isinstance(before, dict) or before.get("status") != "proposed":
-            return
-        state = self.plan_state.approve_current()
-        if state is None:
-            return
-        self._record_plan_event("plan_approved", state, run_id=None)
-
-    def _record_plan_event(
-        self,
-        event_type: str,
-        state: dict[str, Any],
-        *,
-        run_id: str | None,
-    ) -> None:
-        self.append_event(
-            {
-                "type": event_type,
-                "run_id": run_id,
-                "plan": state,
-            }
-        )
 
     def _new_context_governor(self) -> ContextGovernor:
         return ContextGovernor(
@@ -1158,7 +1231,7 @@ class RuntimeSessionCoordinator:
         if run is None or run.checkpoint is None:
             return
         self._restore_context_checkpoint(run)
-        self._restore_plan_state(run)
+        self._restore_rollback_checkpoint(run)
 
     @staticmethod
     def _ensure_workspace_recovery(workspace_status: Any) -> None:
@@ -1175,13 +1248,24 @@ class RuntimeSessionCoordinator:
             "Workspace changed after checkpoint; inspect before resuming: " + detail
         )
 
-    def _restore_plan_state(self, run: Any) -> None:
-        plan = run.core_state.get("plan_state") if isinstance(run.core_state, dict) else None
-        if isinstance(plan, dict):
-            self.plan_state.save(plan)
+    def _restore_rollback_checkpoint(self, run: Any) -> None:
+        checkpoint = run.checkpoint
+        if checkpoint is None:
+            return
+        for component in checkpoint.components:
+            if component.owner == "rollback":
+                self._rollback_baselines[run.run_id] = _rollback_baseline_from_state(
+                    component.state
+                )
+                return
 
     def _capture_workspace_checkpoint(self, core_state: dict[str, object]):
         affected = core_state.get("affected_paths")
+        facts = core_state.get("facts")
+        if isinstance(facts, dict):
+            workspace = facts.get("workspace")
+            if isinstance(workspace, dict):
+                affected = workspace.get("affected_paths")
         paths = [str(path) for path in affected] if isinstance(affected, list) else []
         return capture_workspace_checkpoint(self.workspace_dir, tracked_paths=paths)
 
@@ -1260,8 +1344,7 @@ class RuntimeSessionContextPort:
             runtime_state["verification_status"] = str(
                 run_signals.get("verification_status") or "unknown"
             )
-        prepared = await maybe_await(
-            session.prepare_context(
+        prepared = session.prepare_context(
                 AgentContext(
                     system_prompt=str(request.get("system_prompt", "")),
                     messages=list(request.get("messages", ())),
@@ -1282,7 +1365,8 @@ class RuntimeSessionContextPort:
                     },
                 ),
             )
-        )
+        if inspect.isawaitable(prepared):
+            prepared = await prepared
         report = prepared.report.to_dict()
         session.latest_context_report = report
         self._state_port.queue_durable_event(
@@ -1307,18 +1391,38 @@ class RuntimeSessionContextPort:
             "context_report": report,
         }
 
-    def record_preflight(self, report: dict[str, int], *, run_id: str | None = None) -> None:
-        session = self._session
-        payload = {
-            "type": "context_preflight",
-            "context_id": (session.latest_context_report or {}).get("context_id"),
-            "run_id": run_id,
-            "created_at": _utc_now_iso(),
-            "runner_preflight": dict(report),
-        }
-        self._state_port.queue_durable_event(payload)
-        if session.latest_context_report is not None:
-            session.latest_context_report["runner_preflight"] = dict(report)
+def _user_message(intent: SessionRunIntent) -> UserMessage:
+    content: list[TextContent | ImageContent] = [TextContent(text=intent.text)]
+    for raw in intent.images:
+        mime_type = "image/png"
+        data = raw
+        if raw.startswith("data:") and ";base64," in raw:
+            header, data = raw.split(",", 1)
+            declared = header.removeprefix("data:").removesuffix(";base64").strip()
+            if declared:
+                mime_type = declared
+        content.append(ImageContent(data=data, mime_type=mime_type))
+    return UserMessage(content=content)
+
+
+def _rollback_baseline_state(baseline: GitRollbackBaseline) -> dict[str, object]:
+    return {
+        "eligible": baseline.eligible,
+        "reason": baseline.reason,
+        "head": baseline.head,
+        "branch": baseline.branch,
+        "status_before": baseline.status_before,
+    }
+
+
+def _rollback_baseline_from_state(state: dict[str, object]) -> GitRollbackBaseline:
+    return GitRollbackBaseline(
+        eligible=bool(state.get("eligible")),
+        reason=_optional_text(state.get("reason")),
+        head=_optional_text(state.get("head")),
+        branch=_optional_text(state.get("branch")),
+        status_before=str(state.get("status_before") or ""),
+    )
 
 
 def new_run_id() -> str:
@@ -1378,7 +1482,7 @@ def _mode_policy(mode: str) -> str:
             "框架负责模式、工具边界、canonical plan 状态、审批状态和 Plan 到 Build 的切换；主 Agent 负责理解目标、拆分探索任务、"
             "决定 Subagent 的关注范围、综合证据、识别真正阻塞的问题，并设计最终方案。不得自行假设计划已获批准或切换模式。"
             "阶段一，理解任务：分离对象级任务和控制级指令。代码、行为、测试和配置目标属于对象级；“给方案”“先分析”“不要修改”等"
-            "只约束交付方式，不能成为 interpreted_goal 或计划步骤。识别用户目标、约束、当前证据和真正阻塞的歧义；"
+            "只约束交付方式，不能成为计划摘要或执行步骤。识别用户目标、约束、当前证据和真正阻塞的歧义；"
             "只有缺少会实质改变实现范围或设计的必要信息时，才提出一个具体澄清问题。"
             "阶段二，Subagent 探索：探索阶段默认使用 dispatch_exploration 派发只读 Subagent 探索仓库，并按最少必要原则选择 0 到 3 个。"
             "上下文已经充分或任务真正微小时使用 0 个；已知文件或单一范围需要确认时使用 1 个；存在两个独立调查方向时使用 2 个；"
@@ -1389,7 +1493,7 @@ def _mode_policy(mode: str) -> str:
             "风险、设计约束和验证线索，主 Agent 对最终设计、影响范围、执行步骤和验证方式负责。"
             "阶段四，审查并发布：检查方案是否覆盖用户目标、当前实现、目标设计、影响范围、风险、执行步骤、完成标准和验证方式。"
             "若仍有阻塞性问题，直接询问用户；若证据充分且方案已可交给 Build 执行，必须在当前回合直接调用 propose_plan。"
-            "propose_plan 用于发布或修订 proposed plan：raw_user_request 保存用户原始请求，interpreted_goal 必须描述 Build 要完成的软件工作；"
+            "propose_plan 用于发布初始计划，或在批准前根据用户反馈修订同一个 proposed plan；"
             "task_understanding、current_implementation、target_design、impact_scope、risks_and_open_questions、verification_plan "
             "必须分别记录任务理解、仓库证据、目标设计、影响范围、风险待确认项和验证方案；"
             "summary 只做压缩概括，不能替代这些结构化字段。"
@@ -1412,25 +1516,89 @@ def _mode_policy(mode: str) -> str:
         "当前 mode=build。你仍是同一个 Coding Agent，处理同一个用户任务，本轮可以在权限允许范围内读取、修改、运行命令并验证。"
         "没有 current Task Plan 且任务复杂时，可以用 create_build_plan 创建简要 active 执行计划；简单任务可直接实现和验证。"
         "已有 active plan 时，其中的执行目标、完成标准和步骤是本次任务的执行契约，必须直接推进而不是重新制定方案；"
-        "如果该 plan 来自 Plan 模式批准，Build 暂时不得重新构建或替换它，只能更新状态、记录执行偏差，或在明显无法继续时请求用户确认。"
+        "进度更新只提交发生变化的步骤、expected_revision、完成说明和证据引用，不得回传整份计划快照。"
+        "结构调整必须作为带原因的正式 revision 提交；来自 Plan 模式的已批准计划需要用户再次确认 revision。"
         "用户的“给方案”等控制级表达不能替换执行目标。只有用户明确要求修改，或当前步骤已发生"
-        "五次有效实现/验证失败，或实际代码与计划基础明显不一致时，才可用 update_plan_progress 修订同一计划。"
+        "五次有效实现/验证失败，或实际代码与计划基础明显不一致时，才可用 update_plan_progress 提议 revision。"
         "精确修改优先 apply_patch，"
         "单点替换用 edit，新建或整体重写才用 write。代码定位优先用 read/grep/find，shell 主要用于测试和项目命令。"
         "执行 active plan 时尽量每完成一个主要步骤就更新状态，但中间状态更新是软约束。"
-        "最终答复前必须检查当前 Task Plan 是否完成，并依据 completion criteria、实际改动和最新验证结果调用 close_plan 收尾；"
-        "完成时将 status 设为 completed，明显未完成时设为 active 并保留剩余步骤，避免下一轮误读状态。"
+        "最终答复前必须检查当前 Task Plan 是否完成，并依据 completion criteria、实际改动和最新验证结果调用 close_plan；"
+        "close_plan 只提交关闭请求、expected_revision、总结和证据引用，最终完成状态由 Core 策略判定。"
     )
 
 
 def _plan_goal(plan: object) -> str:
     if not isinstance(plan, dict):
         return ""
-    return _optional_text(plan.get("interpreted_goal")) or ""
+    definition = plan.get("definition")
+    if not isinstance(definition, dict):
+        return ""
+    return _optional_text(definition.get("summary")) or ""
 
 
-def runtime_retry_policy(session: Any) -> RetryPolicy:
-    return session.retry_policy()
+def _core_state_for_run(
+    original_request: str,
+    plan_state: dict[str, Any] | None,
+) -> CoreState:
+    state = CoreState.new(original_request)
+    plan = load_plan_state(plan_state)
+    if plan is None:
+        return state
+    return replace(state, task=replace(state.task, plan=plan))
+
+
+def _continuation_entry(
+    checkpoint: Any,
+    waiting: Any,
+    messages: list[Message],
+) -> ModelEntry | ToolResultEntry:
+    if waiting is not None:
+        return ModelEntry()
+    resume_point = checkpoint.resume_point
+    if resume_point in {"before_model", "after_tools"}:
+        return ModelEntry()
+    if resume_point in {"after_model", "before_finalization"}:
+        return ModelEntry(_last_assistant_message(messages))
+    if resume_point == "before_tools":
+        calls = _unsettled_tool_calls(messages)
+        if not calls:
+            raise ValueError("before_tools checkpoint has no unsettled Tool calls")
+        return ToolResultEntry(
+            interrupted_tool_results(
+                calls,
+                code="runtime.tool_execution_ambiguous",
+                message=(
+                    "The prior Run stopped after Tool preparation; Runtime cannot "
+                    "prove whether these calls executed."
+                ),
+            )
+        )
+    raise ValueError(f"Unsupported continuation checkpoint: {resume_point}")
+
+
+def _last_assistant_message(messages: list[Message]) -> AssistantMessage | None:
+    return next(
+        (
+            message
+            for message in reversed(messages)
+            if isinstance(message, AssistantMessage)
+        ),
+        None,
+    )
+
+
+def _unsettled_tool_calls(messages: list[Message]) -> tuple[ToolCall, ...]:
+    calls: dict[str, ToolCall] = {}
+    settled: set[str] = set()
+    for message in messages:
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, ToolCall):
+                    calls[block.id] = block
+        elif isinstance(message, ToolResultMessage):
+            settled.add(message.tool_call_id)
+    return tuple(call for call_id, call in calls.items() if call_id not in settled)
 
 
 def _is_continue_text(value: object) -> bool:
@@ -1440,8 +1608,8 @@ def _is_continue_text(value: object) -> bool:
     return normalized in _CONTINUE_REQUESTS
 
 
-def _is_terminal_outcome(outcome: AgentLoopOutcome) -> bool:
-    return outcome.status not in {"waiting_user", "waiting_approval"}
+def _is_terminal_outcome(outcome: CoreOutcome) -> bool:
+    return outcome.status != "waiting"
 
 
 def _message_text(message: UserMessage) -> str:
@@ -1480,15 +1648,6 @@ def _optional_text(value: object) -> str | None:
     return text or None
 
 
-def _plan_payload(value: object) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        return dict(value)
-    raw = getattr(value, "__dict__", None)
-    if isinstance(raw, dict):
-        return dict(raw)
-    return None
-
-
 def _short_text(value: object, *, limit: int) -> str:
     text = str(value).strip() if value is not None else ""
     if len(text) <= limit:
@@ -1516,23 +1675,6 @@ def _utc_now_iso() -> str:
 
 def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
-def _plan_event_type(
-    previous: dict[str, Any] | None,
-    current: dict[str, Any],
-) -> str:
-    old_status = previous.get("status") if isinstance(previous, dict) else None
-    new_status = current.get("status")
-    if new_status == "proposed" and old_status != "proposed":
-        return "plan_proposed"
-    if new_status == "completed" and old_status != "completed":
-        return "plan_completed"
-    if new_status == "rejected" and old_status != "rejected":
-        return "plan_rejected"
-    if new_status == "abandoned" and old_status != "abandoned":
-        return "plan_abandoned"
-    return "plan_updated"
 
 
 __all__ = [

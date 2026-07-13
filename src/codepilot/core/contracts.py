@@ -1,260 +1,396 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Awaitable, Callable, Literal, Protocol, cast
+from typing import Any, Awaitable, Callable, Literal, Protocol, TypeAlias
 
 from codepilot.llm.ports import ModelDescriptor, ModelPort
 from codepilot.protocols import (
-    AgentEvent,
-    AgentRunCounters,
     AssistantMessage,
-    ContextReport,
     Message,
-    PlanSummary,
-    RunSignalsSummary,
-    RunVerification,
     TextContent,
-    Tool,
+    ToolCall,
     ToolResultMessage,
     Usage,
     UserMessage,
 )
-from codepilot.tools.contracts import CancellationToken, ToolPort
-from codepilot.tools.security import ApprovalChallenge
-from .plan import RunMode, ensure_run_mode, plan_state_to_dict
+from codepilot.tools.contracts import ToolPort
+from codepilot.tools.results import ToolResult
+from .errors import CoreContractError
+from .events import CoreDomainEvent
+from .plan import RunMode, ensure_run_mode
+from .state import CoreState, load_core_state
 
 
-AgentMessage = Message
-AgentLoopEntry = Literal["prompt", "resume"]
 CoreBoundaryKind = Literal[
     "before_model",
     "after_model",
     "before_tools",
     "after_tools",
-    "waiting_tool_approval",
-    "waiting_user_input",
-    "waiting_plan_confirmation",
-    "before_finalization",
+    "waiting",
+    "before_terminal",
 ]
-CoreWaitingKind = Literal["tool_approval", "user_input", "plan_confirmation"]
+CoreWaitKind = Literal[
+    "tool_approval",
+    "user_input",
+    "plan_confirmation",
+    "continuation",
+]
+CoreOutcomeStatus = Literal["completed", "waiting", "failed", "cancelled"]
+ModelPurpose = Literal[
+    "reasoning",
+    "recovery",
+    "verification",
+    "replan",
+    "plan_publish",
+    "plan_closeout",
+    "final_response",
+]
+TerminationStatus = Literal["completed", "failed", "cancelled"]
 
 
-@dataclass
-class AgentContext:
-    """Model-facing run context prepared by sessions and consumed by core."""
+class ContextPort(Protocol):
+    def prepare(self, request: Any) -> Any | Awaitable[Any]: ...
 
-    system_prompt: str
-    messages: list[AgentMessage]
-    tools: list[Tool] = field(default_factory=list)
-    mode: RunMode = "build"
-    plan_state: dict[str, object] | None = None
-    run_signals: dict[str, object] | None = None
-    runtime_state: dict[str, object] | None = None
+
+@dataclass(frozen=True)
+class ModelEntry:
+    """Start or continue by asking the model to act on the message history."""
+
+    message: AssistantMessage | None = None
+    kind: Literal["model"] = field(default="model", init=False)
 
     def __post_init__(self) -> None:
-        self.system_prompt = _clean_core_text(self.system_prompt)
-        self.messages = _copy_messages(self.messages, field_name="messages")
-        self.tools = _copy_tools(self.tools, field_name="tools")
-        self.mode = ensure_run_mode(self.mode)
-        self.plan_state = _copy_optional_dict(
-            self.plan_state,
-            field_name="plan_state",
-        )
-        self.run_signals = _copy_optional_dict(
-            self.run_signals,
-            field_name="run_signals",
-        )
-        self.runtime_state = _copy_optional_dict(
-            self.runtime_state,
-            field_name="runtime_state",
-        )
+        if self.message is not None and not isinstance(self.message, AssistantMessage):
+            raise CoreContractError("ModelEntry message must be AssistantMessage")
 
 
 @dataclass(frozen=True)
-class ContextPreparationRequest:
-    session_id: str | None
-    model_context_window: int
-    model_max_output_tokens: int
-    signal: Any | None = None
+class ToolResultEntry:
+    """Resume Core with final canonical results produced by Runtime/Tools."""
 
-
-@dataclass
-class PreparedAgentContext:
-    system_prompt: str
-    messages: list[AgentMessage]
-    tools: list[Tool]
-    report: ContextReport
-
-
-PrepareContextFn = Callable[
-    [AgentContext, ContextPreparationRequest],
-    PreparedAgentContext | Awaitable[PreparedAgentContext],
-]
-
-
-AgentLoopStatus = Literal[
-    "completed",
-    "waiting_approval",
-    "waiting_user",
-    "failed",
-    "cancelled",
-]
-
-
-EventSink = Callable[[AgentEvent], None]
-
-
-@dataclass(frozen=True)
-class PreparedContext(Mapping[str, object]):
-    values: Mapping[str, object] = field(default_factory=dict)
+    results: tuple[ToolResult, ...] = ()
+    kind: Literal["tool_results"] = field(default="tool_results", init=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "values",
-            MappingProxyType(deepcopy(dict(self.values))),
-        )
+        results = tuple(self.results)
+        if not results:
+            raise CoreContractError("ToolResultEntry requires at least one result")
+        if any(not isinstance(result, ToolResult) for result in results):
+            raise CoreContractError(
+                "ToolResultEntry requires canonical ToolResult values"
+            )
+        if any(
+            result.status in {"approval_required", "user_input_required"}
+            for result in results
+        ):
+            raise CoreContractError(
+                "ToolResultEntry accepts only final ToolResult values"
+            )
+        object.__setattr__(self, "results", results)
 
-    def __getitem__(self, key: str) -> object:
-        return self.values[key]
 
-    def __iter__(self) -> Iterator[str]:
-        return iter(self.values)
-
-    def __len__(self) -> int:
-        return len(self.values)
-
-    @property
-    def system_prompt(self) -> str:
-        return str(self.values.get("system_prompt", ""))
-
-    @property
-    def session_id(self) -> str | None:
-        return _optional_text(self.values.get("session_id"))
+CoreEntry: TypeAlias = ModelEntry | ToolResultEntry
 
 
 @dataclass(frozen=True)
-class RunCorrelation:
-    session_id: str | None = None
-    turn_id: str | None = None
-
-
-@dataclass(frozen=True)
-class AgentLoopLimits:
-    max_model_turns: int = 256
+class CoreLimits:
+    max_model_turns: int = 100
     max_tool_iterations: int = 240
     max_tool_calls_per_turn: int | None = 16
     max_tool_calls: int | None = None
-    repeated_tool_call_limit: int = 6
-
-
-@dataclass(frozen=True)
-class RetryPolicy:
-    enabled: bool = False
-    max_retries: int = 0
-    base_delay_ms: int = 0
+    max_recovery_attempts: int = 3
+    repeated_tool_call_limit: int = 3
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "enabled", bool(self.enabled))
-        object.__setattr__(
-            self,
-            "max_retries",
-            _non_negative_int(self.max_retries, default=0),
-        )
-        object.__setattr__(
-            self,
-            "base_delay_ms",
-            _non_negative_int(self.base_delay_ms, default=0),
-        )
+        for name in (
+            "max_model_turns",
+            "max_tool_iterations",
+            "max_recovery_attempts",
+            "repeated_tool_call_limit",
+        ):
+            _require_non_negative(getattr(self, name), name)
+        for name in ("max_tool_calls_per_turn", "max_tool_calls"):
+            value = getattr(self, name)
+            if value is not None:
+                _require_non_negative(value, name)
 
 
 @dataclass(frozen=True)
-class AgentLoopInput:
-    run_id: str
-    correlation: RunCorrelation
-    entry: AgentLoopEntry = "prompt"
-    messages: list[Message] = field(default_factory=list)
-    user_prompt: str | None = None
-    context: PreparedContext = field(default_factory=PreparedContext)
-    model: ModelDescriptor = field(default_factory=lambda: ModelDescriptor(provider="unknown", model_id="unknown"))
-    tools: list[Any] = field(default_factory=list)
-    mode: RunMode = "build"
-    plan_state: dict[str, object] | None = None
-    limits: AgentLoopLimits = field(default_factory=AgentLoopLimits)
-    retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
-    event_start_seq: int = 0
-    turn_start_seq: int = 0
-    run_state: dict[str, object] | None = None
-    approval_id: str | None = None
-    decision: Literal["approve", "deny"] | None = None
-    reason: str = ""
+class CoreReason:
+    code: str
+    message: str = ""
+    source: str = "core"
+    recoverable: bool = False
+    evidence_refs: tuple[str, ...] = ()
+    details: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        entry = _clean_core_text(self.entry).strip().lower()
-        if entry not in {"prompt", "resume"}:
-            raise ValueError(f"Unknown agent loop entry: {self.entry}")
-        object.__setattr__(self, "entry", cast(AgentLoopEntry, entry))
-        object.__setattr__(self, "context", _prepared_context(self.context))
-        object.__setattr__(self, "mode", ensure_run_mode(self.mode))
-        object.__setattr__(self, "plan_state", plan_state_to_dict(self.plan_state))
+        object.__setattr__(self, "code", _required_core_text(self.code, "reason code"))
+        object.__setattr__(self, "message", _clean_core_text(self.message).strip())
+        object.__setattr__(
+            self, "source", _required_core_text(self.source, "reason source")
+        )
+        if not isinstance(self.recoverable, bool):
+            raise TypeError("reason recoverable must be bool")
         object.__setattr__(
             self,
-            "run_state",
-            _copy_optional_dict(self.run_state, field_name="run_state"),
+            "evidence_refs",
+            tuple(
+                dict.fromkeys(
+                    _required_core_text(value, "evidence ref")
+                    for value in self.evidence_refs
+                )
+            ),
         )
+        if not isinstance(self.details, Mapping):
+            raise TypeError("reason details must be a mapping")
         object.__setattr__(
             self,
-            "event_start_seq",
-            _non_negative_int(self.event_start_seq, default=0),
+            "details",
+            MappingProxyType(deepcopy(dict(self.details))),
         )
-        object.__setattr__(
-            self,
-            "turn_start_seq",
-            _non_negative_int(self.turn_start_seq, default=0),
-        )
-        approval_id = _optional_core_text(self.approval_id)
-        decision = _optional_core_text(self.decision)
-        if decision is not None:
-            decision = decision.lower()
-        reason = _clean_core_text(self.reason).strip()
-        if entry == "resume":
-            if approval_id is None or decision not in {"approve", "deny"}:
-                raise ValueError("Resume entry requires approval_id and approve/deny decision")
-        elif approval_id is not None or decision is not None or reason:
-            raise ValueError("Prompt entry cannot include resume fields")
-        object.__setattr__(self, "approval_id", approval_id)
-        object.__setattr__(self, "decision", decision)
-        object.__setattr__(self, "reason", reason)
 
 
 @dataclass(frozen=True)
-class CoreWaitingRequest:
-    kind: CoreWaitingKind
+class CoreDirective:
+    code: str
+    constraints: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "code", _required_core_text(self.code, "directive code")
+        )
+        object.__setattr__(
+            self,
+            "constraints",
+            tuple(
+                _required_core_text(value, "constraint") for value in self.constraints
+            ),
+        )
+        object.__setattr__(
+            self,
+            "evidence_refs",
+            tuple(
+                dict.fromkeys(
+                    _required_core_text(value, "evidence ref")
+                    for value in self.evidence_refs
+                )
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class CoreWait:
+    kind: CoreWaitKind
     request_id: str
-    payload: dict[str, object] = field(default_factory=dict)
+    reason: CoreReason
+    payload: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.kind not in {"tool_approval", "user_input", "plan_confirmation"}:
-            raise ValueError(f"Unknown core waiting kind: {self.kind}")
-        object.__setattr__(self, "request_id", _required_core_text(self.request_id, "request_id"))
+        if self.kind not in {
+            "tool_approval",
+            "user_input",
+            "plan_confirmation",
+            "continuation",
+        }:
+            raise ValueError(f"Unknown wait kind: {self.kind}")
+        object.__setattr__(
+            self, "request_id", _required_core_text(self.request_id, "request_id")
+        )
+        if not isinstance(self.reason, CoreReason):
+            raise TypeError("wait reason must be CoreReason")
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("wait payload must be a mapping")
         object.__setattr__(
             self,
             "payload",
-            _copy_dict(self.payload, field_name="waiting payload"),
+            MappingProxyType(deepcopy(dict(self.payload))),
         )
 
 
 @dataclass(frozen=True)
-class CoreRunBoundary:
+class CallModel:
+    purpose: ModelPurpose
+    directive: CoreDirective
+    reason: CoreReason
+
+    def __post_init__(self) -> None:
+        if self.purpose not in {
+            "reasoning",
+            "recovery",
+            "verification",
+            "replan",
+            "plan_publish",
+            "plan_closeout",
+            "final_response",
+        }:
+            raise ValueError(f"Unknown model purpose: {self.purpose}")
+        if not isinstance(self.directive, CoreDirective):
+            raise TypeError("model directive must be CoreDirective")
+        if not isinstance(self.reason, CoreReason):
+            raise TypeError("model reason must be CoreReason")
+
+
+@dataclass(frozen=True)
+class ExecuteTools:
+    calls: tuple[ToolCall, ...]
+    reason: CoreReason
+    catalog_snapshot_id: str | None = None
+
+    def __post_init__(self) -> None:
+        calls = tuple(self.calls)
+        if not calls or any(not isinstance(call, ToolCall) for call in calls):
+            raise ValueError("ExecuteTools requires ToolCall values")
+        object.__setattr__(self, "calls", calls)
+        if not isinstance(self.reason, CoreReason):
+            raise TypeError("tool decision reason must be CoreReason")
+        object.__setattr__(
+            self,
+            "catalog_snapshot_id",
+            _optional_core_text(self.catalog_snapshot_id),
+        )
+
+
+@dataclass(frozen=True)
+class Wait:
+    wait: CoreWait
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.wait, CoreWait):
+            raise TypeError("wait decision requires CoreWait")
+
+
+@dataclass(frozen=True)
+class Terminate:
+    status: TerminationStatus
+    reason_code: str
+    message: str = ""
+    evidence_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.status not in {"completed", "failed", "cancelled"}:
+            raise ValueError(f"Unknown termination status: {self.status}")
+        object.__setattr__(
+            self, "reason_code", _required_core_text(self.reason_code, "reason_code")
+        )
+        object.__setattr__(self, "message", _clean_core_text(self.message).strip())
+        object.__setattr__(
+            self,
+            "evidence_refs",
+            tuple(
+                dict.fromkeys(
+                    _required_core_text(value, "evidence ref")
+                    for value in self.evidence_refs
+                )
+            ),
+        )
+
+    @property
+    def reason(self) -> CoreReason:
+        return CoreReason(
+            code=self.reason_code,
+            message=self.message,
+            evidence_refs=self.evidence_refs,
+        )
+
+
+CoreDecision: TypeAlias = CallModel | ExecuteTools | Wait | Terminate
+
+
+@dataclass(frozen=True)
+class CoreRunInput:
+    run_id: str
+    entry: CoreEntry
+    messages: tuple[Message, ...]
+    state: CoreState | Mapping[str, object]
+    mode: RunMode
+    model: ModelDescriptor
+    limits: CoreLimits = field(default_factory=CoreLimits)
+    context_seed: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "run_id", _required_core_text(self.run_id, "run_id"))
+        if not isinstance(self.entry, (ModelEntry, ToolResultEntry)):
+            raise CoreContractError("CoreRunInput entry must be a typed Core entry")
+        messages = _core_messages(self.messages)
+        object.__setattr__(self, "messages", messages)
+        request = _first_user_text(messages)
+        object.__setattr__(
+            self,
+            "state",
+            load_core_state(self.state, original_request=request),
+        )
+        object.__setattr__(self, "mode", ensure_run_mode(self.mode))
+        if not isinstance(self.model, ModelDescriptor):
+            raise CoreContractError("CoreRunInput model must be ModelDescriptor")
+        if not isinstance(self.limits, CoreLimits):
+            raise CoreContractError("CoreRunInput limits must be CoreLimits")
+        if not isinstance(self.context_seed, Mapping):
+            raise CoreContractError("CoreRunInput context_seed must be a mapping")
+        object.__setattr__(
+            self,
+            "context_seed",
+            MappingProxyType(deepcopy(dict(self.context_seed))),
+        )
+
+
+class BoundaryPort(Protocol):
+    def commit(self, boundary: "CoreBoundary") -> None | Awaitable[None]: ...
+
+
+class CancellationProbe(Protocol):
+    def raise_if_cancelled(self) -> None: ...
+
+
+LiveEventSink = Callable[[Mapping[str, object]], None | Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class CorePorts:
+    model: ModelPort
+    context: ContextPort
+    boundary: BoundaryPort
+    tools: ToolPort | None = None
+    live_events: LiveEventSink | None = None
+    cancellation: CancellationProbe | None = None
+
+    def __post_init__(self) -> None:
+        if self.model is None or not callable(getattr(self.model, "stream", None)):
+            raise CoreContractError("CorePorts requires a model port")
+        if self.context is None or not callable(getattr(self.context, "prepare", None)):
+            raise CoreContractError("CorePorts requires a context port")
+        if self.boundary is None or not callable(
+            getattr(self.boundary, "commit", None)
+        ):
+            raise CoreContractError("CorePorts requires a boundary port")
+        if self.tools is not None and any(
+            not callable(getattr(self.tools, method, None))
+            for method in ("catalog_snapshot", "prepare_batch", "execute_prepared")
+        ):
+            raise CoreContractError(
+                "CorePorts tools must support catalog, preparation, and execution"
+            )
+        if self.live_events is not None and not callable(self.live_events):
+            raise CoreContractError("CorePorts live_events must be callable")
+        if self.cancellation is not None and not callable(
+            getattr(self.cancellation, "raise_if_cancelled", None)
+        ):
+            raise CoreContractError(
+                "CorePorts cancellation must implement CancellationProbe"
+            )
+
+
+@dataclass(frozen=True)
+class CoreBoundary:
     kind: CoreBoundaryKind
-    core_state: dict[str, object]
+    state: CoreState
     new_messages: tuple[Message, ...] = ()
-    durable_events: tuple[AgentEvent, ...] = ()
-    waiting: CoreWaitingRequest | None = None
-    tool_recovery_state: dict[str, object] | None = None
+    domain_events: tuple[CoreDomainEvent, ...] = ()
+    wait: CoreWait | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in {
@@ -262,115 +398,104 @@ class CoreRunBoundary:
             "after_model",
             "before_tools",
             "after_tools",
-            "waiting_tool_approval",
-            "waiting_user_input",
-            "waiting_plan_confirmation",
-            "before_finalization",
+            "waiting",
+            "before_terminal",
         }:
-            raise ValueError(f"Unknown core boundary kind: {self.kind}")
-        object.__setattr__(
-            self,
-            "core_state",
-            _copy_dict(self.core_state, field_name="core_state"),
-        )
-        object.__setattr__(self, "new_messages", tuple(self.new_messages))
-        object.__setattr__(
-            self,
-            "durable_events",
-            tuple(dict(event) for event in self.durable_events),
-        )
-        object.__setattr__(
-            self,
-            "tool_recovery_state",
-            _copy_optional_dict(
-                self.tool_recovery_state,
-                field_name="tool_recovery_state",
-            ),
-        )
-        waiting_boundary = self.kind.startswith("waiting_")
-        if waiting_boundary != (self.waiting is not None):
-            raise ValueError("Waiting boundaries require exactly one waiting request")
-
-
-class RunStatePort(Protocol):
-    def commit(self, boundary: CoreRunBoundary) -> None | Awaitable[None]:
-        ...
+            raise CoreContractError(f"Unknown Core boundary kind: {self.kind}")
+        if not isinstance(self.state, CoreState):
+            raise CoreContractError("CoreBoundary state must be CoreState")
+        object.__setattr__(self, "new_messages", _core_messages(self.new_messages))
+        events = tuple(self.domain_events)
+        if any(not isinstance(event, CoreDomainEvent) for event in events):
+            raise CoreContractError(
+                "CoreBoundary domain_events must contain CoreDomainEvent values"
+            )
+        object.__setattr__(self, "domain_events", events)
+        if self.kind == "waiting" and self.wait is None:
+            raise CoreContractError("Waiting boundary requires CoreWait")
+        if self.kind != "waiting" and self.wait is not None:
+            raise CoreContractError("CoreWait is only valid on a waiting boundary")
 
 
 @dataclass(frozen=True)
-class AgentLoopPorts:
-    model: ModelPort | None
-    tools: ToolPort | None
-    context: ContextPort | None = None
-    state: RunStatePort | None = None
-    events: EventSink | None = None
-    cancellation: CancellationToken | None = None
-    deadline_at_ms: int | None = None
-
-
-@dataclass(frozen=True)
-class WorkspaceEffects:
-    affected_paths: tuple[str, ...] = ()
-    changed: bool = False
-
-
-@dataclass(frozen=True)
-class AgentLoopOutcome:
-    run_id: str
-    status: AgentLoopStatus
-    stop_reason: str
-    new_messages: list[Message] = field(default_factory=list)
+class CoreOutcome:
+    status: CoreOutcomeStatus
+    reason: CoreReason
+    state: CoreState
+    new_messages: tuple[Message, ...] = ()
     final_message: AssistantMessage | None = None
-    interruptions: list[ApprovalChallenge] = field(default_factory=list)
-    counters: AgentRunCounters = field(default_factory=AgentRunCounters)
+    wait: CoreWait | None = None
     usage: Usage | None = None
-    verification: list[RunVerification] = field(default_factory=list)
-    workspace_effects: WorkspaceEffects = field(default_factory=WorkspaceEffects)
-    events: list[AgentEvent] = field(default_factory=list)
-    plan: PlanSummary | None = None
-    signals: RunSignalsSummary = field(default_factory=RunSignalsSummary)
-    run_state: dict[str, object] = field(default_factory=dict)
-    error: Any = None
+    error: object | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in {"completed", "waiting", "failed", "cancelled"}:
+            raise CoreContractError(f"Unknown Core outcome status: {self.status}")
+        if not isinstance(self.reason, CoreReason):
+            raise CoreContractError("CoreOutcome reason must be CoreReason")
+        if not isinstance(self.state, CoreState):
+            raise CoreContractError("CoreOutcome state must be CoreState")
+        object.__setattr__(self, "new_messages", _core_messages(self.new_messages))
+        if self.final_message is not None and not isinstance(
+            self.final_message, AssistantMessage
+        ):
+            raise CoreContractError(
+                "CoreOutcome final_message must be AssistantMessage"
+            )
+        if self.status == "waiting" and self.wait is None:
+            raise CoreContractError("A waiting outcome requires CoreWait")
+        if self.status != "waiting" and self.wait is not None:
+            raise CoreContractError("CoreWait is only valid on a waiting outcome")
+        if self.status == "completed" and self.final_message is None:
+            raise CoreContractError("A completed outcome requires final_message")
+        if self.status in {"completed", "waiting"} and self.error is not None:
+            raise CoreContractError(
+                "Only failed or cancelled outcomes may include an error"
+            )
 
     @property
     def final_text(self) -> str:
         if self.final_message is None:
             return ""
-        if isinstance(self.final_message.content, str):
-            return self.final_message.content
-        chunks: list[str] = []
-        for block in self.final_message.content:
-            if isinstance(block, TextContent):
-                chunks.append(block.text)
-        return "".join(chunks)
+        return "".join(
+            block.text
+            for block in self.final_message.content
+            if isinstance(block, TextContent)
+        )
 
 
-class ContextPort(Protocol):
-    def prepare(self, request: Any) -> Any | Awaitable[Any]:
-        ...
+def _core_messages(value: object) -> tuple[Message, ...]:
+    if not isinstance(value, (tuple, list)):
+        raise CoreContractError("Core messages must be a sequence")
+    messages = tuple(value)
+    if any(
+        not isinstance(message, (UserMessage, AssistantMessage, ToolResultMessage))
+        for message in messages
+    ):
+        raise CoreContractError("Core messages must contain canonical Message values")
+    return messages
 
 
-def _prepared_context(value: object) -> PreparedContext:
-    if isinstance(value, PreparedContext):
-        return value
-    if value is None:
-        return PreparedContext()
-    if not isinstance(value, Mapping):
-        raise TypeError("prepared context must be a mapping")
-    return PreparedContext(value)
+def _first_user_text(messages: tuple[Message, ...]) -> str | None:
+    for message in messages:
+        if not isinstance(message, UserMessage):
+            continue
+        if isinstance(message.content, str):
+            text = message.content.strip()
+        else:
+            text = "".join(
+                block.text
+                for block in message.content
+                if isinstance(block, TextContent)
+            ).strip()
+        if text:
+            return text
+    return None
 
 
-def _non_negative_int(value: object, *, default: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return default
-    return max(0, value)
-
-
-def _optional_text(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
+def _require_non_negative(value: object, field_name: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise CoreContractError(f"{field_name} must be a non-negative integer")
 
 
 def _clean_core_text(value: object) -> str:
@@ -389,67 +514,30 @@ def _required_core_text(value: object, field_name: str) -> str:
     return text
 
 
-def _copy_dict(value: object, *, field_name: str) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise TypeError(f"{field_name} must be a dict")
-    return deepcopy(value)
-
-
-def _copy_messages(value: object, *, field_name: str) -> list[AgentMessage]:
-    if not isinstance(value, list):
-        raise TypeError(f"AgentContext {field_name} must be a list")
-    messages: list[AgentMessage] = []
-    for message in value:
-        if not isinstance(message, (UserMessage, AssistantMessage, ToolResultMessage)):
-            raise TypeError(f"AgentContext {field_name} entries must be AgentMessage")
-        messages.append(message)
-    return messages
-
-
-def _copy_tools(value: object, *, field_name: str) -> list[Tool]:
-    if not isinstance(value, list):
-        raise TypeError(f"AgentContext {field_name} must be a list")
-    tools: list[Tool] = []
-    for tool in value:
-        if not isinstance(tool, Tool):
-            raise TypeError(f"AgentContext {field_name} entries must be Tool")
-        tools.append(tool)
-    return tools
-
-
-def _copy_optional_dict(
-    value: object,
-    *,
-    field_name: str,
-) -> dict[str, object] | None:
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise TypeError(f"AgentContext {field_name} must be a dict or None")
-    return deepcopy(value)
-
-
 __all__ = [
-    "AgentLoopInput",
-    "AgentLoopEntry",
-    "AgentLoopLimits",
-    "AgentLoopOutcome",
-    "AgentLoopPorts",
-    "AgentLoopStatus",
-    "AgentContext",
-    "AgentMessage",
-    "ContextPreparationRequest",
     "ContextPort",
+    "BoundaryPort",
+    "CallModel",
+    "CancellationProbe",
     "CoreBoundaryKind",
-    "CoreRunBoundary",
-    "CoreWaitingKind",
-    "CoreWaitingRequest",
-    "EventSink",
-    "PreparedAgentContext",
-    "PreparedContext",
-    "PrepareContextFn",
-    "RetryPolicy",
-    "RunCorrelation",
-    "RunStatePort",
-    "WorkspaceEffects",
+    "CoreBoundary",
+    "CoreDecision",
+    "CoreDirective",
+    "CoreEntry",
+    "CoreLimits",
+    "CoreOutcome",
+    "CoreOutcomeStatus",
+    "CorePorts",
+    "CoreReason",
+    "CoreRunInput",
+    "CoreWait",
+    "CoreWaitKind",
+    "ExecuteTools",
+    "LiveEventSink",
+    "ModelEntry",
+    "ModelPurpose",
+    "Terminate",
+    "TerminationStatus",
+    "ToolResultEntry",
+    "Wait",
 ]

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import hashlib
 from pathlib import Path
 
-from codepilot.runtime.subagent_registry import SubagentStore
 from codepilot.tools.codecs import JsonObjectCodec
 from codepilot.tools.contracts import (
     ToolExecutionRequest,
+    ToolBatchPreparation,
     ToolHandlerError,
     ToolPort,
     ToolRegistration,
@@ -33,12 +33,13 @@ from codepilot.tools.security import (
 )
 from codepilot.tools.state import InteractionResponse
 
-from ..subagents import (
+from .runner import (
     DEFAULT_READ_ONLY_TOOL_NAMES,
     DISPATCH_EXPLORATION_TOOL,
     LIST_EXPLORATION_AGENTS_TOOL,
     MAX_TASKS_PER_BATCH,
     ExplorationCoordinator,
+    SubagentStore,
 )
 
 
@@ -54,6 +55,12 @@ class RestrictedToolPort(ToolPort):
     base: ToolPort | None
     allowed_names: frozenset[str] = DEFAULT_READ_ONLY_TOOL_NAMES
     forced_mode: str = "plan"
+    _prepared_batches: dict[str, tuple[ToolExecutionRequest, ...]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _prepared_sequence: int = field(default=0, init=False, repr=False)
 
     def catalog_snapshot(self, *, mode=None) -> ToolCatalogSnapshot:
         if self.base is None:
@@ -106,6 +113,27 @@ class RestrictedToolPort(ToolPort):
         requests: tuple[ToolExecutionRequest, ...] | list[ToolExecutionRequest],
     ) -> list[ToolResult]:
         return [await self.execute(request) for request in requests]
+
+    def prepare_batch(
+        self,
+        requests: tuple[ToolExecutionRequest, ...] | list[ToolExecutionRequest],
+    ) -> ToolBatchPreparation:
+        items = tuple(requests)
+        if not items:
+            raise ValueError("RestrictedToolPort.prepare_batch requires requests")
+        if any(not isinstance(item, ToolExecutionRequest) for item in items):
+            raise TypeError("RestrictedToolPort expects ToolExecutionRequest values")
+        self._prepared_sequence += 1
+        batch_id = f"restricted_batch:{self._prepared_sequence}"
+        self._prepared_batches[batch_id] = items
+        return ToolBatchPreparation(batch_id=batch_id)
+
+    async def execute_prepared(self, batch_id: str) -> tuple[ToolResult, ...]:
+        try:
+            requests = self._prepared_batches.pop(batch_id)
+        except KeyError as exc:
+            raise ValueError(f"Restricted prepared batch not found: {batch_id}") from exc
+        return tuple(await self.execute_batch(requests))
 
     async def cancel(self, attempt_id: str) -> bool:
         return False if self.base is None else await self.base.cancel(attempt_id)

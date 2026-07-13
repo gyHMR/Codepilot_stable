@@ -7,20 +7,22 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
-from codepilot.core.contracts import AgentLoopOutcome
-from codepilot.core.runner import run_agent_loop
-from codepilot.protocols import RunSignalsSummary
+from codepilot.core.contracts import CoreOutcome, CoreReason
+from codepilot.core.driver import run_core
 from codepilot.sessions.contracts import PreparedAgentRun
 
 from .environment import RunEnvironment
-from .lifecycle import RuntimeLifecycle
+from .errors import runtime_error_payload
+
+
+_LIVE_EVENT_QUEUE_LIMIT = 2048
 
 
 class RunExecutor:
     """Own the in-process execution of a prepared run.
 
     The executor invokes Core's single loop entry and normalizes task cancellation
-    and unexpected exceptions into ``AgentLoopOutcome``.  It does not create runs,
+    and unexpected exceptions into ``CoreOutcome``. It does not create runs,
     persist Sessions state, or decide task semantics.
     """
 
@@ -29,16 +31,31 @@ class RunExecutor:
         environment: RunEnvironment,
         prepared: PreparedAgentRun,
     ) -> AsyncIterator["RunExecutionUpdate"]:
-        event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
+            maxsize=_LIVE_EVENT_QUEUE_LIMIT
+        )
         downstream = environment.event_sink
-        lifecycle = RuntimeLifecycle(environment.run_id)
+        live_events: list[dict[str, object]] = []
+        lifecycle = environment.lifecycle
+        if lifecycle is None:  # pragma: no cover - RunEnvironment guarantees it
+            raise RuntimeError("RunEnvironment lifecycle is required")
         lifecycle.transition("preparing")
 
         def event_sink(event: dict[str, Any]) -> None:
             payload = dict(event)
+            live_events.append(payload)
             if downstream is not None:
-                downstream(payload)
-            event_queue.put_nowait(payload)
+                try:
+                    downstream(payload)
+                except Exception:
+                    # Live progress is non-authoritative; boundary events remain durable.
+                    pass
+            try:
+                event_queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                # Durable events remain in Core's boundary recorder. A slow
+                # interface may lose live progress, but cannot grow memory without bound.
+                pass
 
         execution_environment = replace(environment, event_sink=event_sink)
         lifecycle.transition("executing")
@@ -54,62 +71,59 @@ class RunExecutor:
                     continue
                 yield RunExecutionEvent(event)
             outcome = await task
-            if outcome.status in {"waiting_approval", "waiting_user"}:
-                lifecycle.transition("waiting")
-            else:
-                lifecycle.transition("finalizing")
-                lifecycle.transition(
-                    "terminal",
-                    terminal_outcome=(
-                        "cancelled"
-                        if outcome.status == "cancelled"
-                        else outcome.status
-                    ),
-                )
         except asyncio.CancelledError:
             environment.resources.cancel("runtime_stream_cancelled")
             raise
-        finally:
-            await environment.resources.release()
-            if lifecycle.state in {"terminal", "waiting"}:
-                lifecycle.mark_released()
-        yield RunExecutionCompleted(outcome)
+        yield RunExecutionCompleted(outcome, events=tuple(live_events))
 
     async def _execute_core(
         self,
         environment: RunEnvironment,
         prepared: PreparedAgentRun,
-    ) -> AgentLoopOutcome:
+    ) -> CoreOutcome:
         try:
+            _bind_tool_checkpoint_reader(environment)
             environment.cancellation.raise_if_cancelled()
-            return await run_agent_loop(prepared.loop_input, environment.ports())
+            outcome = await run_core(prepared.loop_input, environment.ports())
+            environment.cancellation.raise_if_cancelled()
+            return outcome
         except asyncio.CancelledError:
             reason = environment.cancellation.reason or "cancelled"
             timed_out = reason == "deadline_exceeded"
-            return AgentLoopOutcome(
-                run_id=environment.run_id,
+            error = {
+                "code": (
+                    "runtime.deadline_exceeded"
+                    if timed_out
+                    else "runtime.cancelled"
+                ),
+                "message": (
+                    f"Run deadline exceeded: {reason}"
+                    if timed_out
+                    else f"Run cancelled: {reason}"
+                ),
+            }
+            return CoreOutcome(
                 status="failed" if timed_out else "cancelled",
-                stop_reason=reason,
-                signals=RunSignalsSummary(cancelled=True),
-                error={
-                    "code": (
-                        "runtime.deadline_exceeded"
-                        if timed_out
-                        else "runtime.cancelled"
-                    ),
-                    "message": (
-                        f"Run deadline exceeded: {reason}"
-                        if timed_out
-                        else f"Run cancelled: {reason}"
-                    ),
-                },
+                reason=CoreReason(
+                    "runtime.deadline_exceeded" if timed_out else "runtime.cancelled",
+                    message=error["message"],
+                    source="runtime",
+                    details={"cancellation_reason": reason},
+                ),
+                state=prepared.loop_input.state,
+                error=error,
             )
         except Exception as exc:
-            return AgentLoopOutcome(
-                run_id=environment.run_id,
+            error = runtime_error_payload(exc)
+            return CoreOutcome(
                 status="failed",
-                stop_reason="internal_error",
-                error=_runtime_error_payload(exc),
+                reason=CoreReason(
+                    str(error.get("code") or "runtime.internal_error"),
+                    message=str(error.get("message") or "Runtime execution failed"),
+                    source="runtime",
+                ),
+                state=prepared.loop_input.state,
+                error=error,
             )
 
 
@@ -124,38 +138,23 @@ class RunExecutionEvent:
 
 @dataclass(frozen=True)
 class RunExecutionCompleted:
-    outcome: AgentLoopOutcome
+    outcome: CoreOutcome
+    events: tuple[dict[str, object], ...] = ()
     kind: Literal["completed"] = "completed"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "events", tuple(dict(event) for event in self.events))
 
 
 RunExecutionUpdate = RunExecutionEvent | RunExecutionCompleted
 
 
-def _runtime_error_payload(error: Any) -> dict[str, Any]:
-    if isinstance(error, dict):
-        code = error.get("code")
-        message = error.get("message")
-        details = error.get("details")
-        return {
-            "code": code if isinstance(code, str) and code else "runtime.dispatch_failed",
-            "message": message if isinstance(message, str) and message else "Runtime dispatch failed",
-            "details": details if isinstance(details, dict) else {},
-        }
-    details: dict[str, Any] = {}
-    error_info = getattr(error, "error", None)
-    message = str(error)
-    if error_info is not None:
-        message = getattr(error_info, "message", message)
-        details["cause_code"] = getattr(error_info, "code", "")
-    if hasattr(error, "run_id"):
-        details["run_id"] = getattr(error, "run_id")
-    if hasattr(error, "status"):
-        details["status"] = getattr(error, "status")
-    return {
-        "code": "runtime.dispatch_failed",
-        "message": message,
-        "details": details,
-    }
+def _bind_tool_checkpoint_reader(environment: RunEnvironment) -> None:
+    bind = getattr(environment.state, "bind_tool_state", None)
+    if not callable(bind):
+        return
+    checkpoint = getattr(environment.tools, "checkpoint_state", None)
+    bind((lambda: checkpoint()) if callable(checkpoint) else None)
 
 
 __all__ = [

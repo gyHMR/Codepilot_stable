@@ -11,7 +11,17 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Awaitable, Callable, Generic, Literal, Protocol, TYPE_CHECKING, TypeAlias, TypeVar, cast
+from typing import (
+    Awaitable,
+    Callable,
+    Generic,
+    Literal,
+    Protocol,
+    TYPE_CHECKING,
+    TypeAlias,
+    TypeVar,
+    cast,
+)
 
 from .security import (
     ApprovalChallenge,
@@ -92,14 +102,22 @@ class ToolSpec:
         if _TOOL_NAME_PATTERN.fullmatch(name) is None:
             raise ValueError(f"Invalid tool name: {self.name}")
         # 验证版本号
-        if isinstance(self.schema_version, bool) or not isinstance(self.schema_version, int):
+        if isinstance(self.schema_version, bool) or not isinstance(
+            self.schema_version, int
+        ):
             raise TypeError("schema_version must be int")
         if self.schema_version <= 0:
             raise ValueError("schema_version must be positive")
         object.__setattr__(self, "name", name)
-        object.__setattr__(self, "description", _require_text(self.description, "description"))
+        object.__setattr__(
+            self, "description", _require_text(self.description, "description")
+        )
         # 冻结 input_schema 防止运行时篡改
-        object.__setattr__(self, "input_schema", _freeze_json_mapping(self.input_schema, "input_schema"))
+        object.__setattr__(
+            self,
+            "input_schema",
+            _freeze_json_mapping(self.input_schema, "input_schema"),
+        )
         if self.output_schema is not None:
             object.__setattr__(
                 self,
@@ -139,23 +157,56 @@ class ToolExecutionRequest:
 
     def __post_init__(self) -> None:
         # 所有 ID 字段不能为空
-        for name in ("run_id", "session_id", "tool_call_id", "tool_name", "registration_id"):
+        for name in (
+            "run_id",
+            "session_id",
+            "tool_call_id",
+            "tool_name",
+            "registration_id",
+        ):
             object.__setattr__(self, name, _require_text(getattr(self, name), name))
         mode = _clean_text(self.mode)
         if mode not in _TOOL_MODES:
             raise ValueError(f"Unknown tool mode: {self.mode}")
         if self.deadline_at_ms is not None and (
-            isinstance(self.deadline_at_ms, bool) or not isinstance(self.deadline_at_ms, int)
+            isinstance(self.deadline_at_ms, bool)
+            or not isinstance(self.deadline_at_ms, int)
         ):
             raise TypeError("deadline_at_ms must be int or None")
         object.__setattr__(self, "mode", cast(ToolMode, mode))
-        object.__setattr__(self, "arguments", _freeze_json_mapping(self.arguments, "arguments"))
+        object.__setattr__(
+            self, "arguments", _freeze_json_mapping(self.arguments, "arguments")
+        )
         object.__setattr__(self, "raw_arguments", _optional_text(self.raw_arguments))
         object.__setattr__(
             self,
             "argument_parse_error",
             _optional_text(self.argument_parse_error),
         )
+
+
+@dataclass(frozen=True)
+class ToolBatchPreparation:
+    """Opaque prepared batch handle or side-effect-free preparation results."""
+
+    batch_id: str | None = None
+    results: tuple["ToolResult", ...] = ()
+
+    def __post_init__(self) -> None:
+        from .results import ToolResult
+
+        batch_id = _optional_text(self.batch_id)
+        results = tuple(self.results)
+        if any(not isinstance(result, ToolResult) for result in results):
+            raise TypeError(
+                "ToolBatchPreparation results must contain ToolResult values"
+            )
+        if (batch_id is None) == (not results):
+            raise ValueError(
+                "ToolBatchPreparation requires exactly one of batch_id or results"
+            )
+        object.__setattr__(self, "batch_id", batch_id)
+        object.__setattr__(self, "results", results)
 
 
 class CancellationToken(Protocol):
@@ -281,17 +332,20 @@ class ToolCodec(Protocol, Generic[TInput]):
 
     @property
     def json_schema(self) -> Mapping[str, object] | None: ...
-        # 返回 JSON Schema，None 表示不校验（仅 UnverifiedJsonCodec 使用）
+
+    # 返回 JSON Schema，None 表示不校验（仅 UnverifiedJsonCodec 使用）
 
     def decode(self, value: object) -> TInput: ...
-        # 将 JSON 对象解码为类型化的 Python 值
-        # 参数 value: 来自 LLM 的原始 JSON 参数
-        # 返回: 解码后的类型化对象
+
+    # 将 JSON 对象解码为类型化的 Python 值
+    # 参数 value: 来自 LLM 的原始 JSON 参数
+    # 返回: 解码后的类型化对象
 
     def encode(self, value: TInput) -> object: ...
-        # 将类型化的 Python 值编码回 JSON 对象
-        # 参数 value: 工具处理器的返回值
-        # 返回: 编码后的 JSON 对象
+
+    # 将类型化的 Python 值编码回 JSON 对象
+    # 参数 value: 工具处理器的返回值
+    # 返回: 编码后的 JSON 对象
 
 
 class ToolHandler(Protocol, Generic[TInput, TOutput]):
@@ -306,7 +360,9 @@ class ToolHandler(Protocol, Generic[TInput, TOutput]):
         TOutput: 原始的返回类型（在编码前）
     """
 
-    async def __call__(self, input: TInput, context: ToolExecutionContext) -> TOutput: ...
+    async def __call__(
+        self, input: TInput, context: ToolExecutionContext
+    ) -> TOutput: ...
 
 
 class ToolAccessResolver(Protocol, Generic[TInput]):
@@ -429,7 +485,9 @@ class ToolPort(Protocol):
     - resume(): 恢复被挂起的工具执行（审批通过或用户输入后）
     """
 
-    def catalog_snapshot(self, *, mode: ToolMode | None = None) -> ToolCatalogSnapshot: ...
+    def catalog_snapshot(
+        self, *, mode: ToolMode | None = None
+    ) -> ToolCatalogSnapshot: ...
 
     def pending_challenges(self) -> tuple[ApprovalChallenge, ...]: ...
 
@@ -440,11 +498,20 @@ class ToolPort(Protocol):
         requests: tuple[ToolExecutionRequest, ...] | list[ToolExecutionRequest],
     ) -> list[ToolResult]: ...
 
+    def prepare_batch(
+        self,
+        requests: tuple[ToolExecutionRequest, ...] | list[ToolExecutionRequest],
+    ) -> ToolBatchPreparation: ...
+
+    async def execute_prepared(self, batch_id: str) -> tuple[ToolResult, ...]: ...
+
     async def cancel(self, attempt_id: str) -> bool: ...
 
     def approval_challenge(self, approval_id: str): ...
 
-    async def resume(self, response: ApprovalResponse | InteractionResponse) -> ToolResult: ...
+    async def resume(
+        self, response: ApprovalResponse | InteractionResponse
+    ) -> ToolResult: ...
 
     def checkpoint_state(
         self,
@@ -458,7 +525,9 @@ class ToolPort(Protocol):
 # ── 内部辅助函数 ──────────────────────────────────────────────────────────────
 
 
-def _freeze_json_mapping(value: Mapping[str, object], field_name: str) -> Mapping[str, object]:
+def _freeze_json_mapping(
+    value: Mapping[str, object], field_name: str
+) -> Mapping[str, object]:
     """递归冻结一个 JSON 兼容的映射为不可变视图（MappingProxyType）。
 
     使用 MappingProxyType 包装确保数据在运行时不可变，
@@ -503,6 +572,7 @@ __all__ = [
     "EffectReporter",
     "ProgressReporter",
     "ToolAccessResolver",
+    "ToolBatchPreparation",
     "ToolCategory",
     "ToolCodec",
     "ToolExecutionContext",

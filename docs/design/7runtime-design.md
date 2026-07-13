@@ -2,9 +2,7 @@
 
 ## 文档状态
 
-本文定义 Codepilot Runtime v2 的目标边界、执行协议、恢复时序、文件布局、迁移顺序和验收标准，作为 Runtime 重构的唯一目标参考。
-
-本文描述目标设计，不表示所有目标代码已经实现。重构完成后不保留旧 Runtime 调用入口、旧 Sessions 写入口或旧 Session 文件兼容读取。
+本文定义 Codepilot Runtime v2 的有效边界、执行协议、恢复时序、文件布局和验收标准。Core 重构完成后，Runtime 只通过 `RunExecutor -> run_core` 推进任务。
 
 第一版不引入通用依赖注入容器、事件溯源系统、分布式事务、独立调度器或 Effect 抽象。Prompt 和 Resume 使用同一条 Runtime 执行路径，Sessions 是持久化事实的唯一写入者，Core 决定任务语义，Runtime 只编排执行。
 
@@ -16,7 +14,7 @@ Runtime 负责：
 
 - 将用户 Action 转换为 Prompt、Resume 或 Cancel 操作。
 - 创建和管理一次 Run 的执行环境。
-- 调用 Core Agent Loop。
+- 通过 RunExecutor 调用 Core 的唯一入口。
 - 提供 Model、Tool、Context、Memory 等能力接口。
 - 处理并发、取消、超时和任务收敛。
 - 编排 Progress、Waiting 和 Terminal Commit。
@@ -130,7 +128,7 @@ RunEnvironment
 └── resources
 ```
 
-Session 级资源包括 Model 配置、Tool Registry、Memory Service、Context Service 和会话投影。Run 级资源包括 run_id、Core 输入、取消令牌、deadline、事件流、StatePort、Tool task handles 和临时资源。
+Session 级资源包括 Model 配置、Tool Registry、Memory Service、Context Service 和会话投影。Run 级资源包括 run_id、Core 输入、取消令牌、deadline、事件流、BoundaryPort、Tool task handles 和临时资源。`RunEnvironment.ports()` 在边界处组装 CorePorts，并用运行级 ToolPort 将 deadline 注入 ToolExecutionRequest。
 
 ### 3.2 RunResourceScope
 
@@ -162,69 +160,74 @@ RunAction
 
 request_id 是用户操作的幂等标识。Prompt 重试时必须复用同一个 request_id，避免在 begin_run 前崩溃后重复保存用户消息。
 
-### 4.2 AgentLoopInput
+### 4.2 CoreRunInput
 
 Prompt 和 Resume 使用同一个输入协议：
 
 ```text
-AgentLoopInput
-├── entry: prompt | resume
-├── user_message?
-├── recovery_snapshot?
-└── runtime_options
+CoreRunInput
+├── run_id
+├── entry: ModelEntry | ToolResultEntry
+├── messages
+├── state: CoreState
+├── mode
+├── model
+├── limits
+└── context_seed
 ```
 
-Resume 不创建新的 Run，而是使用原 run_id 和最新成功 Checkpoint 创建新的 RunEnvironment。
+Resume 不创建新的 Run，而是使用原 run_id 和最新成功 Checkpoint 创建新的 RunEnvironment。Tool Approval 先由 Runtime 调用 `ToolPort.resume()` 得到最终 ToolResult，再构造 `ToolResultEntry`；Core 输入不包含 approval decision、deadline 或 retry policy。
 
-### 4.3 AgentLoopPorts
+### 4.3 CorePorts
 
 Core 不接收完整 RunEnvironment，只接收最小能力集合：
 
 ```text
-AgentLoopPorts
+CorePorts
 ├── model: ModelPort
-├── tools: ToolPort
 ├── context: ContextPort
-├── memory: MemoryPort
-├── state: TaskStatePort
-├── events: CoreEventSink
-└── cancellation: CancellationToken
+├── boundary: BoundaryPort
+├── tools: ToolPort | None
+├── live_events: LiveEventSink | None
+└── cancellation: CancellationProbe | None
 ```
 
-这些是能力接口，不是具体 Service 或 Repository 的暴露。
+这些是能力接口，不是具体 Service 或 Repository 的暴露。Memory 不直接暴露给 Core；Sessions/Context 在准备上下文时调用 Memory Recall。Runtime 用运行级 ToolPort 适配器注入 deadline，用 Runtime Model Adapter 处理 Provider retry 和消息修复。
 
-### 4.4 AgentLoopOutcome
+### 4.4 CoreBoundary 与 CoreOutcome
 
 所有执行出口都返回统一结果：
 
 ```text
-AgentLoopOutcome
+CoreOutcome
 ├── status: completed | waiting | failed | cancelled
-├── termination_reason?
+├── reason: CoreReason
+├── state: CoreState
+├── new_messages
 ├── final_message?
-├── durable_events
-├── task_state_snapshot?
-├── checkpoint?
+├── wait?
 └── error?
 ```
 
-waiting 不是终态，只能触发 Waiting Commit。completed、failed 和 cancelled 才能触发 Terminal Commit。
+Core 在 `before_model`、`after_model`、`before_tools`、`after_tools`、`waiting` 和 `before_terminal` 提交 `CoreBoundary`。Runtime Boundary Adapter 从 Tool/Context 等组件读取不透明 checkpoint，并转换为 Sessions Commit；`CoreOutcome` 不携带组件 checkpoint 或 Runtime event envelope。
+
+waiting 不是终态，只能触发 Waiting Commit。completed、failed 和 cancelled 才能触发 Terminal Commit。Runtime 直接消费 `CoreOutcome`，外部状态、停止原因、计数器、Plan 和验证摘要只在 Runtime 边界投影。
 
 ## 5. RunExecutor
 
 Runtime 只有一个执行入口：
 
-RunExecutor.execute(environment, input) -> AgentLoopOutcome
+RunExecutor.execute(environment, prepared) -> RunExecutionEvent* + RunExecutionCompleted(CoreOutcome)
 
 RunExecutor 负责：
 
-- 构造 AgentLoopPorts。
-- 调用 Core Agent Loop。
+- 从 RunEnvironment 构造 CorePorts。
+- 调用 `run_core(CoreRunInput, CorePorts)`。
 - 转发实时 Core Event。
 - 管理 Run 级取消和 deadline。
 - 捕获并归一化 Core、Model、Tool 异常。
 - 等待 Core 和子任务收敛。
-- 返回 AgentLoopOutcome。
+- 返回唯一的 CoreOutcome，并单独携带本次 Runtime live events。
 
 RunExecutor 不负责：
 
@@ -290,7 +293,7 @@ CoreEvent
 └── checkpoint_state?
 ```
 
-Token 增量、调试信息和临时进度只走实时 Event Sink。Event Sink 不写 Sessions；消息、Tool 调用结果、Approval、Run 状态、Checkpoint 和 `durable_events` 进入下一次 Commit。Context projection、Memory retrieval 和 preflight 事件由 Runtime State Adapter 暂存后，也必须随下一次边界提交。
+Token 增量、调试信息和临时进度只走实时 Event Sink。Event Sink 不写 Sessions；消息、Tool 调用结果、Approval、Run 状态、Checkpoint 和领域事件进入下一次 Commit。Context projection 和 Memory retrieval 事件由 Runtime State Adapter 暂存后，也必须随下一次边界提交。
 
 当 Core 到达稳定 Progress Boundary 时，Coordinator 必须等待 CommitReceipt 后，才允许继续执行可能产生副作用的下一段工作。
 
@@ -305,11 +308,11 @@ Session 内的 pending Tool Attempt 只能通过 `components.tools` 恢复，不
   -> request_termination(reason)
   -> cancelling
   -> 停止新任务并收敛已有任务
-  -> AgentLoopOutcome
+  -> CoreOutcome
   -> Terminal Commit
-  -> 最终 RuntimeFrame
   -> RunResourceScope.release()
   -> released
+  -> 最终 RuntimeFrame
 ```
 
 终止原因至少包括：
@@ -328,6 +331,8 @@ runtime_error
 
 取消先进行协作式传播，再在 grace period 后强制取消仍未收敛的任务。无论 Outcome 如何，release 都必须在 finally 中幂等调用。
 
+Runtime 在进入 Commit 前关闭本次执行的取消仲裁；此后到达的用户取消必须明确返回未接受，不能与已经确定的 Outcome 竞争。终态提交和资源释放是 Runtime 的不可中断收尾区。若接口消费者在这一区间取消事件流，Runtime 必须先等待当前 Commit 与 release 完成，再向接口层传播 `CancelledError`；不能让传输层取消留下状态未知的 Terminal Commit 或半释放的 RunResourceScope。
+
 第一版 Run 超时通过 `SessionOpenIntent.run_timeout_seconds` 配置。每次 RunEnvironment 创建时计算独立 deadline；超时先触发 cancellation token，超过短 grace period 仍未退出才强制取消，并最终提交 `failed/deadline_exceeded`。
 
 Terminal Commit 失败时不得发送成功最终 Frame。Runtime 可以使用同一 commit_id 有限重试；资源仍然必须释放，后续启动流程从最后成功边界继续恢复。
@@ -344,9 +349,9 @@ Action(prompt)
   -> Sessions.begin_run
   -> RunEnvironmentFactory
   -> RunExecutor.execute
-  -> Core / Model / Tool
+  -> run_core / Model / Tool
   -> Progress Commit（可重复）
-  -> AgentLoopOutcome
+  -> CoreOutcome
   -> Terminal Commit
   -> final RuntimeFrame
   -> resource release
@@ -365,9 +370,12 @@ Core waiting Outcome
 Action(resume)
   -> load_recovery
   -> validate Workspace
-  -> begin_run(resume)
+  -> restore component checkpoints
+  -> resume_run(waiting -> running)（仅 waiting 场景）
+  -> ToolPort.resume()（Tool approval/interaction）
+  -> ToolResultEntry 或 ModelEntry
   -> 创建新的 RunEnvironment
-  -> RunExecutor.execute(entry=resume)
+  -> RunExecutor.execute
 ```
 
 Resume 使用原 run_id，只从最后一次成功的 Checkpoint 恢复。Workspace 校验失败时不得启动 Core。
@@ -382,7 +390,8 @@ Resume 使用原 run_id，只从最后一次成功的 Checkpoint 恢复。Worksp
 | Waiting Commit 成功后 | 保持 waiting，等待 Resume |
 | Terminal Commit 成功后 | 不再执行，直接返回最终结果 |
 | Workspace 已变化 | 阻止恢复并要求验证 |
-| Tool 副作用后未提交 | 使用稳定 tool_call_id 由 Tool 层保证重试幂等 |
+| `after_model` 后中断 | Tool 尚未进入执行边界，可按持久化 ToolCall 继续 |
+| `before_tools` 后中断 | 执行结果不确定，禁止自动重放并暂停等待用户核对；Workspace 已变化时直接阻止恢复 |
 
 Runtime 不恢复未提交的 Python 调用栈、流式半成品或进程内对象。
 
@@ -408,19 +417,23 @@ src/codepilot/
 │   ├── __init__.py
 │   ├── contracts.py
 │   ├── actions.py
-│   ├── gateway.py
 │   ├── builder.py
+│   ├── commands.py
 │   ├── config.py
-│   ├── opening.py
-│   ├── session_controller.py
-│   ├── session_coordinator.py
-│   ├── session_state_adapter.py
 │   ├── coordinator.py
 │   ├── environment.py
+│   ├── errors.py
 │   ├── executor.py
+│   ├── gateway.py
 │   ├── lifecycle.py
-│   ├── approvals.py
-│   └── tool_adapters/
+│   ├── model.py
+│   ├── registry.py
+│   ├── session_coordinator.py
+│   ├── session_state_adapter.py
+│   └── subagents/
+│       ├── __init__.py
+│       ├── runner.py
+│       └── tools.py
 └── interfaces/
 ```
 
@@ -428,20 +441,25 @@ src/codepilot/
 
 | 文件 | 应包含 | 不应包含 |
 |---|---|---|
-| contracts.py | Action、Outcome、Environment、Runtime 状态协议 | 具体执行和持久化 |
-| actions.py | Prompt、Resume、Cancel 输入转换 | Core 循环和 Plan 规则 |
+| contracts.py | Runtime 状态协议、Core Outcome/Event 的边界投影 | 具体执行和持久化 |
+| actions.py | Open、Prompt、Resume、Cancel、Frame 和界面 View DTO | Core 循环、配置解析和 Plan 规则 |
 | gateway.py | 外部入口、Session 并发、Frame 输出 | Core task、Repository 写入 |
-| session_controller.py | 暴露 Session 事实、命令和唯一 `controller.runs` 入口 | 消息、事件和 Checkpoint 写入 |
-| coordinator.py | 通过 `prepare/execute/commit` 统一编排一次 Run，并选择 Prompt、Resume 或 Continuation 的恢复路径 | Context/Memory 具体治理、Core 循环、直接 Repository 写入 |
+| builder.py | Session、Model、Tool、Prompt 和扩展资源装配 | Run 执行、Sessions 事实写入 |
+| commands.py | Runtime 命令路由、参数解释和输出视图 | 重新实现 Context、Memory、Rollback 或 Sessions 服务 |
+| config.py | Workspace/Runtime 配置加载、来源追踪与配置视图 | Model 调用和 Run 编排 |
+| model.py | Model/凭据解析、Provider retry wrapper 和 Provider 消息修复 | Session 生命周期和 Core 任务决策 |
+| coordinator.py | `SessionController` 外观及 Run 的 `prepare/execute/commit` 唯一入口 | Context/Memory 具体治理、Core 循环、直接 Repository 写入 |
 | session_coordinator.py | 组装 Session 运行所需的 Context、Plan、Memory 和 Sessions Adapter，作为 `RunCoordinator` 的内部实现 | 对外暴露第二套 Run API、直接被 Gateway 调用 |
 | session_state_adapter.py | 将 Core 边界转换为 `SessionStateService.commit_run_boundary` 请求 | 自行写 Repository、维护第二份 Run 事实 |
-| environment.py | EnvironmentFactory 和资源组装 | Agent Loop 和文件持久化 |
+| registry.py | 进程内 RuntimeSession、Conversation 投影和 ActiveRunRegistry | 持久化 Session/Run 事实 |
+| environment.py | EnvironmentFactory、运行级 Port 适配、取消令牌和 RunResourceScope | Core 循环和文件持久化 |
 | executor.py | 唯一 Core 执行入口和异常归一化 | Sessions Commit 和任务完成判断 |
 | lifecycle.py | Runtime 状态、终止仲裁、资源释放 | Sessions RunState 和 Plan 状态 |
-| approvals.py | Approval Action 的 Runtime 转换 | Approval 事实存储 |
-| tool_adapters/ | Tool Port 到具体工具的适配 | Tool 副作用策略 |
+| errors.py | Runtime 错误到外部 ErrorInfo/Payload 的唯一转换 | Core 或 Tool 的领域错误决策 |
+| subagents/runner.py | 只读 Subagent 执行、协调和进程内报告缓存 | 主 Run 持久化和写工具权限 |
+| subagents/tools.py | Subagent Tool 注册和受限 ToolPort | 通用 ToolRuntime 和副作用策略 |
 
-第一阶段可以暂时保留现有 session_controller.py 和 session_coordinator.py 文件名，但逻辑必须遵守本表职责。Run 的公开入口只有 `SessionController.runs`，其余 Session Coordinator 的 Run 准备和提交方法为内部实现；不得再从 Gateway 或其他层直接调用旧入口。
+Run 的公开入口只有 `SessionController.runs`。`SessionController` 与 `RunCoordinator` 共置于 coordinator.py；其余 Session Coordinator 的 Run 准备和提交方法为内部实现，不得再从 Gateway 或其他层直接调用旧入口。旧的 opening、views、approvals、prompt、tools、hooks、session_controller、sessions、live_conversation、subagent_registry 和 tool_adapters 模块不保留兼容转发文件。
 
 ### 9.2 Sessions 与 Workspace 边界
 
@@ -459,7 +477,7 @@ tools/sandbox.py 仍负责工具执行时的安全和权限策略；sessions/rol
 
 ### 阶段 B：统一 Core 入口
 
-将 Prompt 和 Resume 收敛到统一 AgentLoop.run(input, ports)，统一 Event、Boundary 和 Outcome 协议。
+将 Prompt 和 Resume 收敛到 `run_core(CoreRunInput, CorePorts)`，统一 Event、Boundary 和 Outcome 协议。
 
 ### 阶段 C：建立 Environment 与 ResourceScope
 
@@ -491,7 +509,7 @@ tools/sandbox.py 仍负责工具执行时的安全和权限策略；sessions/rol
 
 重构完成后不得存在：
 
-- Gateway 直接调用 Core Agent Loop。
+- Gateway 直接调用 `run_core`。
 - Gateway 自己创建或取消 Core task。
 - Runtime 直接写 Sessions Repository。
 - Coordinator 直接追加 Message、Event 或 Checkpoint。
@@ -555,8 +573,8 @@ tools/sandbox.py 仍负责工具执行时的安全和权限策略；sessions/rol
 Action
   -> Runtime Coordinator
   -> RunExecutor
-  -> Core / Model / Tool
-  -> Boundary Outcome
+  -> run_core / Model / Tool
+  -> CoreBoundary / CoreOutcome
   -> SessionStateService.commit_run_boundary
   -> RuntimeFrame
 ```

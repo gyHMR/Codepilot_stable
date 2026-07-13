@@ -8,7 +8,7 @@ from pathlib import Path
 def test_runtime_tools_catalog_is_filtered_by_current_mode(tmp_path: Path) -> None:
     from codepilot.runtime import SessionOpenIntent
     from codepilot.runtime.config import load_runtime_config
-    from codepilot.runtime.tools import build_runtime_tools
+    from codepilot.runtime.builder import build_runtime_tools
 
     config = load_runtime_config(
         SessionOpenIntent(workspace_dir=tmp_path, current_mode="read")
@@ -26,7 +26,7 @@ def test_runtime_tools_catalog_is_filtered_by_current_mode(tmp_path: Path) -> No
 def test_runtime_tools_registers_caller_tools_without_reserved_name_compat(tmp_path: Path) -> None:
     from codepilot.runtime import SessionOpenIntent
     from codepilot.runtime.config import load_runtime_config
-    from codepilot.runtime.tools import build_runtime_tools
+    from codepilot.runtime.builder import build_runtime_tools
     custom = _caller_registration("custom_echo", owner="caller:custom")
     reserved = _caller_registration("read", owner="caller:reserved")
 
@@ -41,7 +41,7 @@ def test_runtime_tools_registers_caller_tools_without_reserved_name_compat(tmp_p
 def test_runtime_reserved_names_do_not_drop_valid_tools_from_same_owner(tmp_path: Path) -> None:
     from codepilot.runtime import SessionOpenIntent
     from codepilot.runtime.config import load_runtime_config
-    from codepilot.runtime.tools import build_runtime_tools
+    from codepilot.runtime.builder import build_runtime_tools
 
     valid = _caller_registration("owner_valid", owner="caller:mixed")
     reserved = _caller_registration("propose_plan", owner="caller:mixed")
@@ -57,7 +57,7 @@ def test_runtime_reserved_names_do_not_drop_valid_tools_from_same_owner(tmp_path
 def test_skill_loader_tool_loads_discovered_skill_content(tmp_path: Path) -> None:
     from codepilot.runtime import SessionOpenIntent
     from codepilot.runtime.config import load_runtime_config
-    from codepilot.runtime.tools import build_runtime_tools
+    from codepilot.runtime.builder import build_runtime_tools
     from codepilot.tools.contracts import ToolExecutionRequest
     from codepilot.tools.runtime import ToolRuntime
 
@@ -263,7 +263,7 @@ def test_apply_patch_rolls_back_all_files_when_one_replace_fails(
 def test_tools_json_limits_enabled_builtin_tools(tmp_path: Path) -> None:
     from codepilot.runtime import SessionOpenIntent
     from codepilot.runtime.config import load_runtime_config
-    from codepilot.runtime.tools import build_runtime_tools
+    from codepilot.runtime.builder import build_runtime_tools
 
     config_dir = tmp_path / ".codepilot"
     config_dir.mkdir()

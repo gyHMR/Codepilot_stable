@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-"""Core-owned canonical registrations for Task Plan operations."""
+"""Plan tools translate model input into Core commands only."""
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from typing import Protocol
 
 from codepilot.protocols import (
     CLOSE_PLAN_TOOL,
@@ -14,12 +12,7 @@ from codepilot.protocols import (
     UPDATE_PLAN_PROGRESS_TOOL,
 )
 from codepilot.tools.codecs import JsonObjectCodec
-from codepilot.tools.contracts import (
-    ToolExecutionRequest,
-    ToolHandlerError,
-    ToolRegistration,
-    ToolSpec,
-)
+from codepilot.tools.contracts import ToolHandlerError, ToolRegistration, ToolSpec
 from codepilot.tools.results import TextContent
 from codepilot.tools.security import (
     ConcurrencyPolicy,
@@ -28,149 +21,110 @@ from codepilot.tools.security import (
     TimeoutPolicy,
     ToolAccessRequest,
     ToolAccessResolution,
-    ToolEffect,
     ToolPolicy,
     ToolResource,
 )
 
-from ..plan import (
-    PlanOperation,
-    PlanSnapshot,
-    PlanState,
-    PlanValidationError,
-    apply_plan_snapshot,
-    ensure_plan_operation,
-    load_plan_state,
+from ..commands import (
+    ProposePlanRevision,
+    RequestPlanClose,
+    SubmitPlan,
+    UpdatePlanProgress,
+    core_command_to_dict,
 )
-
-
-class PlanService(Protocol):
-    """Narrow Core boundary used by Plan handlers to atomically submit one operation."""
-
-    def submit(
-        self,
-        operation: PlanOperation,
-        snapshot: PlanSnapshot,
-        request: ToolExecutionRequest,
-    ) -> Mapping[str, object]:
-        ...
-
-
-@dataclass
-class StoreBackedPlanService:
-    load: Callable[[], Mapping[str, object] | None]
-    save: Callable[[Mapping[str, object] | PlanState], Mapping[str, object]]
-    qualified_failure_count: Callable[[str], int] = lambda _run_id: 0
-
-    def submit(
-        self,
-        operation: PlanOperation,
-        snapshot: PlanSnapshot,
-        request: ToolExecutionRequest,
-    ) -> Mapping[str, object]:
-        current = load_plan_state(self.load())
-        state = apply_plan_snapshot(
-            current,
-            snapshot,
-            mode="plan" if request.mode == "plan" else "build",
-            run_id=request.run_id,
-            operation=operation,
-            qualified_failure_count=self.qualified_failure_count(request.run_id),
-        )
-        return self.save(state)
+from ..plan import (
+    PlanDefinition,
+    PlanStepDefinition,
+    PlanStepUpdate,
+    ensure_plan_operation,
+    ensure_plan_revision_reason,
+)
 
 
 def create_plan_registrations(
     *,
-    service: PlanService,
     allow: Callable[[str], bool] | None = None,
 ) -> list[ToolRegistration]:
     allowed = allow or (lambda _name: True)
     operations = (
-        (PROPOSE_PLAN_TOOL, "plan", _plan_description(PROPOSE_PLAN_TOOL)),
-        (CREATE_BUILD_PLAN_TOOL, "execute", _plan_description(CREATE_BUILD_PLAN_TOOL)),
-        (UPDATE_PLAN_PROGRESS_TOOL, "execute", _plan_description(UPDATE_PLAN_PROGRESS_TOOL)),
-        (CLOSE_PLAN_TOOL, "execute", _plan_description(CLOSE_PLAN_TOOL)),
+        (PROPOSE_PLAN_TOOL, "plan"),
+        (CREATE_BUILD_PLAN_TOOL, "execute"),
+        (UPDATE_PLAN_PROGRESS_TOOL, "execute"),
+        (CLOSE_PLAN_TOOL, "execute"),
     )
     return [
-        _plan_registration(name, mode=mode, description=description, service=service)
-        for name, mode, description in operations
+        _plan_registration(name, mode=mode)
+        for name, mode in operations
         if allowed(name)
     ]
 
 
-def _plan_registration(
-    name: str,
-    *,
-    mode: str,
-    description: str,
-    service: PlanService,
-) -> ToolRegistration:
+def _plan_registration(name: str, *, mode: str) -> ToolRegistration:
     operation = ensure_plan_operation(name)
-    input_schema = _snapshot_schema(operation)
+    input_schema = _input_schema(operation)
     output_schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
             "plan_operation": {"type": "string", "const": operation},
-            "plan_snapshot": {"type": "object"},
-            "plan_state": {"type": "object"},
+            "core_command": {"type": "object"},
         },
-        "required": ["plan_operation", "plan_snapshot", "plan_state"],
+        "required": ["plan_operation", "core_command"],
         "additionalProperties": False,
     }
-    input_codec = JsonObjectCodec(input_schema)
-    output_codec = JsonObjectCodec(output_schema)
 
     class Resolver:
         def resolve(self, input, request):
-            resource = ToolResource(f"session://{request.session_id}/task-plan")
             return ToolAccessResolution(
                 input=input,
                 access=ToolAccessRequest(
                     actions=(operation,),
-                    resources=(resource,),
-                    effects=frozenset({"session_state_write"}),
+                    resources=(
+                        ToolResource(f"session://{request.session_id}/task-plan"),
+                    ),
+                    effects=frozenset(),
                     risk="low",
-                    reason=f"Submit Task Plan operation {operation}",
+                    reason=f"Submit Core Plan command {operation}",
                 ),
             )
 
     async def handler(input, context):
         try:
-            snapshot = _snapshot_from_input(operation, input)
-            state = service.submit(operation, snapshot, context.request)
-        except PlanValidationError as exc:
-            raise ToolHandlerError("plan.invalid", str(exc)) from exc
-        context.effects.report(
-            ToolEffect(
-                kind="session_state_write",
-                resource=ToolResource(f"session://{context.request.session_id}/task-plan"),
-                operation=operation,
-                status="completed",
-                certainty="observed",
+            command = _command_from_input(
+                operation,
+                input,
+                command_id=context.request.tool_call_id,
             )
-        )
+        except (TypeError, ValueError) as exc:
+            raise ToolHandlerError("plan.invalid", str(exc)) from exc
         return {
             "plan_operation": operation,
-            "plan_snapshot": _snapshot_to_dict(snapshot),
-            "plan_state": dict(state),
+            "core_command": core_command_to_dict(command),
         }
 
     class Renderer:
         def render(self, data):
-            return (TextContent(text=f"Task Plan operation {data['plan_operation']} submitted."),)
+            return (
+                TextContent(
+                    text=f"Task Plan command {data['plan_operation']} submitted."
+                ),
+            )
 
     return ToolRegistration(
         version="1.0.0",
-        implementation_version="1",
-        spec=ToolSpec(name, description, input_schema, output_schema),
+        implementation_version="2",
+        spec=ToolSpec(
+            operation,
+            _plan_description(operation),
+            input_schema,
+            output_schema,
+        ),
         category="plan",
         source="builtin",
         owner="core.plan",
         policy=ToolPolicy(
             allowed_modes=frozenset({mode}),
-            declared_effects=frozenset({"session_state_write"}),
+            declared_effects=frozenset(),
             required_permissions=frozenset(),
             base_risk="low",
             approval="never",
@@ -179,113 +133,112 @@ def _plan_registration(
             output_limits=OutputLimits(),
             output_trust=OutputTrustPolicy(),
         ),
-        input_codec=input_codec,
-        output_codec=output_codec,
+        input_codec=JsonObjectCodec(input_schema),
+        output_codec=JsonObjectCodec(output_schema),
         handler=handler,
         renderer=Renderer(),
         access_resolver=Resolver(),
     )
 
 
-def _snapshot_from_input(operation: PlanOperation, input: Mapping[str, object]) -> PlanSnapshot:
-    raw = dict(input)
-    items = raw.get("items")
-    if operation == PROPOSE_PLAN_TOOL and isinstance(items, list):
-        raw["items"] = [{**item, "status": "pending"} for item in items]
-    return PlanSnapshot.from_mapping(raw)
+def _command_from_input(
+    operation: str,
+    raw: Mapping[str, object],
+    *,
+    command_id: str,
+):
+    if operation in {PROPOSE_PLAN_TOOL, CREATE_BUILD_PLAN_TOOL}:
+        return SubmitPlan(
+            command_id=command_id,
+            definition=_definition_from_input(raw),
+            steps=_step_definitions(raw.get("items")),
+        )
+    if operation == UPDATE_PLAN_PROGRESS_TOOL:
+        expected_revision = _non_negative_int(
+            raw.get("expected_revision"), "expected_revision"
+        )
+        revision = raw.get("revision")
+        if isinstance(revision, Mapping):
+            return ProposePlanRevision(
+                command_id=command_id,
+                expected_revision=expected_revision,
+                reason=ensure_plan_revision_reason(revision.get("reason")),
+                definition=_definition_from_input(revision),
+                steps=_step_definitions(revision.get("items")),
+            )
+        return UpdatePlanProgress(
+            command_id=command_id,
+            expected_revision=expected_revision,
+            updates=tuple(
+                PlanStepUpdate.from_mapping(item)
+                for item in _mapping_list(raw.get("updates"), "updates")
+            ),
+        )
+    if operation == CLOSE_PLAN_TOOL:
+        return RequestPlanClose(
+            command_id=command_id,
+            expected_revision=_non_negative_int(
+                raw.get("expected_revision"), "expected_revision"
+            ),
+            summary=_required_text(raw.get("summary"), "summary"),
+            evidence_refs=_string_list(raw.get("evidence_refs"), "evidence_refs"),
+        )
+    raise ValueError(f"Unknown Plan operation: {operation}")
 
 
-def _snapshot_to_dict(snapshot: PlanSnapshot) -> dict[str, object]:
-    result: dict[str, object] = {
-        "summary": snapshot.summary,
-        "completion_criteria": list(snapshot.completion_criteria),
-        "items": [
-            {
-                **({"id": item.id} if item.id is not None else {}),
-                "step": item.step,
-                "details": item.details,
-                "verification": item.verification,
-                "status": item.status,
-            }
-            for item in snapshot.items
-        ],
-        "explanation": snapshot.explanation,
-    }
-    for name in (
-        "raw_user_request",
-        "interpreted_goal",
-        "task_understanding",
-        "current_implementation",
-        "target_design",
-        "impact_scope",
-        "verification_plan",
-        "status",
-        "change_reason",
-    ):
-        value = getattr(snapshot, name)
-        if value is not None:
-            result[name] = value
-    if snapshot.risks_and_open_questions:
-        result["risks_and_open_questions"] = list(snapshot.risks_and_open_questions)
-    return result
+def _definition_from_input(raw: Mapping[str, object]) -> PlanDefinition:
+    return PlanDefinition(
+        summary=_required_text(raw.get("summary"), "summary"),
+        completion_criteria=_string_list(
+            raw.get("completion_criteria"), "completion_criteria"
+        ),
+        task_understanding=_optional_text(raw.get("task_understanding")) or "",
+        current_implementation=_optional_text(raw.get("current_implementation")) or "",
+        target_design=_optional_text(raw.get("target_design")) or "",
+        impact_scope=_optional_text(raw.get("impact_scope")) or "",
+        risks_and_open_questions=_string_list(
+            raw.get("risks_and_open_questions", ()),
+            "risks_and_open_questions",
+        ),
+        verification_plan=_optional_text(raw.get("verification_plan")) or "",
+        explanation=_optional_text(raw.get("explanation")) or "",
+    )
 
 
-def _snapshot_schema(operation: PlanOperation) -> dict[str, object]:
-    proposal = operation == PROPOSE_PLAN_TOOL
-    item_properties: dict[str, object] = {
-        "step": {"type": "string", "minLength": 1},
-        "details": {"type": "string", "minLength": 1},
-        "verification": {"type": "string", "minLength": 1},
-    }
-    item_required = ["step", "details", "verification"]
-    if not proposal:
-        item_properties = {
-            "id": {"type": "string", "minLength": 1},
-            **item_properties,
-            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
-        }
-        item_required.append("status")
-    properties: dict[str, object] = {
-        "raw_user_request": {"type": "string", "minLength": 1},
-        "interpreted_goal": {"type": "string", "minLength": 1},
-        "task_understanding": {"type": "string", "minLength": 1},
-        "current_implementation": {"type": "string", "minLength": 1},
-        "target_design": {"type": "string", "minLength": 1},
-        "impact_scope": {"type": "string", "minLength": 1},
-        "risks_and_open_questions": {
-            "type": "array",
-            "maxItems": 8,
-            "items": {"type": "string", "minLength": 1},
-        },
-        "verification_plan": {"type": "string", "minLength": 1},
-        "summary": {"type": "string", "minLength": 1},
-        "completion_criteria": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 5,
-            "items": {"type": "string", "minLength": 1},
-        },
-        "items": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": PLAN_ITEM_LIMIT,
-            "items": {
-                "type": "object",
-                "properties": item_properties,
-                "required": item_required,
-                "additionalProperties": False,
+def _step_definitions(value: object) -> tuple[PlanStepDefinition, ...]:
+    return tuple(
+        PlanStepDefinition.from_mapping(item)
+        for item in _mapping_list(value, "items")
+    )
+
+
+def _input_schema(operation: str) -> dict[str, object]:
+    if operation in {PROPOSE_PLAN_TOOL, CREATE_BUILD_PLAN_TOOL}:
+        return _submission_schema(detailed=operation == PROPOSE_PLAN_TOOL)
+    if operation == UPDATE_PLAN_PROGRESS_TOOL:
+        return _progress_schema()
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "expected_revision": {"type": "integer", "minimum": 0},
+            "summary": {"type": "string", "minLength": 1},
+            "evidence_refs": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "minLength": 1},
             },
         },
-        "change_reason": {
-            "type": "string",
-            "enum": ["user_request", "repeated_execution_failure"],
-        },
-        "explanation": {"type": "string"},
+        "required": ["expected_revision", "summary", "evidence_refs"],
+        "additionalProperties": False,
     }
+
+
+def _submission_schema(*, detailed: bool) -> dict[str, object]:
+    properties = _definition_properties()
+    properties["items"] = _step_definitions_schema()
     required = ["summary", "completion_criteria", "items"]
-    if operation in {PROPOSE_PLAN_TOOL, CREATE_BUILD_PLAN_TOOL}:
-        required = ["raw_user_request", "interpreted_goal", *required]
-    if proposal:
+    if detailed:
         required.extend(
             [
                 "task_understanding",
@@ -296,9 +249,6 @@ def _snapshot_schema(operation: PlanOperation) -> dict[str, object]:
                 "verification_plan",
             ]
         )
-    if operation == CLOSE_PLAN_TOOL:
-        properties["status"] = {"type": "string", "enum": ["active", "completed"]}
-        required.append("status")
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -308,26 +258,158 @@ def _snapshot_schema(operation: PlanOperation) -> dict[str, object]:
     }
 
 
+def _progress_schema() -> dict[str, object]:
+    revision_properties = _definition_properties()
+    revision_properties.update(
+        {
+            "reason": {
+                "type": "string",
+                "enum": [
+                    "user_request",
+                    "repeated_execution_failure",
+                    "new_evidence",
+                ],
+            },
+            "items": _step_definitions_schema(),
+        }
+    )
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "expected_revision": {"type": "integer", "minimum": 0},
+            "updates": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "step_id": {"type": "string", "minLength": 1},
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "in_progress", "completed"],
+                        },
+                        "completion_note": {"type": "string"},
+                        "evidence_refs": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                    },
+                    "required": ["step_id", "status"],
+                    "additionalProperties": False,
+                },
+            },
+            "revision": {
+                "type": "object",
+                "properties": revision_properties,
+                "required": [
+                    "reason",
+                    "summary",
+                    "completion_criteria",
+                    "items",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "required": ["expected_revision"],
+        "oneOf": [{"required": ["updates"]}, {"required": ["revision"]}],
+        "additionalProperties": False,
+    }
+
+
+def _definition_properties() -> dict[str, object]:
+    return {
+        "summary": {"type": "string", "minLength": 1},
+        "completion_criteria": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {"type": "string", "minLength": 1},
+        },
+        "task_understanding": {"type": "string", "minLength": 1},
+        "current_implementation": {"type": "string", "minLength": 1},
+        "target_design": {"type": "string", "minLength": 1},
+        "impact_scope": {"type": "string", "minLength": 1},
+        "risks_and_open_questions": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {"type": "string", "minLength": 1},
+        },
+        "verification_plan": {"type": "string", "minLength": 1},
+        "explanation": {"type": "string"},
+    }
+
+
+def _step_definitions_schema() -> dict[str, object]:
+    return {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": PLAN_ITEM_LIMIT,
+        "items": {
+            "type": "object",
+            "properties": {
+                "step": {"type": "string", "minLength": 1},
+                "details": {"type": "string", "minLength": 1},
+                "verification": {"type": "string", "minLength": 1},
+            },
+            "required": ["step", "details", "verification"],
+            "additionalProperties": False,
+        },
+    }
+
+
 def _plan_description(operation: str) -> str:
     return {
         PROPOSE_PLAN_TOOL: (
-            "Plan mode only. Submit the complete canonical implementation plan after repository "
-            "evidence is sufficient. Success means the proposal was stored; user plan approval is "
-            "a separate Core workflow and is not a tool security approval."
+            "Plan mode only. Submit a detailed Task Plan proposal as a Core command. "
+            "The user approves or rejects the resulting proposal separately."
         ),
         CREATE_BUILD_PLAN_TOOL: (
-            "Build mode only. Create a lightweight active Task Plan for a complex task when no "
-            "current plan exists."
+            "Build mode only. Submit a lightweight active Task Plan as a Core command."
         ),
         UPDATE_PLAN_PROGRESS_TOOL: (
-            "Build mode only. Atomically update progress or a controlled revision of the active "
-            "Task Plan; use close_plan for completion."
+            "Build mode only. Submit delta progress updates or a controlled Plan revision."
         ),
         CLOSE_PLAN_TOOL: (
-            "Build mode only. Atomically close the active Task Plan as completed, or keep it active "
-            "with explicit remaining work."
+            "Build mode only. Request Plan closeout with evidence. Core completion policy "
+            "decides whether the task may finish."
         ),
     }[operation]
 
 
-__all__ = ["PlanService", "StoreBackedPlanService", "create_plan_registrations"]
+def _mapping_list(
+    value: object,
+    field_name: str,
+) -> tuple[Mapping[str, object], ...]:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{field_name} must be a list")
+    if any(not isinstance(item, Mapping) for item in value):
+        raise TypeError(f"{field_name} must contain objects")
+    return tuple(item for item in value if isinstance(item, Mapping))
+
+
+def _string_list(value: object, field_name: str) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{field_name} must be a list")
+    return tuple(_required_text(item, f"{field_name} item") for item in value)
+
+
+def _non_negative_int(value: object, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return value
+
+
+def _required_text(value: object, field_name: str) -> str:
+    text = _optional_text(value)
+    if text is None:
+        raise ValueError(f"{field_name} is required")
+    return text
+
+
+def _optional_text(value: object) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+__all__ = ["create_plan_registrations"]

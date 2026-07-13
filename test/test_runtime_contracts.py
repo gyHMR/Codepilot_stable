@@ -6,14 +6,26 @@ from types import SimpleNamespace
 import pytest
 
 from codepilot.runtime.contracts import (
-    CommitReceipt,
-    RunCommitIdentity,
+    external_status,
+    external_stop_reason,
+    project_core_counters,
+    project_core_domain_event,
+    project_core_signals,
     terminal_outcome_for_status,
 )
 from codepilot.runtime.environment import RunEnvironment, RunResourceScope
+from codepilot.runtime.errors import runtime_error_info
 from codepilot.runtime.executor import RunExecutionCompleted, RunExecutor
 from codepilot.runtime.lifecycle import RuntimeLifecycle
-from codepilot.core.contracts import AgentLoopOutcome
+from codepilot.core.contracts import (
+    CoreOutcome,
+    CoreReason,
+    CoreWait,
+)
+from codepilot.core.errors import CoreContractError, CoreInvariantError
+from codepilot.core.events import CoreDomainEvent
+from codepilot.core.state import CoreCounters, CoreState, RunFacts, WorkspaceFacts
+from codepilot.protocols import AssistantMessage, TextContent
 
 
 def _environment() -> RunEnvironment:
@@ -35,9 +47,20 @@ def _environment() -> RunEnvironment:
 
 async def _collect_execution(executor, environment, prepared):
     updates = [update async for update in executor.execute(environment, prepared)]
-    completed = [update for update in updates if isinstance(update, RunExecutionCompleted)]
+    completed = [
+        update for update in updates if isinstance(update, RunExecutionCompleted)
+    ]
     assert len(completed) == 1
     return completed[0].outcome
+
+
+def _completed_core_outcome() -> CoreOutcome:
+    return CoreOutcome(
+        status="completed",
+        reason=CoreReason("task.completed"),
+        state=CoreState.new("test Runtime execution"),
+        final_message=AssistantMessage(content=[TextContent(text="done")]),
+    )
 
 
 def test_runtime_lifecycle_accepts_normal_and_resume_paths() -> None:
@@ -87,25 +110,13 @@ def test_runtime_lifecycle_uses_single_cancellation_path() -> None:
     assert lifecycle.terminal_outcome == "cancelled"
 
 
-def test_commit_identity_and_receipt_freeze_idempotency_key() -> None:
-    identity = RunCommitIdentity("commit_1", expected_revision=4, kind="waiting")
-    same_retry = RunCommitIdentity("commit_1", expected_revision=4, kind="waiting")
-    receipt = CommitReceipt("commit_1", revision=5, kind="waiting")
-
-    assert identity == same_retry
-    assert receipt.matches(same_retry)
-    assert not receipt.matches(RunCommitIdentity("commit_1", 4, "terminal"))
-
-    with pytest.raises(ValueError, match="cannot be negative"):
-        RunCommitIdentity("commit_2", expected_revision=-1, kind="progress")
-
-
 @pytest.mark.parametrize(
     ("status", "expected"),
     [
         ("completed", "completed"),
         ("failed", "failed"),
         ("cancelled", "cancelled"),
+        ("aborted", "cancelled"),
         ("waiting_approval", None),
         ("waiting_user", None),
     ],
@@ -114,34 +125,195 @@ def test_terminal_outcome_mapping_has_one_runtime_vocabulary(status, expected) -
     assert terminal_outcome_for_status(status) == expected
 
 
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("task.completed", "final_answer"),
+        ("tool.approval_required", "approval_required"),
+        ("plan.confirmation_required", "plan_approval_required"),
+        ("run.max_model_turns", "max_iterations"),
+        ("run.max_tool_calls", "tool_call_limit"),
+        ("run.repeated_tool_call", "repeated_tool_call"),
+        ("tool.unavailable", "tool_unavailable"),
+        ("run.cancelled", "aborted"),
+        ("verification.failed", "completion_blocked"),
+    ],
+)
+def test_structured_core_reason_maps_without_parsing_message(code, expected) -> None:
+    assert external_stop_reason(CoreReason(code, message="localized text")) == expected
+
+
+def test_runtime_projects_external_views_from_core_outcome() -> None:
+    state = CoreState(
+        task=CoreState.new("fix app").task,
+        facts=RunFacts(
+            counters=CoreCounters(model_turns=2, tool_iterations=1, tool_calls=3),
+            workspace=WorkspaceFacts(
+                revision=1,
+                changed=True,
+                affected_paths=("src/app.py",),
+            ),
+        ),
+    )
+    wait = CoreWait(
+        "tool_approval",
+        "approval_1",
+        CoreReason("tool.approval_required", source="tools", recoverable=True),
+    )
+
+    outcome = CoreOutcome(
+        status="waiting",
+        reason=wait.reason,
+        state=state,
+        wait=wait,
+    )
+
+    assert external_status(outcome) == "waiting_approval"
+    assert external_stop_reason(outcome.reason) == "approval_required"
+    assert project_core_counters(outcome).model_attempts == 2
+    assert outcome.state.facts.workspace.affected_paths == ("src/app.py",)
+    assert project_core_signals(outcome).approval_required is True
+
+
+def test_runtime_event_projection_adds_envelope_to_domain_event() -> None:
+    event = CoreDomainEvent(
+        "verification_recorded",
+        {"status": "passed"},
+        evidence_refs=("call_test",),
+    )
+
+    projected = project_core_domain_event(
+        event,
+        event_id="run_1:core:0",
+        run_id="run_1",
+        session_id="session_1",
+    )
+
+    assert projected == {
+        "event_id": "run_1:core:0",
+        "run_id": "run_1",
+        "session_id": "session_1",
+        "type": "verification_recorded",
+        "status": "passed",
+        "evidence_refs": ["call_test"],
+    }
+
+
+def test_runtime_model_conversion_drops_orphan_tool_results() -> None:
+    from codepilot.protocols import ToolCall, ToolResultMessage, UserMessage
+    from codepilot.runtime.model import convert_to_llm
+
+    messages = [
+        UserMessage(content="continue"),
+        ToolResultMessage(
+            tool_call_id="missing_call",
+            tool_name="read_file",
+            content=[TextContent(text="orphan output")],
+        ),
+        AssistantMessage(
+            content=[
+                TextContent(text="I can continue."),
+                ToolCall(
+                    id="kept_call",
+                    name="read_file",
+                    arguments={"path": "README.md"},
+                ),
+                ToolCall(
+                    id="dropped_call",
+                    name="read_file",
+                    arguments={"path": "old.md"},
+                ),
+            ],
+            stop_reason="toolUse",
+        ),
+        ToolResultMessage(
+            tool_call_id="kept_call",
+            tool_name="read_file",
+            content=[TextContent(text="paired output")],
+        ),
+    ]
+
+    converted = convert_to_llm(messages)
+
+    assert not any(
+        isinstance(message, ToolResultMessage)
+        and message.tool_call_id == "missing_call"
+        for message in converted
+    )
+    assistant = next(
+        message for message in converted if isinstance(message, AssistantMessage)
+    )
+    tool_calls = [block for block in assistant.content if isinstance(block, ToolCall)]
+    assert [call.id for call in tool_calls] == ["kept_call"]
+    assert isinstance(converted[-1], ToolResultMessage)
+    assert converted[-1].tool_call_id == "kept_call"
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (CoreContractError("bad input"), "runtime.core_contract_error"),
+        (CoreInvariantError("bad state"), "runtime.core_invariant_error"),
+    ],
+)
+def test_runtime_error_adapter_distinguishes_core_faults(error, code) -> None:
+    info = runtime_error_info(error)
+
+    assert info is not None
+    assert info.code == code
+    assert info.details["error_type"] == type(error).__name__
+
+
+def test_run_executor_preserves_structured_core_fault_code(monkeypatch) -> None:
+    async def broken(_input, _ports):
+        raise CoreInvariantError("state revision moved backwards")
+
+    monkeypatch.setattr("codepilot.runtime.executor.run_core", broken)
+
+    outcome = asyncio.run(
+        _collect_execution(
+            RunExecutor(),
+            _environment(),
+            SimpleNamespace(loop_input=SimpleNamespace(state=CoreState.new("test"))),
+        )
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error["code"] == "runtime.core_invariant_error"
+
+
 def test_run_executor_normalizes_task_cancellation(monkeypatch) -> None:
     async def cancelled(_input, _ports):
         raise asyncio.CancelledError
 
-    monkeypatch.setattr("codepilot.runtime.executor.run_agent_loop", cancelled)
+    monkeypatch.setattr("codepilot.runtime.executor.run_core", cancelled)
     environment = _environment()
-    prepared = SimpleNamespace(loop_input=object())
+    prepared = SimpleNamespace(
+        loop_input=SimpleNamespace(state=CoreState.new("test"))
+    )
 
     outcome = asyncio.run(_collect_execution(RunExecutor(), environment, prepared))
 
     assert outcome.status == "cancelled"
-    assert outcome.stop_reason == "cancelled"
-    assert outcome.signals.cancelled is True
+    assert outcome.reason.code == "runtime.cancelled"
+    assert project_core_signals(outcome).cancelled is True
 
 
 def test_run_executor_maps_deadline_cancellation_to_failed_timeout(monkeypatch) -> None:
     async def cancelled(_input, _ports):
         raise asyncio.CancelledError
 
-    monkeypatch.setattr("codepilot.runtime.executor.run_agent_loop", cancelled)
+    monkeypatch.setattr("codepilot.runtime.executor.run_core", cancelled)
     environment = _environment()
     environment.resources.cancel("deadline_exceeded")
-    prepared = SimpleNamespace(loop_input=object())
+    prepared = SimpleNamespace(
+        loop_input=SimpleNamespace(state=CoreState.new("test"))
+    )
 
     outcome = asyncio.run(_collect_execution(RunExecutor(), environment, prepared))
 
     assert outcome.status == "failed"
-    assert outcome.stop_reason == "deadline_exceeded"
+    assert external_stop_reason(outcome.reason) == "deadline_exceeded"
 
 
 def test_run_executor_uses_same_core_entry_for_resume(monkeypatch) -> None:
@@ -149,19 +321,112 @@ def test_run_executor_uses_same_core_entry_for_resume(monkeypatch) -> None:
 
     async def execute(input_value, _ports):
         received.append(input_value)
-        return AgentLoopOutcome(
-            run_id="run_1",
-            status="completed",
-            stop_reason="final_answer",
-        )
+        return _completed_core_outcome()
 
-    monkeypatch.setattr("codepilot.runtime.executor.run_agent_loop", execute)
+    monkeypatch.setattr("codepilot.runtime.executor.run_core", execute)
     loop_input = SimpleNamespace(entry="resume")
     environment = _environment()
 
     outcome = asyncio.run(
-        _collect_execution(RunExecutor(), environment, SimpleNamespace(loop_input=loop_input))
+        _collect_execution(
+            RunExecutor(), environment, SimpleNamespace(loop_input=loop_input)
+        )
     )
 
     assert received == [loop_input]
+    assert outcome.status == "completed"
+
+
+def test_run_executor_binds_tool_checkpoint_reader_to_runtime_adapter(
+    monkeypatch,
+) -> None:
+    class StateAdapter:
+        reader = None
+
+        def bind_tool_state(self, reader):
+            self.reader = reader
+
+        def commit(self, _boundary):
+            return None
+
+    class Tools:
+        def checkpoint_state(self):
+            return {"pending": "attempt_1"}
+
+        def catalog_snapshot(self, *, mode=None):
+            del mode
+
+        def prepare_batch(self, _requests):
+            return None
+
+        async def execute_prepared(self, _batch_id):
+            return ()
+
+    state = StateAdapter()
+    environment = _environment()
+    environment = RunEnvironment(
+        run_id=environment.run_id,
+        session_id=environment.session_id,
+        trigger=environment.trigger,
+        model=environment.model,
+        tools=Tools(),
+        context=environment.context,
+        state=state,
+        cancellation=environment.cancellation,
+        deadline_at_ms=environment.deadline_at_ms,
+        event_sink=environment.event_sink,
+        resources=environment.resources,
+    )
+
+    async def execute(_input, _ports):
+        assert state.reader is not None
+        assert state.reader() == {"pending": "attempt_1"}
+        return _completed_core_outcome()
+
+    monkeypatch.setattr("codepilot.runtime.executor.run_core", execute)
+
+    outcome = asyncio.run(
+        _collect_execution(
+            RunExecutor(),
+            environment,
+            SimpleNamespace(loop_input=SimpleNamespace(state=CoreState.new("test"))),
+        )
+    )
+
+    assert outcome.status == "completed"
+
+
+def test_run_executor_isolates_live_event_sink_failures(monkeypatch) -> None:
+    async def execute(_input, ports):
+        assert ports.live_events is not None
+        ports.live_events({"type": "model_delta", "text": "partial"})
+        return _completed_core_outcome()
+
+    def broken_sink(_event):
+        raise RuntimeError("interface disconnected")
+
+    monkeypatch.setattr("codepilot.runtime.executor.run_core", execute)
+    base = _environment()
+    environment = RunEnvironment(
+        run_id=base.run_id,
+        session_id=base.session_id,
+        trigger=base.trigger,
+        model=base.model,
+        tools=base.tools,
+        context=base.context,
+        state=base.state,
+        cancellation=base.cancellation,
+        deadline_at_ms=base.deadline_at_ms,
+        event_sink=broken_sink,
+        resources=base.resources,
+    )
+
+    outcome = asyncio.run(
+        _collect_execution(
+            RunExecutor(),
+            environment,
+            SimpleNamespace(loop_input=SimpleNamespace(state=CoreState.new("test"))),
+        )
+    )
+
     assert outcome.status == "completed"

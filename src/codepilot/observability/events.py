@@ -42,7 +42,6 @@ RUN_EVENT_TYPES = {
     "plan_completed",
     "plan_abandoned",
     "plan_state_warning",
-    "run_guard_checked",
     "file_changed",
     "error",
 }
@@ -127,8 +126,6 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
         return _canonical_existing(raw)
     if event_type in _PLAN_EVENTS:
         return _plan_event(raw, event_type)
-    if event_type == "run_guard_checked":
-        return _run_guard_checked(raw)
     if event_type == "file_diff":
         return {
             **_base(raw, "file_changed"),
@@ -388,18 +385,6 @@ def _plan_event(raw: dict[str, Any], event_type: str) -> dict[str, Any]:
         "raw_user_request": str(plan.get("raw_user_request") or raw.get("raw_user_request") or ""),
         "interpreted_goal": str(plan.get("interpreted_goal") or raw.get("interpreted_goal") or ""),
         "items": _list_of_dicts(plan.get("items")),
-    }
-
-
-def _run_guard_checked(raw: dict[str, Any]) -> dict[str, Any]:
-    decision = _dict(raw.get("decision"))
-    signals = _dict(raw.get("signals"))
-    return {
-        **_base(raw, "run_guard_checked"),
-        "action": str(decision.get("action") or raw.get("action") or ""),
-        "reason": str(decision.get("reason") or raw.get("reason") or ""),
-        "verification_status": str(signals.get("verification_status") or ""),
-        "workspace_changed": bool(signals.get("workspace_changed", False)),
     }
 
 

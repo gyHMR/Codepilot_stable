@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,6 +24,7 @@ def create_app(
     runtime: RuntimeGateway | None = None,
     frontend_dir: Path | None = None,
 ) -> FastAPI:
+    _register_frontend_mime_types()
     gateway = runtime or RuntimeGateway()
     service = WebService(runtime=gateway, workspace=workspace)
 
@@ -78,6 +80,14 @@ def create_app(
         return _error_response(400, exc.code, exc.message)
 
     return app
+
+
+def _register_frontend_mime_types() -> None:
+    # Windows registry MIME mappings can classify JavaScript as text/plain,
+    # which causes browsers to reject Vite's ES module entrypoint.
+    mimetypes.add_type("text/javascript", ".js")
+    mimetypes.add_type("text/javascript", ".mjs")
+    mimetypes.add_type("text/css", ".css")
 
 
 def create_app_from_env() -> FastAPI:

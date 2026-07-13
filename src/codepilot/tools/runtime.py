@@ -35,7 +35,13 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
-from .contracts import ToolExecutionContext, ToolExecutionRequest, ToolHandlerError, ToolPort
+from .contracts import (
+    ToolBatchPreparation,
+    ToolExecutionContext,
+    ToolExecutionRequest,
+    ToolHandlerError,
+    ToolPort,
+)
 from .execution import (
     ExecutionController,
     ToolExecutionCancelledError,
@@ -126,8 +132,18 @@ class ToolRuntime(ToolPort):
     registry: ToolRegistry
     permission_engine: PermissionEngine = field(default_factory=PermissionEngine)
     state_store: ToolStateStore = field(default_factory=InMemoryToolStateStore)
-    execution_controller: ExecutionController = field(default_factory=ExecutionController)
-    progress_callback: Callable[[ToolProgressEvent], Awaitable[None] | None] | None = None
+    execution_controller: ExecutionController = field(
+        default_factory=ExecutionController
+    )
+    progress_callback: Callable[[ToolProgressEvent], Awaitable[None] | None] | None = (
+        None
+    )
+    _prepared_batches: dict[str, tuple[_Prepared, ...]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _prepared_sequence: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not callable(getattr(self.state_store, "compare_and_set", None)):
@@ -191,61 +207,105 @@ class ToolRuntime(ToolPort):
         返回:
             ToolResult 列表（与输入顺序对应）
         """
-        items = tuple(requests)
-        if any(not isinstance(item, ToolExecutionRequest) for item in items):
-            raise TypeError("ToolRuntime.execute_batch expects ToolExecutionRequest values")
-        admitted: list[_Prepared | ToolResult] = []
-        for position, request in enumerate(items):
-            item = self._prepare(request)
-            admitted.append(item)
-            if isinstance(item, ToolResult) or item.registration.category == "interaction":
-                admitted.extend(
-                    self._interrupt_unstarted(
-                        pending,
-                        barrier_tool_call_id=request.tool_call_id,
-                    )
-                    for pending in items[position + 1 :]
-                )
-                break
+        preparation = self.prepare_batch(requests)
+        if preparation.results:
+            return list(preparation.results)
+        return list(await self.execute_prepared(preparation.batch_id or ""))
 
+    def prepare_batch(
+        self,
+        requests: tuple[ToolExecutionRequest, ...] | list[ToolExecutionRequest],
+    ) -> ToolBatchPreparation:
+        """Prepare a batch without running any Tool handler."""
+
+        items = tuple(requests)
+        if not items:
+            raise ValueError("ToolRuntime.prepare_batch requires at least one request")
+        if any(not isinstance(item, ToolExecutionRequest) for item in items):
+            raise TypeError(
+                "ToolRuntime.prepare_batch expects ToolExecutionRequest values"
+            )
+
+        admitted: list[_Prepared] = []
+        for position, request in enumerate(items):
+            prepared = self._prepare(request)
+            if isinstance(prepared, ToolResult):
+                results = [
+                    *self._interrupt_tail(admitted, prepared.tool_call_id),
+                    prepared,
+                    *(
+                        self._interrupt_unstarted(
+                            pending,
+                            barrier_tool_call_id=prepared.tool_call_id,
+                        )
+                        for pending in items[position + 1 :]
+                    ),
+                ]
+                by_call_id = {result.tool_call_id: result for result in results}
+                return ToolBatchPreparation(
+                    results=tuple(by_call_id[item.tool_call_id] for item in items)
+                )
+            admitted.append(prepared)
+
+        self._prepared_sequence += 1
+        batch_id = f"{items[0].run_id}:batch:{self._prepared_sequence}"
+        self._prepared_batches[batch_id] = tuple(admitted)
+        return ToolBatchPreparation(batch_id=batch_id)
+
+    async def execute_prepared(self, batch_id: str) -> tuple[ToolResult, ...]:
+        """Execute a batch that already passed side-effect-free preparation."""
+
+        batch_id = str(batch_id).strip()
+        if not batch_id:
+            raise ValueError("batch_id is required")
+        try:
+            admitted = list(self._prepared_batches.pop(batch_id))
+        except KeyError as exc:
+            raise ValueError(f"Prepared Tool batch not found: {batch_id}") from exc
+        return tuple(await self._execute_prepared_items(admitted))
+
+    async def _execute_prepared_items(
+        self,
+        admitted: list[_Prepared],
+    ) -> list[ToolResult]:
         results: list[ToolResult] = []
         index = 0
         while index < len(admitted):
             item = admitted[index]
-            if isinstance(item, ToolResult):
-                # 遇到准备阶段返回的 ToolResult（错误/审批/交互）
-                results.append(item)
-                index += 1
-                results.extend(self._interrupt_tail(admitted[index:], item.tool_call_id))
-                break
             if item.registration.policy.concurrency.mode == "parallel":
-                # 收集所有连续的 parallel 工具一起执行
                 batch: list[_Prepared] = []
                 while index < len(admitted):
                     candidate = admitted[index]
-                    if isinstance(candidate, ToolResult):
-                        break
                     if candidate.registration.policy.concurrency.mode != "parallel":
                         break
                     batch.append(candidate)
                     index += 1
-                batch_results = await asyncio.gather(*(self._run_handler(value) for value in batch))
+                batch_results = await asyncio.gather(
+                    *(self._run_handler(value) for value in batch)
+                )
                 results.extend(batch_results)
-                # 如果并行批中有工具挂起/拒绝，中断后续
-                if any(value.status in {"approval_required", "user_input_required", "denied"} for value in batch_results):
-                    barrier = next(
-                        value for value in batch_results
-                        if value.status in {"approval_required", "user_input_required", "denied"}
+                barrier = next(
+                    (
+                        value
+                        for value in batch_results
+                        if value.status
+                        in {"approval_required", "user_input_required", "denied"}
+                    ),
+                    None,
+                )
+                if barrier is not None:
+                    results.extend(
+                        self._interrupt_tail(admitted[index:], barrier.tool_call_id)
                     )
-                    results.extend(self._interrupt_tail(admitted[index:], barrier.tool_call_id))
                     break
                 continue
-            # serial 模式：逐个执行
             result = await self._run_handler(item)
             results.append(result)
             index += 1
             if result.status in {"approval_required", "user_input_required", "denied"}:
-                results.extend(self._interrupt_tail(admitted[index:], result.tool_call_id))
+                results.extend(
+                    self._interrupt_tail(admitted[index:], result.tool_call_id)
+                )
                 break
         return results
 
@@ -359,7 +419,9 @@ class ToolRuntime(ToolPort):
             raise RuntimeError("Configured ToolStateStore cannot restore checkpoints")
         restore(state)
 
-    async def resume(self, response: ApprovalResponse | InteractionResponse) -> ToolResult:
+    async def resume(
+        self, response: ApprovalResponse | InteractionResponse
+    ) -> ToolResult:
         """恢复被挂起的工具执行。
 
         根据响应类型分发到不同的恢复流程：
@@ -376,7 +438,9 @@ class ToolRuntime(ToolPort):
             return await self._resume_interaction(response)
         if isinstance(response, ApprovalResponse):
             return await self._resume_approval(response)
-        raise TypeError("ToolRuntime.resume expects ApprovalResponse or InteractionResponse")
+        raise TypeError(
+            "ToolRuntime.resume expects ApprovalResponse or InteractionResponse"
+        )
 
     # ── 准备阶段 ──────────────────────────────────────────────────────────────
 
@@ -402,9 +466,13 @@ class ToolRuntime(ToolPort):
         started = _now_ms()
         attempt_id = attempt_id_for(request)
         try:
-            self.state_store.create(ToolAttemptRecord(attempt_id=attempt_id, request=request))
+            self.state_store.create(
+                ToolAttemptRecord(attempt_id=attempt_id, request=request)
+            )
         except Exception as exc:
-            return _failure(request, "tool.state.conflict", "internal", str(exc), started)
+            return _failure(
+                request, "tool.state.conflict", "internal", str(exc), started
+            )
         self._transition(attempt_id, "validating")
         # 检查参数解析错误
         if request.argument_parse_error is not None:
@@ -422,33 +490,91 @@ class ToolRuntime(ToolPort):
             )
         # 物化注册
         try:
-            materialized = self.registry.materialize(request.tool_name, request.registration_id)
+            materialized = self.registry.materialize(
+                request.tool_name, request.registration_id
+            )
         except ToolRegistrationNotFoundError as exc:
-            return self._settle(attempt_id, "failed", _failure(request, "tool.registration.not_found", "registration", str(exc), started))
+            return self._settle(
+                attempt_id,
+                "failed",
+                _failure(
+                    request,
+                    "tool.registration.not_found",
+                    "registration",
+                    str(exc),
+                    started,
+                ),
+            )
         except StaleToolRegistrationError as exc:
-            return self._settle(attempt_id, "failed", _failure(request, "tool.registration.stale", "stale_registration", str(exc), started))
+            return self._settle(
+                attempt_id,
+                "failed",
+                _failure(
+                    request,
+                    "tool.registration.stale",
+                    "stale_registration",
+                    str(exc),
+                    started,
+                ),
+            )
         registration = materialized.registration
         # 解码输入参数
         try:
             decoded = registration.input_codec.decode(request.arguments)
         except Exception as exc:
-            return self._settle(attempt_id, "failed", _failure(request, "tool.input.invalid", "validation", str(exc) or "Tool input validation failed", started))
+            return self._settle(
+                attempt_id,
+                "failed",
+                _failure(
+                    request,
+                    "tool.input.invalid",
+                    "validation",
+                    str(exc) or "Tool input validation failed",
+                    started,
+                ),
+            )
         self._transition(attempt_id, "resolving_access")
         # 解析访问权限
         try:
             resolution = registration.access_resolver.resolve(decoded, request)
         except Exception as exc:
-            return self._settle(attempt_id, "denied", _failure(request, "tool.access.invalid", "validation", str(exc) or "Tool access resolution failed", started, status="denied"))
+            return self._settle(
+                attempt_id,
+                "denied",
+                _failure(
+                    request,
+                    "tool.access.invalid",
+                    "validation",
+                    str(exc) or "Tool access resolution failed",
+                    started,
+                    status="denied",
+                ),
+            )
         # 权限引擎决策
-        permission = self.permission_engine.decide(request, registration.policy, resolution.access)
+        permission = self.permission_engine.decide(
+            request, registration.policy, resolution.access
+        )
         if permission.denied:
-            return self._settle(attempt_id, "denied", _failure(request, "tool.permission.denied", "permission", permission.reason, started, status="denied"))
+            return self._settle(
+                attempt_id,
+                "denied",
+                _failure(
+                    request,
+                    "tool.permission.denied",
+                    "permission",
+                    permission.reason,
+                    started,
+                    status="denied",
+                ),
+            )
         if permission.requires_approval:
             # 查找可复用的授权
             grant = self.state_store.find_reusable_grant(request, resolution.access)
             if grant is None:
                 # 需要新的审批
-                challenge = build_approval_challenge(request, resolution.access, reason=permission.reason)
+                challenge = build_approval_challenge(
+                    request, resolution.access, reason=permission.reason
+                )
                 self._transition(attempt_id, "awaiting_approval", challenge=challenge)
                 return _approval_result(request, challenge, started)
             # 找到可复用的授权
@@ -486,7 +612,9 @@ class ToolRuntime(ToolPort):
                 prepared.attempt_id,
                 state,
                 result,
-                cleanup_errors=self.execution_controller.take_cleanup_errors(prepared.attempt_id),
+                cleanup_errors=self.execution_controller.take_cleanup_errors(
+                    prepared.attempt_id
+                ),
             )
 
         async def operation(cancellation, progress, cleanup):
@@ -515,27 +643,104 @@ class ToolRuntime(ToolPort):
                 operation=operation,
             )
         except ToolQueueFullError:
-            return settle("failed", _failure(request, "tool.queue.full", "queue_timeout", "Tool queue is full", prepared.started_at_ms, effects=effects.items))
+            return settle(
+                "failed",
+                _failure(
+                    request,
+                    "tool.queue.full",
+                    "queue_timeout",
+                    "Tool queue is full",
+                    prepared.started_at_ms,
+                    effects=effects.items,
+                ),
+            )
         except ToolQueueTimeoutError:
-            return settle("timed_out", _failure(request, "tool.queue.timeout", "queue_timeout", "Tool queue wait timed out", prepared.started_at_ms, status="timed_out", effects=effects.items))
+            return settle(
+                "timed_out",
+                _failure(
+                    request,
+                    "tool.queue.timeout",
+                    "queue_timeout",
+                    "Tool queue wait timed out",
+                    prepared.started_at_ms,
+                    status="timed_out",
+                    effects=effects.items,
+                ),
+            )
         except ToolExecutionTimeoutError:
-            return settle("timed_out", _failure(request, "tool.execution.timeout", "execution_timeout", "Tool execution timed out", prepared.started_at_ms, status="timed_out", effects=effects.items))
+            return settle(
+                "timed_out",
+                _failure(
+                    request,
+                    "tool.execution.timeout",
+                    "execution_timeout",
+                    "Tool execution timed out",
+                    prepared.started_at_ms,
+                    status="timed_out",
+                    effects=effects.items,
+                ),
+            )
         except ToolExecutionCancelledError:
-            return settle("cancelled", _failure(request, "tool.execution.cancelled", "cancelled", "Tool execution cancelled", prepared.started_at_ms, status="cancelled", effects=effects.items))
+            return settle(
+                "cancelled",
+                _failure(
+                    request,
+                    "tool.execution.cancelled",
+                    "cancelled",
+                    "Tool execution cancelled",
+                    prepared.started_at_ms,
+                    status="cancelled",
+                    effects=effects.items,
+                ),
+            )
         except ToolHandlerError as exc:
-            return settle("failed", _failure(request, exc.code, "execution", exc.message, prepared.started_at_ms, effects=effects.items, retryable=exc.retryable, details=exc.details))
+            return settle(
+                "failed",
+                _failure(
+                    request,
+                    exc.code,
+                    "execution",
+                    exc.message,
+                    prepared.started_at_ms,
+                    effects=effects.items,
+                    retryable=exc.retryable,
+                    details=exc.details,
+                ),
+            )
         except Exception as exc:
-            return settle("failed", _failure(request, "tool.execution.handler_error", "execution", f"Tool execution failed: {type(exc).__name__}", prepared.started_at_ms, effects=effects.items))
+            return settle(
+                "failed",
+                _failure(
+                    request,
+                    "tool.execution.handler_error",
+                    "execution",
+                    f"Tool execution failed: {type(exc).__name__}",
+                    prepared.started_at_ms,
+                    effects=effects.items,
+                ),
+            )
 
         # 检查是否返回了 InteractionRequest（用户输入请求）
         if isinstance(output, InteractionRequest):
             if registration.category != "interaction" or effects.items:
-                return settle("failed", _failure(request, "tool.interaction.invalid_handler", "interaction", "Invalid interaction suspension", prepared.started_at_ms, effects=effects.items))
+                return settle(
+                    "failed",
+                    _failure(
+                        request,
+                        "tool.interaction.invalid_handler",
+                        "interaction",
+                        "Invalid interaction suspension",
+                        prepared.started_at_ms,
+                        effects=effects.items,
+                    ),
+                )
             self._transition(
                 prepared.attempt_id,
                 "awaiting_input",
                 interaction=output,
-                cleanup_errors=self.execution_controller.take_cleanup_errors(prepared.attempt_id),
+                cleanup_errors=self.execution_controller.take_cleanup_errors(
+                    prepared.attempt_id
+                ),
             )
             return ToolResult(
                 request.tool_call_id,
@@ -549,7 +754,17 @@ class ToolRuntime(ToolPort):
         # 验证副作用范围（实际效果不超过授权范围）
         actual = frozenset(item.kind for item in effects.items)
         if not actual <= prepared.resolution.access.effects:
-            return settle("failed", _failure(request, "tool.effect.policy_violation", "policy_violation", "Observed effects exceed authorized access", prepared.started_at_ms, effects=effects.items))
+            return settle(
+                "failed",
+                _failure(
+                    request,
+                    "tool.effect.policy_violation",
+                    "policy_violation",
+                    "Observed effects exceed authorized access",
+                    prepared.started_at_ms,
+                    effects=effects.items,
+                ),
+            )
         if not _effect_resources_authorized(
             effects.items,
             prepared.resolution.access.resources,
@@ -575,11 +790,23 @@ class ToolRuntime(ToolPort):
                 registration.output_codec.json_schema is None
                 and not registration.policy.output_trust.allow_structurally_validated
             ):
-                raise ValueError("Structurally validated output is not allowed by tool policy")
+                raise ValueError(
+                    "Structurally validated output is not allowed by tool policy"
+                )
             content = tuple(registration.renderer.render(encoded))
             _guard_output(encoded, content, registration.policy.output_limits)
         except Exception as exc:
-            return settle("failed", _failure(request, "tool.output.invalid", "output_validation", str(exc) or "Tool output validation failed", prepared.started_at_ms, effects=effects.items))
+            return settle(
+                "failed",
+                _failure(
+                    request,
+                    "tool.output.invalid",
+                    "output_validation",
+                    str(exc) or "Tool output validation failed",
+                    prepared.started_at_ms,
+                    effects=effects.items,
+                ),
+            )
 
         # 构建成功结果
         result = ToolResult(
@@ -589,10 +816,16 @@ class ToolRuntime(ToolPort):
             content=content,
             data=encoded,
             effects=effects.items,
-            artifacts=tuple(item.artifact for item in content if isinstance(item, ArtifactContent)),
+            artifacts=tuple(
+                item.artifact for item in content if isinstance(item, ArtifactContent)
+            ),
             timing=_timing(prepared.started_at_ms),
             registration_id=request.registration_id,
-            output_validation="schema_validated" if registration.output_codec.json_schema is not None else "structurally_validated",
+            output_validation=(
+                "schema_validated"
+                if registration.output_codec.json_schema is not None
+                else "structurally_validated"
+            ),
             content_trust=registration.policy.output_trust.default_content_trust,
         )
         return settle("succeeded", result)
@@ -626,32 +859,63 @@ class ToolRuntime(ToolPort):
         if record.state != "awaiting_approval" or record.grant_consumed:
             return _approval_consumed(request, started)
         challenge = record.challenge
-        if challenge is None or response.request_fingerprint != challenge.request_fingerprint:
+        if (
+            challenge is None
+            or response.request_fingerprint != challenge.request_fingerprint
+        ):
             return self._settle_approval_response(
                 record,
                 "denied",
-                _failure(request, "tool.approval.fingerprint_mismatch", "permission", "Approval fingerprint mismatch", started, status="denied"),
+                _failure(
+                    request,
+                    "tool.approval.fingerprint_mismatch",
+                    "permission",
+                    "Approval fingerprint mismatch",
+                    started,
+                    status="denied",
+                ),
                 started,
             )
         if response.scope not in challenge.allowed_scopes:
             return self._settle_approval_response(
                 record,
                 "denied",
-                _failure(request, "tool.approval.scope_denied", "permission", "Approval scope is not allowed", started, status="denied"),
+                _failure(
+                    request,
+                    "tool.approval.scope_denied",
+                    "permission",
+                    "Approval scope is not allowed",
+                    started,
+                    status="denied",
+                ),
                 started,
             )
         if challenge.expires_at_ms is not None and _now_ms() >= challenge.expires_at_ms:
             return self._settle_approval_response(
                 record,
                 "denied",
-                _failure(request, "tool.approval.expired", "permission", "Approval challenge expired", started, status="denied"),
+                _failure(
+                    request,
+                    "tool.approval.expired",
+                    "permission",
+                    "Approval challenge expired",
+                    started,
+                    status="denied",
+                ),
                 started,
             )
         if response.decision == "deny":
             return self._settle_approval_response(
                 record,
                 "denied",
-                _failure(request, "tool.approval.denied", "permission", response.reason or "Tool execution denied", started, status="denied"),
+                _failure(
+                    request,
+                    "tool.approval.denied",
+                    "permission",
+                    response.reason or "Tool execution denied",
+                    started,
+                    status="denied",
+                ),
                 started,
             )
         # 批准：重新验证
@@ -664,18 +928,52 @@ class ToolRuntime(ToolPort):
         except ToolStateConflictError:
             return _approval_consumed(request, started)
         try:
-            materialized = self.registry.materialize(request.tool_name, request.registration_id)
+            materialized = self.registry.materialize(
+                request.tool_name, request.registration_id
+            )
             registration = materialized.registration
             decoded = registration.input_codec.decode(request.arguments)
             resolution = registration.access_resolver.resolve(decoded, request)
         except Exception as exc:
-            return self._settle(record.attempt_id, "denied", _failure(request, "tool.approval.revalidation_failed", "permission", str(exc), started, status="denied"))
+            return self._settle(
+                record.attempt_id,
+                "denied",
+                _failure(
+                    request,
+                    "tool.approval.revalidation_failed",
+                    "permission",
+                    str(exc),
+                    started,
+                    status="denied",
+                ),
+            )
         # 确认指纹未变（安全验证）
-        if approval_fingerprint(request, resolution.access) != challenge.request_fingerprint:
-            return self._settle(record.attempt_id, "denied", _failure(request, "tool.approval.fingerprint_mismatch", "permission", "Resolved approval fingerprint changed", started, status="denied"))
+        if (
+            approval_fingerprint(request, resolution.access)
+            != challenge.request_fingerprint
+        ):
+            return self._settle(
+                record.attempt_id,
+                "denied",
+                _failure(
+                    request,
+                    "tool.approval.fingerprint_mismatch",
+                    "permission",
+                    "Resolved approval fingerprint changed",
+                    started,
+                    status="denied",
+                ),
+            )
         grant = issue_approval_grant(challenge, response)
-        self._transition(record.attempt_id, "queued", grant=grant, grant_consumed=response.scope == "once")
-        return await self._run_handler(_Prepared(request, registration, resolution, record.attempt_id, started))
+        self._transition(
+            record.attempt_id,
+            "queued",
+            grant=grant,
+            grant_consumed=response.scope == "once",
+        )
+        return await self._run_handler(
+            _Prepared(request, registration, resolution, record.attempt_id, started)
+        )
 
     def _settle_approval_response(
         self,
@@ -714,25 +1012,77 @@ class ToolRuntime(ToolPort):
         """
         record = self.state_store.find_by_interaction_id(response.interaction_id)
         if record is None:
-            return _unknown_response("interaction", response.interaction_id, response.tool_call_id, response.tool_name, response.registration_id)
+            return _unknown_response(
+                "interaction",
+                response.interaction_id,
+                response.tool_call_id,
+                response.tool_name,
+                response.registration_id,
+            )
         interaction = record.interaction
-        if record.state != "awaiting_input" or record.interaction_consumed or interaction is None:
-            return _interaction_error(response, "tool.interaction.already_consumed", "Interaction response has already been consumed")
-        expected = (interaction.request_fingerprint, interaction.session_id, interaction.tool_call_id, interaction.tool_name, interaction.registration_id)
-        received = (response.request_fingerprint, response.session_id, response.tool_call_id, response.tool_name, response.registration_id)
+        if (
+            record.state != "awaiting_input"
+            or record.interaction_consumed
+            or interaction is None
+        ):
+            return _interaction_error(
+                response,
+                "tool.interaction.already_consumed",
+                "Interaction response has already been consumed",
+            )
+        expected = (
+            interaction.request_fingerprint,
+            interaction.session_id,
+            interaction.tool_call_id,
+            interaction.tool_name,
+            interaction.registration_id,
+        )
+        received = (
+            response.request_fingerprint,
+            response.session_id,
+            response.tool_call_id,
+            response.tool_name,
+            response.registration_id,
+        )
         if expected != received:
-            return _interaction_error(response, "tool.interaction.fingerprint_mismatch", "Interaction response does not match request")
-        if interaction.options and not interaction.allow_free_text and response.answers.get("answer") not in interaction.options:
-            return _interaction_error(response, "tool.interaction.invalid_answer", "Answer must be one of the allowed options")
+            return _interaction_error(
+                response,
+                "tool.interaction.fingerprint_mismatch",
+                "Interaction response does not match request",
+            )
+        if (
+            interaction.options
+            and not interaction.allow_free_text
+            and response.answers.get("answer") not in interaction.options
+        ):
+            return _interaction_error(
+                response,
+                "tool.interaction.invalid_answer",
+                "Answer must be one of the allowed options",
+            )
         request = record.request
         started = _now_ms()
         try:
-            registration = self.registry.materialize(request.tool_name, request.registration_id).registration
-            encoded = registration.output_codec.encode({"answers": dict(response.answers)})
+            registration = self.registry.materialize(
+                request.tool_name, request.registration_id
+            ).registration
+            encoded = registration.output_codec.encode(
+                {"answers": dict(response.answers)}
+            )
             content = tuple(registration.renderer.render(encoded))
             _guard_output(encoded, content, registration.policy.output_limits)
         except Exception as exc:
-            return self._settle(record.attempt_id, "failed", _failure(request, "tool.interaction.output_invalid", "output_validation", str(exc), started))
+            return self._settle(
+                record.attempt_id,
+                "failed",
+                _failure(
+                    request,
+                    "tool.interaction.output_invalid",
+                    "output_validation",
+                    str(exc),
+                    started,
+                ),
+            )
         result = ToolResult(
             request.tool_call_id,
             request.tool_name,
@@ -744,9 +1094,19 @@ class ToolRuntime(ToolPort):
             content_trust=registration.policy.output_trust.default_content_trust,
         )
         try:
-            self.state_store.compare_and_set(record.attempt_id, "awaiting_input", transition(record, "succeeded", result=result, interaction_consumed=True))
+            self.state_store.compare_and_set(
+                record.attempt_id,
+                "awaiting_input",
+                transition(
+                    record, "succeeded", result=result, interaction_consumed=True
+                ),
+            )
         except ToolStateConflictError:
-            return _interaction_error(response, "tool.interaction.already_consumed", "Interaction response has already been consumed")
+            return _interaction_error(
+                response,
+                "tool.interaction.already_consumed",
+                "Interaction response has already been consumed",
+            )
         return result
 
     # ── 状态管理 ──────────────────────────────────────────────────────────────
@@ -762,9 +1122,18 @@ class ToolRuntime(ToolPort):
         record = self.state_store.get(attempt_id)
         if record is None:
             raise RuntimeError(f"Tool attempt not found: {attempt_id}")
-        self.state_store.compare_and_set(attempt_id, record.state, transition(record, state, **changes))
+        self.state_store.compare_and_set(
+            attempt_id, record.state, transition(record, state, **changes)
+        )
 
-    def _settle(self, attempt_id: str, state, result: ToolResult, *, cleanup_errors: tuple[str, ...] = ()) -> ToolResult:
+    def _settle(
+        self,
+        attempt_id: str,
+        state,
+        result: ToolResult,
+        *,
+        cleanup_errors: tuple[str, ...] = (),
+    ) -> ToolResult:
         """结算 —— 设置最终状态并返回结果。
 
         参数:
@@ -776,7 +1145,9 @@ class ToolRuntime(ToolPort):
         返回:
             ToolResult（与输入相同，方便链式调用）
         """
-        self._transition(attempt_id, state, result=result, cleanup_errors=cleanup_errors)
+        self._transition(
+            attempt_id, state, result=result, cleanup_errors=cleanup_errors
+        )
         return result
 
 
@@ -790,6 +1161,7 @@ class _EffectReporter:
     在工具执行期间收集所有 ToolEffect，
     执行完成后由 ToolRuntime 验证副作用范围。
     """
+
     _items: list[ToolEffect] = field(default_factory=list)
 
     @property
@@ -805,14 +1177,27 @@ class _EffectReporter:
 # ── 内部辅助函数 ──────────────────────────────────────────────────────────────
 
 
-def _failure(request, code, kind, message, started, *, status="error", effects=(), retryable=False, details=None) -> ToolResult:
+def _failure(
+    request,
+    code,
+    kind,
+    message,
+    started,
+    *,
+    status="error",
+    effects=(),
+    retryable=False,
+    details=None,
+) -> ToolResult:
     """构建失败结果。"""
     return ToolResult(
         request.tool_call_id,
         request.tool_name,
         status,
         content=(TextContent(text=message),),
-        error=ToolError(code, kind, message, retryable=retryable, details=details or {}),
+        error=ToolError(
+            code, kind, message, retryable=retryable, details=details or {}
+        ),
         effects=tuple(effects),
         timing=_timing(started),
         registration_id=request.registration_id,
@@ -855,7 +1240,9 @@ def _interaction_error(response, code, message) -> ToolResult:
     )
 
 
-def _unknown_response(kind, identifier, tool_call_id=None, tool_name=None, registration_id=None) -> ToolResult:
+def _unknown_response(
+    kind, identifier, tool_call_id=None, tool_name=None, registration_id=None
+) -> ToolResult:
     """构建未知响应错误结果。"""
     message = f"{kind.title()} request was not found"
     return ToolResult(
@@ -871,7 +1258,11 @@ def _unknown_response(kind, identifier, tool_call_id=None, tool_name=None, regis
 def _timing(started: int) -> ToolTiming:
     """构建执行时间元数据。"""
     finished = _now_ms()
-    return ToolTiming(started_at_ms=started, finished_at_ms=finished, duration_ms=max(0, finished - started))
+    return ToolTiming(
+        started_at_ms=started,
+        finished_at_ms=finished,
+        duration_ms=max(0, finished - started),
+    )
 
 
 def _guard_output(data, content, limits) -> None:
