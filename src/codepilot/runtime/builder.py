@@ -11,7 +11,7 @@ from codepilot.core.tool_adapters import (
     create_plan_registrations,
 )
 from codepilot.llm.adapter import ProviderModelPort
-from codepilot.llm.registry import register_builtin_api_providers
+from codepilot.llm.registry import builtin_api_provider_registry
 from codepilot.sessions.contracts import SessionOptions
 from codepilot.runtime.session_controller import create_session_controller
 from codepilot.tools import (
@@ -35,7 +35,7 @@ from .tools import build_runtime_tools
 def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
     """Build a runnable session from the public open-session intent."""
 
-    register_builtin_api_providers()
+    provider_registry = builtin_api_provider_registry()
 
     config = load_runtime_config(intent)
     model = resolve_runtime_model(intent, config)
@@ -83,6 +83,9 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         retry_enabled=config.retry_enabled,
         max_retries=config.max_retries,
         retry_base_delay_ms=config.retry_base_delay_ms,
+        run_timeout_seconds=int(intent.run_timeout_seconds)
+        if intent.run_timeout_seconds is not None
+        else None,
         extension_commands={
             **intent.extension_commands,
             **tools.commands,
@@ -100,6 +103,7 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         stream_fn=effective_options.stream_fn,
         convert_messages=effective_options.convert_to_llm,
         get_api_key=effective_options.get_api_key,
+        registry=provider_registry,
     )
     tool_state_store = CheckpointToolStateStore(
         session_id=controller.session_id,

@@ -133,6 +133,24 @@ class ToolRuntime(ToolPort):
         if not callable(getattr(self.state_store, "compare_and_set", None)):
             raise TypeError("state_store must implement ToolStateStore")
 
+    def for_session(self, session_id: str) -> "ToolRuntime":
+        """Create an equivalent runtime with isolated session attempt state."""
+
+        from .state_store import CheckpointToolStateStore
+
+        grant_store = getattr(self.state_store, "_grant_store", None)
+        execution_controller = ExecutionController(self.execution_controller.limits)
+        return ToolRuntime(
+            registry=self.registry,
+            permission_engine=self.permission_engine,
+            state_store=CheckpointToolStateStore(
+                session_id=session_id,
+                grant_store=grant_store,
+            ),
+            execution_controller=execution_controller,
+            progress_callback=self.progress_callback,
+        )
+
     # ── ToolPort 接口实现 ──────────────────────────────────────────────────────
 
     def catalog_snapshot(self, *, mode=None) -> ToolCatalogSnapshot:

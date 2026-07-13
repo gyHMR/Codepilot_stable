@@ -36,16 +36,16 @@ def test_rich_cli_preview_has_compact_coding_agent_hierarchy(monkeypatch) -> Non
     )
     renderer.render_progress_event({
         "type": "tool_started",
-        "toolCallId": "read-1",
-        "toolName": "read",
+        "tool_call_id": "read-1",
+        "tool_name": "read",
         "args": {"path": "src/codepilot/core/loop.py"},
     })
     renderer.render_progress_event({
         "type": "tool_completed",
-        "toolCallId": "read-1",
-        "toolName": "read",
+        "tool_call_id": "read-1",
+        "tool_name": "read",
         "status": "success",
-        "isError": False,
+        "is_error": False,
     })
     renderer.render_approval_required(
         SimpleNamespace(

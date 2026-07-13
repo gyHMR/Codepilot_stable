@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import hashlib
 import logging
@@ -13,7 +14,6 @@ from codepilot.core.contracts import (
     AgentLoopInput,
     AgentLoopLimits,
     AgentLoopOutcome,
-    AgentResumeInput,
     ContextPreparationRequest,
     PreparedContext,
     RetryPolicy,
@@ -47,6 +47,7 @@ from codepilot.sessions.contracts import (
     SessionRunIntent,
     SessionRunRecord,
     SessionView,
+    WorkspaceEffectsSnapshot,
 )
 from .live_conversation import SessionConversationState
 from codepilot.sessions.rollback import GitRollbackBaseline, build_rollback_metadata, capture_git_baseline
@@ -60,9 +61,8 @@ from codepilot.sessions.memory import (
 from codepilot.sessions.workspace import capture_workspace_checkpoint
 from codepilot.sessions.service import (
     BeginRunRequest,
-    CommitBoundaryRequest,
+    CommitRunBoundaryRequest,
     CreateSessionRequest,
-    FinishRunRequest,
     ResumeRunRequest,
     SessionStateService,
     new_session_id,
@@ -119,10 +119,9 @@ class RuntimeSessionCoordinator:
 
     A session runtime owns the mutable state needed while the agent is running:
     transcript, persistent stores, context preparation, memory, plan state and
-    rollback baselines.  The lifecycle is deliberately readable:
-
-    ``prepare_run`` opens a run, ``commit_run`` writes the result, ``close``
-    clears listeners.
+    rollback baselines.  ``RunCoordinator`` owns the public Run lifecycle;
+    this object only exposes private preparation/commit primitives to it and
+    keeps Session facts and component state together.
     """
 
     def __init__(self, options: SessionOptions) -> None:
@@ -193,17 +192,16 @@ class RuntimeSessionCoordinator:
         self.retry_enabled = options.retry_enabled
         self.max_retries = options.max_retries
         self.retry_base_delay_ms = options.retry_base_delay_ms
+        self.run_timeout_seconds = options.run_timeout_seconds
         self.extension_commands = dict(options.extension_commands)
         self.before_prompt_hooks = list(options.before_prompt_hooks)
         self.after_prompt_hooks = list(options.after_prompt_hooks)
         self.stream_fn = options.stream_fn
         self.convert_to_llm = options.convert_to_llm
 
-        self._last_session_run_record: SessionRunRecord | None = None
         self._rollback_baselines: dict[str, GitRollbackBaseline] = {}
-        self._persisted_event_ids: set[str] = set()
 
-    async def prepare_run(
+    async def _prepare_run(
         self,
         intent: SessionRunIntent,
         *,
@@ -250,6 +248,7 @@ class RuntimeSessionCoordinator:
                     intent.text,
                     run_id=run_id,
                     source_message_id=user_message_id,
+                    state_port=state_port,
                 )
         run_plan_state = self._plan_state_for_run(
             text=intent.text,
@@ -274,7 +273,7 @@ class RuntimeSessionCoordinator:
                 limits=self.loop_limits(effective_mode),
                 retry_policy=self.retry_policy(),
             ),
-            context_port=RuntimeSessionContextPort(self),
+            context_port=RuntimeSessionContextPort(self, state_port),
             state_port=state_port,
             input_messages=[user_message],
             rollback_baseline=self._remember_rollback_baseline(run_id, rollback),
@@ -283,7 +282,7 @@ class RuntimeSessionCoordinator:
             plan_refs={"plan_state": run_plan_state},
         )
 
-    async def prepare_resume(
+    async def _prepare_resume(
         self,
         intent: SessionResumeIntent,
         *,
@@ -324,9 +323,10 @@ class RuntimeSessionCoordinator:
         self.conversation.set_messages(messages)
         event_start_seq, turn_start_seq = self._run_sequence_offsets(run_id)
         run_state = dict(resumed_run.core_state)
-        resume_input = AgentResumeInput(
+        loop_input = AgentLoopInput(
             run_id=run_id,
             correlation=RunCorrelation(session_id=self.session_id),
+            entry="resume",
             messages=messages,
             context=self._loop_context(),
             model=model,
@@ -345,29 +345,14 @@ class RuntimeSessionCoordinator:
         return PreparedAgentRun(
             run_id=run_id,
             session_id=self.session_id,
-            loop_input=AgentLoopInput(
-                run_id=run_id,
-                correlation=RunCorrelation(session_id=self.session_id),
-                messages=messages,
-                context=self._loop_context(),
-                model=model,
-                tools=[],
-                mode=self.current_mode,
-                plan_state=self.active_plan_state(),
-                limits=self.loop_limits(),
-                retry_policy=self.retry_policy(),
-                event_start_seq=event_start_seq,
-                turn_start_seq=turn_start_seq,
-                run_state=run_state,
-            ),
-            resume_input=resume_input,
-            context_port=RuntimeSessionContextPort(self),
+            loop_input=loop_input,
+            context_port=RuntimeSessionContextPort(self, state_port),
             state_port=state_port,
             plan_refs={"plan_state": self.active_plan_state()},
             rollback_baseline=self._rollback_baseline_ref(run_id),
         )
 
-    async def prepare_continuation(
+    async def _prepare_continuation(
         self,
         intent: SessionContinuationIntent,
         *,
@@ -375,7 +360,7 @@ class RuntimeSessionCoordinator:
         model: ModelDescriptor,
     ) -> PreparedAgentRun:
         if intent.kind in {"tool_approved", "tool_denied"}:
-            return await self.prepare_resume(
+            return await self._prepare_resume(
                 SessionResumeIntent(
                     approval_id=intent.approval_id,
                     decision="approve" if intent.kind == "tool_approved" else "deny",
@@ -409,19 +394,20 @@ class RuntimeSessionCoordinator:
         input_messages: list[Message] = []
         if intent.text:
             user_message = UserMessage(content=intent.text)
-            committed = self.state_service.commit_boundary(
-                CommitBoundaryRequest(
+            committed = self.state_service.commit_run_boundary(
+                CommitRunBoundaryRequest(
+                    commit_id=f"{run_id}:continuation_input:{resumed_run.revision}",
+                    kind="progress",
                     session_id=self.session_id,
                     run_id=run_id,
-                    status="running",
+                    expected_run_revision=resumed_run.revision,
+                    expected_session_revision=self.session_state.revision,
                     phase="model",
                     resume_point="before_model",
                     core_state=resumed_run.core_state,
                     new_messages=(user_message,),
                     workspace=(resumed_run.checkpoint.workspace if resumed_run.checkpoint else None),
-                ),
-                expected_run_revision=resumed_run.revision,
-                expected_session_revision=self.session_state.revision,
+                )
             )
             resumed_run = committed.run
             self.session_state = committed.session
@@ -468,7 +454,7 @@ class RuntimeSessionCoordinator:
             run_id=run_id,
             session_id=self.session_id,
             loop_input=loop_input,
-            context_port=RuntimeSessionContextPort(self),
+            context_port=RuntimeSessionContextPort(self, state_port),
             state_port=state_port,
             input_messages=input_messages,
             context_refs={"context": "session_context", "continuation": intent.kind},
@@ -477,7 +463,7 @@ class RuntimeSessionCoordinator:
             rollback_baseline=self._rollback_baseline_ref(run_id),
         )
 
-    async def commit_run(
+    async def _commit_run(
         self,
         prepared: PreparedAgentRun,
         outcome: AgentLoopOutcome,
@@ -498,38 +484,47 @@ class RuntimeSessionCoordinator:
                     "aborted": "cancelled",
                     "cancelled": "cancelled",
                 }.get(result.status, "failed")
-                finished = self.state_service.finish_run(
-                    FinishRunRequest(
-                        session_id=self.session_id,
-                        run_id=result.run_id,
-                        status=terminal_status,  # type: ignore[arg-type]
-                        stop_reason=result.stop_reason,
-                        result=result,
-                        workspace_effects=None,
-                        final_messages=tuple(
-                            message
-                            for message in outcome.new_messages
-                            if id(message) not in state_port.committed_message_ids
-                        ),
-                    ),
-                    expected_run_revision=state_port.run.revision,
-                    expected_session_revision=state_port.session.revision,
-                )
-                state_port.run = finished.run
-                state_port.session = finished.session
-                uncommitted = [
+                terminal_messages = tuple(
                     message
                     for message in outcome.new_messages
                     if id(message) not in state_port.committed_message_ids
-                ]
-                for message, record in zip(uncommitted, finished.committed_messages, strict=True):
+                )
+                terminal_request = CommitRunBoundaryRequest(
+                    commit_id=f"{result.run_id}:terminal:{state_port.run.revision}",
+                    kind="terminal",
+                    session_id=self.session_id,
+                    run_id=result.run_id,
+                    expected_run_revision=state_port.run.revision,
+                    expected_session_revision=state_port.session.revision,
+                    stop_reason=result.stop_reason,
+                    terminal_status=terminal_status,  # type: ignore[arg-type]
+                    result=result,
+                    new_messages=terminal_messages,
+                    workspace_effects=WorkspaceEffectsSnapshot(
+                        changed=bool(result.workspace_changed),
+                        affected_paths=tuple(result.affected_paths),
+                    ),
+                )
+                finished = None
+                for attempt in range(2):
+                    try:
+                        finished = self.state_service.commit_run_boundary(terminal_request)
+                        break
+                    except OSError:
+                        if attempt == 1:
+                            raise
+                        await asyncio.sleep(0)
+                if finished is None:  # pragma: no cover - defensive
+                    raise RuntimeError("Terminal commit produced no receipt")
+                state_port.run = finished.run
+                state_port.session = finished.session
+                for message, record in zip(terminal_messages, finished.committed_messages, strict=True):
                     state_port.committed_message_ids[id(message)] = record.message_id
             self.session_state = state_port.session
         if store_outcome:
             for event in outcome.events:
                 payload = dict(event)
                 self._apply_plan_event(payload)
-                self._persist_event(payload)
                 await self.conversation.dispatch_event(payload)
             committed_messages = list(outcome.new_messages)
             self.conversation.append_messages(committed_messages)
@@ -574,7 +569,6 @@ class RuntimeSessionCoordinator:
                 "rollback": prepared.rollback_baseline,
             },
         )
-        self._last_session_run_record = record
         return record
 
     def describe(self, *, last_run_id: str | None) -> SessionView:
@@ -773,8 +767,7 @@ class RuntimeSessionCoordinator:
             self.append_event(
                 {
                     "type": "mode_changed",
-                    "sessionId": self.session_id,
-                    "currentMode": normalized,
+                    "current_mode": normalized,
                 }
             )
         return normalized
@@ -840,21 +833,8 @@ class RuntimeSessionCoordinator:
     def close(self) -> None:
         self.conversation.clear_listeners()
 
-    def record_event(self, event: dict[str, Any]) -> None:
-        """Persist a streamed runner event for audit and live views."""
-
-        payload = dict(event)
-        self._apply_plan_event(payload)
-        self._persist_event(payload)
-
     def append_event(self, event: dict[str, Any]) -> dict[str, Any]:
         payload = dict(event)
-        if "eventId" in payload:
-            payload.setdefault("event_id", payload.pop("eventId"))
-        if "sessionId" in payload:
-            payload.pop("sessionId")
-        if "runId" in payload:
-            payload.setdefault("run_id", payload.pop("runId"))
         return self.state_service.append_event(self.session_id, payload)
 
     def _is_continue_run(self, text: str) -> bool:
@@ -881,6 +861,7 @@ class RuntimeSessionCoordinator:
         *,
         run_id: str | None,
         source_message_id: str | None,
+        state_port: RuntimeSessionStateAdapter,
     ) -> None:
         try:
             event_id = f"event_{uuid4().hex[:12]}"
@@ -901,22 +882,20 @@ class RuntimeSessionCoordinator:
             if result is None:
                 return
             record, decision = result
-            self.append_event(
+            state_port.queue_durable_event(
                 {
                     "type": decision.reason,
-                    "eventId": event_id,
-                    "sessionId": self.session_id,
-                    "runId": run_id,
-                    "memoryId": record.id,
+                    "event_id": event_id,
+                    "run_id": run_id,
+                    "memory_id": record.id,
                     "status": record.status,
                 }
             )
         except Exception as exc:
             logger.warning("failed to admit prompt memory: %s", exc)
-            self.append_event(
+            state_port.queue_durable_event(
                 {
                     "type": "memory_warning",
-                    "sessionId": self.session_id,
                     "operation": "prompt_memory_admission",
                     "message": str(exc),
                 }
@@ -961,9 +940,8 @@ class RuntimeSessionCoordinator:
                 self.append_event(
                     {
                         "type": "memory_candidate_created",
-                        "sessionId": self.session_id,
-                        "runId": result.run_id,
-                        "memoryId": record.id,
+                        "run_id": result.run_id,
+                        "memory_id": record.id,
                         "status": record.status,
                     }
                 )
@@ -972,7 +950,6 @@ class RuntimeSessionCoordinator:
             self.append_event(
                 {
                     "type": "memory_warning",
-                    "sessionId": self.session_id,
                     "operation": "finalize_run",
                     "message": str(exc),
                 }
@@ -997,14 +974,13 @@ class RuntimeSessionCoordinator:
             self.append_event(
                 {
                     "type": "plan_state_warning",
-                    "sessionId": self.session_id,
                     "operation": "plan_state_finalize",
                     "message": str(exc),
                 }
             )
 
     def _close_plan_for_terminal_outcome(self, outcome: AgentLoopOutcome) -> None:
-        if outcome.status not in {"failed", "aborted"}:
+        if outcome.status not in {"failed", "cancelled"}:
             return
         state = self.current_plan_state()
         if not isinstance(state, dict) or state.get("status") != "active":
@@ -1078,15 +1054,6 @@ class RuntimeSessionCoordinator:
             *self.conversation.drain_steering_messages(),
         ]
 
-    def _persist_event(self, event: dict[str, Any]) -> bool:
-        event_id = _event_id(event)
-        if event_id is not None and event_id in self._persisted_event_ids:
-            return False
-        self.append_event(dict(event))
-        if event_id is not None:
-            self._persisted_event_ids.add(event_id)
-        return True
-
     def _apply_plan_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
         if event.get("type") not in _PLAN_STATE_EVENT_TYPES:
             return None
@@ -1100,7 +1067,6 @@ class RuntimeSessionCoordinator:
             self.append_event(
                 {
                     "type": "plan_state_warning",
-                    "sessionId": self.session_id,
                     "operation": "plan_event_apply",
                     "message": str(exc),
                 }
@@ -1162,8 +1128,7 @@ class RuntimeSessionCoordinator:
         self.append_event(
             {
                 "type": event_type,
-                "sessionId": self.session_id,
-                "runId": run_id,
+                "run_id": run_id,
                 "plan": state,
             }
         )
@@ -1250,16 +1215,21 @@ class RuntimeSessionCoordinator:
     def _run_sequence_offsets(self, run_id: str) -> tuple[int, int]:
         events = self.state_service.load_events(self.session_id, run_id=run_id)
         turn_ids = [
-            int(event.get("turnId", 0))
+            int(event.get("turn_id", 0))
             for event in events
-            if isinstance(event.get("turnId"), int)
+            if isinstance(event.get("turn_id"), int)
         ]
         return len(events), max(turn_ids, default=0)
 
 
 class RuntimeSessionContextPort:
-    def __init__(self, session: RuntimeSessionCoordinator) -> None:
+    def __init__(
+        self,
+        session: RuntimeSessionCoordinator,
+        state_port: RuntimeSessionStateAdapter,
+    ) -> None:
         self._session = session
+        self._state_port = state_port
 
     async def prepare(self, request: dict[str, Any]) -> dict[str, Any]:
         session = self._session
@@ -1267,15 +1237,10 @@ class RuntimeSessionContextPort:
         request_context = request_context if isinstance(request_context, dict) else {}
         run_signals = request_context.get("run_signals")
         request_mode = _optional_text(request.get("mode"))
-        session_mode = ensure_run_mode(getattr(session, "current_mode", "build"))
-        context_plan_for_mode = getattr(session, "context_plan_state_for_mode", None)
-        if callable(context_plan_for_mode):
-            plan_state = context_plan_for_mode(request_mode or session_mode)
-        else:
-            plan_state = session.context_plan_state()
+        session_mode = ensure_run_mode(session.current_mode)
+        plan_state = session.context_plan_state_for_mode(request_mode or session_mode)
         mode = ensure_run_mode(request_mode or session_mode)
-        checkpoint_getter = getattr(session, "runtime_checkpoint", None)
-        checkpoint = checkpoint_getter() if callable(checkpoint_getter) else None
+        checkpoint = session.runtime_checkpoint()
         runtime_state: dict[str, object] = {
             "run_id": str(request.get("run_id") or ""),
             "mode": mode,
@@ -1320,22 +1285,18 @@ class RuntimeSessionContextPort:
         )
         report = prepared.report.to_dict()
         session.latest_context_report = report
-        session.append_event(
+        self._state_port.queue_durable_event(
             {
                 "type": "context_projected",
-                "sessionId": session.session_id,
-                "runId": request.get("run_id"),
                 "report": report,
             }
         )
         memory_ids = report.get("retrieved_memory_ids")
         if session.memory_enabled and isinstance(memory_ids, list) and memory_ids:
-            session.append_event(
+            self._state_port.queue_durable_event(
                 {
                     "type": "memory_retrieved",
-                    "sessionId": session.session_id,
-                    "runId": request.get("run_id"),
-                    "memoryIds": memory_ids,
+                    "memory_ids": memory_ids,
                     "reasons": report.get("memory_retrieval_reasons", {}),
                 }
             )
@@ -1355,7 +1316,7 @@ class RuntimeSessionContextPort:
             "created_at": _utc_now_iso(),
             "runner_preflight": dict(report),
         }
-        session.append_event(payload)
+        self._state_port.queue_durable_event(payload)
         if session.latest_context_report is not None:
             session.latest_context_report["runner_preflight"] = dict(report)
 
@@ -1506,16 +1467,6 @@ def _int_or_default(value: object, *, default: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return default
     return value
-
-
-def _event_id(event: dict[str, Any]) -> str | None:
-    value = event.get("eventId") or event.get("event_id")
-    return value if isinstance(value, str) and value else None
-
-
-def _event_run_id(event: dict[str, Any]) -> str | None:
-    value = event.get("runId") or event.get("run_id")
-    return value if isinstance(value, str) and value else None
 
 
 def _int_or_none(value: object) -> int | None:

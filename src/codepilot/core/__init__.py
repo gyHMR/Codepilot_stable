@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from .contracts import (
     AgentContext,
+    AgentLoopEntry,
     AgentLoopInput,
     AgentLoopLimits,
     AgentLoopOutcome,
     AgentLoopPorts,
     AgentLoopStatus,
     AgentMessage,
-    AgentResumeInput,
     ContextPort,
     ContextPreparationRequest,
     CoreRunBoundary,
@@ -37,18 +37,18 @@ from .plan import (
     ensure_run_mode,
 )
 from .run_guard import RunGuard, RunGuardDecision
-from .runner import AgentEventEmitter, maybe_await, resume_agent_loop, run_agent_loop
+from .runner import AgentEventEmitter, maybe_await, run_agent_loop
 from .state import RunState, new_run_id
 
 __all__ = [
     "AgentContext",
+    "AgentLoopEntry",
     "AgentLoopInput",
     "AgentLoopLimits",
     "AgentLoopOutcome",
     "AgentLoopPorts",
     "AgentLoopStatus",
     "AgentMessage",
-    "AgentResumeInput",
     "ContextPort",
     "ContextPreparationRequest",
     "CoreRunBoundary",
@@ -76,7 +76,6 @@ __all__ = [
     "AgentEventEmitter",
     "maybe_await",
     "run_agent_loop",
-    "resume_agent_loop",
     "RunState",
     "new_run_id",
 ]

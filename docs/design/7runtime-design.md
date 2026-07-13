@@ -275,6 +275,8 @@ expected_revision
 
 相同 commit_id 的重试返回原 CommitReceipt，不重复写入。过期 expected_revision 必须被拒绝，不能覆盖新状态。Terminal 状态成功提交后不可被后续提交覆盖。
 
+当前第一版请求字段固定为：`commit_id`、`kind`、`session_id`、`run_id`、`expected_run_revision`、`expected_session_revision`，以及本次边界的 `core_state`、`new_messages`、`durable_events`、组件快照、Workspace Checkpoint 或 Terminal Result。消息 ID、Checkpoint ID 和边界 receipt Event ID 均由 `commit_id` 确定性派生，重试不会重新产生事实。
+
 ### 6.2 Boundary 事件
 
 Core Event 可以标识持久化意图：
@@ -288,7 +290,7 @@ CoreEvent
 └── checkpoint_state?
 ```
 
-Token 增量、调试信息和临时进度只走实时 Event Sink。消息、Tool 调用结果、Approval、Run 状态和 Checkpoint 等领域事实进入下一次 Commit。
+Token 增量、调试信息和临时进度只走实时 Event Sink。Event Sink 不写 Sessions；消息、Tool 调用结果、Approval、Run 状态、Checkpoint 和 `durable_events` 进入下一次 Commit。Context projection、Memory retrieval 和 preflight 事件由 Runtime State Adapter 暂存后，也必须随下一次边界提交。
 
 当 Core 到达稳定 Progress Boundary 时，Coordinator 必须等待 CommitReceipt 后，才允许继续执行可能产生副作用的下一段工作。
 
@@ -325,6 +327,8 @@ runtime_error
 用户取消归类为 cancelled/user_cancelled。超时归类为 failed/deadline_exceeded。取消、超时和异常通过同一个终止仲裁器决定唯一生效的终止意图。
 
 取消先进行协作式传播，再在 grace period 后强制取消仍未收敛的任务。无论 Outcome 如何，release 都必须在 finally 中幂等调用。
+
+第一版 Run 超时通过 `SessionOpenIntent.run_timeout_seconds` 配置。每次 RunEnvironment 创建时计算独立 deadline；超时先触发 cancellation token，超过短 grace period 仍未退出才强制取消，并最终提交 `failed/deadline_exceeded`。
 
 Terminal Commit 失败时不得发送成功最终 Frame。Runtime 可以使用同一 commit_id 有限重试；资源仍然必须释放，后续启动流程从最后成功边界继续恢复。
 
@@ -396,7 +400,6 @@ src/codepilot/
 │   ├── repository.py
 │   ├── filesystem.py
 │   ├── serde.py
-│   ├── recovery.py
 │   ├── workspace.py
 │   ├── context/
 │   ├── memory/
@@ -406,12 +409,16 @@ src/codepilot/
 │   ├── contracts.py
 │   ├── actions.py
 │   ├── gateway.py
-│   ├── controller.py
+│   ├── builder.py
+│   ├── config.py
+│   ├── opening.py
+│   ├── session_controller.py
+│   ├── session_coordinator.py
+│   ├── session_state_adapter.py
 │   ├── coordinator.py
 │   ├── environment.py
 │   ├── executor.py
 │   ├── lifecycle.py
-│   ├── frames.py
 │   ├── approvals.py
 │   └── tool_adapters/
 └── interfaces/
@@ -424,16 +431,17 @@ src/codepilot/
 | contracts.py | Action、Outcome、Environment、Runtime 状态协议 | 具体执行和持久化 |
 | actions.py | Prompt、Resume、Cancel 输入转换 | Core 循环和 Plan 规则 |
 | gateway.py | 外部入口、Session 并发、Frame 输出 | Core task、Repository 写入 |
-| controller.py | Action 到 Coordinator 请求的转换 | 消息、事件和 Checkpoint 写入 |
-| coordinator.py | Prepare、Recovery、Commit、Termination 编排 | Context/Memory 具体治理 |
+| session_controller.py | 暴露 Session 事实、命令和唯一 `controller.runs` 入口 | 消息、事件和 Checkpoint 写入 |
+| coordinator.py | 通过 `prepare/execute/commit` 统一编排一次 Run，并选择 Prompt、Resume 或 Continuation 的恢复路径 | Context/Memory 具体治理、Core 循环、直接 Repository 写入 |
+| session_coordinator.py | 组装 Session 运行所需的 Context、Plan、Memory 和 Sessions Adapter，作为 `RunCoordinator` 的内部实现 | 对外暴露第二套 Run API、直接被 Gateway 调用 |
+| session_state_adapter.py | 将 Core 边界转换为 `SessionStateService.commit_run_boundary` 请求 | 自行写 Repository、维护第二份 Run 事实 |
 | environment.py | EnvironmentFactory 和资源组装 | Agent Loop 和文件持久化 |
 | executor.py | 唯一 Core 执行入口和异常归一化 | Sessions Commit 和任务完成判断 |
 | lifecycle.py | Runtime 状态、终止仲裁、资源释放 | Sessions RunState 和 Plan 状态 |
-| frames.py | RuntimeFrame 生成 | 持久化 Event |
 | approvals.py | Approval Action 的 Runtime 转换 | Approval 事实存储 |
 | tool_adapters/ | Tool Port 到具体工具的适配 | Tool 副作用策略 |
 
-第一阶段可以暂时保留现有 session_controller.py 和 session_coordinator.py 文件名，但逻辑必须遵守本表职责；迁移完成后只保留一套公开入口，不同时导出新旧名称。
+第一阶段可以暂时保留现有 session_controller.py 和 session_coordinator.py 文件名，但逻辑必须遵守本表职责。Run 的公开入口只有 `SessionController.runs`，其余 Session Coordinator 的 Run 准备和提交方法为内部实现；不得再从 Gateway 或其他层直接调用旧入口。
 
 ### 9.2 Sessions 与 Workspace 边界
 
@@ -459,7 +467,7 @@ tools/sandbox.py 仍负责工具执行时的安全和权限策略；sessions/rol
 
 ### 阶段 D：提取唯一 RunExecutor
 
-把 Gateway 中的 Core task、事件转发、异常、取消和超时逻辑迁入 Executor。Gateway 只调用 Controller/Coordinator。
+把 Gateway 中的 Core task、事件转发、异常、取消和超时逻辑迁入 Executor；Plan 子 Agent 也必须复用同一个 Executor。Gateway 只调用 Controller/Coordinator。
 
 ### 阶段 E：收敛 Coordinator
 

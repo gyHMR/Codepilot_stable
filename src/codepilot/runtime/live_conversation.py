@@ -92,11 +92,11 @@ class SessionConversationState:
         elif event_type == "message_end":
             self.stream_message = None
         elif event_type == "tool_started":
-            tool_call_id = event.get("toolCallId")
+            tool_call_id = event.get("tool_call_id")
             if tool_call_id:
                 self.active_tool_call_ids.add(str(tool_call_id))
         elif event_type in {"tool_completed", "tool_failed", "tool_interrupted"}:
-            tool_call_id = event.get("toolCallId")
+            tool_call_id = event.get("tool_call_id")
             if tool_call_id:
                 self.active_tool_call_ids.discard(str(tool_call_id))
         elif event_type == "error":

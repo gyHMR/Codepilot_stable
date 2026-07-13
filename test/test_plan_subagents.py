@@ -419,7 +419,7 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
             frame.event
             for frame in frames
             if getattr(frame, "event", {}).get("type") == "tool_completed"
-            and getattr(frame, "event", {}).get("toolName") == "propose_plan"
+                and getattr(frame, "event", {}).get("tool_name") == "propose_plan"
         ]
         assert completed_plan_events
         assert completed_plan_events[0]["result"]["data"]["plan_operation"] == "propose_plan"
@@ -432,7 +432,7 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
             frame.event["result"]["data"]
             for frame in frames
             if getattr(frame, "event", {}).get("type") == "tool_completed"
-            and getattr(frame, "event", {}).get("toolName") == "dispatch_exploration"
+                and getattr(frame, "event", {}).get("tool_name") == "dispatch_exploration"
         )
         assert model_port.subagent_calls == 1, dispatch_data
         assert any(

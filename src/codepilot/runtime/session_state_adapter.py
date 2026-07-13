@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 from codepilot.core.contracts import CoreRunBoundary, RunStatePort
@@ -10,7 +11,7 @@ from codepilot.sessions.contracts import (
     WaitingState,
     WorkspaceCheckpoint,
 )
-from codepilot.sessions.service import CommitBoundaryRequest, SessionStateService
+from codepilot.sessions.service import CommitRunBoundaryRequest, SessionStateService
 
 
 class RuntimeSessionStateAdapter(RunStatePort):
@@ -32,9 +33,22 @@ class RuntimeSessionStateAdapter(RunStatePort):
         self.plan_state = plan_state
         self.workspace_state = workspace_state
         self.committed_message_ids: dict[int, str] = {}
+        self._pending_events: list[dict[str, object]] = []
+
+    def queue_durable_event(self, event: dict[str, object]) -> None:
+        """Queue a run event until the next authoritative boundary commit."""
+
+        payload = dict(event)
+        payload.setdefault(
+            "event_id",
+            f"{self.run.run_id}:runtime:{self.run.revision}:{len(self._pending_events) + 1}",
+        )
+        payload.setdefault("run_id", self.run.run_id)
+        payload.setdefault("session_id", self.session.session_id)
+        self._pending_events.append(payload)
 
     async def commit(self, boundary: CoreRunBoundary) -> None:
-        status, phase, resume_point = _boundary_state(boundary.kind)
+        _, phase, resume_point = _boundary_state(boundary.kind)
         waiting = (
             WaitingState(
                 kind=boundary.waiting.kind,
@@ -66,28 +80,38 @@ class RuntimeSessionStateAdapter(RunStatePort):
             current_plan = self.plan_state()
             if current_plan is not None:
                 core_state["plan_state"] = current_plan
-        result = self.service.commit_boundary(
-            CommitBoundaryRequest(
-                session_id=self.session.session_id,
-                run_id=self.run.run_id,
-                status=status,
-                phase=phase,
-                resume_point=resume_point,
-                core_state=core_state,
-                new_messages=boundary.new_messages,
-                waiting=waiting,
-                components=tuple(components),
-                workspace=(
-                    self.workspace_state(core_state)
-                    if self.workspace_state is not None
-                    else self.run.checkpoint.workspace if self.run.checkpoint else None
-                ),
-            ),
+        commit_kind = "waiting" if boundary.kind.startswith("waiting_") else "progress"
+        request = CommitRunBoundaryRequest(
+            commit_id=f"{self.run.run_id}:{commit_kind}:{self.run.revision}",
+            kind=commit_kind,
+            session_id=self.session.session_id,
+            run_id=self.run.run_id,
             expected_run_revision=self.run.revision,
             expected_session_revision=self.session.revision,
+            phase=phase,
+            resume_point=resume_point,
+            core_state=core_state,
+            new_messages=boundary.new_messages,
+            durable_events=tuple([*self._pending_events, *boundary.durable_events]),
+            waiting=waiting,
+            components=tuple(components),
+            workspace=(
+                self.workspace_state(core_state)
+                if self.workspace_state is not None
+                else self.run.checkpoint.workspace if self.run.checkpoint else None
+            ),
         )
+        try:
+            result = self.service.commit_run_boundary(request)
+        except OSError:
+            # The first attempt may have replaced run.json before an event append
+            # failed.  Reusing the same commit_id lets Sessions return its receipt
+            # without creating a second message/checkpoint/result.
+            await asyncio.sleep(0)
+            result = self.service.commit_run_boundary(request)
         self.session = result.session
         self.run = result.run
+        self._pending_events.clear()
         for message, record in zip(boundary.new_messages, result.committed_messages, strict=True):
             self.committed_message_ids[id(message)] = record.message_id
 

@@ -96,8 +96,7 @@ def switch_to_entry(session: Any, entry_id: str) -> None:
         session.session_id,
         {
             "type": "session_leaf_switched",
-            "sessionId": session.session_id,
-            "entryId": entry_id,
+            "entry_id": entry_id,
         }
     )
 
@@ -297,13 +296,12 @@ def revert_run(session: Any, run_id: str) -> GitRollbackResult:
     session.append_event(
         {
             "type": "run_reverted",
-            "sessionId": session.session_id,
-            "targetRunId": run_id,
+            "target_run_id": run_id,
             "status": result.status,
             "reason": result.reason,
-            "restoredPaths": list(result.restored_paths),
-            "removedPaths": list(result.removed_paths),
-            "conflictedPaths": list(result.conflicted_paths),
+            "restored_paths": list(result.restored_paths),
+            "removed_paths": list(result.removed_paths),
+            "conflicted_paths": list(result.conflicted_paths),
         }
     )
     return result
@@ -412,7 +410,7 @@ async def apply_session_command(
 def _status_record(session_id: str, text: str, session: Any) -> SessionCommandRecord:
     model = session.conversation.model
     model_id = f"{model.provider}/{model.id}" if model.provider else model.id
-    plan = session.plan_summary() if hasattr(session, "plan_summary") else None
+    plan = session.plan_summary()
     output_lines = [
         "=== Status ===",
         f"  Model      : {model_id}",
@@ -444,7 +442,7 @@ def _mode_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
             data={"current_mode": session.current_mode},
         )
     requested_mode = arg.strip().lower()
-    plan = session.pending_plan_approval() if hasattr(session, "pending_plan_approval") else None
+    plan = session.pending_plan_approval()
     if requested_mode in {"build", "read"} and isinstance(plan, dict):
         return _record(
             session_id,
@@ -461,7 +459,7 @@ def _mode_record(session_id: str, text: str, session: Any, arg: str) -> SessionC
                 "blocked": True,
             },
         )
-    checkpoint = session.runtime_checkpoint() if hasattr(session, "runtime_checkpoint") else None
+    checkpoint = session.runtime_checkpoint()
     checkpoint_phase = (
         str(checkpoint.get("phase") or "")
         if isinstance(checkpoint, dict)
@@ -844,14 +842,13 @@ def _record_memory_event(
 ) -> None:
     payload = {
         "type": event_type,
-        "sessionId": session.session_id,
-        "memoryId": record.id,
-        "memoryType": record.type,
+        "memory_id": record.id,
+        "memory_type": record.type,
         "scope": record.scope,
         "status": record.status,
     }
     if source_memory_id:
-        payload["sourceMemoryId"] = source_memory_id
+        payload["source_memory_id"] = source_memory_id
     session.append_event(payload)
 
 
@@ -964,11 +961,12 @@ def _open_derived_runtime(session: Any, session_id: str) -> Any:
             retry_enabled=session.retry_enabled,
             max_retries=session.max_retries,
             retry_base_delay_ms=session.retry_base_delay_ms,
+            run_timeout_seconds=session.run_timeout_seconds,
             extension_commands=dict(session.extension_commands),
             before_prompt_hooks=list(session.before_prompt_hooks),
             after_prompt_hooks=list(session.after_prompt_hooks),
             stream_fn=session.stream_fn,
-            prepare_context=getattr(session, "_custom_prepare_context", None),
+            prepare_context=session._custom_prepare_context,
         )
     )
 

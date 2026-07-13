@@ -175,29 +175,24 @@ def test_agent_loop_default_tool_iteration_budget_supports_coding_tasks(tmp_path
 def test_agent_loop_retry_policy_is_explicit_contract() -> None:
     from typing import get_type_hints
 
-    from codepilot.core.contracts import AgentLoopInput, AgentResumeInput, RetryPolicy
+    from codepilot.core.contracts import AgentLoopInput, RetryPolicy
 
     input_hints = get_type_hints(AgentLoopInput)
-    resume_hints = get_type_hints(AgentResumeInput)
 
     assert input_hints["retry_policy"] is RetryPolicy
-    assert resume_hints["retry_policy"] is RetryPolicy
     assert RetryPolicy(enabled=True, max_retries=-1, base_delay_ms=-5).max_retries == 0
 
 
 def test_agent_loop_mode_and_plan_state_are_explicit_contracts() -> None:
     from typing import get_type_hints
 
-    from codepilot.core.contracts import AgentLoopInput, AgentResumeInput, RunCorrelation
+    from codepilot.core.contracts import AgentLoopInput, RunCorrelation
 
     input_hints = get_type_hints(AgentLoopInput)
-    resume_hints = get_type_hints(AgentResumeInput)
     plan_state = {"plan_id": "plan_1", "interpreted_goal": "ship it"}
 
     assert input_hints["mode"].__args__ == ("read", "plan", "build")
-    assert resume_hints["mode"].__args__ == ("read", "plan", "build")
     assert input_hints["plan_state"] == dict[str, object] | None
-    assert resume_hints["plan_state"] == dict[str, object] | None
 
     loop_input = AgentLoopInput(
         run_id="run_plan_contract",
@@ -215,14 +210,13 @@ def test_agent_loop_context_is_named_prepared_context_contract() -> None:
 
     from codepilot.core import PreparedContext as PublicPreparedContext
     from codepilot.core.contracts import (
+        AgentLoopEntry,
         AgentLoopInput,
-        AgentResumeInput,
         PreparedContext,
         RunCorrelation,
     )
 
     input_hints = get_type_hints(AgentLoopInput)
-    resume_hints = get_type_hints(AgentResumeInput)
     source = {"system_prompt": "Base rules", "session_id": "s1"}
 
     loop_input = AgentLoopInput(
@@ -230,27 +224,67 @@ def test_agent_loop_context_is_named_prepared_context_contract() -> None:
         correlation=RunCorrelation(session_id="s1"),
         context=source,
     )
-    resume_input = AgentResumeInput(
+    resume_input = AgentLoopInput(
         run_id="run_context_resume",
         correlation=RunCorrelation(session_id="s1"),
+        entry="resume",
         context=source,
+        approval_id="approval_1",
+        decision="approve",
     )
     source["system_prompt"] = "mutated"
 
     assert PublicPreparedContext is PreparedContext
     assert input_hints["context"] is PreparedContext
-    assert resume_hints["context"] is PreparedContext
+    assert input_hints["entry"] is AgentLoopEntry
     assert loop_input.context.system_prompt == "Base rules"
     assert resume_input.context.session_id == "s1"
-    assert not hasattr(resume_input, "tool_call_id")
-    assert not hasattr(resume_input, "tool_name")
-    assert not hasattr(resume_input, "arguments")
+    assert resume_input.entry == "resume"
+    assert resume_input.approval_id == "approval_1"
     assert dict(loop_input.context) == {
         "system_prompt": "Base rules",
         "session_id": "s1",
     }
     with pytest.raises(TypeError):
         loop_input.context["new"] = "value"  # type: ignore[index]
+
+
+def test_agent_loop_entry_validates_prompt_and_resume_fields() -> None:
+    from codepilot.core.contracts import AgentLoopInput, RunCorrelation
+
+    resume = AgentLoopInput(
+        run_id="run_resume",
+        correlation=RunCorrelation(session_id="s1"),
+        entry="resume",
+        approval_id="approval_1",
+        decision="approve",
+    )
+
+    assert resume.entry == "resume"
+    with pytest.raises(ValueError, match="requires approval_id"):
+        AgentLoopInput(
+            run_id="run_invalid_resume",
+            correlation=RunCorrelation(session_id="s1"),
+            entry="resume",
+        )
+    with pytest.raises(ValueError, match="cannot include resume fields"):
+        AgentLoopInput(
+            run_id="run_invalid_prompt",
+            correlation=RunCorrelation(session_id="s1"),
+            approval_id="approval_1",
+            decision="approve",
+        )
+
+
+def test_prepared_run_has_one_agent_loop_input() -> None:
+    from typing import get_type_hints
+
+    from codepilot.sessions.contracts import PreparedAgentRun
+
+    hints = get_type_hints(PreparedAgentRun)
+
+    assert "loop_input" in hints
+    assert "resume_input" not in hints
 
 
 def test_agent_loop_ports_use_named_event_sink_contract() -> None:
@@ -288,15 +322,15 @@ def test_prepared_agent_run_rollback_baseline_is_public_ref() -> None:
     assert ref.kind == "rollback_baseline_ref"
 
 
-def test_session_run_record_status_follows_core_loop_status_contract() -> None:
+def test_session_run_record_status_uses_public_run_status_contract() -> None:
     from typing import get_type_hints
 
-    from codepilot.core.contracts import AgentLoopStatus
+    from codepilot.protocols import AgentRunStatus
     from codepilot.sessions.contracts import SessionRunRecord
 
     hints = get_type_hints(SessionRunRecord)
 
-    assert hints["status"] == AgentLoopStatus
+    assert hints["status"] == AgentRunStatus
 
 
 def test_session_intents_normalize_resume_and_cancel_values() -> None:

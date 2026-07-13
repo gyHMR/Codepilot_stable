@@ -113,7 +113,7 @@ def _emit_llm_delta(
     emit(
         {
             "type": "message_update",
-            "assistantMessageEvent": {
+            "assistant_message_event": {
                 "type": event_type,
                 **payload,
             },

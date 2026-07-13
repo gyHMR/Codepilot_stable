@@ -459,7 +459,7 @@ class DingTalkBridge:
                     )
                     return
 
-            run_id = _field(result, "run_id") or _field(result, "runId")
+            run_id = _field(result, "run_id")
             status = _field(result, "status")
             self.audit.record(
                 "approval_finished",
@@ -531,7 +531,7 @@ class DingTalkBridge:
         event_type = event.get("type")
         if event_type == "tool_interrupted":
             status = event.get("status")
-            approval_id = event.get("approvalId")
+            approval_id = event.get("approval_id")
             if status == "approval_required" and approval_id:
                 self.audit.record(
                     "approval_requested",
@@ -541,12 +541,12 @@ class DingTalkBridge:
                     run_id=_event_run_id(event),
                     approval_id=str(approval_id),
                     status="approval_required",
-                    reason=event.get("errorReason") or _field(result, "error_code"),
+                    reason=event.get("error_reason") or "approval_required",
                     workspace_state=_remote_workspace_state(self.config.workspace_dir),
                 )
         if event_type == "agent_end":
             result = event.get("result") or event
-            run_id = _field(result, "run_id") or _field(result, "runId") or event.get("runId")
+            run_id = _field(result, "run_id") or event.get("run_id")
             status = _field(result, "status") or event.get("status")
             self.audit.record(
                 "run_finished",
@@ -565,7 +565,7 @@ class DingTalkBridge:
         *,
         command: str,
     ) -> None:
-        run_id = _field(result, "run_id") or _field(result, "runId")
+        run_id = _field(result, "run_id")
         status = _field(result, "status")
         self.audit.record(
             "run_finished",
@@ -739,7 +739,7 @@ def _field(value: object, name: str) -> Any:
 
 def _event_run_id(event: dict[str, Any]) -> str | None:
     result = event.get("result")
-    value = event.get("runId") or event.get("run_id") or _field(result, "run_id") or _field(result, "runId")
+    value = event.get("run_id") or _field(result, "run_id")
     return str(value) if value else None
 
 
@@ -763,12 +763,12 @@ def _approval_frame_to_event(frame: ApprovalRequiredFrame) -> dict[str, Any]:
     )
     return {
         "type": "tool_interrupted",
-        "toolName": tool_name,
+        "tool_name": tool_name,
         "status": "approval_required",
-        "riskLevel": str(risk_level),
+        "risk_level": str(risk_level),
         "args": arguments,
-        "approvalId": approval_id,
-        "errorReason": str(reason),
+        "approval_id": approval_id,
+        "error_reason": str(reason),
         "result": {
             "status": "approval_required",
             "approval_id": approval_id,

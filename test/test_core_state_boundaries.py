@@ -156,3 +156,75 @@ def test_before_tools_commit_failure_prevents_tool_execution() -> None:
         }
 
     asyncio.run(run_case())
+
+
+def test_single_agent_loop_entry_resumes_tool_approval() -> None:
+    async def run_case() -> None:
+        from types import SimpleNamespace
+
+        from codepilot.tools.results import TextContent as ToolTextContent, ToolResult
+
+        class Model:
+            async def stream(self, _request):
+                yield LLMCompleted(
+                    message=AssistantMessage(content=[TextContent(text="resumed")])
+                )
+
+        class Tools:
+            responses = []
+
+            def catalog_snapshot(self, *, mode=None):
+                return ToolCatalogSnapshot("catalog_1", (), 0)
+
+            def approval_challenge(self, approval_id):
+                assert approval_id == "approval_1"
+                return SimpleNamespace(
+                    tool_call_id="call_1",
+                    tool_name="shell",
+                    request_fingerprint="fingerprint_1",
+                )
+
+            async def resume(self, response):
+                self.responses.append(response)
+                return ToolResult(
+                    tool_call_id="call_1",
+                    tool_name="shell",
+                    status="success",
+                    content=(ToolTextContent("approved"),),
+                    registration_id="reg_1",
+                )
+
+            def checkpoint_state(self, *, intent=None):
+                return {
+                    "schema_version": 1,
+                    "session_id": "session_1",
+                    "attempts": [],
+                    "intent": dict(intent) if intent is not None else None,
+                }
+
+        tools = Tools()
+        state = RecordingStatePort()
+        outcome = await run_agent_loop(
+            AgentLoopInput(
+                run_id="run_resume",
+                correlation=RunCorrelation(session_id="session_1"),
+                entry="resume",
+                approval_id="approval_1",
+                decision="approve",
+                model=ModelDescriptor(provider="fake", model_id="unit"),
+                limits=AgentLoopLimits(max_model_turns=1),
+            ),
+            AgentLoopPorts(model=Model(), tools=tools, state=state),  # type: ignore[arg-type]
+        )
+
+        assert outcome.status == "completed"
+        assert tools.responses[0].approval_id == "approval_1"
+        assert [boundary.kind for boundary in state.boundaries] == [
+            "before_tools",
+            "after_tools",
+            "before_model",
+            "after_model",
+            "before_finalization",
+        ]
+
+    asyncio.run(run_case())

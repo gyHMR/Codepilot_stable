@@ -1,7 +1,10 @@
-from __future__ import annotations
+"""ModelPort 适配器 —— 将现有 provider registry 适配为 Core 可消费的 ModelPort。
 
-# 新手导读：adapters.py 把现有 provider registry 适配成 core 可消费的 ModelPort。
-# 关注点：端口契约在 ports.py；这里才允许接触 provider registry、event stream 和模型能力细节。
+ProviderModelPort 是 ModelPort 协议的标准实现，它将：
+1. LLMRequest（core 层请求）转换为 provider 的流式调用
+2. provider 的响应流转换为 core 层的 LLMEvent 事件流
+3. 处理消息格式转换、API Key 解析、模型能力验证等跨切面逻辑
+"""
 
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -36,7 +39,20 @@ from .stream import SimpleStreamOptions, classify_llm_error
 
 
 class ProviderModelPort(ModelPort):
-    """ModelPort adapter over the existing provider registry or injected stream function."""
+    """ModelPort 适配器 —— 在现有 provider registry 或注入的流函数之上适配。
+
+    支持两种装配方式：
+    1. 通过 registry: 传入 ApiProviderRegistry 实例
+    2. 通过注入函数: 传入 stream_fn / complete_fn / convert_messages 等
+
+    参数:
+        model: 模型配置
+        stream_fn: 流式调用函数（可选，不提供则使用 registry）
+        complete_fn: 非流式调用函数（可选）
+        convert_messages: 消息转换函数（可选，如 OpenAI ↔ Anthropic 互转）
+        get_api_key: API Key 解析函数（可选）
+        registry: Provider 注册中心（可选）
+    """
 
     def __init__(
         self,
@@ -56,6 +72,22 @@ class ProviderModelPort(ModelPort):
         self._registry = registry
 
     async def stream(self, request: LLMRequest) -> AsyncIterator[LLMEvent]:
+        """执行一次流式 LLM 调用。
+
+        处理流程:
+        1. 消息转换（如有 convert_messages）
+        2. 验证模型能力（如图片支持）
+        3. 构造 Context（包含 system_prompt、messages、tools）
+        4. 解析 API Key
+        5. 根据模型能力选择流式或非流式调用
+        6. 将 provider 事件转换为 core 层 LLMEvent
+
+        参数:
+            request: LLM 请求
+
+        返回:
+            LLMEvent 的异步迭代器
+        """
         try:
             messages = list(request.messages)
             if self._convert_messages is not None:
@@ -80,7 +112,7 @@ class ProviderModelPort(ModelPort):
                 api_key = await resolved if _is_awaitable(resolved) else resolved
             options = SimpleStreamOptions(
                 reasoning=(
-                    request.options.reasoning  # type: ignore[arg-type]
+                    request.options.reasoning
                     if capabilities.reasoning
                     else None
                 ),
@@ -91,6 +123,7 @@ class ProviderModelPort(ModelPort):
                 session_id=request.correlation.session_id or None,
             )
             if not capabilities.streaming:
+                # 非流式模式：直接调用 complete 并返回
                 complete_fn = self._complete_fn or (
                     self._registry.complete_simple if self._registry is not None else complete_simple
                 )
@@ -101,6 +134,7 @@ class ProviderModelPort(ModelPort):
                 else:
                     yield LLMCompleted(message=completed, usage=completed.usage)
                 return
+            # 流式模式
             stream_fn = self._stream_fn or (
                 self._registry.stream_simple if self._registry is not None else stream_simple
             )
@@ -131,10 +165,12 @@ class ProviderModelPort(ModelPort):
 
 
 def _is_awaitable(value: object) -> bool:
+    """检查值是否为 awaitable（有 __await__ 方法）。"""
     return hasattr(value, "__await__")
 
 
 def _correlate_error(error: LLMErrorInfo, request: LLMRequest) -> LLMErrorInfo:
+    """将错误信息与请求关联 —— 注入 run_id 和 session_id。"""
     details = dict(error.details)
     if request.correlation.run_id:
         details["run_id"] = request.correlation.run_id
@@ -148,6 +184,17 @@ def _validate_capabilities(
     *,
     model: Model,
 ) -> LLMErrorInfo | None:
+    """验证模型能力是否满足消息需求。
+
+    当前检查：如果消息中包含图片但模型不支持 vision，返回错误。
+
+    参数:
+        messages: 消息列表
+        model: 模型配置
+
+    返回:
+        如果能力不足，返回 LLMErrorInfo；否则返回 None
+    """
     if model.capabilities.vision:
         return None
     has_images = any(

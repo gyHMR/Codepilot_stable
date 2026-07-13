@@ -97,7 +97,7 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
         return {
             **_base(raw, "run_finished"),
             "status": str(raw.get("status", "")),
-            "stop_reason": str(raw.get("stopReason") or raw.get("stop_reason") or ""),
+            "stop_reason": str(raw.get("stop_reason") or ""),
         }
     if event_type == "message_start" and _message_role(raw) == "assistant":
         return {**_base(raw, "model_call_started")}
@@ -115,8 +115,8 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
         _require_internal_tool_event(raw, finished=False)
         return {
             **_base(raw, "tool_call_started"),
-            "tool_call_id": str(raw.get("toolCallId") or ""),
-            "tool_name": str(raw.get("toolName") or ""),
+            "tool_call_id": str(raw.get("tool_call_id") or ""),
+            "tool_name": str(raw.get("tool_name") or ""),
             "args": _slim_args(_dict(raw.get("args"))),
         }
     if event_type in {"tool_completed", "tool_failed", "tool_interrupted"}:
@@ -180,15 +180,10 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
 _COMMON_EVENT_FIELDS = {
     "schema_version",
     "event_id",
-    "eventId",
     "run_id",
-    "runId",
     "session_id",
-    "sessionId",
     "turn",
-    "turnId",
     "type",
-    "timestamp",
     "timestamp_ms",
 }
 
@@ -211,12 +206,12 @@ def _canonical_existing(raw: dict[str, Any]) -> dict[str, Any]:
 def _base(raw: dict[str, Any], event_type: str) -> dict[str, Any]:
     return {
         "schema_version": 1,
-        "event_id": str(raw.get("event_id") or raw.get("eventId") or ""),
-        "run_id": str(raw.get("run_id") or raw.get("runId") or ""),
-        "session_id": raw.get("session_id") or raw.get("sessionId"),
-        "turn": _int(raw.get("turn", raw.get("turnId"))),
+        "event_id": str(raw.get("event_id") or ""),
+        "run_id": str(raw.get("run_id") or ""),
+        "session_id": raw.get("session_id"),
+        "turn": _int(raw.get("turn")),
         "type": event_type,
-        "timestamp_ms": _int(raw.get("timestamp_ms", raw.get("timestamp"))),
+        "timestamp_ms": _int(raw.get("timestamp_ms")),
     }
 
 
@@ -314,35 +309,35 @@ def _tool_finished(raw: dict[str, Any]) -> dict[str, Any]:
     if isinstance(permission, dict):
         permission = permission.get("decision") or permission.get("action")
     verification = _dict(result.get("verification"))
-    affected = raw.get("affectedPaths")
-    is_error = bool(raw.get("isError", False))
+    affected = raw.get("affected_paths")
+    is_error = bool(raw.get("is_error", False))
     status = str(raw.get("status") or "")
     if not status:
         status = "error" if is_error else "success"
     return {
         **_base(raw, "tool_call_finished"),
-        "tool_call_id": str(raw.get("toolCallId") or ""),
-        "tool_name": str(raw.get("toolName") or ""),
+        "tool_call_id": str(raw.get("tool_call_id") or ""),
+        "tool_name": str(raw.get("tool_name") or ""),
         "status": status,
         "is_error": is_error,
-        "error_reason": raw.get("errorReason"),
+        "error_reason": raw.get("error_reason"),
         "approved": bool(raw.get("approved", True)),
         "permission": permission,
-        "duration_ms": _optional_int(raw.get("durationMs")),
+        "duration_ms": _optional_int(raw.get("duration_ms")),
         "affected_paths": [str(path) for path in affected or [] if isinstance(path, str)],
-        "workspace_changed": _optional_bool(raw.get("workspaceChanged")),
+        "workspace_changed": _optional_bool(raw.get("workspace_changed")),
         "verification_status": str(verification.get("status") or "none"),
-        "output_truncated": bool(raw.get("outputTruncated", False)),
+        "output_truncated": bool(raw.get("output_truncated", False)),
     }
 
 
 def _require_internal_tool_event(raw: dict[str, Any], *, finished: bool) -> None:
-    for field_name in ("toolCallId", "toolName"):
+    for field_name in ("tool_call_id", "tool_name"):
         if not isinstance(raw.get(field_name), str) or not raw[field_name]:
             raise ValueError(f"Internal tool event requires {field_name}")
     if finished:
-        if "status" not in raw or "isError" not in raw:
-            raise ValueError("Finished internal tool event requires status and isError")
+        if "status" not in raw or "is_error" not in raw:
+            raise ValueError("Finished internal tool event requires status and is_error")
     elif not isinstance(raw.get("args"), dict):
         raise ValueError("tool_started event requires args")
 

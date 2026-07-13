@@ -18,9 +18,8 @@ from codepilot.sessions.filesystem import atomic_write_json, read_json_object, r
 from codepilot.sessions.repository import FileSessionRepository
 from codepilot.sessions.service import (
     BeginRunRequest,
-    CommitBoundaryRequest,
+    CommitRunBoundaryRequest,
     CreateSessionRequest,
-    FinishRunRequest,
     ResumeRunRequest,
     SessionStateService,
 )
@@ -54,17 +53,18 @@ def _begin(service: SessionStateService, session_revision: int):
 
 
 def _start(service: SessionStateService, begun):
-    return service.commit_boundary(
-        CommitBoundaryRequest(
+    return service.commit_run_boundary(
+        CommitRunBoundaryRequest(
+            commit_id=f"start:{begun.run.revision}",
+            kind="progress",
             session_id="session_1",
             run_id="run_1",
-            status="running",
+            expected_run_revision=begun.run.revision,
+            expected_session_revision=begun.session.revision,
             phase="model",
             resume_point="before_model",
             core_state={"turn": 0},
-        ),
-        expected_run_revision=begun.run.revision,
-        expected_session_revision=begun.session.revision,
+        )
     )
 
 
@@ -97,23 +97,24 @@ def test_repository_message_append_is_idempotent_and_rejects_conflicts(tmp_path:
         )
 
 
-def test_commit_boundary_updates_run_before_session_navigation(tmp_path: Path) -> None:
+def test_commit_run_boundary_updates_run_before_session_navigation(tmp_path: Path) -> None:
     service, session = _service(tmp_path)
     begun = _begin(service, session.revision)
-    committed = service.commit_boundary(
-        CommitBoundaryRequest(
+    committed = service.commit_run_boundary(
+        CommitRunBoundaryRequest(
+            commit_id=f"after-model:{begun.run.revision}",
+            kind="progress",
             session_id="session_1",
             run_id="run_1",
-            status="running",
+            expected_run_revision=begun.run.revision,
+            expected_session_revision=begun.session.revision,
             phase="model",
             resume_point="after_model",
             core_state={"turn": 1},
             new_messages=(
                 AssistantMessage(content=[TextContent(text="I found the entry point.")]),
             ),
-        ),
-        expected_run_revision=begun.run.revision,
-        expected_session_revision=begun.session.revision,
+        )
     )
 
     assert committed.run.revision == 2
@@ -124,15 +125,52 @@ def test_commit_boundary_updates_run_before_session_navigation(tmp_path: Path) -
     assert len(committed.committed_messages) == 1
 
 
+def test_commit_run_boundary_retry_is_idempotent(tmp_path: Path) -> None:
+    service, session = _service(tmp_path)
+    begun = _begin(service, session.revision)
+    request = CommitRunBoundaryRequest(
+        commit_id="retry-progress",
+        kind="progress",
+        session_id="session_1",
+        run_id="run_1",
+        expected_run_revision=begun.run.revision,
+        expected_session_revision=begun.session.revision,
+        phase="model",
+        resume_point="after_model",
+        core_state={"turn": 1},
+        new_messages=(AssistantMessage(content=[TextContent(text="once")]),),
+        durable_events=(
+            {
+                "event_id": "retry-event",
+                "type": "agent_end",
+            },
+        ),
+    )
+    first = service.commit_run_boundary(request)
+    message_count = len(service.load_messages("session_1"))
+    event_count = len(service.load_events("session_1"))
+
+    second = service.commit_run_boundary(request)
+
+    assert second.run == first.run
+    assert second.session == first.session
+    assert second.committed_messages == first.committed_messages
+    assert len(service.load_messages("session_1")) == message_count
+    assert len(service.load_events("session_1")) == event_count
+
+
 def test_waiting_run_can_resume_only_with_current_checkpoint_and_request(tmp_path: Path) -> None:
     service, session = _service(tmp_path)
     begun = _begin(service, session.revision)
     started = _start(service, begun)
-    waiting = service.commit_boundary(
-        CommitBoundaryRequest(
+    waiting = service.commit_run_boundary(
+        CommitRunBoundaryRequest(
+            commit_id=f"waiting:{started.run.revision}",
+            kind="waiting",
             session_id="session_1",
             run_id="run_1",
-            status="waiting",
+            expected_run_revision=started.run.revision,
+            expected_session_revision=started.session.revision,
             phase="tools",
             resume_point="before_tools",
             core_state={"turn": 1},
@@ -141,9 +179,7 @@ def test_waiting_run_can_resume_only_with_current_checkpoint_and_request(tmp_pat
                 request_id="approval_1",
                 payload={"tool_call_id": "call_1"},
             ),
-        ),
-        expected_run_revision=started.run.revision,
-        expected_session_revision=started.session.revision,
+        )
     )
     checkpoint = waiting.run.checkpoint
     assert checkpoint is not None
@@ -173,7 +209,7 @@ def test_waiting_run_can_resume_only_with_current_checkpoint_and_request(tmp_pat
     assert resumed.checkpoint is not None and resumed.checkpoint.waiting is None
 
 
-def test_finish_run_commits_result_artifact_and_clears_current_run(tmp_path: Path) -> None:
+def test_terminal_commit_commits_result_artifact_and_clears_current_run(tmp_path: Path) -> None:
     service, session = _service(tmp_path)
     begun = _begin(service, session.revision)
     started = _start(service, begun)
@@ -183,22 +219,27 @@ def test_finish_run_commits_result_artifact_and_clears_current_run(tmp_path: Pat
         status="completed",
         stop_reason="final_answer",
     )
-    finished = service.finish_run(
-        FinishRunRequest(
-            session_id="session_1",
-            run_id="run_1",
-            status="completed",
-            stop_reason="final_answer",
-            result=result,
-        ),
+    request = CommitRunBoundaryRequest(
+        commit_id=f"terminal:{started.run.revision}",
+        kind="terminal",
+        session_id="session_1",
+        run_id="run_1",
         expected_run_revision=started.run.revision,
         expected_session_revision=started.session.revision,
+        stop_reason="final_answer",
+        terminal_status="completed",
+        result=result,
     )
+    finished = service.commit_run_boundary(request)
+    event_count = len(service.load_events("session_1"))
+    repeated = service.commit_run_boundary(request)
 
     assert finished.run.status == "completed"
     assert finished.run.checkpoint is None
     assert finished.session.current_run_id is None
     assert (tmp_path / ".codepilot" / "runs" / "run_1" / "artifacts" / "result.json").is_file()
+    assert repeated.run == finished.run
+    assert len(service.load_events("session_1")) == event_count
 
 
 def test_inspect_recovery_uses_run_state_and_message_cursor(tmp_path: Path) -> None:

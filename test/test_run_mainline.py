@@ -55,5 +55,5 @@ async def _run_retry_case() -> None:
     assert outcome.status == "completed"
     assert outcome.counters.model_attempts == 2
     assert model.attempts == 2
-    assert {event["runId"] for event in outcome.events} == {outcome.run_id}
+    assert {event["run_id"] for event in outcome.events} == {outcome.run_id}
     assert any(event["type"] == "model_retry_start" for event in outcome.events)

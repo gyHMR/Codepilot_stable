@@ -42,15 +42,15 @@ async def _run_event_emitter_contract_case() -> None:
     events: list[dict[str, Any]] = []
     emitter = AgentEventEmitter(events.append, run_id=" run_events ", session_id=" session_1 ")
 
-    await emitter.emit({"type": "turn_start", "runId": "caller_override"})
+    await emitter.emit({"type": "turn_start", "run_id": "caller_override"})
     await emitter.emit({"type": "message_end", "message": "payload"})
 
-    assert events[0]["runId"] == "run_events"
-    assert events[0]["sessionId"] == "session_1"
-    assert events[0]["turnId"] == 1
-    assert events[0]["eventId"] == "run_events:1"
-    assert events[1]["turnId"] == 1
-    assert events[1]["eventId"] == "run_events:2"
+    assert events[0]["run_id"] == "run_events"
+    assert events[0]["session_id"] == "session_1"
+    assert events[0]["turn_id"] == 1
+    assert events[0]["event_id"] == "run_events:1"
+    assert events[1]["turn_id"] == 1
+    assert events[1]["event_id"] == "run_events:2"
 
     with pytest.raises(ValueError, match="runtime event type"):
         await emitter.emit({"type": "unknown_event"})

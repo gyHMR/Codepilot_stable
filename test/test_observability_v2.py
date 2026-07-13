@@ -13,12 +13,12 @@ def test_tool_event_normalization_rejects_removed_field_dialects() -> None:
 
     from codepilot.observability.events import event_to_record
 
-    with pytest.raises(ValueError, match="toolCallId"):
+    with pytest.raises(ValueError, match="tool_call_id"):
         event_to_record(
             {
                 "type": "tool_started",
-                "tool_call_id": "call-old",
-                "tool_name": "read",
+                "toolCallId": "call-old",
+                "toolName": "read",
                 "args": {},
             }
         )
@@ -41,11 +41,11 @@ def test_event_recorder_writes_slim_canonical_events(tmp_path: Path) -> None:
     recorder.append(
         {
             "type": "context_projected",
-            "runId": "run-1",
-            "sessionId": "session-1",
-            "turnId": 1,
-            "eventId": "raw-1",
-            "timestamp": 100,
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "turn": 1,
+            "event_id": "raw-1",
+            "timestamp_ms": 100,
             "report": {
                 "context_id": "ctx-1",
                 "context_mode": "repair",
@@ -131,21 +131,21 @@ def test_event_recorder_redacts_secrets_and_skips_low_value_events(
     skipped = recorder.append(
         {
             "type": "turn_start",
-            "runId": "run-1",
-            "sessionId": "session-1",
-            "turnId": 1,
-            "eventId": "raw-turn",
-            "timestamp": 100,
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "turn": 1,
+            "event_id": "raw-turn",
+            "timestamp_ms": 100,
         }
     )
     written = recorder.append(
         {
             "type": "error",
-            "runId": "run-1",
-            "sessionId": "session-1",
-            "turnId": 1,
-            "eventId": "raw-error",
-            "timestamp": 101,
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "turn": 1,
+            "event_id": "raw-error",
+            "timestamp_ms": 101,
             "message": "api_key=abc123",
             "api_key": "abc123",
         }
@@ -280,21 +280,21 @@ def test_trace_normalizes_raw_event_shapes_even_when_event_names_are_canonical()
     events = [
         {
             "type": "memory_retrieved",
-            "runId": "run-1",
-            "sessionId": "session-1",
-            "turnId": 1,
-            "eventId": "mem-evt",
-            "timestamp": 100,
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "turn": 1,
+            "event_id": "mem-evt",
+            "timestamp_ms": 100,
             "memoryIds": ["mem_api_contract_v2"],
             "reasons": {"mem_api_contract_v2": ["path_match"]},
         },
         {
             "type": "plan_updated",
-            "runId": "run-1",
-            "sessionId": "session-1",
-            "turnId": 1,
-            "eventId": "plan-evt",
-            "timestamp": 110,
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "turn": 1,
+            "event_id": "plan-evt",
+            "timestamp_ms": 110,
             "plan": {
                 "plan_id": "plan-1",
                 "origin_mode": "build",

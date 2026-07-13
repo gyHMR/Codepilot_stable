@@ -53,6 +53,8 @@ AgentRunStopReason = Literal[
     "missing_tool_port",     # 内部工具端口缺失
     "missing_approval_decision",  # approval resume 缺少审批决定
     "internal_error",        # 内部错误
+    "deadline_exceeded",     # Run deadline exceeded
+    "runtime_error",         # Runtime infrastructure failure
 ]
 
 # 运行验证状态
@@ -86,6 +88,8 @@ _STOP_REASONS = frozenset(
         "missing_tool_port",
         "missing_approval_decision",
         "internal_error",
+        "deadline_exceeded",
+        "runtime_error",
     }
 )
 _VERIFICATION_STATUSES = frozenset({"passed", "failed", "cancelled", "unknown"})
@@ -684,11 +688,11 @@ class AgentEventBase(TypedDict):
     """Stable envelope shared by all runtime events."""
 
     type: RuntimeEventType
-    runId: str
-    turnId: int
-    eventId: str
-    timestamp: int
-    sessionId: str | None
+    run_id: str
+    turn_id: int
+    event_id: str
+    timestamp_ms: int
+    session_id: str | None
 
 
 EventEnvelope = AgentEventBase
@@ -702,7 +706,7 @@ class AgentEndEvent(AgentEventBase):
     type: Literal["agent_end"]
     messages: list[Message]
     status: AgentRunStatus
-    stopReason: AgentRunStopReason
+    stop_reason: AgentRunStopReason
     counters: AgentRunCounters
     result: AgentRunResult
 
@@ -714,7 +718,7 @@ class TurnStartEvent(AgentEventBase):
 class TurnEndEvent(AgentEventBase):
     type: Literal["turn_end"]
     message: AssistantMessage
-    toolResults: list[ToolResultMessage]
+    tool_results: list[ToolResultMessage]
 
 
 class MessageStartEvent(AgentEventBase):
@@ -725,7 +729,7 @@ class MessageStartEvent(AgentEventBase):
 class MessageUpdateEvent(AgentEventBase):
     type: Literal["message_update"]
     message: Message
-    assistantMessageEvent: dict[str, Any]
+    assistant_message_event: dict[str, Any]
 
 
 class MessageEndEvent(AgentEventBase):
@@ -736,28 +740,28 @@ class MessageEndEvent(AgentEventBase):
 class ModelRetryStartEvent(AgentEventBase):
     type: Literal["model_retry_start"]
     attempt: int
-    maxAttempts: int
-    delayMs: int
+    max_attempts: int
+    delay_ms: int
     error: ErrorInfo
 
 
 class ToolStartedEvent(AgentEventBase):
     type: Literal["tool_started"]
-    toolCallId: str
-    toolName: str
+    tool_call_id: str
+    tool_name: str
     args: dict[str, Any]
 
 
 class ToolFinishedEvent(AgentEventBase):
     type: Literal["tool_completed", "tool_failed", "tool_interrupted"]
-    toolCallId: str
-    toolName: str
+    tool_call_id: str
+    tool_name: str
     result: Any
     status: ToolResultStatus
-    isError: bool
+    is_error: bool
     approved: bool
-    approvalId: str | None
-    errorReason: str | None
+    approval_id: str | None
+    error_reason: str | None
 
 
 class ErrorEvent(AgentEventBase, total=False):

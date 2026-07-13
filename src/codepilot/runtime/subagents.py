@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -14,12 +15,13 @@ from uuid import uuid4
 from codepilot.core.contracts import (
     AgentLoopInput,
     AgentLoopLimits,
-    AgentLoopPorts,
     RunCorrelation,
 )
-from codepilot.core.runner import run_agent_loop
 from codepilot.llm.ports import ModelDescriptor, ModelPort
 from codepilot.protocols import UserMessage
+from codepilot.sessions.contracts import PreparedAgentRun
+from .environment import RunEnvironmentFactory
+from .executor import RunExecutionCompleted, RunExecutionEvent, RunExecutor
 from .subagent_registry import SubagentStore
 from codepilot.tools.contracts import ToolPort
 
@@ -84,16 +86,25 @@ class SubagentRunner:
                 repeated_tool_call_limit=3,
             ),
         )
-        ports = AgentLoopPorts(
+        prepared = PreparedAgentRun(
+            run_id=subrun_id,
+            session_id=self.session_id,
+            loop_input=loop_input,
+        )
+        environment = RunEnvironmentFactory().create(
+            prepared,
             model=self.model_port,
             tools=self.tool_port,
-            context=None,
-            events=events.append,
+            deadline_at_ms=int(time.time() * 1000) + self.timeout_seconds * 1000,
         )
-        outcome = await asyncio.wait_for(
-            run_agent_loop(loop_input, ports),
-            timeout=self.timeout_seconds,
-        )
+        outcome = None
+        async for update in RunExecutor().execute(environment, prepared):
+            if isinstance(update, RunExecutionEvent):
+                events.append(update.event)
+            elif isinstance(update, RunExecutionCompleted):
+                outcome = update.outcome
+        if outcome is None:  # pragma: no cover - RunExecutor always completes or raises
+            raise RuntimeError("Subagent execution completed without an outcome")
         if outcome.status != "completed":
             return _failure_report(
                 task,

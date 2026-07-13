@@ -40,7 +40,7 @@ from .builder import build_runtime_session
 from .opening import AppSessionView, SessionRef
 from .sessions import ActiveRunRegistry, RuntimeSession, RuntimeSessionRegistry
 from .views import CommandDescriptor, SessionStatus, builtin_commands
-from .executor import RunEnvironment, RunExecutor
+from .executor import RunExecutionCompleted, RunExecutionEvent
 
 if TYPE_CHECKING:
     from .opening import SessionOpenIntent
@@ -63,7 +63,6 @@ class RuntimeGateway:
         self._tool_port = tool_port
         self._active_runs = ActiveRunRegistry()
         self._session_locks: dict[str, asyncio.Lock] = {}
-        self._executor = RunExecutor()
 
     def open_session(self, intent: "SessionOpenIntent") -> SessionRef:
         session = build_runtime_session(intent)
@@ -96,8 +95,11 @@ class RuntimeGateway:
             if self._active_runs.is_running(session_id):
                 yield self._run_active_frame(session_id)
                 return
-            async for frame in self._dispatch_action(session, action):
-                yield frame
+            try:
+                async for frame in self._dispatch_action(session, action):
+                    yield frame
+            except Exception as exc:
+                yield FailedFrame(error=_runtime_error_payload(exc))
 
     async def _dispatch_action(
         self,
@@ -107,30 +109,53 @@ class RuntimeGateway:
         if isinstance(action, PromptSubmitted):
             await self._ensure_mcp_ready(session)
             checkpoint = session.controller.runtime_checkpoint()
-            if _is_plan_wait_checkpoint(checkpoint):
-                plan_command = _explicit_plan_command(session, action.text)
-                if plan_command is not None:
-                    record = await self._run_command(
-                        session,
-                        CommandSubmitted(plan_command),
+            checkpoint_run_id = (
+                _optional_text(checkpoint.get("run_id"))
+                if isinstance(checkpoint, dict)
+                else None
+            )
+            if checkpoint_run_id is not None:
+                waiting_kind = (
+                    _optional_text(checkpoint.get("waiting_kind"))
+                    if isinstance(checkpoint, dict)
+                    else None
+                )
+                if waiting_kind == "tool_approval":
+                    yield FailedFrame(
+                        error={
+                            "code": "runtime.waiting_approval",
+                            "message": "Resolve the pending tool approval before continuing.",
+                            "run_id": checkpoint_run_id,
+                        }
                     )
-                    yield CommandFinishedFrame(record=record)
-                    async for frame in self._follow_up_from_command(session, record):
-                        yield frame
                     return
+                if _is_plan_wait_checkpoint(checkpoint):
+                    plan_command = _explicit_plan_command(session, action.text)
+                    if plan_command is not None:
+                        record = await self._run_command(
+                            session,
+                            CommandSubmitted(plan_command),
+                        )
+                        yield CommandFinishedFrame(record=record)
+                        async for frame in self._follow_up_from_command(session, record):
+                            yield frame
+                        return
                 phase = _optional_text(checkpoint.get("phase"))
+                continuation_kind = (
+                    "plan_clarification"
+                    if phase == "plan_clarification"
+                    else "automatic_continuation"
+                    if phase == "plan_incomplete"
+                    else "plan_feedback"
+                    if _is_plan_wait_checkpoint(checkpoint)
+                    else "automatic_continuation"
+                )
                 async for frame in self._run_continuation(
                     session,
                     SessionContinuationIntent(
-                        kind=(
-                            "plan_clarification"
-                            if phase == "plan_clarification"
-                            else "automatic_continuation"
-                            if phase == "plan_incomplete"
-                            else "plan_feedback"
-                        ),
-                        run_id=_optional_text(checkpoint.get("run_id")),
-                        text=action.text,
+                        kind=continuation_kind,
+                        run_id=checkpoint_run_id,
+                        text=action.text if waiting_kind is not None else "",
                     ),
                 ):
                     yield frame
@@ -178,7 +203,7 @@ class RuntimeGateway:
         )
 
     def close(self, session_id: str) -> None:
-        active_run_id = self._active_runs.cancel(session_id)
+        active_run_id = self._active_runs.cancel(session_id, "session_closed")
         closed = self._sessions.close(session_id)
         if (
             closed is not None
@@ -189,12 +214,15 @@ class RuntimeGateway:
             )
         ):
             _schedule_close(closed.mcp_manager)
-        if active_run_id is None or not self._active_runs.has_attached_task(session_id):
+        if active_run_id is None or not self._active_runs.has_active_tasks(session_id):
             self._active_runs.finish(session_id)
         self._session_locks.pop(session_id, None)
 
     async def close_all(self) -> None:
-        self._active_runs.cancel_all()
+        scopes = self._active_runs.cancel_all()
+        if scopes:
+            await asyncio.gather(*(scope.release() for scope in scopes))
+            self._active_runs.clear()
         managers = {
             id(session.mcp_manager): session.mcp_manager
             for session in self._sessions.values()
@@ -216,12 +244,13 @@ class RuntimeGateway:
         session: RuntimeSession,
         action: PromptSubmitted,
     ) -> AsyncIterator[RuntimeFrame]:
-        prepared = await session.controller.prepare_run(
+        prepared = await session.controller.runs.prepare(
             SessionRunIntent(
                 text=action.text,
                 images=action.images,
                 mode_hint=action.mode_hint,
-            )
+            ),
+            model=session.controller.model,
         )
         async for frame in self._run_agent_loop(
             session,
@@ -277,7 +306,10 @@ class RuntimeGateway:
         session: RuntimeSession,
         intent: SessionContinuationIntent,
     ) -> AsyncIterator[RuntimeFrame]:
-        prepared = await session.controller.prepare_continuation(intent)
+        prepared = await session.controller.runs.prepare(
+            intent,
+            model=session.controller.model,
+        )
         async for frame in self._run_agent_loop(session, prepared):
             yield frame
 
@@ -310,23 +342,15 @@ class RuntimeGateway:
             )
             return
 
-        prepared = await session.controller.prepare_resume(
+        prepared = await session.controller.runs.prepare(
             SessionResumeIntent(
                 approval_id=action.approval_id,
                 decision=action.decision,
                 reason=action.reason,
                 run_id=challenge.run_id,
-            )
+            ),
+            model=session.controller.model,
         )
-        if prepared.resume_input is None:
-            yield FailedFrame(
-                error={
-                    "code": "runtime.missing_resume_input",
-                    "approval_id": action.approval_id,
-                }
-            )
-            return
-
         async for frame in self._run_agent_loop(
             session,
             prepared,
@@ -334,7 +358,7 @@ class RuntimeGateway:
             yield frame
 
     def _cancel_run(self, session_id: str, action: RunCancelled) -> CancelledFrame:
-        active = self._active_runs.cancel(session_id)
+        active = self._active_runs.cancel(session_id, action.reason)
         return CancelledFrame(
             session_id=session_id,
             cancelled=active is not None,
@@ -346,41 +370,31 @@ class RuntimeGateway:
         session: RuntimeSession,
         prepared: PreparedAgentRun,
     ) -> AsyncIterator[RuntimeFrame]:
-        self._active_runs.start(session.session_id, prepared.run_id)
-        event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-
-        def event_sink(event: dict[str, Any]) -> None:
-            payload = dict(event)
-            session.controller.record_event(payload)
-            event_queue.put_nowait(payload)
-
+        environment = session.controller.runs.create_environment(
+            prepared,
+            model=session.model_port or self._model_port,
+            tools=session.tool_port or self._tool_port,
+        )
+        self._active_runs.start(
+            session.session_id,
+            prepared.run_id,
+            environment.resources,
+        )
+        outcome: AgentLoopOutcome | None = None
         try:
-            environment = RunEnvironment(
-                run_id=prepared.run_id,
-                session_id=prepared.session_id,
-                model=session.model_port or self._model_port,
-                tools=session.tool_port or self._tool_port,
-                context=prepared.context_port,
-                state=prepared.state_port,
-                event_sink=event_sink,
-            )
-            task = asyncio.create_task(self._executor.execute(environment, prepared))
-            self._active_runs.attach_task(session.session_id, task)
-            while not task.done() or not event_queue.empty():
-                try:
-                    event = await asyncio.wait_for(event_queue.get(), timeout=0.05)
-                except asyncio.TimeoutError:
-                    continue
-                yield ProgressFrame(event=event)
-            outcome = await task
-        except asyncio.CancelledError:
-            self._active_runs.finish(session.session_id, run_id=prepared.run_id)
-            raise
+            async for update in session.controller.runs.execute(environment, prepared):
+                if isinstance(update, RunExecutionEvent):
+                    yield ProgressFrame(event=update.event)
+                elif isinstance(update, RunExecutionCompleted):
+                    outcome = update.outcome
         finally:
             self._active_runs.finish(session.session_id, run_id=prepared.run_id)
 
+        if outcome is None:
+            return
+
         try:
-            record = await session.controller.commit_run(prepared, outcome)
+            record = await session.controller.runs.commit(prepared, outcome)
         except Exception as exc:
             yield FailedFrame(error=_runtime_error_payload(exc))
             return
@@ -413,6 +427,13 @@ class RuntimeGateway:
             return
         if outcome.status == "failed":
             yield FailedFrame(error=_runtime_error_payload(outcome.error))
+            return
+        if outcome.status == "cancelled":
+            yield CancelledFrame(
+                session_id=controller.session_id,
+                cancelled=True,
+                reason=outcome.stop_reason,
+            )
             return
         yield RunFinishedFrame(record=record)
 

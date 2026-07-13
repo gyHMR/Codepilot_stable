@@ -1,15 +1,16 @@
-from __future__ import annotations
+"""OpenAI 标准 Chat Completions 流式 provider。
 
-# 新手导读：OpenAI compatible provider 适配 DeepSeek/OpenAI 风格的 Chat Completions 接口。
-# 关注点：它展示了如何把统一 ToolCall/Message 协议映射到兼容 API。
-
-"""
-OpenAI 标准 Chat Completions 流式 provider。
+适配 OpenAI 风格的 Chat Completions 接口（也适用于 DeepSeek 等兼容 API）。
+它展示了如何把统一 ToolCall/Message 协议映射到兼容 API。
 
 特点：
-1) 使用 SSE data 行消费增量；
+1) 使用 SSE data 行消费增量（openai-compatible 协议）；
 2) 统一输出 text/thinking/toolcall 事件；
 3) 最终组装成 AssistantMessage。
+
+不同网关的推理字段名适配：
+- DeepSeek: delta["reasoning_content"]
+- OpenAI: delta["reasoning"]
 """
 
 import json
@@ -36,6 +37,13 @@ from .common import empty_assistant_message, finalize_tool_arguments, normalize_
 
 
 def _map_stop_reason(finish_reason: str | None) -> str:
+    """将 OpenAI 的 finish_reason 映射为统一的格式。
+
+    OpenAI 原始值 → 统一值：
+    - "tool_calls" → "toolUse"
+    - "length" → "length"
+    - "stop" 或其他 → "stop"
+    """
     if finish_reason == "tool_calls":
         return "toolUse"
     if finish_reason == "length":
@@ -48,20 +56,36 @@ def stream_openai_compatible(
     context: Context,
     options: StreamOptions | None = None,
 ) -> AssistantMessageEventStream:
+    """创建 OpenAI-compatible API 的流式调用。
+
+    发起 SSE 流式请求，解析 OpenAI Chat Completions 的数据行格式，
+    输出统一的事件流（text_start/delta/end、thinking_start/delta/end、
+    toolcall_start/delta/end、done/error）。
+
+    支持的工具调用格式：
+    - OpenAI 标准 (tool_calls 数组)
+    - DeepSeek 等兼容 API
+
+    参数:
+        model: 模型配置
+        context: 上下文（消息 + 系统提示 + 工具）
+        options: 流式调用选项
+
+    返回:
+        AssistantMessageEventStream 事件流
+    """
     stream = AssistantMessageEventStream()
     resolved_options = options or StreamOptions()
 
     async def _run() -> None:
         out = empty_assistant_message(api=model.api, provider=model.provider, model=model.id)
         try:
-            # 允许调用参数覆盖环境变量。
             api_key = resolved_options.api_key or get_env_api_key(model.provider)
             if not api_key and model.provider not in {"deepseek"}:
                 api_key = get_env_api_key("openai")
             headers = {"Content-Type": "application/json"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
-            # 模型级和调用级 headers 逐层覆盖。
             if model.headers:
                 headers.update(model.headers)
             if resolved_options.headers:
@@ -93,7 +117,7 @@ def stream_openai_compatible(
                         try:
                             response.raise_for_status()
                         except httpx.HTTPStatusError as exc:
-                            exc._response_text = body.decode("utf-8", errors="replace")  # type: ignore[attr-defined]
+                            exc._response_text = body.decode("utf-8", errors="replace")
                             raise
                     response.raise_for_status()
                     stream.push(llm_event("start", partial=out))
@@ -138,7 +162,7 @@ def stream_openai_compatible(
                                 )
                             )
 
-                        # 不同网关的 reasoning 字段名可能不同。
+                        # 推理增量（支持不同网关的不同字段名）
                         reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning")
                         if reasoning_delta:
                             if current_thinking is None:
@@ -155,7 +179,7 @@ def stream_openai_compatible(
                                 )
                             )
 
-                        # 工具调用增量（按 index 聚合）
+                        # 工具调用增量（按 index 聚合多个候选工具调用）
                         for tc_delta in delta.get("tool_calls") or []:
                             index = tc_delta.get("index", 0)
                             tc = tool_call_index_map.get(index)
@@ -191,7 +215,7 @@ def stream_openai_compatible(
                             out.usage.total_tokens = usage.get("total_tokens", out.usage.total_tokens)
 
                     normalize_usage(out.usage)
-                    # 收尾事件：把进行中的块发出 *_end
+                    # 收尾事件：发出所有正在进行中的块的 *_end
                     if current_text is not None:
                         stream.push(
                             llm_event(
@@ -239,13 +263,23 @@ def stream_simple_openai_compatible(
     context: Context,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
-    # 第一阶段实现：simple 接口直接复用标准 stream。
+    """简化的 OpenAI-compatible 流式调用（第一阶段复用标准 stream）。"""
     return stream_openai_compatible(model, context, options)
 
 
 def apply_openai_reasoning_options(
     payload: dict[str, Any], model: Model, options: SimpleStreamOptions
 ) -> None:
+    """应用 OpenAI/DeepSeek 的推理选项。
+
+    DeepSeek: 使用 thinking={"type": "enabled"}
+    OpenAI: 使用 reasoning_effort 参数
+
+    参数:
+        payload: API 请求体字典（会被修改）
+        model: 模型配置（用于区分 DeepSeek / OpenAI）
+        options: 流式选项（含 reasoning level）
+    """
     level = getattr(options, "reasoning", None)
     if level is None:
         return

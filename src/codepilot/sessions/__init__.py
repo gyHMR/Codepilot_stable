@@ -1,16 +1,10 @@
-from __future__ import annotations
+"""会话层状态和恢复契约 —— 会话状态、运行状态、检查点、消息记录的规范定义。
 
-# 新手导读：包门面文件：集中导出本层最常用的类型和入口，降低学习时的导入成本。
-# 关注点：sessions 层保存 Session、Run、消息和 Checkpoint 事实，不决定任务如何推进。
-
-"""Session state and recovery contracts.
-
-The sessions layer owns four facts:
-
-- Session state
-- Run state and checkpoints
-- Canonical messages
-- Non-authoritative audit events
+sessions 层拥有四个核心事实：
+- 会话状态（SessionState）：会话的元信息
+- 运行状态（RunState）：单次运行的完整生命周期
+- 规范消息（MessageRecord）：会话中的消息记录
+- 非权威审计事件（events）：异步事件日志
 """
 
 from .contracts import (
@@ -30,6 +24,7 @@ from .contracts import (
     RecoveryResult,
     RollbackBaselineRef,
     RunCheckpoint,
+    RunCommitKind,
     RunState,
     SessionCommandIntent,
     SessionCommandRecord,
@@ -53,11 +48,9 @@ from .repository import FileSessionRepository
 from .service import (
     BeginRunRequest,
     BeginRunResult,
-    CommitBoundaryRequest,
-    CommitBoundaryResult,
+    CommitRunBoundaryReceipt,
+    CommitRunBoundaryRequest,
     CreateSessionRequest,
-    FinishRunRequest,
-    FinishRunResult,
     ResumeRunRequest,
     SessionStateService,
     new_session_id,
@@ -70,6 +63,7 @@ __all__ = [
     "SessionState",
     "RunState",
     "RunCheckpoint",
+    "RunCommitKind",
     "MessageRecord",
     "MessageCursor",
     "ModelRef",
@@ -91,11 +85,9 @@ __all__ = [
     "CreateSessionRequest",
     "BeginRunRequest",
     "BeginRunResult",
-    "CommitBoundaryRequest",
-    "CommitBoundaryResult",
+    "CommitRunBoundaryReceipt",
+    "CommitRunBoundaryRequest",
     "ResumeRunRequest",
-    "FinishRunRequest",
-    "FinishRunResult",
     "SessionRunIntent",
     "SessionResumeIntent",
     "SessionCommandIntent",

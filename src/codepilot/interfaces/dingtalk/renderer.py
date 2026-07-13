@@ -36,11 +36,11 @@ def render_event(event: dict[str, Any], *, verbose: bool = False) -> list[str]:
         if approval:
             return [safe_reply(approval)]
         if verbose:
-            tool = event.get("toolName") or "tool"
+            tool = event.get("tool_name") or "tool"
             status = event.get("status") or _field(event.get("result"), "status") or "done"
             return [safe_reply(f"Tool {tool}: {status}")]
     if event_type == "tool_started" and verbose:
-        tool = event.get("toolName") or "tool"
+        tool = event.get("tool_name") or "tool"
         return [safe_reply(f"Tool {tool}: started")]
     if event_type == "agent_end":
         return [render_run_summary(event.get("result") or event)]
@@ -68,7 +68,7 @@ def render_run_accepted(*, session_id: str, prompt: str) -> str:
 def render_run_summary(result: object) -> str:
     """Render a final run result or result-like event."""
 
-    run_id = _field(result, "run_id") or _field(result, "runId") or "(unknown)"
+    run_id = _field(result, "run_id") or "(unknown)"
     status = _field(result, "status") or "(unknown)"
     affected = _field(result, "affected_paths") or _field(result, "affectedPaths") or []
     changed = _field(result, "workspace_changed")
@@ -224,15 +224,13 @@ def render_help() -> str:
 def _approval_from_tool_event(event: dict[str, Any]) -> str | None:
     result = event.get("result")
     status = event.get("status") or _field(result, "status")
-    approval_id = (
-        event.get("approvalId")
-    )
+    approval_id = event.get("approval_id")
     if status != "approval_required" or not approval_id:
         return None
-    tool = event.get("toolName") or "tool"
-    reason = event.get("errorReason") or "approval_required"
+    tool = event.get("tool_name") or "tool"
+    reason = event.get("error_reason") or "approval_required"
     risk = (
-        event.get("riskLevel")
+        event.get("risk_level")
         or "unknown"
     )
     args = event.get("args") or _field(result, "arguments") or _field(result, "args") or {}

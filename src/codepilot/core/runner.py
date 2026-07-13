@@ -29,7 +29,6 @@ from .contracts import (
     AgentLoopInput,
     AgentLoopOutcome,
     AgentLoopPorts,
-    AgentResumeInput,
     CoreRunBoundary,
     CoreWaitingRequest,
     PreparedContext,
@@ -86,11 +85,18 @@ class _SyntheticControlFrame:
 
 
 class _BoundaryCommitter:
-    def __init__(self, ports: AgentLoopPorts, new_messages: list[Message]) -> None:
+    def __init__(
+        self,
+        ports: AgentLoopPorts,
+        new_messages: list[Message],
+        events: list[AgentEvent],
+    ) -> None:
         self._port = ports.state
         self._tools = ports.tools
         self._messages = new_messages
+        self._events = events
         self._committed_count = 0
+        self._committed_event_count = 0
 
     def tool_checkpoint_state(
         self,
@@ -128,17 +134,21 @@ class _BoundaryCommitter:
     ) -> None:
         if self._port is None:
             self._committed_count = len(self._messages)
+            self._committed_event_count = len(self._events)
             return
         pending = tuple(self._messages[self._committed_count :])
+        pending_events = tuple(self._events[self._committed_event_count :])
         boundary = CoreRunBoundary(
             kind=kind,  # type: ignore[arg-type]
             core_state=core_state,
             new_messages=pending,
+            durable_events=pending_events,
             waiting=waiting,
             tool_recovery_state=tool_recovery_state,
         )
         await maybe_await(self._port.commit(boundary))
         self._committed_count = len(self._messages)
+        self._committed_event_count = len(self._events)
 
 
 class AgentEventEmitter:
@@ -152,29 +162,26 @@ class AgentEventEmitter:
         session_id: str | None = None,
     ) -> None:
         self._sink = sink
-        self.run_id = _required_text(run_id, "run_id")
-        self.session_id = _optional_text(session_id)
-        self.turn_id = 0
-        self._event_seq = 0
+        self._sequencer = _EventSequencer(
+            run_id=_required_text(run_id, "run_id"),
+            session_id=_optional_text(session_id),
+        )
 
     async def emit(self, event: dict[str, Any]) -> None:
-        event_type = ensure_runtime_event_type(event.get("type"))
-        if event_type == "turn_start":
-            self.turn_id += 1
-        self._event_seq += 1
-        enriched = {
-            **event,
-            "type": event_type,
-            "runId": self.run_id,
-            "sessionId": self.session_id,
-            "turnId": self.turn_id,
-            "eventId": f"{self.run_id}:{self._event_seq}",
-            "timestamp": now_ms(),
-        }
+        enriched = self._sequencer.enrich(event)
         await maybe_await(self._sink(enriched))  # type: ignore[arg-type]
 
 
 async def run_agent_loop(
+    input: AgentLoopInput,
+    ports: AgentLoopPorts,
+) -> AgentLoopOutcome:
+    if input.entry == "resume":
+        return await _run_resume_entry(input, ports)
+    return await _run_prompt_entry(input, ports)
+
+
+async def _run_prompt_entry(
     input: AgentLoopInput,
     ports: AgentLoopPorts,
 ) -> AgentLoopOutcome:
@@ -187,7 +194,7 @@ async def run_agent_loop(
     plan_state = load_plan_state(input.plan_state)
     messages = list(input.messages)
     new_messages: list[Message] = []
-    committer = _BoundaryCommitter(ports, new_messages)
+    committer = _BoundaryCommitter(ports, new_messages, recorder.events)
 
     recorder.emit({"type": "agent_start"})
     recorder.emit({"type": "turn_start"})
@@ -208,8 +215,8 @@ async def run_agent_loop(
     return outcome
 
 
-async def resume_agent_loop(
-    input: AgentResumeInput,
+async def _run_resume_entry(
+    input: AgentLoopInput,
     ports: AgentLoopPorts,
 ) -> AgentLoopOutcome:
     run_state = RunState.from_mapping(
@@ -218,7 +225,8 @@ async def resume_agent_loop(
         session_id=input.correlation.session_id,
     )
     new_messages: list[Message] = []
-    committer = _BoundaryCommitter(ports, new_messages)
+    recorder = _EventRecorder(input, ports)
+    committer = _BoundaryCommitter(ports, new_messages, recorder.events)
     if ports.tools is None:
         outcome = AgentLoopOutcome(
             run_id=input.run_id,
@@ -242,22 +250,6 @@ async def resume_agent_loop(
         await _commit_outcome_boundary(committer, outcome)
         return outcome
 
-    loop_input = AgentLoopInput(
-        run_id=input.run_id,
-        correlation=input.correlation,
-        messages=list(input.messages),
-        context=input.context,
-        model=input.model,
-        tools=input.tools,
-        mode=input.mode,
-        plan_state=input.plan_state,
-        limits=input.limits,
-        retry_policy=input.retry_policy,
-        event_start_seq=input.event_start_seq,
-        turn_start_seq=input.turn_start_seq,
-        run_state=input.run_state,
-    )
-    recorder = _EventRecorder(loop_input, ports)
     plan_state = load_plan_state(input.plan_state)
     messages = list(input.messages)
 
@@ -269,8 +261,8 @@ async def resume_agent_loop(
     recorder.emit(
         {
             "type": "tool_started",
-            "toolCallId": tool_call_id,
-            "toolName": tool_name,
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
             "args": {
                 "approval_id": input.approval_id,
                 "decision": input.decision,
@@ -305,14 +297,14 @@ async def resume_agent_loop(
     plan_state = _apply_plan_updates(
         plan_state,
         [observation],
-        input=loop_input,
+        input=input,
         recorder=recorder,
         qualified_failure_count=run_state.qualified_plan_failure_count,
     )
     await committer.commit("after_tools", run_state)
 
     interruption = _interruption_after_tool_results(
-        input=loop_input,
+        input=input,
         recorder=recorder,
         assistant=last_assistant(messages),
         visible_tool_messages=[tool_message],
@@ -327,7 +319,7 @@ async def resume_agent_loop(
         return interruption
 
     outcome = await _drive_loop(
-        input=loop_input,
+        input=input,
         ports=ports,
         recorder=recorder,
         messages=messages,
@@ -343,7 +335,7 @@ async def resume_agent_loop(
 
 
 async def _resume_tool_observation(
-    input: AgentResumeInput,
+    input: AgentLoopInput,
     ports: AgentLoopPorts,
 ) -> ToolResult:
     approval_id = input.approval_id or ""
@@ -401,7 +393,7 @@ async def _drive_loop(
         )
         if model_turn.error is not None:
             recorder.emit({"type": "error", "error": model_turn.error})
-            recorder.emit({"type": "turn_end", "message": None, "toolResults": []})
+            recorder.emit({"type": "turn_end", "message": None, "tool_results": []})
             recorder.emit({"type": "agent_end", "status": "failed"})
             return _outcome(
                 input=input,
@@ -458,7 +450,7 @@ async def _drive_loop(
                 "message": "Model requested tools but no ToolPort was provided",
             }
             recorder.emit({"type": "error", "error": error})
-            recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+            recorder.emit({"type": "turn_end", "message": assistant, "tool_results": []})
             recorder.emit({"type": "agent_end", "status": "failed"})
             return _outcome(
                 input=input,
@@ -511,6 +503,7 @@ async def _drive_loop(
             tools=ports.tools,
             tool_calls=tool_calls,
             catalog_snapshot=model_turn.catalog_snapshot,
+            deadline_at_ms=ports.deadline_at_ms,
             emit=recorder.emit,
         )
         observations.extend(turn_observations)
@@ -607,7 +600,7 @@ async def _drive_loop(
             {
                 "type": "turn_end",
                 "message": assistant,
-                "toolResults": visible_tool_messages,
+                "tool_results": visible_tool_messages,
             }
         )
 
@@ -656,8 +649,8 @@ async def _model_turn_with_retries(
             {
                 "type": "model_retry_start",
                 "attempt": retries,
-                "maxAttempts": 1 + input.retry_policy.max_retries,
-                "delayMs": delay,
+                "max_attempts": 1 + input.retry_policy.max_retries,
+                "delay_ms": delay,
                 "error": result.error,
             }
         )
@@ -683,7 +676,7 @@ def _finish_or_steer(
 ) -> AgentLoopOutcome | _SyntheticControlFrame | None:
     if input.mode == "plan":
         if not plan_publish_attempted and turn_index + 1 < max_model_turns:
-            recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+            recorder.emit({"type": "turn_end", "message": assistant, "tool_results": []})
             return _synthetic_control(
                 kind="plan_publish_required",
                 scope="plan_protocol_only",
@@ -706,12 +699,12 @@ def _finish_or_steer(
                 "reason": "plan_mode_finished_without_published_plan",
             }
         )
-        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+        recorder.emit({"type": "turn_end", "message": assistant, "tool_results": []})
         recorder.emit(
             {
                 "type": "agent_end",
                 "status": "waiting_user",
-                "stopReason": "plan_clarification_required",
+                "stop_reason": "plan_clarification_required",
             }
         )
         return _outcome(
@@ -752,7 +745,7 @@ def _finish_or_steer(
         if plan_guard is not None:
             reason, instruction = plan_guard
             if plan_closeout_attempted:
-                recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+                recorder.emit({"type": "turn_end", "message": assistant, "tool_results": []})
                 recorder.emit({"type": "agent_end", "status": "waiting_user"})
                 return _outcome(
                     input=input,
@@ -778,14 +771,14 @@ def _finish_or_steer(
                 }
             )
             if turn_index + 1 < max_model_turns:
-                recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+                recorder.emit({"type": "turn_end", "message": assistant, "tool_results": []})
                 return _synthetic_control(
                     kind="plan_closeout",
                     scope="plan_closeout_only",
                     instruction=instruction,
                     reason=reason,
                 )
-            recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+            recorder.emit({"type": "turn_end", "message": assistant, "tool_results": []})
             recorder.emit({"type": "agent_end", "status": "waiting_user"})
             return _outcome(
                 input=input,
@@ -799,7 +792,7 @@ def _finish_or_steer(
                 events=recorder.events,
                 usage=usage,
             )
-        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+        recorder.emit({"type": "turn_end", "message": assistant, "tool_results": []})
         recorder.emit({"type": "agent_end", "status": "completed"})
         return _outcome(
             input=input,
@@ -814,10 +807,10 @@ def _finish_or_steer(
             usage=usage,
         )
     if decision.action == "continue_with_instruction" and turn_index + 1 < max_model_turns:
-        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+        recorder.emit({"type": "turn_end", "message": assistant, "tool_results": []})
         return _synthetic_control_for_guard(decision.reason, decision.instruction)
     status: AgentRunStatus = "failed" if decision.action == "stopped" else "waiting_user"
-    recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+    recorder.emit({"type": "turn_end", "message": assistant, "tool_results": []})
     recorder.emit({"type": "agent_end", "status": status})
     return _outcome(
         input=input,
@@ -908,7 +901,7 @@ def _tool_limit_outcome(
             ),
         }
         recorder.emit({"type": "error", "error": error})
-        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+        recorder.emit({"type": "turn_end", "message": assistant, "tool_results": []})
         recorder.emit({"type": "agent_end", "status": "failed"})
         return _outcome(
             input=input,
@@ -930,7 +923,7 @@ def _tool_limit_outcome(
     ):
         error = {"code": "run.max_tool_calls", "message": "Tool call limit reached"}
         recorder.emit({"type": "error", "error": error})
-        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+        recorder.emit({"type": "turn_end", "message": assistant, "tool_results": []})
         recorder.emit({"type": "agent_end", "status": "failed"})
         return _outcome(
             input=input,
@@ -955,7 +948,7 @@ def _tool_limit_outcome(
             new_messages.pop()
         new_messages.append(pause)
         _emit_message(recorder, pause)
-        recorder.emit({"type": "turn_end", "message": pause, "toolResults": []})
+        recorder.emit({"type": "turn_end", "message": pause, "tool_results": []})
         recorder.emit({"type": "agent_end", "status": "waiting_user"})
         return _outcome(
             input=input,
@@ -976,7 +969,7 @@ def _tool_limit_outcome(
     ):
         error = {"code": "run.repeated_tool_call", "message": "Repeated identical tool calls"}
         recorder.emit({"type": "error", "error": error})
-        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": []})
+        recorder.emit({"type": "turn_end", "message": assistant, "tool_results": []})
         recorder.emit({"type": "agent_end", "status": "failed"})
         return _outcome(
             input=input,
@@ -1018,7 +1011,7 @@ def _tool_continuation_limit_outcome(
         {
             "type": "turn_end",
             "message": pause,
-            "toolResults": visible_tool_messages,
+            "tool_results": visible_tool_messages,
         }
     )
     recorder.emit({"type": "agent_end", "status": "waiting_user"})
@@ -1054,7 +1047,7 @@ def _interruption_after_tool_results(
             {
                 "type": "turn_end",
                 "message": assistant,
-                "toolResults": visible_tool_messages,
+                "tool_results": visible_tool_messages,
             }
         )
         recorder.emit({"type": "agent_end", "status": "waiting_approval"})
@@ -1073,7 +1066,7 @@ def _interruption_after_tool_results(
         )
     if any(result.status == "user_input_required" for result in observations):
         recorder.emit(
-            {"type": "turn_end", "message": assistant, "toolResults": visible_tool_messages}
+            {"type": "turn_end", "message": assistant, "tool_results": visible_tool_messages}
         )
         recorder.emit({"type": "agent_end", "status": "waiting_user"})
         return _outcome(
@@ -1089,12 +1082,12 @@ def _interruption_after_tool_results(
             usage=usage,
         )
     if any(result.status == "cancelled" for result in observations):
-        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": visible_tool_messages})
-        recorder.emit({"type": "agent_end", "status": "aborted"})
+        recorder.emit({"type": "turn_end", "message": assistant, "tool_results": visible_tool_messages})
+        recorder.emit({"type": "agent_end", "status": "cancelled"})
         return _outcome(
             input=input,
-            status="aborted",
-            stop_reason="aborted",
+            status="cancelled",
+            stop_reason="cancelled",
             new_messages=new_messages,
             final_message=assistant,
             run_state=run_state,
@@ -1106,7 +1099,7 @@ def _interruption_after_tool_results(
     if run_state.tool_unavailable:
         error = run_state.last_error or {"code": "tool_unavailable"}
         recorder.emit({"type": "error", "error": error})
-        recorder.emit({"type": "turn_end", "message": assistant, "toolResults": visible_tool_messages})
+        recorder.emit({"type": "turn_end", "message": assistant, "tool_results": visible_tool_messages})
         recorder.emit({"type": "agent_end", "status": "failed"})
         return _outcome(
             input=input,
@@ -1148,14 +1141,14 @@ def _plan_approval_pause_outcome(
         {
             "type": "turn_end",
             "message": assistant,
-            "toolResults": list(tool_results or []),
+            "tool_results": list(tool_results or []),
         }
     )
     recorder.emit(
         {
             "type": "agent_end",
             "status": "waiting_user",
-            "stopReason": "plan_approval_required",
+            "stop_reason": "plan_approval_required",
         }
     )
     return _outcome(
@@ -1517,29 +1510,62 @@ def _plan_summary_for_outcome(plan_state: PlanState | None) -> Any:
 
 class _EventRecorder:
     def __init__(self, input: AgentLoopInput, ports: AgentLoopPorts) -> None:
-        self._input = input
         self._ports = ports
         self.events: list[AgentEvent] = []
-        self._turn_id = input.turn_start_seq
-        self._event_seq = input.event_start_seq
+        self._sequencer = _EventSequencer(
+            run_id=input.run_id,
+            session_id=input.correlation.session_id,
+            event_start_seq=input.event_start_seq,
+            turn_start_seq=input.turn_start_seq,
+        )
 
     def emit(self, event: dict[str, Any]) -> None:
-        event_type = ensure_runtime_event_type(event.get("type"))
-        if event_type == "turn_start":
-            self._turn_id += 1
-        self._event_seq += 1
-        enriched = {
-            **event,
-            "type": event_type,
-            "runId": self._input.run_id,
-            "sessionId": self._input.correlation.session_id,
-            "turnId": self._turn_id,
-            "eventId": f"{self._input.run_id}:{self._event_seq}",
-            "timestamp": now_ms(),
-        }
+        enriched = self._sequencer.enrich(event)
         self.events.append(enriched)  # type: ignore[arg-type]
         if self._ports.events is not None:
             self._ports.events(enriched)
+
+
+class _EventSequencer:
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        session_id: str | None,
+        event_start_seq: int = 0,
+        turn_start_seq: int = 0,
+    ) -> None:
+        self.run_id = run_id
+        self.session_id = session_id
+        self.turn_id = turn_start_seq
+        self.event_seq = event_start_seq
+
+    def enrich(self, event: dict[str, Any]) -> dict[str, Any]:
+        event_type = ensure_runtime_event_type(event.get("type"))
+        if event_type == "turn_start":
+            self.turn_id += 1
+        self.event_seq += 1
+        payload = dict(event)
+        legacy_keys = {
+            "runId",
+            "sessionId",
+            "turnId",
+            "eventId",
+            "timestamp",
+        }.intersection(payload)
+        if legacy_keys:
+            raise ValueError(
+                "Event uses legacy field names: " + ", ".join(sorted(legacy_keys))
+            )
+        return {
+            **payload,
+            "type": event_type,
+            "run_id": self.run_id,
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "event_id": f"{self.run_id}:{self.event_seq}",
+            "timestamp_ms": now_ms(),
+        }
 
 
 def _emit_message(recorder: _EventRecorder, message: Message) -> None:
@@ -1564,6 +1590,5 @@ __all__ = [
     "last_assistant",
     "max_iterations_pause_message",
     "maybe_await",
-    "resume_agent_loop",
     "run_agent_loop",
 ]

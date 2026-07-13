@@ -79,9 +79,9 @@ def test_core_loop_uses_model_port_and_returns_outcome() -> None:
             "agent_end",
         ]
         assert events == outcome.events
-        assert outcome.events[0]["runId"] == "run1"
-        assert outcome.events[1]["turnId"] == 1
-        assert all("eventId" in event for event in outcome.events)
+        assert outcome.events[0]["run_id"] == "run1"
+        assert outcome.events[1]["turn_id"] == 1
+        assert all("event_id" in event for event in outcome.events)
 
     asyncio.run(run_case())
 def test_run_guard_steering_is_an_ephemeral_runtime_directive() -> None:
@@ -165,7 +165,7 @@ def test_core_loop_emits_model_text_deltas_as_message_updates() -> None:
         )
 
         deltas = [
-            event["assistantMessageEvent"]["delta"]
+                event["assistant_message_event"]["delta"]
             for event in outcome.events
             if event["type"] == "message_update"
         ]
@@ -276,8 +276,8 @@ def test_core_loop_retries_retryable_model_turn_from_retry_policy() -> None:
             event for event in outcome.events if event["type"] == "model_retry_start"
         )
         assert retry_event["attempt"] == 1
-        assert retry_event["maxAttempts"] == 2
-        assert retry_event["delayMs"] == 0
+        assert retry_event["max_attempts"] == 2
+        assert retry_event["delay_ms"] == 0
 
     asyncio.run(run_case())
 def test_core_loop_plan_mode_keeps_soft_plan_proposed() -> None:

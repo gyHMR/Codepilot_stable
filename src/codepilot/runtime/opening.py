@@ -40,6 +40,7 @@ class SessionOpenIntent:
     retry_enabled: bool | None = None
     max_retries: int | None = None
     retry_base_delay_ms: int | None = None
+    run_timeout_seconds: int | None = None
     model_context_window: int | None = None
     model_max_output_tokens: int | None = None
     edit_require_unique_match: bool | None = None

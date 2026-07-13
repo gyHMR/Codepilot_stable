@@ -1,15 +1,14 @@
-from __future__ import annotations
+"""Anthropic Messages API 流式 provider。
 
-# 新手导读：Anthropic provider 把内部消息和工具规范转换为 Anthropic Messages API 请求。
-# 关注点：对照 openai.py 可以学习不同 API 适配方式。
-
-"""
-Anthropic Messages API 流式 provider。
+把内部的统一 Message 和工具规范转换为 Anthropic Messages API 请求，
+并解析 SSE 事件流为统一的事件格式。
 
 实现思路：
 1) 读取 SSE 的 event/data；
 2) 按 content block 组装 text/thinking/toolCall；
 3) 映射 stop reason 并输出统一 done/error 事件。
+
+对照 openai.py 可以学习不同 API 适配方式。
 """
 
 import json
@@ -36,6 +35,13 @@ from .common import empty_assistant_message, finalize_tool_arguments, normalize_
 
 
 def _map_stop_reason(reason: str | None) -> str:
+    """将 Anthropic 的 stop_reason 映射为统一的格式。
+
+    Anthropic 原始值 → 统一值：
+    - "tool_use" → "toolUse"
+    - "max_tokens" → "length"
+    - "end_turn" 或其他 → "stop"
+    """
     if reason == "tool_use":
         return "toolUse"
     if reason == "max_tokens":
@@ -48,6 +54,20 @@ def stream_anthropic(
     context: Context,
     options: StreamOptions | None = None,
 ) -> AssistantMessageEventStream:
+    """创建 Anthropic Messages API 的流式调用。
+
+    发起 SSE 流式请求，解析 Anthropic 的 event/data 格式，
+    输出统一的事件流（text_start/delta/end、thinking_start/delta/end、
+    toolcall_start/delta/end、done/error）。
+
+    参数:
+        model: 模型配置
+        context: 上下文（消息 + 系统提示 + 工具）
+        options: 流式调用选项
+
+    返回:
+        AssistantMessageEventStream 事件流
+    """
     stream = AssistantMessageEventStream()
     resolved_options = options or StreamOptions()
 
@@ -95,7 +115,7 @@ def stream_anthropic(
                         try:
                             response.raise_for_status()
                         except httpx.HTTPStatusError as exc:
-                            exc._response_text = body.decode("utf-8", errors="replace")  # type: ignore[attr-defined]
+                            exc._response_text = body.decode("utf-8", errors="replace")
                             raise
                     response.raise_for_status()
                     stream.push(llm_event("start", partial=out))
@@ -113,12 +133,12 @@ def stream_anthropic(
                             continue
 
                         if line.startswith("event:"):
-                            current_event = line[len("event:") :].strip()
+                            current_event = line[len("event:"):].strip()
                             continue
                         if not line.startswith("data:"):
                             continue
 
-                        data = json.loads(line[len("data:") :].strip())
+                        data = json.loads(line[len("data:"):].strip())
 
                         if current_event == "message_start":
                             message = data.get("message", {})
@@ -247,13 +267,26 @@ def stream_simple_anthropic(
     context: Context,
     options: SimpleStreamOptions | None = None,
 ) -> AssistantMessageEventStream:
-    # 第一阶段实现：simple 接口复用标准 stream。
+    """简化的 Anthropic 流式调用（第一阶段复用标准 stream）。"""
     return stream_anthropic(model, context, options)
 
 
 def apply_anthropic_reasoning_options(
     payload: dict[str, Any], options: SimpleStreamOptions
 ) -> None:
+    """应用 Anthropic 的推理选项（thinking）。
+
+    根据不同的 reasoning level 设置 thinking budget：
+    - minimal: max_tokens 的 10%
+    - low: 25%
+    - medium: 50%
+    - high: 80%
+    - xhigh: 90%
+
+    参数:
+        payload: API 请求体字典（会被修改）
+        options: 流式选项（含 reasoning level）
+    """
     level = getattr(options, "reasoning", None)
     if level is None:
         return

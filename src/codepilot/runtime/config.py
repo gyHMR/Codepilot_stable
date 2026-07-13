@@ -16,7 +16,7 @@ from codepilot.core.plan import (
     ensure_run_mode,
 )
 from codepilot.protocols import Model, ModelCapabilities
-from codepilot.sessions.repository import FileSessionRepository
+from codepilot.sessions.service import SessionStateService
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,7 @@ def load_session_open_metadata(
 ) -> SessionOpenMetadata | None:
     if not session_id:
         return None
-    state = FileSessionRepository(workspace_dir).load_session(session_id)
+    state = SessionStateService(workspace_dir).get_session(session_id)
     if state is None:
         return None
     return SessionOpenMetadata(provider=state.model.provider, model_id=state.model.model)

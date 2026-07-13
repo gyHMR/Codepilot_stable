@@ -19,6 +19,7 @@ async def execute_tool_turn(
     tools: ToolPort,
     tool_calls: list[ToolCall],
     catalog_snapshot: ToolCatalogSnapshot,
+    deadline_at_ms: int | None = None,
     emit: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[ToolResult]:
     """Execute one model tool-call batch through the immutable catalog it observed."""
@@ -43,6 +44,7 @@ async def execute_tool_turn(
                 if tool_call.name in entries
                 else "registration_missing"
             ),
+            deadline_at_ms=deadline_at_ms,
         )
         for tool_call in tool_calls
     ]
@@ -102,17 +104,17 @@ def tool_end_event(result: ToolResult) -> AgentEvent:
     effects = workspace_effects([result])
     return {
         "type": _tool_event_type(result),
-        "toolCallId": result.tool_call_id,
-        "toolName": result.tool_name,
+        "tool_call_id": result.tool_call_id,
+        "tool_name": result.tool_name,
         "status": result.status,
-        "isError": result.status not in {"success", "approval_required", "user_input_required"},
+        "is_error": result.status not in {"success", "approval_required", "user_input_required"},
         "approved": result.status not in {"approval_required", "denied"},
-        "approvalId": approval.approval_id if approval is not None else None,
-        "errorReason": error.code if error is not None else None,
-        "affectedPaths": list(effects.affected_paths),
-        "workspaceChanged": effects.changed,
+        "approval_id": approval.approval_id if approval is not None else None,
+        "error_reason": error.code if error is not None else None,
+        "affected_paths": list(effects.affected_paths),
+        "workspace_changed": effects.changed,
         "reason": approval.reason if approval is not None else None,
-        "riskLevel": approval.risk if approval is not None else None,
+        "risk_level": approval.risk if approval is not None else None,
         "result": {
             "content": list(result.content),
             "data": dict(result.data),
@@ -126,9 +128,9 @@ def tool_end_event(result: ToolResult) -> AgentEvent:
                 }
                 for effect in result.effects
             ],
-            "registrationId": result.registration_id,
-            "outputValidation": result.output_validation,
-            "contentTrust": result.content_trust,
+            "registration_id": result.registration_id,
+            "output_validation": result.output_validation,
+            "content_trust": result.content_trust,
         },
     }
 
@@ -156,8 +158,8 @@ def _emit_tool_start(
     emit(
         {
             "type": "tool_started",
-            "toolCallId": tool_call.id,
-            "toolName": tool_call.name,
+            "tool_call_id": tool_call.id,
+            "tool_name": tool_call.name,
             "args": dict(tool_call.arguments),
         }
     )

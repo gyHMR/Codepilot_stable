@@ -1,7 +1,13 @@
-from __future__ import annotations
+"""工作区状态工具 —— 会话层需要的文件状态快照和仓库信息。
 
-# 新手导读：workspace_state.py 负责会话层需要的文件状态快照。
-# 关注点：它服务 freshness、rollback 和 context validation，不依赖 tools 的执行管线。
+本文件提供三类功能：
+1. 仓库引导信息（RepositoryBootstrap）—— 工作区的项目元数据
+2. 工作区检查点（capture_workspace_checkpoint）—— 运行开始时的文件快照
+3. 检查点验证（validate_workspace_checkpoint）—— 恢复时检查工作区变化
+
+注意：本文件服务 freshness、rollback 和 context validation，
+不依赖 tools 的执行管线。
+"""
 
 import hashlib
 import subprocess
@@ -14,6 +20,13 @@ from .contracts import WorkspaceCheckpoint, WorkspaceRecoveryState
 
 @dataclass(frozen=True)
 class GitInfo:
+    """Git 仓库信息。
+
+    参数:
+        branch: 当前分支名
+        head_sha: HEAD 的提交 SHA
+        is_dirty: 工作区是否有未提交的更改
+    """
     branch: str | None = None
     head_sha: str | None = None
     is_dirty: bool = False
@@ -21,6 +34,19 @@ class GitInfo:
 
 @dataclass(frozen=True)
 class RepositoryBootstrap:
+    """仓库引导信息 —— 工作区的项目结构和 Git 状态。
+
+    用于在会话开始时向 Agent 展示工作区的概览信息。
+
+    参数:
+        workspace_root: 工作区根目录路径
+        project_type: 项目类型（Python / Node.js / Rust / Go / None）
+        manifest_files: 发现的清单文件列表
+        top_level_entries: 顶级目录和文件名（前 30 个）
+        test_directories: 测试目录列表
+        instruction_files: 指令文件列表（AGENTS.md / CLAUDE.md / README.md）
+        git: Git 仓库信息（可选）
+    """
     workspace_root: str
     project_type: str | None
     manifest_files: list[str]
@@ -31,6 +57,21 @@ class RepositoryBootstrap:
 
 
 def build_repository_bootstrap(workspace: str | Path) -> RepositoryBootstrap:
+    """构建仓库引导信息 —— 扫描工作区并收集元数据。
+
+    扫描内容：
+    - 项目清单文件（pyproject.toml / package.json / Cargo.toml / go.mod）
+    - 顶级目录和文件（排除 .codepilot 和 .git）
+    - 测试目录
+    - 指令文件
+    - Git 仓库信息（分支、HEAD、Dirty 状态）
+
+    参数:
+        workspace: 工作区根目录
+
+    返回:
+        RepositoryBootstrap 包含完整的项目元数据
+    """
     root = Path(workspace).resolve()
     manifests = [
         name
@@ -68,6 +109,14 @@ def build_repository_bootstrap(workspace: str | Path) -> RepositoryBootstrap:
 
 
 def render_repository_context(bootstrap: RepositoryBootstrap) -> str:
+    """将仓库引导信息渲染为系统提示词中的文本块。
+
+    参数:
+        bootstrap: RepositoryBootstrap 对象
+
+    返回:
+        格式化的多行文本（直接插入到系统提示词中）
+    """
     return "\n".join(
         [
             "## Repository Context",
@@ -85,8 +134,21 @@ def render_repository_context(bootstrap: RepositoryBootstrap) -> str:
 
 
 def file_state_for_path(workspace_dir: str | Path, path: str | Path) -> dict[str, Any]:
-    """Return a bounded file-state snapshot for session freshness checks."""
+    """返回工作区内文件的状态快照（用于会话 freshness 检查）。
 
+    与 tools/sandbox.py 中的同名函数类似，但独立实现，
+    不依赖工具子系统的沙箱。
+
+    如果文件存在，返回 size、mtime_ns、sha256；
+    如果文件不存在，返回 exists=False。
+
+    参数:
+        workspace_dir: 工作区根目录
+        path: 目标文件路径
+
+    返回:
+        文件状态字典（包含 path、exists、size、sha256 等）
+    """
     root = Path(workspace_dir).resolve()
     target = Path(path)
     resolved = target.resolve() if target.is_absolute() else (root / target).resolve()
@@ -116,6 +178,20 @@ def capture_workspace_checkpoint(
     *,
     tracked_paths: list[str] | tuple[str, ...] = (),
 ) -> WorkspaceCheckpoint:
+    """捕获工作区检查点 —— 记录运行开始时的文件系统状态。
+
+    保存的信息包括：
+    - Git HEAD 提交哈希
+    - 未提交的变更路径（git status --porcelain）
+    - 指定跟踪文件的 SHA256 哈希
+
+    参数:
+        workspace_dir: 工作区根目录
+        tracked_paths: 要跟踪的文件路径列表
+
+    返回:
+        WorkspaceCheckpoint 包含文件状态快照
+    """
     root = Path(workspace_dir).resolve()
     dirty_paths = tuple(_git_status_paths(root))
     paths = sorted(set(dirty_paths) | {Path(path).as_posix() for path in tracked_paths if path})
@@ -137,6 +213,20 @@ def validate_workspace_checkpoint(
     workspace_dir: str | Path,
     checkpoint: WorkspaceCheckpoint | None,
 ) -> WorkspaceRecoveryState:
+    """验证工作区检查点 —— 检查从检查点之后工作区是否发生了变化。
+
+    对比两个方面的变化：
+    1. Git dirty paths 的变化（新增或消失的未提交变更）
+    2. 跟踪文件的 SHA256 哈希变化（文件内容被修改）
+    3. Git HEAD 的变化（切换了分支或提交了代码）
+
+    参数:
+        workspace_dir: 工作区根目录
+        checkpoint: 要验证的工作区检查点（None = 视为未变化）
+
+    返回:
+        WorkspaceRecoveryState 包含变化详情
+    """
     if checkpoint is None:
         return WorkspaceRecoveryState(status="unchanged")
     root = Path(workspace_dir).resolve()
@@ -163,7 +253,11 @@ def validate_workspace_checkpoint(
     )
 
 
+# ── 内部辅助函数 ──────────────────────────────────────────────────────────────
+
+
 def _sha256_file(path: Path) -> str:
+    """计算文件的 SHA256 哈希（流式读取，内存恒定）。"""
     digest = hashlib.sha256()
     with path.open("rb") as fp:
         for chunk in iter(lambda: fp.read(1024 * 1024), b""):
@@ -172,6 +266,7 @@ def _sha256_file(path: Path) -> str:
 
 
 def _project_type(manifests: list[str]) -> str | None:
+    """根据清单文件名推断项目类型。"""
     for name, kind in (
         ("pyproject.toml", "Python"),
         ("package.json", "Node.js"),
@@ -184,6 +279,10 @@ def _project_type(manifests: list[str]) -> str | None:
 
 
 def _git(root: Path, *args: str) -> str | None:
+    """运行 git 命令并返回标准输出（去除尾部换行）。
+
+    如果命令失败（非零退出码），返回 None。
+    """
     completed = subprocess.run(
         ["git", *args],
         cwd=root,
@@ -197,6 +296,13 @@ def _git(root: Path, *args: str) -> str | None:
 
 
 def _git_status_paths(root: Path) -> list[str]:
+    """解析 git status --porcelain 输出，提取变更文件的路径列表。
+
+    排除 .codepilot 目录下的变更。
+
+    返回:
+        变更的文件路径列表（排序、去重）
+    """
     output = _git(root, "status", "--porcelain") or ""
     paths: list[str] = []
     for line in output.splitlines():

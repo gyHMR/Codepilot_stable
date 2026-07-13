@@ -1,4 +1,14 @@
-from __future__ import annotations
+"""会话层序列化函数 —— 数据类型与 JSON 字典之间的互转。
+
+本文件提供所有 sessions 层数据类型的序列化/反序列化函数：
+- 协议消息（Message）↔ dict
+- 会话状态（SessionState）↔ dict
+- 运行状态（RunState）↔ dict
+- 消息记录（MessageRecord）↔ dict
+- 运行检查点（RunCheckpoint）↔ dict
+
+所有双向转换是精确的：序列化后再反序列化应得到完全相同的对象。
+"""
 
 from dataclasses import asdict
 from typing import Any
@@ -30,8 +40,23 @@ from codepilot.sessions.contracts import (
 )
 
 
+# ── 消息序列化 ────────────────────────────────────────────────────────────────
+
+
 def message_to_dict(message: Message) -> dict[str, Any]:
-    """Serialize protocol messages into the session JSONL format."""
+    """将协议消息序列化为会话 JSONL 格式的字典。
+
+    支持三种消息角色：
+    - user: UserMessage（文本或文本+图片）
+    - assistant: AssistantMessage（文本/思考/工具调用 + Usage）
+    - toolResult: ToolResultMessage（工具调用结果 + 副作用）
+
+    参数:
+        message: 协议层消息对象
+
+    返回:
+        JSON 兼容的字典
+    """
 
     if isinstance(message, UserMessage):
         content: str | list[dict[str, Any]]
@@ -100,7 +125,16 @@ def message_to_dict(message: Message) -> dict[str, Any]:
 
 
 def message_from_dict(data: dict[str, Any]) -> Message:
-    """Restore a protocol message from the session JSONL format."""
+    """从会话 JSONL 格式的字典恢复协议消息。
+
+    与 message_to_dict 互逆。
+
+    参数:
+        data: JSON 字典
+
+    返回:
+        协议层消息对象
+    """
 
     role = data.get("role")
     if role == "user":
@@ -184,6 +218,9 @@ def message_from_dict(data: dict[str, Any]) -> Message:
         )
 
     raise ValueError(f"Unknown role: {role!r}")
+
+
+# ── 消息内容块序列化辅助 ────────────────────────────────────────────────────
 
 
 def _user_block_to_dict(block: TextContent | ImageContent) -> dict[str, Any]:
@@ -303,7 +340,11 @@ def _float(value: object) -> float:
     return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else 0.0
 
 
+# ── 会话状态序列化 ────────────────────────────────────────────────────────────
+
+
 def session_state_to_dict(state: SessionState) -> dict[str, Any]:
+    """将 SessionState 序列化为 JSON 字典。"""
     return {
         "schema_version": state.schema_version,
         "session_id": state.session_id,
@@ -324,6 +365,7 @@ def session_state_to_dict(state: SessionState) -> dict[str, Any]:
 
 
 def session_state_from_dict(data: dict[str, Any]) -> SessionState:
+    """从 JSON 字典反序列化 SessionState。"""
     _expect_keys(
         data,
         {
@@ -366,6 +408,9 @@ def session_state_from_dict(data: dict[str, Any]) -> SessionState:
     )
 
 
+# ── 消息记录序列化 ────────────────────────────────────────────────────────────
+
+
 def message_record_to_dict(record: MessageRecord) -> dict[str, Any]:
     return {
         "schema_version": record.schema_version,
@@ -403,6 +448,9 @@ def message_record_from_dict(data: dict[str, Any]) -> MessageRecord:
     )
 
 
+# ── 运行状态序列化 ────────────────────────────────────────────────────────────
+
+
 def run_state_to_dict(state: RunState) -> dict[str, Any]:
     return {
         "schema_version": state.schema_version,
@@ -416,6 +464,11 @@ def run_state_to_dict(state: RunState) -> dict[str, Any]:
         "core_state": dict(state.core_state),
         "checkpoint": _checkpoint_to_dict(state.checkpoint),
         "result_ref": state.result_ref,
+        "last_commit_id": state.last_commit_id,
+        "last_commit_kind": state.last_commit_kind,
+        "last_commit_digest": state.last_commit_digest,
+        "last_commit_session_revision": state.last_commit_session_revision,
+        "last_commit_message_ids": list(state.last_commit_message_ids),
         "workspace_effects": {
             "changed": state.workspace_effects.changed,
             "affected_paths": list(state.workspace_effects.affected_paths),
@@ -446,6 +499,11 @@ def run_state_from_dict(data: dict[str, Any]) -> RunState:
             "core_state",
             "checkpoint",
             "result_ref",
+            "last_commit_id",
+            "last_commit_kind",
+            "last_commit_digest",
+            "last_commit_session_revision",
+            "last_commit_message_ids",
             "workspace_effects",
             "resume_count",
             "created_at",
@@ -479,6 +537,11 @@ def run_state_from_dict(data: dict[str, Any]) -> RunState:
             else None
         ),
         result_ref=data["result_ref"],
+        last_commit_id=data["last_commit_id"],
+        last_commit_kind=data["last_commit_kind"],
+        last_commit_digest=data["last_commit_digest"],
+        last_commit_session_revision=data["last_commit_session_revision"],
+        last_commit_message_ids=data["last_commit_message_ids"],
         workspace_effects=WorkspaceEffectsSnapshot(
             changed=effects["changed"],
             affected_paths=effects["affected_paths"],
@@ -492,6 +555,9 @@ def run_state_from_dict(data: dict[str, Any]) -> RunState:
         ended_at=data["ended_at"],
         revision=data["revision"],
     )
+
+
+# ── 检查点序列化辅助 ─────────────────────────────────────────────────────────
 
 
 def _checkpoint_to_dict(checkpoint: RunCheckpoint | None) -> dict[str, Any] | None:
@@ -604,7 +670,14 @@ def _checkpoint_from_dict(data: dict[str, Any]) -> RunCheckpoint:
     )
 
 
+# ── 通用辅助函数 ──────────────────────────────────────────────────────────────
+
+
 def _expect_keys(data: dict[str, Any], expected: set[str], name: str) -> None:
+    """验证字典的键集合与期望的集合完全一致。
+
+    如果有多余或缺失的键，抛出 ValueError。
+    """
     actual = set(data)
     if actual != expected:
         missing = sorted(expected - actual)

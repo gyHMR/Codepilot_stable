@@ -65,7 +65,7 @@ class TestTerminalRenderer:
 
         event = {
             "type": "message_update",
-            "assistantMessageEvent": {
+            "assistant_message_event": {
                 "type": "text_delta",
                 "delta": "Hello",
             },
@@ -110,7 +110,7 @@ class TestTerminalRenderer:
 
         event = {
             "type": "tool_started",
-            "toolName": "Read",
+            "tool_name": "Read",
             "args": {"file_path": "/test/file.py"},
         }
 
@@ -124,14 +124,14 @@ class TestTerminalRenderer:
 
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolCallId": "read-1",
-            "toolName": "read",
+            "tool_call_id": "read-1",
+            "tool_name": "read",
             "args": {"path": "src/codepilot/core/loop.py", "offset": 10, "limit": 20},
         })
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolCallId": "ls-1",
-            "toolName": "ls",
+            "tool_call_id": "ls-1",
+            "tool_name": "ls",
             "args": {"path": "src/codepilot"},
         })
 
@@ -146,8 +146,8 @@ class TestTerminalRenderer:
 
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolCallId": "read-long",
-            "toolName": "read",
+            "tool_call_id": "read-long",
+            "tool_name": "read",
             "args": {"path": long_path},
         })
 
@@ -167,27 +167,27 @@ class TestTerminalRenderer:
 
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolCallId": "read-1",
-            "toolName": "read",
+            "tool_call_id": "read-1",
+            "tool_name": "read",
             "args": {"path": "a.py"},
         })
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolCallId": "ls-1",
-            "toolName": "ls",
+            "tool_call_id": "ls-1",
+            "tool_name": "ls",
             "args": {"path": "src"},
         })
         renderer.render_progress_event({
             "type": "tool_completed",
-            "toolCallId": "read-1",
-            "toolName": "read",
-            "isError": False,
+            "tool_call_id": "read-1",
+            "tool_name": "read",
+            "is_error": False,
         })
         renderer.render_progress_event({
             "type": "tool_completed",
-            "toolCallId": "ls-1",
-            "toolName": "ls",
-            "isError": False,
+            "tool_call_id": "ls-1",
+            "tool_name": "ls",
+            "is_error": False,
         })
 
         rendered = [call.args[0] for call in output.call_args_list]
@@ -319,12 +319,12 @@ class TestTerminalRenderer:
 
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolName": "write",
+            "tool_name": "write",
             "args": {"path": "demo.txt"},
         })
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolName": "bash",
+            "tool_name": "bash",
             "args": {"command": "python register.py --demo"},
         })
 
@@ -338,17 +338,17 @@ class TestTerminalRenderer:
 
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolCallId": "bash-1",
-            "toolName": "bash",
+            "tool_call_id": "bash-1",
+            "tool_name": "bash",
             "args": {"command": "head -5 agent-test/chatbot.py"},
         })
         renderer.render_progress_event({
             "type": "tool_interrupted",
-            "toolCallId": "bash-1",
-            "toolName": "bash",
+            "tool_call_id": "bash-1",
+            "tool_name": "bash",
             "status": "approval_required",
-            "isError": True,
-            "errorReason": "approval_required",
+            "is_error": True,
+            "error_reason": "approval_required",
         })
 
         rendered = [call.args[0] for call in output.call_args_list]
@@ -364,7 +364,7 @@ class TestTerminalRenderer:
         renderer.render_progress_event(
             {
                 "type": "message_update",
-                "assistantMessageEvent": {
+                "assistant_message_event": {
                     "type": "text_delta",
                     "delta": text,
                 },
@@ -373,8 +373,8 @@ class TestTerminalRenderer:
         renderer.render_progress_event(
             {
                 "type": "tool_started",
-                "toolCallId": "bash-1",
-                "toolName": "bash",
+                "tool_call_id": "bash-1",
+                "tool_name": "bash",
                 "args": {"command": "python smoke_test.py"},
             }
         )
@@ -449,7 +449,7 @@ class TestSimpleRenderer:
 
         event = {
             "type": "message_update",
-            "assistantMessageEvent": {
+            "assistant_message_event": {
                 "type": "text_delta",
                 "delta": "Hello",
             },

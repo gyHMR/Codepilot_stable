@@ -4,7 +4,7 @@ from collections.abc import Iterator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Awaitable, Callable, Literal, Protocol
+from typing import Any, Awaitable, Callable, Literal, Protocol, cast
 
 from codepilot.llm.ports import ModelDescriptor, ModelPort
 from codepilot.protocols import (
@@ -22,12 +22,13 @@ from codepilot.protocols import (
     Usage,
     UserMessage,
 )
-from codepilot.tools.contracts import ToolPort
+from codepilot.tools.contracts import CancellationToken, ToolPort
 from codepilot.tools.security import ApprovalChallenge
 from .plan import RunMode, ensure_run_mode, plan_state_to_dict
 
 
 AgentMessage = Message
+AgentLoopEntry = Literal["prompt", "resume"]
 CoreBoundaryKind = Literal[
     "before_model",
     "after_model",
@@ -100,7 +101,6 @@ AgentLoopStatus = Literal[
     "waiting_user",
     "failed",
     "cancelled",
-    "aborted",
 ]
 
 
@@ -175,6 +175,7 @@ class RetryPolicy:
 class AgentLoopInput:
     run_id: str
     correlation: RunCorrelation
+    entry: AgentLoopEntry = "prompt"
     messages: list[Message] = field(default_factory=list)
     user_prompt: str | None = None
     context: PreparedContext = field(default_factory=PreparedContext)
@@ -187,48 +188,15 @@ class AgentLoopInput:
     event_start_seq: int = 0
     turn_start_seq: int = 0
     run_state: dict[str, object] | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "context", _prepared_context(self.context))
-        object.__setattr__(self, "mode", ensure_run_mode(self.mode))
-        object.__setattr__(self, "plan_state", plan_state_to_dict(self.plan_state))
-        object.__setattr__(
-            self,
-            "run_state",
-            _copy_optional_dict(self.run_state, field_name="run_state"),
-        )
-        object.__setattr__(
-            self,
-            "event_start_seq",
-            _non_negative_int(self.event_start_seq, default=0),
-        )
-        object.__setattr__(
-            self,
-            "turn_start_seq",
-            _non_negative_int(self.turn_start_seq, default=0),
-        )
-
-
-@dataclass(frozen=True)
-class AgentResumeInput:
-    run_id: str
-    correlation: RunCorrelation
-    messages: list[Message] = field(default_factory=list)
-    context: PreparedContext = field(default_factory=PreparedContext)
-    model: ModelDescriptor = field(default_factory=lambda: ModelDescriptor(provider="unknown", model_id="unknown"))
-    tools: list[Any] = field(default_factory=list)
     approval_id: str | None = None
-    decision: str | None = None
+    decision: Literal["approve", "deny"] | None = None
     reason: str = ""
-    mode: RunMode = "build"
-    plan_state: dict[str, object] | None = None
-    limits: AgentLoopLimits = field(default_factory=AgentLoopLimits)
-    retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
-    event_start_seq: int = 0
-    turn_start_seq: int = 0
-    run_state: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
+        entry = _clean_core_text(self.entry).strip().lower()
+        if entry not in {"prompt", "resume"}:
+            raise ValueError(f"Unknown agent loop entry: {self.entry}")
+        object.__setattr__(self, "entry", cast(AgentLoopEntry, entry))
         object.__setattr__(self, "context", _prepared_context(self.context))
         object.__setattr__(self, "mode", ensure_run_mode(self.mode))
         object.__setattr__(self, "plan_state", plan_state_to_dict(self.plan_state))
@@ -247,6 +215,19 @@ class AgentResumeInput:
             "turn_start_seq",
             _non_negative_int(self.turn_start_seq, default=0),
         )
+        approval_id = _optional_core_text(self.approval_id)
+        decision = _optional_core_text(self.decision)
+        if decision is not None:
+            decision = decision.lower()
+        reason = _clean_core_text(self.reason).strip()
+        if entry == "resume":
+            if approval_id is None or decision not in {"approve", "deny"}:
+                raise ValueError("Resume entry requires approval_id and approve/deny decision")
+        elif approval_id is not None or decision is not None or reason:
+            raise ValueError("Prompt entry cannot include resume fields")
+        object.__setattr__(self, "approval_id", approval_id)
+        object.__setattr__(self, "decision", decision)
+        object.__setattr__(self, "reason", reason)
 
 
 @dataclass(frozen=True)
@@ -271,6 +252,7 @@ class CoreRunBoundary:
     kind: CoreBoundaryKind
     core_state: dict[str, object]
     new_messages: tuple[Message, ...] = ()
+    durable_events: tuple[AgentEvent, ...] = ()
     waiting: CoreWaitingRequest | None = None
     tool_recovery_state: dict[str, object] | None = None
 
@@ -292,6 +274,11 @@ class CoreRunBoundary:
             _copy_dict(self.core_state, field_name="core_state"),
         )
         object.__setattr__(self, "new_messages", tuple(self.new_messages))
+        object.__setattr__(
+            self,
+            "durable_events",
+            tuple(dict(event) for event in self.durable_events),
+        )
         object.__setattr__(
             self,
             "tool_recovery_state",
@@ -317,6 +304,8 @@ class AgentLoopPorts:
     context: ContextPort | None = None
     state: RunStatePort | None = None
     events: EventSink | None = None
+    cancellation: CancellationToken | None = None
+    deadline_at_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -442,11 +431,11 @@ def _copy_optional_dict(
 
 __all__ = [
     "AgentLoopInput",
+    "AgentLoopEntry",
     "AgentLoopLimits",
     "AgentLoopOutcome",
     "AgentLoopPorts",
     "AgentLoopStatus",
-    "AgentResumeInput",
     "AgentContext",
     "AgentMessage",
     "ContextPreparationRequest",

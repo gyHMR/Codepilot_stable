@@ -485,7 +485,7 @@ Tools    -> 判断工具恢复状态是否可以继续
 Context  -> 重新投影上下文并处理工作区变化
 ```
 
-Sessions 不直接调用 `run_agent_loop()` 或 `resume_agent_loop()`。
+Sessions 不直接调用 Core Agent Loop；Core 只暴露统一的 `run_agent_loop(input, ports)` 入口。
 
 ### Recovery Request
 
@@ -668,9 +668,8 @@ Run State 是主要提交点。
 class SessionStateService:
     def create_session(...): ...
     def begin_run(...): ...
-    def commit_boundary(...): ...
+    def commit_run_boundary(...): ...
     def resume_run(...): ...
-    def finish_run(...): ...
     def inspect_recovery(...): ...
 ```
 
@@ -690,44 +689,38 @@ class SessionStateService:
 -> 追加 run_created Event
 ```
 
-### commit_boundary
+### commit_run_boundary
 
-Runtime 通过该操作提交模型、工具和等待边界：
+Runtime 通过同一个操作提交 Progress、Waiting 和 Terminal 边界：
 
 ```python
 @dataclass(frozen=True)
-class CommitBoundaryRequest:
+class CommitRunBoundaryRequest:
+    commit_id: str
+    kind: Literal["progress", "waiting", "terminal"]
     session_id: str
     run_id: str
-    status: Literal["running", "waiting"]
-    phase: RunPhase
-    resume_point: ResumePoint
+    expected_run_revision: int
+    expected_session_revision: int
+    phase: RunPhase | None
+    resume_point: ResumePoint | None
     new_messages: tuple[Message, ...]
+    durable_events: tuple[dict[str, object], ...]
     core_state: dict[str, object]
     waiting: WaitingState | None = None
     components: tuple[ComponentCheckpoint, ...] = ()
     workspace: WorkspaceCheckpoint | None = None
+    terminal_status: Literal["completed", "failed", "cancelled"] | None = None
+    result: AgentRunResult | None = None
 ```
 
-Sessions 负责分配消息 ID、更新消息链、构造 Checkpoint、提交 Run State、更新 Session leaf 和追加 Event。
+Sessions 负责分配确定性消息/Checkpoint ID、更新消息链、构造 Checkpoint、提交 Run State、更新 Session leaf、写入 durable events 和保存 Terminal Result。相同 `commit_id` 重试返回同一个 Receipt，不重复产生事实。
 
 ### resume_run
 
 只处理 `waiting -> running` 状态转换，不调用 Core 或 Tools。
 
 第一版只保存 `resume_count` 和审计 Event，不保存完整 resume history。
-
-### finish_run
-
-固定执行：
-
-```text
-保存最终消息
--> 保存 AgentRunResult Artifact
--> 提交终态 Run
--> 清理 Session current_run_id
--> 追加终态 Event
-```
 
 ### inspect_recovery
 
@@ -749,7 +742,7 @@ class RunStatePort(Protocol):
 
 ```text
 state  -> 权威边界提交
-events -> 流式进度和非权威审计
+events -> 流式进度（不直接持久化）
 ```
 
 Core 不能通过普通 Event 隐式更新 Checkpoint。
@@ -762,8 +755,8 @@ Runtime 提供 Adapter：
 
 ```text
 CoreRunBoundary
--> CommitBoundaryRequest
--> SessionStateService.commit_boundary()
+-> CommitRunBoundaryRequest
+-> SessionStateService.commit_run_boundary()
 ```
 
 Adapter 持有最新 Session/Run revision，避免 revision 在 Gateway 中传播。
@@ -932,21 +925,16 @@ src/codepilot/
 │   ├── repository.py
 │   ├── filesystem.py
 │   ├── serde.py
-│   ├── recovery.py
 │   ├── workspace.py
 │   ├── context/
 │   │   ├── __init__.py
-│   │   ├── contracts.py
 │   │   ├── service.py
-│   │   └── runtime_port.py
 │   ├── memory/
 │   │   ├── __init__.py
-│   │   ├── contracts.py
 │   │   ├── service.py
 │   │   └── repository.py
 │   └── rollback/
 │       ├── __init__.py
-│       ├── contracts.py
 │       └── service.py
 ├── tools/
 │   ├── sandbox.py
@@ -1022,7 +1010,7 @@ protocols -> sessions.workspace -> llm/tools -> core -> sessions state/observabi
 职责：
 
 - 实现 `create_session()`。
-- 实现 `begin_run()`、`commit_boundary()`、`resume_run()` 和 `finish_run()`。
+- 实现 `begin_run()`、`commit_run_boundary()` 和 `resume_run()`。
 - 实现 fork、switch leaf 等结构化 Session 操作。
 - 统一编排消息、Run、Session 和 Event 的写入顺序。
 - 校验状态转换、revision 和 Session/Run 关联不变量。
@@ -1092,7 +1080,7 @@ protocols -> sessions.workspace -> llm/tools -> core -> sessions state/observabi
 - prompt 格式化。
 - 状态恢复决策。
 
-### `sessions/recovery.py`
+### Recovery capability（当前实现在 `sessions/service.py`）
 
 职责：
 
@@ -1111,7 +1099,7 @@ protocols -> sessions.workspace -> llm/tools -> core -> sessions state/observabi
 - 通过 Event replay 重建 Run State。
 - 自动选择多个非终态 Run 中的一个。
 
-### `context/contracts.py`
+### Context contract（第一版与 `context/service.py` 共置）
 
 职责：
 
@@ -1146,7 +1134,7 @@ protocols -> sessions.workspace -> llm/tools -> core -> sessions state/observabi
 - 工具执行。
 - Run status 或 Checkpoint 的直接更新。
 
-### `context/runtime_port.py`
+### Context runtime port（当前实现在 `runtime/session_coordinator.py`）
 
 职责：
 
@@ -1163,7 +1151,7 @@ protocols -> sessions.workspace -> llm/tools -> core -> sessions state/observabi
 - Run 生命周期协调。
 - Memory 文件访问。
 
-### `memory/contracts.py`
+### Memory contract（第一版与 `memory/service.py` 共置）
 
 职责：
 
@@ -1282,7 +1270,7 @@ protocols -> sessions.workspace -> llm/tools -> core -> sessions state/observabi
 职责：
 
 - 实现 Core `RunStatePort`。
-- 将 `CoreRunBoundary` 映射为 `CommitBoundaryRequest`。
+- 将 `CoreRunBoundary` 映射为 `CommitRunBoundaryRequest`。
 - 持有最新 Session/Run revision。
 - 将 Tools、Context 的组件恢复状态加入稳定边界提交。
 
@@ -1442,19 +1430,19 @@ Workspace 与 Tools 的边界如下：
 
 ### 文件合并规则
 
-第一版允许以下合并，以控制文件数量：
+第一版采用以下合并，以控制文件数量：
 
-- `sessions/repository.py` 可以暂时包含文件系统 Repository 实现。
-- `sessions/recovery.py` 可以暂时由 `SessionStateService` 内部实现。
-- `context/contracts.py` 和 `context/service.py` 可以先合并。
-- `memory/contracts.py` 和 `memory/service.py` 可以先合并。
-- `rollback/contracts.py` 和 `rollback/service.py` 可以先合并。
+- `sessions/repository.py` 包含文件系统 Repository 实现。
+- Recovery 检查由 `SessionStateService` 内部实现，不创建 `sessions/recovery.py`。
+- Context contract 与实现共置于 `context/service.py`；Core Port 适配留在 Runtime。
+- Memory contract 与实现共置于 `memory/service.py`，持久化单独留在 `memory/repository.py`。
+- Rollback contract 与实现共置于 `rollback/service.py`。
 - `sessions/workspace.py` 第一版只实现已经存在复用需求的路径边界、文件 Hash、affected paths/diff DTO 和低级 Git 查询；不为可能出现的需求预建抽象。
 - `runtime/session_controller.py` 和 `runtime/session_coordinator.py` 可以在迁移早期共存于一个文件。
 
 不允许以下合并：
 
-- Context 或 Memory 重新放入 `sessions/`。
+- Context 或 Memory 的治理实现并入 `sessions/service.py` 或 Sessions State 模型。
 - Runtime 协调逻辑重新放入 `sessions/service.py`。
 - Sessions 文件读写进入 Core。
 - Plan 状态机进入 Sessions。

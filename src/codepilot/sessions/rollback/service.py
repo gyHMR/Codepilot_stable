@@ -1,6 +1,16 @@
-from __future__ import annotations
+"""Git 干净工作树回滚 —— 对单次记录的运行做文件级别回滚。
 
-"""Git clean-worktree rollback for a single recorded run."""
+本文件提供基于 Git 的文件级别回滚功能：
+当一个 Agent 运行修改了工作区文件后，可以将其回滚到运行开始前的状态。
+
+回滚策略：
+- 对 Git 跟踪的文件：使用 git restore 恢复为 HEAD 版本
+- 对未跟踪的新文件：直接删除
+- 回滚前会检查文件是否有运行之外的中间修改（阻止回滚防止丢失数据）
+
+核心流程：
+capture_git_baseline → （运行结束后）→ plan_run_rollback → revert_run_changes
+"""
 
 import subprocess
 from dataclasses import dataclass, field
@@ -20,6 +30,17 @@ _ROLLBACK_ACTIONS = frozenset({"restore", "remove", "skip", "block"})
 
 @dataclass(frozen=True)
 class GitRollbackBaseline:
+    """Git 回滚基线 —— 运行开始时的 Git 状态。
+
+    参数:
+        eligible: 是否有资格进行回滚
+            - True: 运行开始时工作区是干净的（无未提交变更）
+            - False: 运行开始时工作区不干净，无法区分运行前后的变化
+        reason: 不满足回滚条件的原因
+        head: 运行开始时的 HEAD 提交哈希
+        branch: 运行开始时的当前分支名
+        status_before: 运行前的 git status 输出
+    """
     eligible: bool
     reason: str | None = None
     head: str | None = None
@@ -29,6 +50,16 @@ class GitRollbackBaseline:
 
 @dataclass(frozen=True)
 class GitRollbackResult:
+    """Git 回滚结果。
+
+    参数:
+        status: 回滚状态
+        run_id: 运行的 ID
+        reason: 说明或原因
+        restored_paths: 成功恢复的文件路径列表（git restore）
+        removed_paths: 成功删除的文件路径列表
+        conflicted_paths: 冲突的文件路径列表（无法回滚）
+    """
     status: RollbackStatus
     run_id: str
     reason: str | None = None
@@ -42,6 +73,13 @@ class GitRollbackResult:
 
 @dataclass(frozen=True)
 class GitRollbackAction:
+    """回滚行动计划 —— 对单个文件的处理决策。
+
+    参数:
+        path: 文件路径
+        action: 处理动作
+        reason: 决策原因
+    """
     path: str
     action: RollbackAction
     reason: str | None = None
@@ -52,6 +90,15 @@ class GitRollbackAction:
 
 @dataclass(frozen=True)
 class GitRollbackPlan:
+    """回滚计划 —— 回滚前的完整决策结果。
+
+    参数:
+        status: 计划状态
+        run_id: 运行 ID
+        reason: 状态原因
+        actions: 对每个受影响文件的处理行动
+        ignored_paths: 被忽略的路径（不属于本次运行的变更）
+    """
     status: RollbackPlanStatus
     run_id: str
     reason: str | None = None
@@ -62,7 +109,24 @@ class GitRollbackPlan:
         _ensure_rollback_plan_status(self.status)
 
 
+# =========================================================================
+# 核心函数
+# =========================================================================
+
+
 def capture_git_baseline(workspace_dir: str | Path) -> GitRollbackBaseline:
+    """捕获 Git 基线 —— 在运行开始前记录 Git 状态。
+
+    检查工作区是否满足回滚条件：
+    - 必须在 Git 仓库中
+    - 运行开始时工作区必须是干净的（没有未提交的变更）
+
+    参数:
+        workspace_dir: 工作区目录
+
+    返回:
+        GitRollbackBaseline 包含基线状态
+    """
     root = Path(workspace_dir)
     if _git(root, "rev-parse", "--is-inside-work-tree").returncode != 0:
         return GitRollbackBaseline(eligible=False, reason="not_git_repo")
@@ -93,6 +157,16 @@ def build_rollback_metadata(
     affected_paths: list[str],
     workspace_changed: bool,
 ) -> dict[str, Any]:
+    """构建回滚元数据 —— 保存到运行状态中供后续回滚使用。
+
+    参数:
+        baseline: Git 基线
+        affected_paths: 运行影响的工作区文件路径
+        workspace_changed: 工作区是否发生了变更
+
+    返回:
+        元数据字典（JSON 可序列化）
+    """
     return {
         "strategy": "git-clean-worktree",
         "eligible": baseline.eligible,
@@ -111,6 +185,26 @@ def plan_run_rollback(
     workspace_dir: str | Path,
     run_state: dict[str, Any],
 ) -> GitRollbackPlan:
+    """计划运行回滚 —— 对一次运行的变更进行全面分析并制定回滚计划。
+
+    处理流程：
+    1. 检查运行是否具备回滚条件（元数据、eligible 标志）
+    2. 提取受影响的文件路径
+    3. 对每个文件，决定处理方式（restore/remove/skip/block）
+    4. 如果有任何文件被 blocked（因为运行后有额外修改），阻止回滚
+
+    restore 条件：Git 跟踪的文件，且自运行后未被修改
+    remove 条件：未跟踪的新文件（运行期间创建的）
+    block 条件：文件自运行结束后又被修改过（防止数据丢失）
+    skip 条件：内部文件（.codepilot/*）、已经删除的文件
+
+    参数:
+        workspace_dir: 工作区目录
+        run_state: 运行状态的字典表示（含 rollback 元数据）
+
+    返回:
+        GitRollbackPlan 包含完整的回滚计划和决策
+    """
     root = Path(workspace_dir)
     run_id = str(run_state.get("run_id") or "")
     rollback = run_state.get("rollback")
@@ -135,6 +229,7 @@ def plan_run_rollback(
 
     affected = set(affected_paths)
     status_entries = _status_entries(root)
+    # 收集运行之外的变更（与回滚无关，但有冲突风险的路径）
     ignored_paths = sorted(
         {
             entry.path
@@ -142,11 +237,13 @@ def plan_run_rollback(
             if not _is_internal_path(entry.path) and entry.path not in affected
         }
     )
+    # 检测"受影响的文件被暂存了"的情况
     staged_affected = {
         entry.path
         for entry in status_entries
         if entry.staged and not _is_internal_path(entry.path) and entry.path in affected
     }
+    # 获取运行开始时记录的文件状态
     tracked_files = _tracked_file_states(run_state)
 
     actions: list[GitRollbackAction] = []
@@ -198,6 +295,19 @@ def revert_run_changes(
     workspace_dir: str | Path,
     run_state: dict[str, Any],
 ) -> GitRollbackResult:
+    """执行运行回滚 —— 根据计划执行文件恢复/删除操作。
+
+    先通过 plan_run_rollback 生成计划，然后执行：
+    - restore: git restore --worktree
+    - remove: 直接删除文件
+
+    参数:
+        workspace_dir: 工作区目录
+        run_state: 运行状态的字典表示
+
+    返回:
+        GitRollbackResult 包含执行结果
+    """
     root = Path(workspace_dir)
     plan = plan_run_rollback(root, run_state)
     if plan.status == "not_eligible":
@@ -242,8 +352,19 @@ def revert_run_changes(
     )
 
 
+# =========================================================================
+# 内部类型和辅助函数
+# =========================================================================
+
+
 @dataclass(frozen=True)
 class _StatusEntry:
+    """Git 状态条目。
+
+    参数:
+        path: 文件路径
+        staged: 是否已暂存（git add 过）
+    """
     path: str
     staged: bool
 
@@ -253,6 +374,30 @@ def _plan_path_action(
     path: str,
     expected_state: dict[str, Any] | None,
 ) -> GitRollbackAction:
+    """规划对单个文件路径的回滚行动。
+
+    决策树:
+    1. 如果路径在工作区外 → block
+    2. 如果是 Git 跟踪文件：
+       a. 如果文件自运行后又发生了变化 → block
+       b. 否则 → restore
+    3. 如果是未跟踪文件（运行期间创建的）：
+       a. 如果有运行时的状态记录：
+          - 运行时文件已存在且当前还存在 → 检查哈希是否变化
+          - 运行时文件已存在但当前已不存在 → skip
+          - 运行时文件不存在但当前存在 → block（说明是之后创建的）
+       b. 如果没有状态记录：
+          - 如果当前文件存在 → remove
+          - 如果当前文件不存在 → skip
+
+    参数:
+        root: 工作区根目录
+        path: 文件路径
+        expected_state: 运行开始时记录的文件状态（可选）
+
+    返回:
+        GitRollbackAction 行动决策
+    """
     absolute = (root / path).resolve()
     root_resolved = root.resolve()
     if not _is_relative_to(absolute, root_resolved):
@@ -294,6 +439,7 @@ def _plan_path_action(
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """运行 git 命令。"""
     return subprocess.run(
         ["git", *args],
         cwd=root,
@@ -310,6 +456,7 @@ def _stdout(result: subprocess.CompletedProcess[str]) -> str:
 
 
 def _visible_status(root: Path) -> str:
+    """获取排除 .codepilot 后的 git status。"""
     return "\n".join(
         line
         for line in _git_status_lines(root)
@@ -345,6 +492,7 @@ def _is_git_tracked(root: Path, path: str) -> bool:
 
 
 def _tracked_file_states(run_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """从运行状态中提取跟踪文件的状态。"""
     tracked: dict[str, dict[str, Any]] = {}
     for item in run_state.get("tracked_files", []):
         if not isinstance(item, dict):
@@ -356,6 +504,7 @@ def _tracked_file_states(run_state: dict[str, Any]) -> dict[str, dict[str, Any]]
 
 
 def _file_changed_since_state(root: Path, path: str, expected: dict[str, Any]) -> bool:
+    """检查文件自录制状态后是否发生了变化。"""
     current = file_state_for_path(root, path)
     expected_exists = bool(expected.get("exists"))
     if bool(current.get("exists")) != expected_exists:
@@ -374,6 +523,7 @@ def _normalize_path(path: str) -> str:
 
 
 def _is_internal_path(path: str) -> bool:
+    """检查是否为 .codepilot 内部文件。"""
     normalized = _normalize_path(path)
     return normalized == ".codepilot" or normalized.startswith(".codepilot/")
 
