@@ -1,10 +1,5 @@
-from __future__ import annotations
-
-# 新手导读：errors.py 定义跨层可共享的错误信息结构。
-# 关注点：稳定错误结构能帮助 CLI/钉钉/RPC 用一致方式展示失败。
-
 """
-错误信息类型定义。
+定义跨层传递的结构化错误契约。
 
 定义了跨层传递的结构化错误载荷：
 - ErrorInfo: 通用错误信息基类
@@ -13,6 +8,8 @@ from __future__ import annotations
 通过结构化的错误信息，上层可以根据错误类型（认证、限流、超时等）
 做出不同的处理策略（重试、降级、报错等）。
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast

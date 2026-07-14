@@ -1,10 +1,5 @@
-from __future__ import annotations
-
-# 新手导读：runtime.py 定义 run 状态、run 结果和运行时事件。
-# 关注点：这里描述跨层可观察的运行事实，不管理 session，也不分发事件。
-
 """
-Agent 运行结果与事件类型定义。
+定义 Agent Run 的结果、停止语义与公共事件契约。
 
 定义了一次 Agent 运行（run）的完整结果结构：
 - 运行状态和停止原因
@@ -12,7 +7,12 @@ Agent 运行结果与事件类型定义。
 - 运行验证结果
 - 最终的运行结果汇总
 - 运行过程中的事件信封和事件 payload
+
+这些对象描述 Core 与 Runtime 已确认的可观察事实；Sessions 负责持久化，事件系统负责
+分发，Interface 只做投影。本模块本身不管理 Session，也不执行事件处理器。
 """
+
+from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -190,7 +190,7 @@ RunSignalsVerificationStatus = Literal["unknown", "passed", "failed", "cancelled
 
 @dataclass
 class PlanSummary:
-    """Structured execution-plan snapshot saved with a run result."""
+    """随 Run 结果保存的结构化执行计划快照。"""
 
     schema_version: int
     plan_id: str
@@ -269,7 +269,7 @@ class PlanSummary:
 
 @dataclass
 class RunSignalsSummary:
-    """Observable run facts used by Runtime projections and context reporting."""
+    """供 Runtime 投影与 Context 报告使用的可观察 Run 信号汇总。"""
 
     workspace_changed: bool = False
     affected_paths: list[str] = field(default_factory=list)
@@ -670,7 +670,7 @@ _RUNTIME_EVENT_TYPES = frozenset(
 
 
 def ensure_runtime_event_type(value: object) -> RuntimeEventType:
-    """Validate a runtime event type shared by core/runtime/interfaces."""
+    """校验 Core、Runtime 与 Interface 共享的公共事件类型。"""
 
     text = str(value).strip() if value is not None else ""
     if not text:
@@ -681,7 +681,7 @@ def ensure_runtime_event_type(value: object) -> RuntimeEventType:
 
 
 class AgentEventBase(TypedDict):
-    """Stable envelope shared by all runtime events."""
+    """所有 Runtime 事件共用的稳定信封，负责贯穿 Run、Turn 与事件 ID。"""
 
     type: RuntimeEventType
     run_id: str
@@ -695,10 +695,14 @@ EventEnvelope = AgentEventBase
 
 
 class AgentStartEvent(AgentEventBase):
+    """Agent Run 开始事件。"""
+
     type: Literal["agent_start"]
 
 
 class AgentEndEvent(AgentEventBase):
+    """Agent Run 结束事件，携带唯一的终态结果。"""
+
     type: Literal["agent_end"]
     messages: list[Message]
     status: AgentRunStatus
@@ -708,32 +712,44 @@ class AgentEndEvent(AgentEventBase):
 
 
 class TurnStartEvent(AgentEventBase):
+    """Core 新一轮模型/工具循环开始事件。"""
+
     type: Literal["turn_start"]
 
 
 class TurnEndEvent(AgentEventBase):
+    """一轮循环结束事件，包含助手消息及本轮工具结果。"""
+
     type: Literal["turn_end"]
     message: AssistantMessage
     tool_results: list[ToolResultMessage]
 
 
 class MessageStartEvent(AgentEventBase):
+    """规范消息开始产生的事件。"""
+
     type: Literal["message_start"]
     message: Message
 
 
 class MessageUpdateEvent(AgentEventBase):
+    """流式消息增量事件，并保留 Provider 规范化后的增量载荷。"""
+
     type: Literal["message_update"]
     message: Message
     assistant_message_event: dict[str, Any]
 
 
 class MessageEndEvent(AgentEventBase):
+    """规范消息生成完毕事件。"""
+
     type: Literal["message_end"]
     message: Message
 
 
 class ModelRetryStartEvent(AgentEventBase):
+    """一次模型重试开始事件，记录次数、退避时间和上次错误。"""
+
     type: Literal["model_retry_start"]
     attempt: int
     max_attempts: int
@@ -742,6 +758,8 @@ class ModelRetryStartEvent(AgentEventBase):
 
 
 class ToolStartedEvent(AgentEventBase):
+    """工具调用开始事件，使用模型产生的 ``tool_call_id`` 关联后续结果。"""
+
     type: Literal["tool_started"]
     tool_call_id: str
     tool_name: str
@@ -749,6 +767,8 @@ class ToolStartedEvent(AgentEventBase):
 
 
 class ToolFinishedEvent(AgentEventBase):
+    """工具调用的统一终态事件，覆盖完成、失败与中断。"""
+
     type: Literal["tool_completed", "tool_failed", "tool_interrupted"]
     tool_call_id: str
     tool_name: str
@@ -761,6 +781,8 @@ class ToolFinishedEvent(AgentEventBase):
 
 
 class ErrorEvent(AgentEventBase, total=False):
+    """可选字段的公共错误事件；``errorInfo`` 是结构化错误权威载荷。"""
+
     type: Literal["error"]
     error: str
     message: str

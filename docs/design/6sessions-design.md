@@ -4,7 +4,7 @@
 
 本文描述 Sessions v2 当前有效的状态、提交和恢复边界。Sessions 是 Session、Run、Message 和 Checkpoint 的持久化权威，但不决定 Agent 下一步行为。
 
-当前 Sessions v2 的旧 Core payload 可以在恢复时升级为 `CoreState` schema v2；新边界只写新 schema。不提供更早历史 Session API 和文件格式的长期兼容层。
+Sessions 恢复只接受当前 `CoreState` schema v2；缺失或不匹配的 schema 直接阻止恢复，不提供历史 Core payload、Session API 或文件格式兼容层。
 
 ## 职责边界
 
@@ -311,8 +311,7 @@ inspect_recovery
 
 Sessions 持久化的是 JSON `core_state`，不解释字段。恢复时 Runtime 构造 `CoreRunInput`，由 `load_core_state()`：
 
-- 直接读取 schema v2。
-- 将当前 Sessions v2 的无 schema payload 升级为 v2。
+- 只读取 schema v2；缺失或不匹配的 schema 视为不可恢复。
 - 拒绝未知 schema version 或无法确定 original request 的 payload。
 
 下一次 `CoreBoundary` 只写 `CoreState.to_dict()` 的新 schema，不再双写旧字段或独立 Plan 状态。

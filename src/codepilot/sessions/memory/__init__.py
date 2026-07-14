@@ -1,3 +1,5 @@
+"""导出长期 Memory 的契约、存储、召回、准入和管理服务。"""
+
 from .contracts import (
     AddMemory,
     ApproveMemory,
@@ -29,7 +31,6 @@ from .contracts import (
     RejectMemory,
     ShowMemory,
 )
-from .repository import MemoryMigrationReport
 from .service import MemoryService
 
 
@@ -46,7 +47,6 @@ __all__ = [
     "MemoryCommand",
     "MemoryCommandResult",
     "MemoryManagementPort",
-    "MemoryMigrationReport",
     "MemoryProposal",
     "MemoryProposalBatch",
     "MemoryProposalOrigin",

@@ -1,3 +1,5 @@
+"""根据 Core 状态和运行限制决定下一步模型、工具、等待或终止动作。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -29,6 +31,7 @@ from .state import CoreState, assess_core_state
 
 @dataclass(frozen=True)
 class PolicyContext:
+    """供策略判断当前状态的只读上下文。"""
     mode: RunMode
     limits: CoreLimits = field(default_factory=CoreLimits)
 
@@ -39,12 +42,14 @@ class PolicyContext:
 
 
 class CorePolicy:
+    """根据状态和限制选择下一步 Core 指令。"""
     @staticmethod
     def decide(
         state: CoreState,
         observation: CoreObservation,
         context: PolicyContext,
     ) -> CoreDecision:
+        """根据当前状态、观察和限制选择下一步指令。"""
         if state.task.status == "satisfied":
             return Terminate("completed", "task.completed")
         if state.task.status == "abandoned":

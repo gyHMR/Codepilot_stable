@@ -1,3 +1,5 @@
+"""解析 MCP 服务配置并组装多服务客户端管理器。"""
+
 from __future__ import annotations
 
 """MCP server configuration, lazy discovery and client lifecycle."""

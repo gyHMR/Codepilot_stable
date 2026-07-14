@@ -1,3 +1,5 @@
+"""加载并解释工作区、模型、工具和 Session 打开配置。"""
+
 from __future__ import annotations
 
 """Runtime configuration loading and interface-facing config views."""
@@ -21,6 +23,7 @@ from codepilot.sessions.service import SessionStateService
 
 @dataclass(frozen=True)
 class SessionOpenMetadata:
+    """打开 Session 时记录的配置来源与解析结果。"""
     provider: str | None = None
     model_id: str | None = None
     system_prompt: str | None = None
@@ -60,12 +63,14 @@ class UnknownRuntimeConfigKeyError(KeyError):
 
 @dataclass(frozen=True)
 class ConfigValueSource:
+    """单个配置值的来源位置和优先级。"""
     kind: ConfigSourceKind
     location: str | None = None
 
 
 @dataclass(frozen=True)
 class ResolvedConfigValue:
+    """解析后的配置值及其来源。"""
     key: str
     value: Any
     source: ConfigValueSource
@@ -73,18 +78,21 @@ class ResolvedConfigValue:
 
 @dataclass(frozen=True)
 class WorkspaceConfigCheck:
+    """工作区配置的一项校验结果。"""
     rows: tuple[tuple[str, object], ...]
     border_style: str
 
 
 @dataclass(frozen=True)
 class WorkspaceConfigView:
+    """面向 Interface 的工作区配置解释视图。"""
     model_rows: tuple[tuple[str, object], ...]
     settings_rows: tuple[tuple[str, object], ...]
 
 
 @dataclass(frozen=True)
 class WorkspaceModelConfig:
+    """工作区指定的模型与 Provider 配置。"""
     api: str
     provider: str
     model_id: str
@@ -139,6 +147,7 @@ class WorkspaceModelConfig:
 
 @dataclass
 class WorkspaceSettings:
+    """工作区级运行设置。"""
     provider: str | None = None
     model_id: str | None = None
     system_prompt: str | None = None
@@ -166,6 +175,7 @@ class WorkspaceSettings:
 
 @dataclass
 class WorkspaceResources:
+    """工作区发现的指令、Skill 和 MCP 资源。"""
     settings: WorkspaceSettings = field(default_factory=WorkspaceSettings)
     model: WorkspaceModelConfig | None = None
     prompt: str | None = None
@@ -174,6 +184,7 @@ class WorkspaceResources:
 
 @dataclass(frozen=True)
 class RuntimeConfig:
+    """完成优先级解析后的 Runtime 装配配置。"""
     workspace: Path
     settings: WorkspaceSettings
     local_model: WorkspaceModelConfig | None

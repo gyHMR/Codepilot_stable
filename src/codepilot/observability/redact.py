@@ -1,3 +1,5 @@
+"""在事件、Trace 和审计产物落盘前统一脱敏敏感信息。"""
+
 from __future__ import annotations
 
 # 新手导读：redact.py 集中做敏感字段脱敏，避免日志和报告泄露 token/key。

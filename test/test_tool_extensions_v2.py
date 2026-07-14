@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import pytest
 
+from tool_runtime_testkit import execute_tool
+
 
 def test_mcp_config_rejects_removed_legacy_field_aliases() -> None:
     from codepilot.extensions.mcp import parse_mcp_server_configs
@@ -96,7 +98,8 @@ def test_skill_loader_produces_canonical_registration_executed_by_runtime() -> N
 
     runtime, ids = _runtime((registration,))
     result = asyncio.run(
-        runtime.execute(
+        execute_tool(
+            runtime,
             _request(
                 "load_skill",
                 ids["load_skill"],
@@ -172,7 +175,8 @@ def test_mcp_adapter_builds_canonical_registration_with_policy_and_output_valida
 
     runtime, ids = _runtime(registrations)
     result = asyncio.run(
-        runtime.execute(
+        execute_tool(
+            runtime,
             _request(
                 "mcp__demo__echo",
                 ids["mcp__demo__echo"],

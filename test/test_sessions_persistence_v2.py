@@ -23,6 +23,7 @@ from codepilot.sessions.service import (
     ResumeRunRequest,
     SessionStateService,
 )
+from codepilot.sessions.workspace import capture_workspace_checkpoint
 
 
 def _service(tmp_path: Path) -> tuple[SessionStateService, object]:
@@ -48,6 +49,7 @@ def _begin(service: SessionStateService, session_revision: int):
             message_id="message_user",
             user_message=UserMessage(content="inspect repository"),
             initial_core_state={"turn": 0},
+            workspace=capture_workspace_checkpoint(service.workspace_dir),
         ),
         expected_session_revision=session_revision,
     )
@@ -149,6 +151,7 @@ def _start(service: SessionStateService, begun):
             phase="model",
             resume_point="before_model",
             core_state={"turn": 0},
+            workspace=begun.run.checkpoint.workspace,
         )
     )
 
@@ -196,6 +199,7 @@ def test_commit_run_boundary_updates_run_before_session_navigation(tmp_path: Pat
             phase="model",
             resume_point="after_model",
             core_state={"turn": 1},
+            workspace=begun.run.checkpoint.workspace,
             new_messages=(
                 AssistantMessage(content=[TextContent(text="I found the entry point.")]),
             ),
@@ -223,6 +227,7 @@ def test_commit_run_boundary_retry_is_idempotent(tmp_path: Path) -> None:
         phase="model",
         resume_point="after_model",
         core_state={"turn": 1},
+        workspace=begun.run.checkpoint.workspace,
         new_messages=(AssistantMessage(content=[TextContent(text="once")]),),
         durable_events=(
             {
@@ -264,6 +269,7 @@ def test_waiting_run_can_resume_only_with_current_checkpoint_and_request(tmp_pat
                 request_id="approval_1",
                 payload={"tool_call_id": "call_1"},
             ),
+            workspace=started.run.checkpoint.workspace,
         )
     )
     checkpoint = waiting.run.checkpoint

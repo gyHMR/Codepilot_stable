@@ -1,3 +1,5 @@
+"""构建、持久化并加载覆盖模型、Context、Tools、Plan 和 Memory 的 Run Trace。"""
+
 from __future__ import annotations
 
 # 新手导读：trace.py 组织一次 run 的 trace/report/audit bundle。
@@ -16,6 +18,7 @@ from .redact import redact_artifact
 
 @dataclass(frozen=True)
 class ModelCallTrace:
+    """一次模型调用的请求、响应、用量和错误追踪。"""
     provider: str = ""
     model: str = ""
     api: str = ""
@@ -29,6 +32,7 @@ class ModelCallTrace:
 
 @dataclass(frozen=True)
 class ContextTrace:
+    """一次 Context 投影的预算、裁剪和 checkpoint 追踪。"""
     context_id: str = ""
     mode: str = "normal"
     budget_tokens: int = 0
@@ -44,6 +48,7 @@ class ContextTrace:
 
 @dataclass(frozen=True)
 class ToolCallTrace:
+    """一次工具调用从意图到终态的关联追踪。"""
     tool_call_id: str
     tool_name: str
     status: str
@@ -61,6 +66,7 @@ class ToolCallTrace:
 
 @dataclass(frozen=True)
 class PlanTrace:
+    """Run 内计划状态变化的追踪。"""
     plan_id: str = ""
     status: str = ""
     origin_mode: str = ""
@@ -71,6 +77,7 @@ class PlanTrace:
 
 @dataclass(frozen=True)
 class MemoryTrace:
+    """Run 内 Memory 召回和沉淀的追踪。"""
     memory_ids: list[str] = field(default_factory=list)
     action: str = ""
     reasons: dict[str, list[str]] = field(default_factory=dict)
@@ -78,6 +85,7 @@ class MemoryTrace:
 
 @dataclass(frozen=True)
 class RunTrace:
+    """聚合模型、Context、Tools、Plan 和 Memory 的完整 Run Trace。"""
     run_id: str
     session_id: str | None
     status: str = ""
@@ -117,6 +125,7 @@ def build_run_trace(
     events: list[dict[str, Any]],
     result: dict[str, Any] | Any | None = None,
 ) -> RunTrace:
+    """把规范事件和最终结果关联为完整 RunTrace。"""
     result = _result_dict(result)
     events = _canonical_events(events)
     run_id = _first_text(events, "run_id") or str(result.get("run_id") or "")
@@ -305,6 +314,7 @@ def _tool_calls_from_result(result: dict[str, Any]) -> list[ToolCallTrace]:
 
 
 def write_run_trace(path: str | Path, trace: RunTrace) -> None:
+    """以 UTF-8 JSON 原子写入完整 RunTrace。"""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
@@ -316,6 +326,7 @@ def write_run_trace(path: str | Path, trace: RunTrace) -> None:
 
 
 def load_run_trace(path: str | Path) -> RunTrace:
+    """严格校验并加载持久化 RunTrace。"""
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"Trace must be a JSON object: {path}")
@@ -367,6 +378,7 @@ def load_audit_bundle(
     *,
     workspace: str | Path | None = None,
 ) -> AuditBundle:
+    """加载 Run 目录中的事件、结果、Trace 和工作区审计产物。"""
     root = Path(run_dir)
     events = _read_jsonl(root / "events.jsonl")
     result = _read_json(root / "run.json")

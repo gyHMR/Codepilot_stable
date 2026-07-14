@@ -1,3 +1,5 @@
+"""适配 Runtime 模型调用与 Context 摘要模型能力。"""
+
 from __future__ import annotations
 
 """Resolve the model and credentials for an opened runtime session."""
@@ -45,6 +47,7 @@ from .actions import SessionOpenIntent
 
 @dataclass(frozen=True)
 class RuntimeModel:
+    """把 LLM 适配器暴露为 Core 所需模型端口。"""
     model: Model
     get_api_key: Any | None
     source: ConfigValueSource
@@ -140,6 +143,7 @@ class RetryingModelPort:
 
 @dataclass(frozen=True)
 class RuntimeContextSummarizer:
+    """为 Context 压缩提供隔离的模型摘要能力。"""
     model_port: Any
     model: ModelDescriptor
 

@@ -16,6 +16,8 @@ from codepilot.sessions.contracts import PreparedAgentRun
 from codepilot.sessions import memory as memory_package
 from codepilot.sessions import context as context_package
 from codepilot.sessions.context import ContextService
+from codepilot.sessions.context.compaction import ContextCompactor
+from codepilot.sessions.memory import MemoryService
 from codepilot.tools import contracts as tool_contracts
 from codepilot.tools.contracts import (
     ToolCheckpointPort,
@@ -104,6 +106,7 @@ def test_stage_two_exposes_only_the_new_memory_surface() -> None:
         "MemoryRetriever",
         "MemoryRepository",
         "RetrievedMemory",
+        "MemoryMigrationReport",
     ):
         assert not hasattr(memory_package, legacy_name)
 
@@ -119,6 +122,10 @@ def test_stage_two_exposes_only_the_new_memory_surface() -> None:
     assert "memory_writer" not in session_source
     assert "MemoryRecallPort" in context_source
     assert "MemoryRepository" not in context_source
+    assert "auto_migrate" not in inspect.signature(MemoryService).parameters
+    assert not hasattr(MemoryService, "migrate_legacy")
+    assert not hasattr(MemoryService, "dry_run_legacy_migration")
+    assert not hasattr(ContextCompactor, "_restore_legacy_checkpoint")
 
 
 def test_stage_three_uses_the_target_context_layout_and_service_port() -> None:

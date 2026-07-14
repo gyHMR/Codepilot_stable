@@ -477,7 +477,9 @@ class TestSimpleRenderer:
         message = MagicMock(spec=AssistantMessage)
         message.content = [TextContent(text="Hello")]
 
-        renderer.render_final(message)
+        renderer.render_final(
+            SimpleNamespace(outcome=SimpleNamespace(final_message=message))
+        )
         output.assert_called_with("Hello")
 
 

@@ -1,3 +1,5 @@
+"""创建 FastAPI 应用并注入 WebService、事件中心和路由。"""
+
 from __future__ import annotations
 
 import mimetypes

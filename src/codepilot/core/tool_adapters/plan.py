@@ -1,3 +1,5 @@
+"""将计划控制命令适配为受 Core 状态约束的内部工具。"""
+
 from __future__ import annotations
 
 """Plan tools translate model input into Core commands only."""
@@ -45,6 +47,7 @@ def create_plan_registrations(
     *,
     allow: Callable[[str], bool] | None = None,
 ) -> list[ToolRegistration]:
+    """创建提交、更新和关闭计划所需的内部工具注册。"""
     allowed = allow or (lambda _name: True)
     operations = (
         (PROPOSE_PLAN_TOOL, "plan"),

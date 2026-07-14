@@ -156,6 +156,7 @@ def build_rollback_metadata(
     *,
     affected_paths: list[str],
     workspace_changed: bool,
+    workspace_dir: str | Path,
 ) -> dict[str, Any]:
     """构建回滚元数据 —— 保存到运行状态中供后续回滚使用。
 
@@ -167,6 +168,11 @@ def build_rollback_metadata(
     返回:
         元数据字典（JSON 可序列化）
     """
+    root = Path(workspace_dir).resolve()
+    post_run_files = {
+        path: file_state_for_path(root, path)
+        for path in _normalize_paths(affected_paths)
+    }
     return {
         "strategy": "git-clean-worktree",
         "eligible": baseline.eligible,
@@ -177,6 +183,7 @@ def build_rollback_metadata(
             "status_before": baseline.status_before,
         },
         "affected_paths": _normalize_paths(affected_paths),
+        "post_run_files": post_run_files,
         "workspace_changed": bool(workspace_changed),
     }
 
@@ -226,6 +233,12 @@ def plan_run_rollback(
     )
     if not affected_paths:
         return GitRollbackPlan(status="noop", run_id=run_id, reason="no_affected_paths")
+    if not isinstance(rollback.get("post_run_files"), dict):
+        return GitRollbackPlan(
+            status="not_eligible",
+            run_id=run_id,
+            reason="missing_post_run_workspace_state",
+        )
 
     affected = set(affected_paths)
     status_entries = _status_entries(root)
@@ -492,14 +505,14 @@ def _is_git_tracked(root: Path, path: str) -> bool:
 
 
 def _tracked_file_states(run_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """从运行状态中提取跟踪文件的状态。"""
+    """从运行元数据中提取运行结束时的文件状态。"""
     tracked: dict[str, dict[str, Any]] = {}
-    for item in run_state.get("tracked_files", []):
-        if not isinstance(item, dict):
-            continue
-        path = item.get("path")
-        if isinstance(path, str) and path:
-            tracked[_normalize_path(path)] = item
+    rollback = run_state.get("rollback")
+    values = rollback.get("post_run_files") if isinstance(rollback, dict) else None
+    if isinstance(values, dict):
+        for path, item in values.items():
+            if isinstance(path, str) and isinstance(item, dict):
+                tracked[_normalize_path(path)] = item
     return tracked
 
 

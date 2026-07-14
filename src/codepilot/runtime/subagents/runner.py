@@ -1,3 +1,5 @@
+"""在受限工具环境中调度探索型子 Agent 并汇总结果。"""
+
 from __future__ import annotations
 
 """Plan-mode read-only exploration subagents."""
@@ -178,6 +180,7 @@ def _utc_now_iso() -> str:
 
 @dataclass(frozen=True)
 class ExplorationTask:
+    """交给探索型子 Agent 的受限只读任务。"""
     task_id: str
     subagent_id: str
     purpose: str
@@ -190,6 +193,7 @@ class ExplorationTask:
 
 @dataclass
 class SubagentRunner:
+    """在独立 Core Run 中执行单个受限子 Agent。"""
     workspace: Path
     session_id: str
     model: ModelDescriptor
@@ -282,6 +286,7 @@ class SubagentRunner:
 
 @dataclass
 class ExplorationCoordinator:
+    """调度多个探索任务并将结果稳定汇总给主 Run。"""
     workspace: Path
     session_id: str
     model: ModelDescriptor

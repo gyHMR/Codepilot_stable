@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
+from tool_runtime_testkit import execute_tool, resume_tool
+
 
 def test_plan_adapter_returns_core_command_without_writing_plan_state() -> None:
     from codepilot.core.tool_adapters.plan import create_plan_registrations
@@ -27,7 +29,7 @@ def test_plan_adapter_returns_core_command_without_writing_plan_state() -> None:
         arguments=_build_plan_snapshot(),
     )
 
-    result = asyncio.run(runtime.execute(request))
+    result = asyncio.run(execute_tool(runtime, request))
 
     assert result.status == "success"
     assert result.approval is None
@@ -69,7 +71,7 @@ def test_interaction_pauses_and_resumes_same_attempt_once_without_rerunning_hand
         },
     )
 
-    suspended = asyncio.run(runtime.execute(request))
+    suspended = asyncio.run(execute_tool(runtime, request))
 
     assert suspended.status == "user_input_required"
     assert suspended.interaction is not None
@@ -88,7 +90,7 @@ def test_interaction_pauses_and_resumes_same_attempt_once_without_rerunning_hand
         registration_id=request.registration_id,
         answers={"answer": "incremental"},
     )
-    rejected = asyncio.run(runtime.resume(bad_response))
+    rejected = asyncio.run(resume_tool(runtime, bad_response))
     assert rejected.status == "error"
     assert rejected.error is not None
     assert rejected.error.code == "tool.interaction.fingerprint_mismatch"
@@ -104,7 +106,7 @@ def test_interaction_pauses_and_resumes_same_attempt_once_without_rerunning_hand
         answers={"answer": "incremental"},
     )
     async def resume_twice():
-        return await asyncio.gather(runtime.resume(response), runtime.resume(response))
+        return await asyncio.gather(resume_tool(runtime, response), resume_tool(runtime, response))
 
     resumed, duplicate = asyncio.run(resume_twice())
     if resumed.status == "error":
@@ -175,7 +177,8 @@ def test_subagent_adapter_registers_runtime_owned_tools_and_executes_through_run
 
     runtime, ids = _runtime(registrations)
     result = asyncio.run(
-        runtime.execute(
+        execute_tool(
+            runtime,
             _request(
                 "list_exploration_agents",
                 ids["list_exploration_agents"],

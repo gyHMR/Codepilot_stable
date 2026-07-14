@@ -1,3 +1,5 @@
+"""创建面向 Interface 的 SessionController 并连接运行时依赖。"""
+
 from __future__ import annotations
 
 """Runtime-owned orchestration for one Agent Run.
@@ -151,7 +153,6 @@ class RunCoordinator:
             outcome,
             result,
             events=events,
-            store_outcome=True,
         )
         return record
 

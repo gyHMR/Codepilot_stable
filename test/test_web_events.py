@@ -67,6 +67,7 @@ def test_event_hub_replays_and_reports_expired_ids() -> None:
         assert [event.event_id for event in replay.events] == ["e3"]
         assert replay.expired is False
         assert hub.replay_after("e1").expired is True
+        assert EventHub().replay_after("event-from-previous-process").expired is True
 
     asyncio.run(run_case())
 
@@ -87,5 +88,29 @@ def test_event_hub_broadcasts_to_two_subscribers() -> None:
 
         assert await first.get() == event
         assert await second.get() == event
+
+    asyncio.run(run_case())
+
+
+def test_event_hub_subscribe_after_has_no_replay_subscription_gap() -> None:
+    async def run_case() -> None:
+        from codepilot.interfaces.web.events import EventHub, WebEvent
+
+        hub = EventHub()
+        first = WebEvent(
+            event_id="e1", session_id="s1", type="progress",
+            sequence=1, timestamp="now", data={},
+        )
+        second = WebEvent(
+            event_id="e2", session_id="s1", type="progress",
+            sequence=2, timestamp="now", data={},
+        )
+        await hub.publish(first)
+
+        replay, queue = hub.subscribe_after("e1")
+        await hub.publish(second)
+
+        assert replay.events == ()
+        assert await queue.get() == second
 
     asyncio.run(run_case())

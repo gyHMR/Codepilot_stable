@@ -34,6 +34,8 @@ class LLMProvider(Protocol):
         context: Context,
         options: StreamOptions | None = None,
     ) -> AssistantMessageEventStream:
+        """执行标准流式调用并返回可关闭、可读取最终结果的事件流。"""
+
         ...
 
     def stream_simple(
@@ -42,6 +44,8 @@ class LLMProvider(Protocol):
         context: Context,
         options: SimpleStreamOptions | None = None,
     ) -> AssistantMessageEventStream:
+        """使用简化选项执行流式调用，供 Core 的模型端口适配器使用。"""
+
         ...
 
 

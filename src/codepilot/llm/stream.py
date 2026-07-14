@@ -198,7 +198,7 @@ class AssistantMessageEventStream:
         task.add_done_callback(self._handle_background_done)
 
     async def aclose(self) -> None:
-        """Cancel provider work and close this stream."""
+        """取消尚未完成的 Provider 工作并关闭事件流；重复调用保持幂等。"""
         task = self._background_task
         if task is not None and not task.done():
             task.cancel()

@@ -177,6 +177,17 @@ def test_tools_public_facade_exposes_canonical_runtime_only() -> None:
     assert expected <= set(tools.__all__)
     assert not any(hasattr(tools, name) for name in removed)
 
+    assert not hasattr(tools.ToolRuntime, "execute")
+    assert not hasattr(tools.ToolRuntime, "resume")
+
+
+def test_tool_result_message_has_status_as_its_only_error_truth() -> None:
+    from codepilot.protocols import ToolResultMessage
+
+    assert "is_error" not in ToolResultMessage.__dataclass_fields__
+    assert ToolResultMessage(status="error").is_error is True
+    assert ToolResultMessage(status="success").is_error is False
+
 
 
 

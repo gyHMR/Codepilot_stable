@@ -127,6 +127,16 @@ class FileSessionRepository:
             raise ValueError("Session path escapes the sessions directory")
         if not target.is_dir():
             return False
+        runs_dir = (self.layout.codepilot_dir / "runs").resolve()
+        owned_run_dirs: list[Path] = []
+        for run in self.list_runs(session_id=session_id):
+            run_dir = self.layout.run_dir(run.run_id).resolve()
+            if run_dir.parent != runs_dir:
+                raise ValueError("Run path escapes the runs directory")
+            owned_run_dirs.append(run_dir)
+        for run_dir in owned_run_dirs:
+            if run_dir.is_dir():
+                shutil.rmtree(run_dir)
         shutil.rmtree(target)
         return True
 

@@ -1,3 +1,5 @@
+"""把 Runtime 帧投影为 Web 事件，并支持 SSE 有界重放。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -12,6 +14,7 @@ from pydantic import BaseModel, Field
 
 
 class WebEvent(BaseModel):
+    """Web/SSE 对 Runtime 帧的稳定事件投影。"""
     event_id: str
     session_id: str
     run_id: str | None = None
@@ -23,6 +26,7 @@ class WebEvent(BaseModel):
 
 @dataclass(frozen=True)
 class ReplayResult:
+    """按事件 ID 重放得到的事件集合及游标过期标记。"""
     events: tuple[WebEvent, ...]
     expired: bool = False
 
@@ -80,6 +84,7 @@ def runtime_frame_to_event(
 
 
 class EventHub:
+    """维护有界事件缓存和实时订阅队列，不持久化业务状态。"""
     def __init__(self, capacity: int = 256, subscriber_capacity: int = 256) -> None:
         if capacity < 1 or subscriber_capacity < 1:
             raise ValueError("Event capacities must be positive")
@@ -103,6 +108,15 @@ class EventHub:
         self._subscribers.add(queue)
         return queue
 
+    def subscribe_after(
+        self,
+        event_id: str | None,
+    ) -> tuple[ReplayResult, asyncio.Queue[WebEvent]]:
+        """Atomically capture replay state and register the live subscriber."""
+
+        queue = self.subscribe()
+        return self.replay_after(event_id), queue
+
     def unsubscribe(self, queue: asyncio.Queue[WebEvent]) -> None:
         self._subscribers.discard(queue)
 
@@ -113,7 +127,7 @@ class EventHub:
         for index, event in enumerate(events):
             if event.event_id == event_id:
                 return ReplayResult(events=events[index + 1 :])
-        return ReplayResult(events=(), expired=bool(events))
+        return ReplayResult(events=(), expired=True)
 
     @property
     def latest_sequence(self) -> int:

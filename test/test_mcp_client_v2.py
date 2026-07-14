@@ -5,6 +5,8 @@ import json
 
 import httpx
 
+from tool_runtime_testkit import execute_tool
+
 
 def test_streamable_http_transport_initializes_discovers_calls_and_closes() -> None:
     from codepilot.extensions.mcp import MCPServerConfig, StreamableHttpTransport
@@ -146,8 +148,9 @@ def test_mcp_manager_discovers_allowlisted_tools_and_registers_them(monkeypatch)
         await manager.ensure_ready(registry)
         entry = registry.entry("mcp__demo__allowed")
         assert entry is not None
-        result = await ToolRuntime(registry).execute(
-            _request("mcp__demo__allowed", entry.registration_id)
+        result = await execute_tool(
+            ToolRuntime(registry),
+            _request("mcp__demo__allowed", entry.registration_id),
         )
         await manager.aclose()
         return result
@@ -253,7 +256,7 @@ def test_runtime_discovers_mcp_tools_before_first_model_request_and_closes_trans
         base_url="",
         reasoning=False,
         input=["text"],
-        context_window=4_000,
+        context_window=32_000,
         max_tokens=500,
     )
 

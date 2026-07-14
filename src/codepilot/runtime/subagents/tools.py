@@ -1,3 +1,5 @@
+"""将子 Agent 调度能力注册为受权限约束的工具。"""
+
 from __future__ import annotations
 
 """Canonical registrations for Runtime-owned exploration subagents."""
@@ -86,7 +88,7 @@ class RestrictedToolPort:
     def pending_challenges(self) -> tuple[object, ...]:
         return ()
 
-    async def execute(self, request: ToolExecutionRequest) -> ToolResult:
+    async def _execute_request(self, request: ToolExecutionRequest) -> ToolResult:
         if self.base is None:
             return _restricted_denied(request, "restricted_base_missing")
         if request.tool_name not in self.allowed_names:
@@ -115,12 +117,6 @@ class RestrictedToolPort:
             )
         return result
 
-    async def execute_batch(
-        self,
-        requests: tuple[ToolExecutionRequest, ...] | list[ToolExecutionRequest],
-    ) -> list[ToolResult]:
-        return [await self.execute(request) for request in requests]
-
     def prepare_batch(
         self,
         requests: tuple[ToolExecutionRequest, ...] | list[ToolExecutionRequest],
@@ -140,7 +136,7 @@ class RestrictedToolPort:
             requests = self._prepared_batches.pop(batch_id)
         except KeyError as exc:
             raise ValueError(f"Restricted prepared batch not found: {batch_id}") from exc
-        return tuple(await self.execute_batch(requests))
+        return tuple([await self._execute_request(request) for request in requests])
 
 def _restricted_denied(
     request: ToolExecutionRequest,

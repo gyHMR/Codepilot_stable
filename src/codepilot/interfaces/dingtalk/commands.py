@@ -1,3 +1,5 @@
+"""解析 DingTalk 文本中的 Session 和运行控制命令。"""
+
 from __future__ import annotations
 
 # 新手导读：commands.py 只把钉钉文本解析成远程控制命令。

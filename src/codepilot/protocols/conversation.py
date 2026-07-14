@@ -1,9 +1,10 @@
+"""定义模型、Core、Tools 与 Sessions 共享的规范化对话契约。
+
+本模块描述消息、内容块以及模型产生的工具调用意图，是持久化记录和 Provider 转换共同
+使用的边界对象；它不执行工具，也不拥有 Run 或 Session 状态。
+"""
+
 from __future__ import annotations
-
-# 新手导读：conversation.py 定义模型与工具之间能看见的对话事实。
-# 关注点：这里描述消息、内容块和模型发出的工具调用意图，不执行工具。
-
-"""Conversation-level protocol DTOs shared across layers."""
 
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, TYPE_CHECKING, Union
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class TextContent:
-    """Plain text content block."""
+    """普通文本内容块，可出现在用户、助手或工具结果消息中。"""
 
     type: Literal["text"] = "text"
     text: str = ""
@@ -26,7 +27,7 @@ class TextContent:
 
 @dataclass
 class ThinkingContent:
-    """Reasoning/thinking content block emitted by capable models."""
+    """支持推理能力的模型产生的思考内容块。"""
 
     type: Literal["thinking"] = "thinking"
     thinking: str = ""
@@ -36,7 +37,7 @@ class ThinkingContent:
 
 @dataclass
 class ImageContent:
-    """Base64 encoded image content block."""
+    """图片内容块；``data`` 保存 Base64 数据，``mime_type`` 声明媒体类型。"""
 
     type: Literal["image"] = "image"
     data: str = ""
@@ -46,7 +47,11 @@ class ImageContent:
 
 @dataclass
 class ToolCall:
-    """Normalized tool-call intent emitted by the model."""
+    """Provider 输出经规范化后的工具调用意图。
+
+    ``id`` 是贯穿模型消息、工具执行和 ToolResult 的 ``tool_call_id``；本对象只表达
+    调用意图，不代表工具已经通过校验、审批或执行。
+    """
 
     type: Literal["toolCall"] = "toolCall"
     id: str = ""
@@ -66,7 +71,7 @@ ToolResultBlock = Union[TextContent, ImageContent]
 
 @dataclass
 class UserMessage:
-    """User message in the canonical transcript."""
+    """规范对话记录中的用户消息。"""
 
     role: str = "user"
     content: Union[str, list[UserBlock]] = ""
@@ -76,7 +81,11 @@ class UserMessage:
 
 @dataclass
 class AssistantMessage:
-    """Normalized assistant message returned by a model provider."""
+    """模型 Provider 返回并规范化后的助手消息。
+
+    消息同时携带模型身份、用量、停止原因和结构化错误，是 LLM 层交给 Core 的最终
+    消息事实，而不是界面专用展示对象。
+    """
 
     role: str = "assistant"
     content: list[AssistantBlock] = field(default_factory=list)
@@ -94,14 +103,13 @@ class AssistantMessage:
 
 @dataclass
 class ToolResultMessage:
-    """Tool observation appended back to the transcript for model reasoning."""
+    """追加回规范对话记录、供模型继续推理的工具观察结果。"""
 
     role: str = "toolResult"
     tool_call_id: str = ""
     tool_name: str = ""
     content: list[ToolResultBlock] = field(default_factory=list)
     status: ToolResultStatus = "success"
-    is_error: bool = False
     approved: bool = True
     approval_id: str | None = None
     error_code: str | None = None
@@ -117,11 +125,13 @@ class ToolResultMessage:
     def __post_init__(self) -> None:
         from .tools import ensure_tool_result_status
 
-        ensure_tool_result_status(self.status)
-        if self.is_error and self.status == "success":
-            self.status = "error"
-        elif self.status != "success":
-            self.is_error = True
+        self.status = ensure_tool_result_status(self.status)
+
+    @property
+    def is_error(self) -> bool:
+        """返回该结果是否属于非成功终态。"""
+
+        return self.status != "success"
 
 
 Message = Union[UserMessage, AssistantMessage, ToolResultMessage]
@@ -129,7 +139,7 @@ Message = Union[UserMessage, AssistantMessage, ToolResultMessage]
 
 @dataclass
 class Context:
-    """Model request context: transcript, system prompt, and visible tools."""
+    """传给 Provider 的模型请求上下文，包含消息链、系统提示词和可见工具。"""
 
     messages: list[Message]
     system_prompt: Optional[str] = None

@@ -1,3 +1,5 @@
+"""执行一次已准备 Run，桥接 Core 事件、边界提交与终态结果。"""
+
 from __future__ import annotations
 
 """Execute one prepared Core run inside a Runtime-owned task."""
@@ -160,6 +162,7 @@ def _cancelled_outcome(outcome: CoreOutcome, reason: str) -> CoreOutcome:
 
 @dataclass(frozen=True)
 class RunExecutionEvent:
+    """Run 执行过程中产生的规范事件。"""
     event: dict[str, Any]
     kind: Literal["event"] = "event"
 
@@ -169,6 +172,7 @@ class RunExecutionEvent:
 
 @dataclass(frozen=True)
 class RunExecutionCompleted:
+    """Run 执行器完成后返回的终态结果。"""
     outcome: CoreOutcome
     events: tuple[dict[str, object], ...] = ()
     kind: Literal["completed"] = "completed"

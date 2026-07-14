@@ -1,3 +1,5 @@
+"""将 Skill 清单、提示和资源装配为运行时扩展能力。"""
+
 from __future__ import annotations
 
 """Expose validated Skill Packages through commands and canonical tools."""

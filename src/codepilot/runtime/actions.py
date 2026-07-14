@@ -1,3 +1,5 @@
+"""定义 Interface 与 Runtime 协调器交换的动作和进度帧。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -79,11 +81,13 @@ class SessionOpenIntent:
 
 @dataclass(frozen=True)
 class SessionRef:
+    """Interface 使用的 Session 最小引用。"""
     session_id: str
 
 
 @dataclass(frozen=True)
 class ApprovalView:
+    """等待界面展示和决策的审批投影。"""
     approval_id: str
     session_id: str
     run_id: str
@@ -157,6 +161,7 @@ class SessionStatus:
 
 @dataclass(frozen=True)
 class AppSessionView:
+    """Interface 查询 Session 时获得的只读视图。"""
     session: SessionView
     status: SessionStatus
     state: Mapping[str, Any] | None = None
@@ -171,6 +176,7 @@ class AppSessionView:
 
 @dataclass(frozen=True)
 class PromptSubmitted:
+    """向 Session 提交普通提示词的动作。"""
     text: str
     request_id: str = field(default_factory=lambda: f"request_{uuid4().hex}")
     images: tuple[str, ...] | list[str] | None = None
@@ -185,6 +191,7 @@ class PromptSubmitted:
 
 @dataclass(frozen=True)
 class CommandSubmitted:
+    """向 Session 提交斜杠命令的动作。"""
     text: str
 
     def __post_init__(self) -> None:
@@ -193,6 +200,7 @@ class CommandSubmitted:
 
 @dataclass(frozen=True)
 class ApprovalDecided:
+    """用户对待处理审批作出决定的动作。"""
     approval_id: str
     decision: ApprovalDecisionValue
     reason: str = ""
@@ -205,6 +213,7 @@ class ApprovalDecided:
 
 @dataclass(frozen=True)
 class RunCancelled:
+    """请求取消活动 Run 的动作。"""
     reason: str = "user"
 
     def __post_init__(self) -> None:
@@ -216,24 +225,28 @@ UserAction = PromptSubmitted | CommandSubmitted | ApprovalDecided | RunCancelled
 
 @dataclass(frozen=True)
 class ProgressFrame:
+    """向 Interface 推送的运行中进度帧。"""
     event: dict[str, Any]
     kind: Literal["progress"] = field(default="progress", init=False)
 
 
 @dataclass(frozen=True)
 class ApprovalRequiredFrame:
+    """Run 因工具审批而暂停的帧。"""
     approval: ApprovalChallenge
     kind: Literal["approval_required"] = field(default="approval_required", init=False)
 
 
 @dataclass(frozen=True)
 class RunFinishedFrame:
+    """Run 已提交终态结果的帧。"""
     record: SessionRunRecord
     kind: Literal["run_finished"] = field(default="run_finished", init=False)
 
 
 @dataclass(frozen=True)
 class RunPausedFrame:
+    """Run 因等待用户输入而暂停的帧。"""
     record: SessionRunRecord
     checkpoint: dict[str, Any] = field(default_factory=dict)
     kind: Literal["run_paused"] = field(default="run_paused", init=False)
@@ -241,12 +254,14 @@ class RunPausedFrame:
 
 @dataclass(frozen=True)
 class CommandFinishedFrame:
+    """斜杠命令执行完成的帧。"""
     record: SessionCommandRecord
     kind: Literal["command_finished"] = field(default="command_finished", init=False)
 
 
 @dataclass(frozen=True)
 class CancelledFrame:
+    """取消请求完成后的帧。"""
     session_id: str
     cancelled: bool = False
     reason: str = "user"
@@ -258,6 +273,7 @@ class CancelledFrame:
 
 @dataclass(frozen=True)
 class FailedFrame:
+    """Runtime 无法完成动作时返回的失败帧。"""
     error: Any
     kind: Literal["failed"] = field(default="failed", init=False)
 

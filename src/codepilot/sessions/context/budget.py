@@ -1,3 +1,5 @@
+"""计算上下文预算、压力等级并执行分层裁剪。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,11 +12,13 @@ from .contracts import ContextBudget, ContextItem, ContextPressure
 
 
 class ContextBudgetExceededError(RuntimeError):
+    """受保护上下文超过模型窗口、无法安全裁剪时抛出。"""
     pass
 
 
 @dataclass(frozen=True)
 class ContextBudgetConfig:
+    """上下文各层预算、单项上限和压力阈值配置。"""
     context_window: int
     max_output_tokens: int
     safety_margin_tokens: int = 1024
@@ -44,6 +48,7 @@ class ContextBudgetConfig:
 
 
 class ContextBudgetManager:
+    """估算 token、计算压力并按保留策略选择上下文项。"""
     def __init__(self, config: ContextBudgetConfig) -> None:
         self.config = config
         self.budget = ContextBudget(
@@ -184,6 +189,7 @@ def calibrate_context_usage(
     report: dict[str, object] | None,
     actual_input_tokens: int,
 ) -> None:
+    """使用 Provider 实际输入 token 校准本地估算系数。"""
     if not report or actual_input_tokens <= 0:
         return
     raw = report.get("raw_estimate_tokens")

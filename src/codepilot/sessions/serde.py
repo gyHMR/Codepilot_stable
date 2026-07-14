@@ -189,7 +189,15 @@ def message_from_dict(data: dict[str, Any]) -> Message:
         )
 
     if role == "toolResult":
-        is_error = bool(data.get("is_error", False))
+        status = data.get("status")
+        if not isinstance(status, str):
+            raise ValueError("toolResult status is required")
+        if "is_error" in data:
+            is_error = data["is_error"]
+            if not isinstance(is_error, bool):
+                raise ValueError("toolResult is_error must be bool")
+            if is_error != (status != "success"):
+                raise ValueError("toolResult is_error conflicts with status")
         return ToolResultMessage(
             tool_call_id=str(data.get("tool_call_id") or ""),
             tool_name=str(data.get("tool_name") or ""),
@@ -198,8 +206,7 @@ def message_from_dict(data: dict[str, Any]) -> Message:
                 for item in data.get("content", [])
                 if isinstance(item, dict)
             ],
-            status=data.get("status", "error" if is_error else "success"),
-            is_error=is_error,
+            status=status,
             approved=bool(data.get("approved", True)),
             approval_id=data.get("approval_id") if isinstance(data.get("approval_id"), str) else None,
             error_code=data.get("error_code") if isinstance(data.get("error_code"), str) else None,
@@ -412,6 +419,7 @@ def session_state_from_dict(data: dict[str, Any]) -> SessionState:
 
 
 def message_record_to_dict(record: MessageRecord) -> dict[str, Any]:
+    """将规范消息记录编码为当前持久化 schema。"""
     return {
         "schema_version": record.schema_version,
         "message_id": record.message_id,
@@ -424,6 +432,7 @@ def message_record_to_dict(record: MessageRecord) -> dict[str, Any]:
 
 
 def message_record_from_dict(data: dict[str, Any]) -> MessageRecord:
+    """从当前持久化 schema 恢复规范消息记录。"""
     _expect_keys(
         data,
         {
@@ -452,6 +461,7 @@ def message_record_from_dict(data: dict[str, Any]) -> MessageRecord:
 
 
 def run_state_to_dict(state: RunState) -> dict[str, Any]:
+    """将 RunState 编码为当前唯一持久化 schema。"""
     return {
         "schema_version": state.schema_version,
         "run_id": state.run_id,
@@ -487,6 +497,7 @@ def run_state_to_dict(state: RunState) -> dict[str, Any]:
 
 
 def run_state_from_dict(data: dict[str, Any]) -> RunState:
+    """按照当前唯一持久化 schema 严格校验并恢复 RunState。"""
     _expect_keys(
         data,
         {

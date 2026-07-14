@@ -442,7 +442,6 @@ def to_tool_result_message(result: ToolResult) -> ToolResultMessage:
             for item in result.content
         ],
         status=conversation_status,
-        is_error=conversation_status != "success",
         approved=result.status not in {"approval_required", "denied"},
         approval_id=result.approval.approval_id if result.approval is not None else None,
         error_code=result.error.code if result.error is not None else None,

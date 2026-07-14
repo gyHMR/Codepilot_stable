@@ -117,7 +117,7 @@ def test_plan_state_rejects_unknown_fields_and_multiple_in_progress_steps() -> N
         )
 
 
-def test_load_plan_state_migrates_current_schema_without_retaining_task_identity() -> None:
+def test_load_plan_state_rejects_removed_schema_six() -> None:
     legacy = {
         "schema_version": 6,
         "plan_id": "plan_old",
@@ -151,13 +151,8 @@ def test_load_plan_state_migrates_current_schema_without_retaining_task_identity
         "completion_source": None,
     }
 
-    migrated = load_plan_state(legacy)
-
-    assert migrated is not None
-    assert migrated.schema_version == PLAN_STATE_SCHEMA_VERSION
-    assert migrated.origin == "plan_mode"
-    assert migrated.steps[0].step_id == "item_1"
-    assert "raw_user_request" not in migrated.to_dict()
+    with pytest.raises(PlanValidationError, match="unsupported plan state schema"):
+        load_plan_state(legacy)
 
 
 def test_plan_definition_requires_bounded_completion_criteria() -> None:

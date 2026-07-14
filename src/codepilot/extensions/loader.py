@@ -1,3 +1,5 @@
+"""发现并加载 Python 扩展，隔离加载失败并汇总能力。"""
+
 from __future__ import annotations
 
 # 新手导读：loader.py 负责发现并安全加载 .codepilot/extensions 下的 Python 扩展。

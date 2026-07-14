@@ -1,3 +1,5 @@
+"""定义 MCP 连接配置、认证、传输协议和远程工具描述。"""
+
 from __future__ import annotations
 
 """Minimal MCP Streamable HTTP transport and remote definition models."""
@@ -14,6 +16,7 @@ MCP_PROTOCOL_VERSION = "2025-06-18"
 
 
 class MCPTransportError(RuntimeError):
+    """MCP 连接、协议或远程响应失败。"""
     def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
         self.code = code
         self.message = message
@@ -23,6 +26,7 @@ class MCPTransportError(RuntimeError):
 
 @dataclass(frozen=True)
 class MCPAuthConfig:
+    """MCP 服务认证配置。"""
     type: str
     env: str
     binding: str
@@ -30,6 +34,7 @@ class MCPAuthConfig:
 
 @dataclass(frozen=True)
 class MCPServerConfig:
+    """单个 MCP 服务的连接与能力配置。"""
     name: str
     url: str
     auth: MCPAuthConfig | None
@@ -43,6 +48,7 @@ class MCPServerConfig:
 
 @dataclass(frozen=True)
 class MCPRemoteTool:
+    """MCP 服务暴露的远程工具描述。"""
     name: str
     description: str
     input_schema: Mapping[str, object]
@@ -51,6 +57,7 @@ class MCPRemoteTool:
 
 
 class MCPTransport(Protocol):
+    """MCP 列举与调用远程工具的传输端口。"""
     async def initialize(self) -> None: ...
 
     async def list_tools(self) -> tuple[MCPRemoteTool, ...]: ...

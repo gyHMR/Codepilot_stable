@@ -228,7 +228,7 @@ def validate_workspace_checkpoint(
         WorkspaceRecoveryState 包含变化详情
     """
     if checkpoint is None:
-        return WorkspaceRecoveryState(status="unchanged")
+        return WorkspaceRecoveryState(status="unknown")
     root = Path(workspace_dir).resolve()
     if Path(checkpoint.root).resolve() != root:
         return WorkspaceRecoveryState(status="changed")
@@ -303,7 +303,15 @@ def _git_status_paths(root: Path) -> list[str]:
     返回:
         变更的文件路径列表（排序、去重）
     """
-    output = _git(root, "status", "--porcelain") or ""
+    output = _git(
+        root,
+        "status",
+        "--porcelain",
+        "--untracked-files=normal",
+        "--relative",
+        "--",
+        ".",
+    ) or ""
     paths: list[str] = []
     for line in output.splitlines():
         value = line[3:].split(" -> ")[-1].strip().strip('"').replace("\\", "/")

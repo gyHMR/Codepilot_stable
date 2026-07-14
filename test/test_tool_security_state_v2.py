@@ -1,4 +1,6 @@
 from pathlib import Path
+
+import pytest
 def _policy(*, effects, permissions):
     from codepilot.tools.security import (
         ConcurrencyPolicy,
@@ -45,6 +47,18 @@ def _request(*, tool_call_id="call_1"):
         mode="execute",
         registration_id="reg_1",
     )
+
+
+def test_tool_attempt_state_machine_rejects_invalid_transition() -> None:
+    from codepilot.tools.state import ToolAttemptRecord, transition
+
+    record = ToolAttemptRecord(
+        attempt_id="session_1:run_1:call_1",
+        request=_request(),
+    )
+
+    with pytest.raises(ValueError, match="received -> running"):
+        transition(record, "running")
 
 
 def test_permission_engine_enforces_required_permissions_and_sensitive_reads() -> None:

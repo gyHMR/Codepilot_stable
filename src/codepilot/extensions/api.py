@@ -1,3 +1,5 @@
+"""定义扩展向运行系统注册命令、工具和生命周期钩子的 API。"""
+
 from __future__ import annotations
 
 # 新手导读：ExtensionAPI 是 Python 扩展 register(api) 能拿到的注册入口。

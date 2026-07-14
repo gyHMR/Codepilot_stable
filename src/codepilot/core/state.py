@@ -1,3 +1,5 @@
+"""保存 Core 决策循环的唯一内存状态及其严格物化/评估逻辑。"""
+
 from __future__ import annotations
 
 """Canonical task state and observable run facts owned by Core."""
@@ -65,6 +67,7 @@ CoreAssessmentStatus = Literal[
 
 @dataclass(frozen=True)
 class TaskBlocker:
+    """阻止 Core 宣布完成的结构化原因。"""
     kind: TaskBlockerKind
     reason: str
     evidence_refs: tuple[str, ...] = ()
@@ -89,6 +92,7 @@ class TaskBlocker:
 
 @dataclass(frozen=True)
 class TaskState:
+    """任务目标、完成状态和阻塞项的权威快照。"""
     original_request: str
     current_goal: str
     status: TaskStatus = "active"
@@ -118,6 +122,7 @@ class TaskState:
 
 @dataclass(frozen=True)
 class CoreCounters:
+    """Core 循环中的模型和工具计数器。"""
     model_turns: int = 0
     model_attempts: int | None = None
     tool_iterations: int = 0
@@ -141,6 +146,7 @@ class CoreCounters:
 
 @dataclass(frozen=True)
 class WorkspaceFacts:
+    """Core 已知的工作区变更事实。"""
     revision: int = 0
     changed: bool = False
     affected_paths: tuple[str, ...] = ()
@@ -163,6 +169,7 @@ class WorkspaceFacts:
 
 @dataclass(frozen=True)
 class VerificationFacts:
+    """Core 已知的验证状态与摘要。"""
     status: VerificationFactStatus = "none"
     verified_revision: int | None = None
     attempted_checks: tuple[str, ...] = ()
@@ -196,6 +203,7 @@ class VerificationFacts:
 
 @dataclass(frozen=True)
 class FailureRecord:
+    """一次可观测失败及其关联调用。"""
     code: str
     source: str
     message: str
@@ -217,6 +225,7 @@ class FailureRecord:
 
 @dataclass(frozen=True)
 class FailureCount:
+    """按错误指纹聚合的失败次数。"""
     code: str
     count: int
 
@@ -234,6 +243,7 @@ class FailureCount:
 
 @dataclass(frozen=True)
 class FailureFacts:
+    """失败记录及重试聚合信息。"""
     latest: FailureRecord | None = None
     counts: tuple[FailureCount, ...] = ()
 
@@ -250,11 +260,13 @@ class FailureFacts:
         )
 
     def count_for(self, code: str) -> int:
+        """返回指定失败代码累计出现的次数。"""
         return next((item.count for item in self.counts if item.code == code), 0)
 
 
 @dataclass(frozen=True)
 class LoopGuardFacts:
+    """用于识别重复模型/工具循环的守卫状态。"""
     last_tool_fingerprint: str | None = None
     repeated_tool_calls: int = 0
     repeated_no_progress: int = 0
@@ -275,6 +287,7 @@ class LoopGuardFacts:
 
 @dataclass(frozen=True)
 class ObservationLedger:
+    """已消费观察值的序号账本，保证 reducer 幂等。"""
     applied_observation_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -287,6 +300,7 @@ class ObservationLedger:
 
 @dataclass(frozen=True)
 class RunFacts:
+    """Run 级别的消息、错误和停止事实。"""
     counters: CoreCounters = field(default_factory=CoreCounters)
     workspace: WorkspaceFacts = field(default_factory=WorkspaceFacts)
     verification: VerificationFacts = field(default_factory=VerificationFacts)
@@ -297,12 +311,14 @@ class RunFacts:
 
 @dataclass(frozen=True)
 class CoreAssessment:
+    """对当前 CoreState 是否可完成的评估结果。"""
     status: CoreAssessmentStatus
     reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class CoreState:
+    """Core 决策循环的唯一状态容器。"""
     task: TaskState
     facts: RunFacts = field(default_factory=RunFacts)
     schema_version: int = CORE_STATE_SCHEMA_VERSION
@@ -317,11 +333,13 @@ class CoreState:
 
     @classmethod
     def new(cls, original_request: str, current_goal: str | None = None) -> "CoreState":
+        """从用户原始请求创建初始 CoreState。"""
         request = _required_core_text(original_request, "original_request")
         goal = _optional_text(current_goal) or request
         return cls(task=TaskState(original_request=request, current_goal=goal))
 
     def to_dict(self) -> dict[str, object]:
+        """编码为当前唯一 schema 的持久化映射。"""
         return {
             "schema_version": self.schema_version,
             "task": {
@@ -377,6 +395,7 @@ class CoreState:
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, object]) -> "CoreState":
+        """从严格映射恢复 CoreState，不执行历史 schema 升级。"""
         if not isinstance(raw, Mapping):
             raise TypeError("CoreState must be an object")
         if raw.get("schema_version") != CORE_STATE_SCHEMA_VERSION:
@@ -502,225 +521,24 @@ class CoreState:
 
 def load_core_state(
     raw: CoreState | Mapping[str, object],
-    *,
-    original_request: str | None = None,
-    current_goal: str | None = None,
 ) -> CoreState:
-    """Load the target schema or upgrade the current pre-refactor payload."""
+    """Load only the current authoritative CoreState schema."""
 
     if isinstance(raw, CoreState):
         return raw
     if not isinstance(raw, Mapping):
         raise CoreContractError("Core state must be an object")
     schema_version = raw.get("schema_version")
-    if schema_version is not None:
-        if schema_version != CORE_STATE_SCHEMA_VERSION:
-            raise CoreContractError(f"Unsupported CoreState schema: {schema_version}")
-        try:
-            return CoreState.from_mapping(raw)
-        except (TypeError, ValueError) as exc:
-            raise CoreContractError(f"Invalid CoreState schema: {exc}") from exc
+    if schema_version != CORE_STATE_SCHEMA_VERSION:
+        raise CoreContractError(f"Unsupported CoreState schema: {schema_version}")
     try:
-        return _upgrade_current_sessions_v2_state(
-            raw,
-            original_request=original_request,
-            current_goal=current_goal,
-        )
-    except CoreContractError:
-        raise
+        return CoreState.from_mapping(raw)
     except (TypeError, ValueError) as exc:
-        raise CoreContractError(
-            f"Invalid current Sessions v2 Core payload: {exc}"
-        ) from exc
-
-
-def _upgrade_current_sessions_v2_state(
-    raw: Mapping[str, object],
-    *,
-    original_request: str | None,
-    current_goal: str | None,
-) -> CoreState:
-    legacy_plan_raw = raw.get("plan_state")
-    legacy_plan = legacy_plan_raw if isinstance(legacy_plan_raw, Mapping) else {}
-    plan = load_plan_state(legacy_plan_raw)
-    request = _optional_text(original_request)
-    if request is None:
-        request = _optional_text(legacy_plan.get("raw_user_request"))
-    if request is None:
-        raise CoreContractError(
-            "Legacy Core state requires original_request for schema upgrade"
-        )
-    goal = _optional_text(current_goal)
-    if goal is None:
-        goal = _optional_text(legacy_plan.get("interpreted_goal"))
-    goal = goal or request
-
-    counters_raw = raw.get("counters")
-    counters = counters_raw if isinstance(counters_raw, Mapping) else {}
-    workspace_changed = bool(raw.get("workspace_changed"))
-    workspace_revision = 1 if workspace_changed else 0
-    verification_values = _legacy_verification_values(raw.get("verification"))
-    verification_status = _legacy_verification_status(raw.get("verification_status"))
-    attempted_checks = tuple(
-        dict.fromkeys(
-            command
-            for item in verification_values
-            if (command := _optional_text(item.get("command"))) is not None
-        )
-    )
-    verification_refs = tuple(
-        dict.fromkeys(
-            call_id
-            for item in verification_values
-            if (call_id := _optional_text(item.get("tool_call_id"))) is not None
-        )
-    )
-
-    last_error_raw = raw.get("last_error")
-    latest_failure = None
-    if isinstance(last_error_raw, Mapping):
-        failure_code = (
-            _optional_text(last_error_raw.get("error_code"))
-            or _optional_text(last_error_raw.get("code"))
-            or "tool.execution_failed"
-        )
-        latest_failure = FailureRecord(
-            code=failure_code,
-            source="tools",
-            message=_optional_text(last_error_raw.get("message")) or failure_code,
-            recoverable=True,
-            evidence_refs=tuple(
-                item
-                for item in (_optional_text(last_error_raw.get("tool_call_id")),)
-                if item is not None
-            ),
-        )
-    if bool(raw.get("cancelled")):
-        latest_failure = FailureRecord(
-            code="run.cancelled",
-            source="runtime",
-            message="Run was cancelled",
-            recoverable=False,
-        )
-
-    task_status: TaskStatus = "abandoned" if bool(raw.get("cancelled")) else "active"
-    recovery_raw = raw.get("recovery_outcome")
-    if isinstance(recovery_raw, Mapping):
-        recovered_status = _optional_text(recovery_raw.get("status"))
-        if recovered_status == "completed":
-            task_status = "satisfied"
-        elif recovered_status == "cancelled":
-            task_status = "abandoned"
-            latest_failure = FailureRecord(
-                code="run.cancelled",
-                source="runtime",
-                message="Recovered run was cancelled",
-                recoverable=False,
-            )
-        elif recovered_status == "failed":
-            task_status = "blocked"
-            failure_code = (
-                _optional_text(recovery_raw.get("stop_reason"))
-                or "runtime.recovered_failure"
-            )
-            latest_failure = FailureRecord(
-                code=failure_code,
-                source="runtime",
-                message=failure_code,
-                recoverable=False,
-            )
-
-    blockers: list[TaskBlocker] = []
-    if bool(raw.get("tool_unavailable")):
-        blockers.append(
-            TaskBlocker(
-                "tool_unavailable",
-                "Requested tool is unavailable",
-                recoverable=True,
-            )
-        )
-    if verification_status == "failed":
-        blockers.append(
-            TaskBlocker(
-                "verification_failed",
-                "Verification failed",
-                evidence_refs=verification_refs,
-                recoverable=True,
-            )
-        )
-
-    return CoreState(
-        task=TaskState(
-            original_request=request,
-            current_goal=goal,
-            status=task_status,
-            plan=plan,
-            blockers=tuple(blockers),
-        ),
-        facts=RunFacts(
-            counters=CoreCounters(
-                model_turns=_non_negative_int(
-                    raw.get("model_turns", counters.get("model_attempts"))
-                ),
-                model_attempts=_non_negative_int(
-                    counters.get(
-                        "model_attempts",
-                        raw.get("model_turns"),
-                    )
-                ),
-                tool_iterations=_non_negative_int(counters.get("tool_iterations")),
-                tool_calls=_non_negative_int(counters.get("tool_calls")),
-            ),
-            workspace=WorkspaceFacts(
-                revision=workspace_revision,
-                changed=workspace_changed,
-                affected_paths=tuple(_string_list(raw.get("affected_paths"))),
-                evidence_refs=tuple(
-                    f"tool_call:{call_id}"
-                    for call_id in _string_list(raw.get("seen_tool_call_ids"))
-                ),
-            ),
-            verification=VerificationFacts(
-                status=verification_status,
-                verified_revision=(
-                    workspace_revision
-                    if verification_status in {"passed", "failed"}
-                    else None
-                ),
-                attempted_checks=attempted_checks,
-                evidence_refs=verification_refs,
-            ),
-            failures=FailureFacts(
-                latest=latest_failure,
-                counts=(
-                    (FailureCount(latest_failure.code, 1),)
-                    if latest_failure is not None
-                    else ()
-                ),
-            ),
-            loop_guards=LoopGuardFacts(
-                last_tool_fingerprint=_optional_text(raw.get("last_tool_fingerprint")),
-                repeated_tool_calls=_non_negative_int(raw.get("repeated_tool_calls")),
-                seen_tool_call_ids=tuple(_string_list(raw.get("seen_tool_call_ids"))),
-            ),
-        ),
-    )
-
-
-def _legacy_verification_values(value: object) -> list[Mapping[str, object]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, Mapping)]
-
-
-def _legacy_verification_status(value: object) -> VerificationFactStatus:
-    status = _optional_text(value)
-    if status in {"passed", "failed", "stale"}:
-        return cast(VerificationFactStatus, status)
-    return "unknown"
+        raise CoreContractError(f"Invalid CoreState schema: {exc}") from exc
 
 
 def assess_core_state(state: CoreState) -> CoreAssessment:
+    """评估任务是否完成、阻塞或仍需继续执行。"""
     if state.task.status == "satisfied":
         return CoreAssessment("satisfied")
     if state.task.status in {"blocked", "abandoned"}:

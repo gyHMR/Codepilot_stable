@@ -1,3 +1,5 @@
+"""实现 Session、Memory、Context 和 rollback 的运行时命令用例。"""
+
 from __future__ import annotations
 
 import inspect

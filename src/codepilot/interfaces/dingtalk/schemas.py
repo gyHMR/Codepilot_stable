@@ -1,3 +1,5 @@
+"""定义 DingTalk 入站事件和出站响应的数据结构。"""
+
 from __future__ import annotations
 
 # 新手导读：schemas.py 定义钉钉远程入口和 RuntimeGateway 之间的稳定数据契约。

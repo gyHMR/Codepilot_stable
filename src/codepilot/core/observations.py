@@ -1,3 +1,5 @@
+"""定义 Core reducer 消费的模型、工具、用户和取消观察值。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,6 +25,7 @@ ModelObservationPurpose = Literal[
 
 @dataclass(frozen=True)
 class ModelObservation:
+    """Core 消费的模型调用观察值。"""
     observation_id: str
     message: AssistantMessage | None = None
     status: ModelObservationStatus = "completed"
@@ -63,6 +66,7 @@ class ModelObservation:
 
 @dataclass(frozen=True)
 class ToolBatchObservation:
+    """Core 消费的一批工具结果观察值。"""
     observation_id: str
     calls: tuple[ToolCall, ...] = ()
     results: tuple[ToolResult, ...] = ()
@@ -90,6 +94,7 @@ class ToolBatchObservation:
 
 @dataclass(frozen=True)
 class UserInputObservation:
+    """Core 消费的用户输入观察值。"""
     observation_id: str
     text: str
     current_goal: str | None = None
@@ -107,6 +112,7 @@ class UserInputObservation:
 
 @dataclass(frozen=True)
 class CoreCommandObservation:
+    """Core 消费的命令观察值。"""
     observation_id: str
     command: CoreCommand
 
@@ -122,6 +128,7 @@ class CoreCommandObservation:
 
 @dataclass(frozen=True)
 class CancellationObservation:
+    """Core 消费的取消观察值。"""
     observation_id: str
     reason: str
 

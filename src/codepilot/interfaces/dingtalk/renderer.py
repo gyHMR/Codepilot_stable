@@ -1,3 +1,5 @@
+"""把 Runtime 消息、审批和终态结果渲染为 DingTalk 文本。"""
+
 from __future__ import annotations
 
 # 新手导读：renderer.py 把 Agent/Runtime 事件压缩成适合钉钉聊天窗口阅读的短消息。

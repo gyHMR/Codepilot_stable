@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+from tool_runtime_testkit import execute_tool
+
 
 def test_restricted_tool_port_only_exposes_and_executes_read_allowlist(tmp_path) -> None:
     async def run_case() -> None:
@@ -20,26 +22,31 @@ def test_restricted_tool_port_only_exposes_and_executes_read_allowlist(tmp_path)
         }
         base = ToolRuntime(registry)
         restricted = RestrictedToolPort(base)
+        assert not hasattr(restricted, "execute")
+        assert not hasattr(restricted, "execute_batch")
 
         names = {item.spec.name for item in restricted.catalog_snapshot(mode="plan").entries}
         assert names == {"read"}
 
-        allowed = await restricted.execute(
+        allowed = await execute_tool(
+            restricted,
             ToolExecutionRequest(
                 "run1", "session1", "read1", "read", {"path": "sample.py"}, "plan", ids["read"]
             )
         )
-        denied = await restricted.execute(
+        denied = await execute_tool(
+            restricted,
             ToolExecutionRequest(
                 "run1", "session1", "write1", "write", {"path": "x", "content": "x"}, "plan", ids["write"]
             )
         )
-        batch = await restricted.execute_batch(
-            [
+        preparation = restricted.prepare_batch(
+            (
                 ToolExecutionRequest("run1", "session1", "read2", "read", {"path": "sample.py"}, "plan", ids["read"]),
                 ToolExecutionRequest("run1", "session1", "read3", "read", {"path": "sample.py"}, "plan", ids["read"]),
-            ]
+            )
         )
+        batch = await restricted.execute_prepared(preparation.batch_id or "")
 
         assert allowed.status == "success"
         assert [item.status for item in batch] == ["success", "success"]
@@ -101,7 +108,8 @@ def test_list_exploration_agents_empty_result_points_to_dispatch(tmp_path) -> No
             )
         registry = ToolRegistry()
         ids = {item.spec.name: registry.register(item) for item in registrations}
-        result = await ToolRuntime(registry).execute(
+        result = await execute_tool(
+            ToolRuntime(registry),
             ToolExecutionRequest(
                 run_id="run_plan",
                 session_id="session_a",

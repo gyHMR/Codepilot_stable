@@ -1,3 +1,5 @@
+"""Core 主驱动：按决策循环调用模型/工具，并提交边界事实。"""
+
 from __future__ import annotations
 
 import asyncio

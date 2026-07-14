@@ -1,3 +1,5 @@
+"""把 MCP 远程工具适配为统一 ToolRegistration 与执行结果。"""
+
 from __future__ import annotations
 
 """Adapt configured MCP tools into canonical Codepilot registrations."""
@@ -32,6 +34,7 @@ from .transport import MCPRemoteTool, MCPServerConfig, MCPTransportError
 
 
 class MCPClient(Protocol):
+    """MCP 远程工具列表与调用能力的最小客户端协议。"""
     async def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> Any:
         ...
 

@@ -100,7 +100,7 @@ def test_tool_result_entry_accepts_only_final_canonical_results() -> None:
         ToolResultEntry(results=(object(),))  # type: ignore[arg-type]
 
 
-def test_current_sessions_v2_payload_is_loaded_into_the_new_schema() -> None:
+def test_schema_less_core_payload_is_rejected() -> None:
     legacy = {
         "counters": {
             "model_attempts": 2,
@@ -121,27 +121,13 @@ def test_current_sessions_v2_payload_is_loaded_into_the_new_schema() -> None:
         "seen_tool_call_ids": ["call_test"],
     }
 
-    run_input = _input(
-        state=legacy,
-        messages=(UserMessage(content="fix app"),),
-    )
-    state = run_input.state
-
-    assert state.schema_version == CORE_STATE_SCHEMA_VERSION
-    assert state.task.original_request == "fix app"
-    assert state.facts.counters.model_turns == 2
-    assert state.facts.workspace.affected_paths == ("src/app.py",)
-    assert state.facts.verification.status == "passed"
-    assert state.facts.verification.verified_revision == 1
-    assert "workspace_changed" not in state.to_dict()
+    with pytest.raises(CoreContractError, match="Unsupported CoreState schema"):
+        _input(state=legacy, messages=(UserMessage(content="fix app"),))
 
 
 def test_unknown_serialized_core_schema_is_not_treated_as_legacy() -> None:
     with pytest.raises(CoreContractError, match="schema"):
-        load_core_state(
-            {"schema_version": 99},
-            original_request="inspect",
-        )
+        load_core_state({"schema_version": 99})
 
 
 def test_core_wait_and_reason_are_structured_and_immutable() -> None:

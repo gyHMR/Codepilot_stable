@@ -1,3 +1,5 @@
+"""提供 Interface 调用 Runtime Session 能力的统一门面。"""
+
 from __future__ import annotations
 
 """Runtime gateway: receive interface actions and stream runtime frames."""
@@ -210,7 +212,9 @@ class RuntimeGateway:
     def close(self, session_id: str) -> None:
         active_scope = self._active_runs.resources(session_id)
         active_run_id = self._active_runs.cancel(session_id, "session_closed")
-        closed = self._sessions.close(session_id)
+        closed = self._sessions.detach(session_id)
+        if closed is not None:
+            self._schedule_controller_close(closed.controller, after=active_scope)
         if (
             closed is not None
             and closed.mcp_manager is not None
@@ -267,6 +271,29 @@ class RuntimeGateway:
             asyncio.run(close())
             return
         task = loop.create_task(close(), name="runtime-manager-close")
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    def _schedule_controller_close(
+        self,
+        controller: SessionController,
+        *,
+        after: object | None = None,
+    ) -> None:
+        if after is None:
+            controller.close()
+            return
+
+        async def close() -> None:
+            await after.wait_released()
+            controller.close()
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(close())
+            return
+        task = loop.create_task(close(), name="runtime-session-close")
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 

@@ -1,6 +1,6 @@
-from __future__ import annotations
+"""Core 公共入口：导出运行状态、端口、决策和驱动能力。"""
 
-"""Public surface for the deterministic Core task kernel."""
+from __future__ import annotations
 
 from .commands import (
     AbandonPlan,

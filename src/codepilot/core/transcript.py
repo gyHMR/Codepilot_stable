@@ -1,3 +1,5 @@
+"""提供对话记录中未结工具调用和最后助手消息的纯查询函数。"""
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -6,6 +8,7 @@ from codepilot.protocols import AssistantMessage, Message, ToolCall, ToolResultM
 
 
 def unsettled_tool_calls(messages: Sequence[Message]) -> tuple[ToolCall, ...]:
+    """返回尚未被 ToolResultMessage 结算的工具调用。"""
     calls: dict[str, ToolCall] = {}
     settled: set[str] = set()
     for message in messages:
@@ -19,6 +22,7 @@ def unsettled_tool_calls(messages: Sequence[Message]) -> tuple[ToolCall, ...]:
 
 
 def last_assistant_message(messages: Sequence[Message]) -> AssistantMessage | None:
+    """返回对话记录中的最后一条助手消息。"""
     return next(
         (
             message

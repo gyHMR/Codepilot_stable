@@ -1,3 +1,5 @@
+"""DingTalk 适配器的命令行入口与服务启动逻辑。"""
+
 from __future__ import annotations
 
 # 新手导读：main.py 是独立的 codepilot-dingtalk 入口，不复用 CLI parser。

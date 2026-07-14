@@ -176,7 +176,7 @@ CoreRunInput
 └── context_seed
 ```
 
-Resume 不创建新的 Run，而是使用原 run_id 和最新成功 Checkpoint 创建新的 RunEnvironment。Tool Approval 先由 Runtime 调用 `ToolPort.resume()` 得到最终 ToolResult，再构造 `ToolResultEntry`；Core 输入不包含 approval decision、deadline 或 retry policy。
+Resume 不创建新的 Run，而是使用原 run_id 和最新成功 Checkpoint 创建新的 RunEnvironment。Tool Approval 先由 Runtime 调用 `ToolPort.prepare_resume()`，将响应和 Tools checkpoint 随 Sessions Resume Commit 持久化，再调用 `execute_prepared_resume()` 得到最终 ToolResult 并构造 `ToolResultEntry`；Core 输入不包含 approval decision、deadline 或 retry policy。
 
 ### 4.3 CorePorts
 
@@ -372,7 +372,9 @@ Action(resume)
   -> validate Workspace
   -> restore component checkpoints
   -> resume_run(waiting -> running)（仅 waiting 场景）
-  -> ToolPort.resume()（Tool approval/interaction）
+  -> ToolPort.prepare_resume()
+  -> Sessions Resume Commit（保存 prepared Tools checkpoint）
+  -> ToolPort.execute_prepared_resume()（Tool approval/interaction）
   -> ToolResultEntry 或 ModelEntry
   -> 创建新的 RunEnvironment
   -> RunExecutor.execute

@@ -1,3 +1,5 @@
+"""将观察值和 Core 命令归约为新的 CoreState 与下一步决策。"""
+
 from __future__ import annotations
 
 import json
@@ -58,6 +60,7 @@ from .state import (
 
 @dataclass(frozen=True)
 class ReductionContext:
+    """一次 reducer 调用所需的时间、限制和外部观察上下文。"""
     run_id: str
     mode: RunMode
     now_ms: int
@@ -78,6 +81,7 @@ class ReductionContext:
 
 @dataclass(frozen=True)
 class CoreReduction:
+    """Reducer 输出的新状态与下一步 Core 决策。"""
     state: CoreState
     events: tuple[CoreDomainEvent, ...] = ()
     command_results: tuple[CommandResult, ...] = ()
@@ -88,6 +92,7 @@ def reduce_observation(
     observation: CoreObservation,
     context: ReductionContext,
 ) -> CoreReduction:
+    """消费一个观察值并归约为新状态和下一步决策。"""
     observation_id = observation.observation_id
     if observation_id in state.facts.observation_ledger.applied_observation_ids:
         return CoreReduction(state=state)
@@ -122,6 +127,7 @@ def apply_decision(
     decision: object,
     context: ReductionContext,
 ) -> CoreReduction:
+    """将 Driver 已执行的决策结果应用回 CoreState。"""
     del context
     from .contracts import CallModel, ExecuteTools, Terminate, Wait
 
@@ -354,6 +360,7 @@ def apply_core_command(
     command: CoreCommand,
     context: ReductionContext,
 ) -> CoreReduction:
+    """应用 Core 命令并返回状态变化及后续决策。"""
     if command.command_id in state.facts.observation_ledger.applied_observation_ids:
         return CoreReduction(state=state)
 

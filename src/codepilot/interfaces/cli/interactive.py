@@ -1,3 +1,5 @@
+"""实现交互式终端循环、审批询问和命令分发。"""
+
 from __future__ import annotations
 
 """人类 CLI 交互主流程：读取输入、派发 runtime action、渲染 frame。

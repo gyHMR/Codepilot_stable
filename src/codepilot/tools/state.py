@@ -42,6 +42,24 @@ ToolAttemptState = Literal[
     "interrupted",        # 被中断（同一批中的前驱工具挂起时）
 ]
 
+_TOOL_ATTEMPT_TRANSITIONS: dict[ToolAttemptState, frozenset[ToolAttemptState]] = {
+    "received": frozenset({"validating"}),
+    "validating": frozenset({"resolving_access", "failed"}),
+    "resolving_access": frozenset({"awaiting_approval", "queued", "denied"}),
+    "awaiting_approval": frozenset({"resolving_access", "denied"}),
+    "awaiting_input": frozenset({"succeeded", "failed"}),
+    "queued": frozenset({"running", "failed", "timed_out", "cancelled", "interrupted"}),
+    "running": frozenset(
+        {"awaiting_input", "succeeded", "failed", "timed_out", "cancelled"}
+    ),
+    "succeeded": frozenset(),
+    "failed": frozenset(),
+    "denied": frozenset(),
+    "timed_out": frozenset(),
+    "cancelled": frozenset(),
+    "interrupted": frozenset(),
+}
+
 
 # ── 交互类型 ──────────────────────────────────────────────────────────────────
 
@@ -458,6 +476,9 @@ def transition(record: ToolAttemptRecord, state: ToolAttemptState, **changes) ->
     返回:
         更新后的新记录
     """
+    allowed = _TOOL_ATTEMPT_TRANSITIONS[record.state]
+    if state not in allowed:
+        raise ValueError(f"Invalid Tool attempt transition: {record.state} -> {state}")
     return replace(record, state=state, **changes)
 
 

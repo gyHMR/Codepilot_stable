@@ -1,3 +1,5 @@
+"""登记活动 Session 和 Run，用于取消、查询与资源清理。"""
+
 from __future__ import annotations
 
 import inspect
@@ -131,6 +133,7 @@ class RuntimeSession:
 
 
 class RuntimeSessionRegistry:
+    """登记活动 Session 和 Run 资源的运行时注册中心。"""
     def __init__(self) -> None:
         self._items: dict[str, RuntimeSession] = {}
 
@@ -148,6 +151,11 @@ class RuntimeSessionRegistry:
         if entry is not None:
             entry.controller.close()
         return entry
+
+    def detach(self, session_id: str) -> RuntimeSession | None:
+        """Remove a session without closing resources still used by an active Run."""
+
+        return self._items.pop(session_id, None)
 
     def close_all(self) -> None:
         for session_id in list(self._items):
@@ -187,6 +195,7 @@ class RuntimeSessionRegistry:
 
 @dataclass
 class ActiveRun:
+    """可取消、可查询的活动 Run 句柄。"""
     run_id: str
     resources: RunResourceScope
 

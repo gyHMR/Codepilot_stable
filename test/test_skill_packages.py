@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from tool_runtime_testkit import execute_tool
+
 
 def test_flat_skill_file_is_rejected_without_legacy_fallback(tmp_path: Path) -> None:
     from codepilot.extensions import load_skill_catalog
@@ -52,7 +54,8 @@ def test_skill_resource_rejects_traversal(tmp_path: Path) -> None:
     runtime = ToolRuntime(registry)
 
     result = asyncio.run(
-        runtime.execute(
+        execute_tool(
+            runtime,
             ToolExecutionRequest(
                 run_id="run-skill-resource",
                 session_id="session-skill-resource",
@@ -81,7 +84,8 @@ def test_skill_mode_is_enforced_by_runtime_handler(tmp_path: Path) -> None:
     runtime = ToolRuntime(registry)
 
     result = asyncio.run(
-        runtime.execute(
+        execute_tool(
+            runtime,
             ToolExecutionRequest(
                 run_id="run-skill-mode",
                 session_id="session-skill-mode",

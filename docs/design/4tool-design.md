@@ -1215,7 +1215,7 @@ src/codepilot/
 | `contracts.py` | Spec、Registration、Request、Context、Handler/Resolver/Renderer 等稳定 Protocol | 具体执行流程、持久化实现、平台 I/O |
 | `codecs.py` | JSON Schema、输入输出 Codec、内置 Codec 实现 | Registry、权限和模型内容渲染 |
 | `registry.py` | 注册、materialize、Catalog snapshot、registration identity | handler 执行、安全审批 |
-| `runtime.py` | `execute/resume/execute_batch` 主入口和管线编排 | 具体权限匹配、调度算法、文件系统安全实现 |
+| `runtime.py` | `prepare_batch/execute_prepared` 与 `prepare_resume/execute_prepared_resume` 管线编排 | 具体权限匹配、调度算法、文件系统安全实现 |
 | `execution.py` | timeout、取消、CleanupStack、基础调度、并发、progress | 权限规则、审批存储、结果渲染 |
 | `security.py` | ToolPolicy、资源/effect、Permission、Approval、AccessResolution | OS 沙箱实现、Runtime 主流程 |
 | `results.py` | ToolResult、ToolError、内容块和模型消息单向投影 | handler 调度、权限决策、Runtime 输出限额执行 |
@@ -1317,7 +1317,7 @@ src/codepilot/
 
 ### 阶段 3：单工具执行闭环
 
-先实现 ToolRuntime.execute 的新链路，不同时迁移复杂并发和恢复。选择 workspace_status 或 read 完成第一个端到端切片。
+先实现 `prepare_batch/execute_prepared` 新链路，不同时迁移复杂并发和恢复。选择 workspace_status 或 read 完成第一个端到端切片。
 
 ### 阶段 4：逐个迁移 Builtins
 

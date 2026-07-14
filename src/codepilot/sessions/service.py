@@ -155,6 +155,8 @@ class CommitRunBoundaryRequest:
         else:
             if self.phase is None or self.resume_point is None:
                 raise ValueError("Progress and waiting commits require phase and resume_point")
+            if self.workspace is None:
+                raise ValueError("Progress and waiting commits require workspace checkpoint")
             if self.terminal_status is not None or self.result is not None:
                 raise ValueError("Non-terminal commit cannot include terminal result")
             if (self.kind == "waiting") != (self.waiting is not None):

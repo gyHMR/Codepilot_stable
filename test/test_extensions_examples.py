@@ -4,6 +4,8 @@ import asyncio
 import json
 from pathlib import Path
 
+from tool_runtime_testkit import execute_tool
+
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "docs" / "examples" / "extensions"
@@ -152,7 +154,8 @@ def _execute_registration(registration, arguments, *, mode="execute"):
     registration_id = registry.register(registration)
     runtime = ToolRuntime(registry)
     return asyncio.run(
-        runtime.execute(
+        execute_tool(
+            runtime,
             ToolExecutionRequest(
                 run_id="run-extension-example",
                 session_id="session-extension-example",

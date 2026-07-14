@@ -186,6 +186,40 @@ def test_active_run_registry_delegates_task_ownership_to_scope() -> None:
     asyncio.run(run_case())
 
 
+def test_closing_active_session_waits_for_run_resources_before_controller_close() -> None:
+    from codepilot.runtime.gateway import RuntimeGateway
+    from codepilot.runtime.registry import RuntimeSession
+
+    async def run_case() -> None:
+        closed = False
+
+        class Controller:
+            session_id = "session_close_active"
+
+            def close(self) -> None:
+                nonlocal closed
+                closed = True
+
+        gateway = RuntimeGateway()
+        gateway._sessions.add(RuntimeSession(controller=Controller()))  # noqa: SLF001
+        scope = RunResourceScope(cancel_grace_ms=0)
+        scope.create_task(asyncio.Event().wait())
+        gateway._active_runs.start(  # noqa: SLF001
+            "session_close_active",
+            "run_close_active",
+            scope,
+        )
+
+        gateway.close("session_close_active")
+
+        assert closed is False
+        await scope.release()
+        await asyncio.gather(*tuple(gateway._background_tasks))  # noqa: SLF001
+        assert closed is True
+
+    asyncio.run(run_case())
+
+
 def test_run_deadline_reaches_tool_execution_request() -> None:
     from codepilot.tools.contracts import ToolExecutionRequest
 

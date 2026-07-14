@@ -1,3 +1,5 @@
+"""定义 Context 投影、预算、摘要与 checkpoint 的稳定边界契约。"""
+
 from __future__ import annotations
 
 from collections.abc import Awaitable, Mapping
@@ -32,6 +34,7 @@ _PRESSURE = frozenset({"normal", "tight", "critical", "overflow"})
 
 @dataclass(frozen=True)
 class ContextSourceRef:
+    """上下文事实来源的稳定引用。"""
     kind: str
     ref: str
 
@@ -42,6 +45,7 @@ class ContextSourceRef:
 
 @dataclass(frozen=True)
 class ContextItem:
+    """参与预算选择的单个分层上下文候选。"""
     item_id: str
     layer: ContextLayer
     retention: RetentionClass
@@ -72,6 +76,7 @@ class ContextItem:
 
 @dataclass(frozen=True)
 class ContextBudget:
+    """一次投影可使用的总预算与分层预算。"""
     effective_input_tokens: int
     output_reserve_tokens: int
     safety_margin_tokens: int
@@ -94,6 +99,7 @@ class ContextBudget:
 
 @dataclass(frozen=True)
 class ContextPressure:
+    """估算用量相对预算形成的压力判断。"""
     level: ContextPressureLevel
     raw_tokens: int
     effective_budget: int
@@ -119,6 +125,7 @@ class ContextPressure:
 
 @dataclass(frozen=True)
 class ProjectedMessage:
+    """消息在上下文投影中的保留动作和来源。"""
     source_ref: str
     message: Message
     action: ProjectionAction
@@ -133,6 +140,7 @@ class ProjectedMessage:
 
 @dataclass(frozen=True)
 class ProjectedEvidence:
+    """证据在投影中的精简表示。"""
     source_ref: str
     content: str
     action: EvidenceAction
@@ -146,6 +154,7 @@ class ProjectedEvidence:
 
 @dataclass(frozen=True)
 class ProjectionPlan:
+    """消息与证据投影动作组成的不可变计划。"""
     messages: tuple[ProjectedMessage, ...] = ()
     evidence: tuple[ProjectedEvidence, ...] = ()
 
@@ -170,6 +179,7 @@ class ProjectionPlan:
 
 @dataclass(frozen=True)
 class CompactSummary:
+    """对已压缩历史事实的结构化摘要。"""
     original_goal: str
     user_constraints: tuple[str, ...] = ()
     decisions: tuple[str, ...] = ()
@@ -273,6 +283,7 @@ class CompactSummary:
 
 @dataclass(frozen=True)
 class CompactSnapshotRef:
+    """压缩产物对应的 artifact 引用。"""
     compact_id: str
     path: str
     compacted_until_message_id: str
@@ -289,6 +300,7 @@ class CompactSnapshotRef:
 
 @dataclass(frozen=True)
 class ContextCheckpointState:
+    """恢复 Context 工作集所需的 checkpoint 状态。"""
     compact_snapshot_ref: str | None = None
     compacted_until_message_id: str | None = None
 
@@ -322,6 +334,7 @@ class ContextCheckpointState:
 
 @dataclass(frozen=True)
 class ContextSummaryRequest:
+    """请求摘要器压缩指定历史范围。"""
     messages: tuple[Message, ...]
     original_goal: str
     previous_summary: CompactSummary | None = None
@@ -345,6 +358,7 @@ class ContextSummaryRequest:
 
 @dataclass(frozen=True)
 class ContextSummaryResult:
+    """摘要器返回的结构化摘要与来源。"""
     summary: CompactSummary
     compacted_until_message_id: str
 
@@ -359,6 +373,7 @@ class ContextSummaryResult:
 
 
 class ContextSummarizerPort(Protocol):
+    """Context 调用模型摘要能力的最小端口。"""
     def summarize(
         self,
         request: ContextSummaryRequest,
@@ -366,6 +381,7 @@ class ContextSummarizerPort(Protocol):
 
 
 class ContextCheckpointPort(Protocol):
+    """Context 保存和读取自身 checkpoint 的最小端口。"""
     def checkpoint_state(self) -> Mapping[str, object] | None: ...
 
     def restore_checkpoint_state(self, state: Mapping[str, object]) -> None: ...

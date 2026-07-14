@@ -1,6 +1,10 @@
-from __future__ import annotations
+"""管理 Tools 拥有的 checkpoint 状态与工作区范围审批授权。
 
-"""Tool-owned checkpoint state and workspace-scoped approval grants."""
+内存状态保存未完成的 ToolAttempt；文件授权存储只保存可复用的 session/project grant。
+两者都严格校验 schema 和 session_id，不承担 Run 或 Session 的权威状态职责。
+"""
+
+from __future__ import annotations
 
 import json
 import os
@@ -45,7 +49,7 @@ _GRANT_FILE_LOCKS_GUARD = RLock()
 
 
 class FileToolGrantStore:
-    """Persist reusable session/project grants as Tools security state."""
+    """将可复用的 session/project 授权持久化为 Tools 安全状态。"""
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path).resolve()
@@ -58,6 +62,7 @@ class FileToolGrantStore:
         registration_id: str,
         grant: ApprovalGrant,
     ) -> None:
+        """保存一个未过期授权；仅接受 session 或 project 范围。"""
         if grant.scope not in {"session", "project"}:
             return
         session_key = session_id if grant.scope == "session" else None
@@ -78,6 +83,7 @@ class FileToolGrantStore:
         request: ToolExecutionRequest,
         access: ToolAccessRequest,
     ) -> ApprovalGrant | None:
+        """按注册版本、资源、效果、风险和作用域查找可复用授权。"""
         wanted_resources = tuple(resource.uri for resource in access.resources)
         with self._lock:
             entries = self._load()
@@ -140,7 +146,7 @@ class FileToolGrantStore:
 
 
 class CheckpointToolStateStore(InMemoryToolStateStore):
-    """Keep live attempt state in memory and expose opaque checkpoint payloads."""
+    """在内存维护活动尝试，并暴露严格校验的 opaque checkpoint 载荷。"""
 
     def __init__(
         self,
@@ -153,10 +159,12 @@ class CheckpointToolStateStore(InMemoryToolStateStore):
         self._grant_store = grant_store
 
     def create(self, record: ToolAttemptRecord) -> None:
+        """创建属于当前 Session 的 ToolAttempt 记录。"""
         self._validate_record_session(record)
         super().create(record)
 
     def compare_and_set(self, attempt_id, expected_state, record) -> None:
+        """原子更新尝试状态，并在产生授权时写入授权存储。"""
         self._validate_record_session(record)
         super().compare_and_set(attempt_id, expected_state, record)
         if self._grant_store is not None and record.grant is not None:
@@ -167,6 +175,7 @@ class CheckpointToolStateStore(InMemoryToolStateStore):
             )
 
     def find_reusable_grant(self, request, access):
+        """先查当前运行态，再查配置的持久化授权存储。"""
         grant = super().find_reusable_grant(request, access)
         if grant is not None or self._grant_store is None:
             return grant
@@ -181,6 +190,7 @@ class CheckpointToolStateStore(InMemoryToolStateStore):
         *,
         intent: Mapping[str, object] | None = None,
     ) -> dict[str, object] | None:
+        """导出非终态尝试和 Runtime 意图组成的 Tools checkpoint。"""
         with self._lock:
             attempts = [
                 _record_to_dict(item)
@@ -197,6 +207,7 @@ class CheckpointToolStateStore(InMemoryToolStateStore):
         }
 
     def restore_checkpoint_state(self, payload: Mapping[str, object]) -> None:
+        """严格校验并恢复属于当前 Session 的非终态尝试。"""
         _require_exact_keys(payload, set(_CHECKPOINT_KEYS), "tool checkpoint")
         if payload.get("schema_version") != TOOL_CHECKPOINT_SCHEMA_VERSION:
             raise ValueError("Unsupported tool checkpoint schema version")

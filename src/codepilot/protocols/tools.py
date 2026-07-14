@@ -1,10 +1,5 @@
-from __future__ import annotations
-
-# 新手导读：tools.py 只定义模型可见工具 spec 和对话结果状态。
-# 关注点：注意这里没有 execute 函数和运行时元数据；可执行工具属于 tools/contracts.py。
-
 """
-工具相关类型定义。
+定义跨层共享的模型可见工具规范与对话结果状态。
 
 定义模型调用协议中的可见结构：
 - Tool: 工具定义（模型可见的工具规范）
@@ -12,6 +7,8 @@ from __future__ import annotations
 
 工具执行结果由 codepilot.tools.results.ToolResult 唯一定义。
 """
+
+from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
@@ -42,6 +39,8 @@ _TOOL_RESULT_STATUSES = frozenset(
 
 
 def tool_mode_for_run_mode(mode: str) -> Literal["plan", "execute"]:
+    """把 Core 的运行模式映射为工具目录使用的权限模式。"""
+
     return "plan" if mode in {"read", "plan"} else "execute"
 
 # Task Plan tool names shared by tools execution and core plan state.
@@ -88,6 +87,8 @@ class Tool:
 
 
 def ensure_tool_result_status(value: object) -> ToolResultStatus:
+    """校验并收窄工具结果状态；未知状态直接拒绝进入对话记录。"""
+
     if value not in _TOOL_RESULT_STATUSES:
         raise ValueError(f"Unknown tool result status: {value}")
     return cast(ToolResultStatus, value)

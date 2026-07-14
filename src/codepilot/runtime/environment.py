@@ -1,3 +1,5 @@
+"""拥有单次 Run 的取消、截止时间、端口和资源生命周期。"""
+
 from __future__ import annotations
 
 """Run-scoped capabilities and resource ownership."""
@@ -29,6 +31,7 @@ CleanupCallback = Callable[[], Awaitable[None] | None]
 
 
 class RunCancellationToken:
+    """Runtime 拥有的单次 Run 取消令牌。"""
     def __init__(self) -> None:
         self._cancelled = False
         self._reason: str | None = None
@@ -221,6 +224,7 @@ class RunResourceScope:
 
 @dataclass(frozen=True)
 class RunEnvironment:
+    """单次 Run 的端口、截止时间、取消和资源作用域。"""
     run_id: str
     session_id: str
     trigger: RunTrigger
@@ -265,6 +269,7 @@ class RunEnvironment:
 
 
 class RunEnvironmentFactory:
+    """根据 PreparedAgentRun 创建隔离的 RunEnvironment。"""
     def create(
         self,
         prepared: PreparedAgentRun,

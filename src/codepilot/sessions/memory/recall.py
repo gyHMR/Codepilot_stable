@@ -1,3 +1,5 @@
+"""按作用域、关键词、状态和预算召回可注入 Context 的长期记忆。"""
+
 from __future__ import annotations
 
 import re

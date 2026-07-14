@@ -1,5 +1,7 @@
 import asyncio
 
+from tool_runtime_testkit import execute_tool
+
 
 def test_streamed_tool_arguments_are_strictly_finalized() -> None:
     from codepilot.llm.providers.common import finalize_tool_arguments
@@ -28,7 +30,8 @@ def test_runtime_returns_validation_result_for_invalid_model_arguments(tmp_path)
     registration = create_builtin_registrations(tmp_path, enabled_names=["read"])[0]
     registration_id = registry.register(registration)
     result = asyncio.run(
-        ToolRuntime(registry).execute(
+        execute_tool(
+            ToolRuntime(registry),
             ToolExecutionRequest(
                 run_id="run1",
                 session_id="session1",

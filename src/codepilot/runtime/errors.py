@@ -1,3 +1,5 @@
+"""将运行时异常规范化为结构化错误信息和事件载荷。"""
+
 from __future__ import annotations
 
 """Single Runtime error normalization used by persistence and interface frames."""

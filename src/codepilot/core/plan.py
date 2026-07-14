@@ -1,3 +1,5 @@
+"""定义计划状态、计划项和计划变更的权威 Core 数据模型。"""
+
 from __future__ import annotations
 
 """Core-owned Task Plan values.
@@ -8,7 +10,6 @@ methods and performs no persistence.
 """
 
 from collections.abc import Mapping, Sequence
-from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
@@ -53,11 +54,13 @@ _PLAN_OPERATIONS = frozenset(
 
 
 class PlanValidationError(ValueError):
+    """计划结构或状态违反当前契约时抛出的领域错误。"""
     pass
 
 
 @dataclass(frozen=True)
 class PlanDefinition:
+    """计划创建时的目标、范围、风险和完成标准定义。"""
     summary: str
     completion_criteria: tuple[str, ...]
     task_understanding: str = ""
@@ -157,6 +160,7 @@ class PlanDefinition:
 
 @dataclass(frozen=True)
 class PlanStepDefinition:
+    """计划项的声明式定义。"""
     step: str
     details: str
     verification: str
@@ -189,6 +193,7 @@ class PlanStepDefinition:
 
 @dataclass(frozen=True)
 class PlanStep:
+    """带运行时状态的计划项。"""
     step_id: str
     step: str
     details: str
@@ -269,6 +274,7 @@ class PlanStep:
 
 @dataclass(frozen=True)
 class PlanStepUpdate:
+    """对现有计划项执行的一次状态更新。"""
     step_id: str
     status: PlanStepStatus
     completion_note: str = ""
@@ -318,6 +324,7 @@ class PlanStepUpdate:
 
 @dataclass(frozen=True)
 class PendingPlanRevision:
+    """等待用户决定的计划修订请求。"""
     reason: PlanRevisionReason
     definition: PlanDefinition
     steps: tuple[PlanStep, ...]
@@ -367,6 +374,7 @@ class PendingPlanRevision:
 
 @dataclass(frozen=True)
 class PlanCloseRequest:
+    """关闭活动计划所需的请求与验证信息。"""
     summary: str
     evidence_refs: tuple[str, ...]
     requested_at_revision: int
@@ -414,6 +422,7 @@ class PlanCloseRequest:
 
 @dataclass(frozen=True)
 class PlanState:
+    """Core 唯一拥有的完整计划状态。"""
     plan_id: str
     origin: PlanOrigin
     status: PlanStatus
@@ -542,6 +551,7 @@ class PlanState:
 
 
 def load_plan_state(raw: object) -> PlanState | None:
+    """从持久化对象加载当前计划状态。"""
     if raw is None:
         return None
     if isinstance(raw, PlanState):
@@ -550,21 +560,19 @@ def load_plan_state(raw: object) -> PlanState | None:
         raise PlanValidationError("plan state must be an object")
     if raw.get("schema_version") == PLAN_STATE_SCHEMA_VERSION:
         return PlanState.from_mapping(raw)
-    if raw.get("schema_version") == 6:
-        return _migrate_schema_6(raw)
     raise PlanValidationError("unsupported plan state schema")
 
 
 def plan_state_to_dict(
     state: PlanState | Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
-    if isinstance(state, Mapping) and state.get("schema_version") not in {6, 7}:
-        return deepcopy(dict(state))
+    """将计划状态编码为当前唯一 schema 的字典。"""
     loaded = load_plan_state(state)
     return loaded.to_dict() if loaded is not None else None
 
 
 def ensure_run_mode(value: object) -> RunMode:
+    """校验并收窄 Core 运行模式。"""
     text = str(value).strip() if value is not None else ""
     if text not in _RUN_MODES:
         raise ValueError(f"Unknown run mode: {value}")
@@ -572,6 +580,7 @@ def ensure_run_mode(value: object) -> RunMode:
 
 
 def ensure_planning_budget_profile(value: object) -> PlanningBudgetProfile:
+    """校验并收窄计划预算配置。"""
     text = str(value).strip() if value is not None else ""
     if text not in _BUDGET_PROFILES:
         raise ValueError(f"Unknown planning budget profile: {value}")
@@ -579,6 +588,7 @@ def ensure_planning_budget_profile(value: object) -> PlanningBudgetProfile:
 
 
 def ensure_plan_origin(value: object) -> PlanOrigin:
+    """校验并收窄计划来源。"""
     text = str(value).strip() if value is not None else ""
     if text not in _PLAN_ORIGINS:
         raise PlanValidationError(f"Unknown plan origin: {value}")
@@ -586,6 +596,7 @@ def ensure_plan_origin(value: object) -> PlanOrigin:
 
 
 def ensure_plan_status(value: object) -> PlanStatus:
+    """校验并收窄计划状态。"""
     text = str(value).strip() if value is not None else ""
     if text not in _PLAN_STATUSES:
         raise PlanValidationError(f"Unknown plan status: {value}")
@@ -593,6 +604,7 @@ def ensure_plan_status(value: object) -> PlanStatus:
 
 
 def ensure_plan_step_status(value: object) -> PlanStepStatus:
+    """校验并收窄计划项状态。"""
     text = str(value).strip() if value is not None else ""
     if text not in _STEP_STATUSES:
         raise PlanValidationError(f"Unknown plan step status: {value}")
@@ -600,6 +612,7 @@ def ensure_plan_step_status(value: object) -> PlanStepStatus:
 
 
 def ensure_plan_revision_reason(value: object) -> PlanRevisionReason:
+    """校验并收窄计划修订原因。"""
     text = str(value).strip() if value is not None else ""
     if text not in _REVISION_REASONS:
         raise PlanValidationError(f"Unknown plan revision reason: {value}")
@@ -607,58 +620,11 @@ def ensure_plan_revision_reason(value: object) -> PlanRevisionReason:
 
 
 def ensure_plan_operation(value: object) -> PlanOperation:
+    """校验并收窄计划操作类型。"""
     text = str(value).strip() if value is not None else ""
     if text not in _PLAN_OPERATIONS:
         raise PlanValidationError(f"Unknown plan operation: {value}")
     return cast(PlanOperation, text)
-
-
-def _migrate_schema_6(raw: Mapping[str, object]) -> PlanState:
-    definition = PlanDefinition(
-        summary=_required_text(raw.get("summary"), "summary"),
-        completion_criteria=_sequence(
-            raw.get("completion_criteria"), "completion_criteria"
-        ),
-        task_understanding=_optional_text(raw.get("task_understanding")) or "",
-        current_implementation=_optional_text(raw.get("current_implementation")) or "",
-        target_design=_optional_text(raw.get("target_design")) or "",
-        impact_scope=_optional_text(raw.get("impact_scope")) or "",
-        risks_and_open_questions=_sequence(
-            raw.get("risks_and_open_questions", ()),
-            "risks_and_open_questions",
-        ),
-        verification_plan=_optional_text(raw.get("verification_plan")) or "",
-        explanation=_optional_text(raw.get("explanation")) or "",
-    )
-    legacy_steps = _mapping_sequence(raw.get("items"), "items")
-    steps = tuple(
-        PlanStep(
-            step_id=_required_text(item.get("id"), f"items[{index}].id"),
-            step=_required_text(item.get("step"), f"items[{index}].step"),
-            details=_required_text(item.get("details"), f"items[{index}].details"),
-            verification=_required_text(
-                item.get("verification"), f"items[{index}].verification"
-            ),
-            status=ensure_plan_step_status(item.get("status")),
-            completion_note=(
-                "Migrated completed step."
-                if item.get("status") == "completed"
-                else ""
-            ),
-        )
-        for index, item in enumerate(legacy_steps)
-    )
-    origin_mode = ensure_run_mode(raw.get("origin_mode"))
-    if origin_mode == "read":
-        raise PlanValidationError("read mode cannot own a plan")
-    return PlanState(
-        plan_id=_required_text(raw.get("plan_id"), "plan_id"),
-        origin="plan_mode" if origin_mode == "plan" else "build_mode",
-        status=ensure_plan_status(raw.get("status")),
-        revision=_non_negative_int(raw.get("revision"), "revision"),
-        definition=definition,
-        steps=steps,
-    )
 
 
 def _validate_steps(values: Sequence[PlanStep]) -> tuple[PlanStep, ...]:

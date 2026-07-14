@@ -161,6 +161,7 @@ class _Resolver:
     name: str
 
     def resolve(self, input, request):
+        """把搜索输入解析为工作区内只读资源访问请求。"""
         _ = request
         root = self.sandbox.ensure_readable_path(self.sandbox.resolve_path(input.path))
         return ToolAccessResolution(
@@ -333,7 +334,10 @@ class _SearchHandler:
 
 
 class _Renderer:
+    """将搜索结果文本转换为模型可消费的文本内容块。"""
+
     def render(self, data):
+        """渲染搜索工具的文本结果。"""
         return (TextContent(text=str(data["text"])),)
 
 

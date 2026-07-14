@@ -1,3 +1,5 @@
+"""定义 Core 与 Context、LLM、Tools、Sessions 之间的唯一端口和结果契约。"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -55,6 +57,7 @@ ContextPurpose = Literal["reasoning", "verification", "finalization"]
 
 @dataclass(frozen=True)
 class TaskStepView:
+    """供策略读取的单个计划项只读投影。"""
     step_id: str
     step: str
     details: str
@@ -76,6 +79,7 @@ class TaskStepView:
 
 @dataclass(frozen=True)
 class TaskPlanView:
+    """供 Core 决策使用的活动计划只读投影。"""
     plan_id: str
     origin: str
     status: str
@@ -101,6 +105,7 @@ class TaskPlanView:
         object.__setattr__(self, "steps", steps)
 
     def to_mapping(self) -> dict[str, object]:
+        """返回计划视图的普通字典投影。"""
         return {
             "plan_id": self.plan_id,
             "origin": self.origin,
@@ -122,6 +127,7 @@ class TaskPlanView:
 
 @dataclass(frozen=True)
 class VerificationView:
+    """最近一次工具验证结果的只读投影。"""
     status: str
     verified_revision: int | None = None
     attempted_checks: tuple[str, ...] = ()
@@ -165,6 +171,7 @@ class VerificationView:
 
 @dataclass(frozen=True)
 class CoreContextView:
+    """Core 从 Context 获得的模型输入视图。"""
     original_request: str
     goal: str
     mode: RunMode
@@ -221,6 +228,7 @@ class CoreContextView:
 
     @classmethod
     def from_state(cls, state: CoreState, mode: RunMode) -> "CoreContextView":
+        """从 CoreState 构造供 Context 消费的只读视图。"""
         plan = state.task.plan
         plan_view = None
         current_step = None
@@ -277,6 +285,7 @@ class CoreContextView:
 
 @dataclass(frozen=True)
 class ContextPrepareRequest:
+    """请求 Context 端口准备一次模型输入。"""
     session_id: str
     run_id: str
     purpose: ContextPurpose
@@ -317,6 +326,7 @@ class ContextPrepareRequest:
 
 @dataclass(frozen=True)
 class PreparedModelContext:
+    """Context 端口返回的稳定模型输入及投影引用。"""
     system_prompt: str
     messages: tuple[Message, ...]
     tools: tuple[Tool, ...]
@@ -341,10 +351,13 @@ class PreparedModelContext:
 
 
 class ContextPreparationPort(Protocol):
+    """Core 唯一可见的上下文准备端口。"""
     def prepare(
         self,
         request: ContextPrepareRequest,
-    ) -> PreparedModelContext | Awaitable[PreparedModelContext]: ...
+    ) -> PreparedModelContext | Awaitable[PreparedModelContext]:
+        """为一次模型尝试物化系统提示、消息和工具目录。"""
+        ...
 
 
 @dataclass(frozen=True)
@@ -389,6 +402,7 @@ CoreEntry: TypeAlias = ModelEntry | ToolResultEntry
 
 @dataclass(frozen=True)
 class CoreLimits:
+    """约束 Core 模型和工具循环的运行限制。"""
     max_model_turns: int = 100
     max_tool_iterations: int = 240
     max_tool_calls_per_turn: int | None = 16
@@ -412,6 +426,7 @@ class CoreLimits:
 
 @dataclass(frozen=True)
 class CoreReason:
+    """可观察的决策原因及结构化详情。"""
     code: str
     message: str = ""
     source: str = "core"
@@ -448,6 +463,7 @@ class CoreReason:
 
 @dataclass(frozen=True)
 class CoreDirective:
+    """Reducer 交给 Driver 执行的下一步指令基类。"""
     code: str
     constraints: tuple[str, ...] = ()
     evidence_refs: tuple[str, ...] = ()
@@ -477,6 +493,7 @@ class CoreDirective:
 
 @dataclass(frozen=True)
 class CoreWait:
+    """表示 Run 必须等待外部事件后才能继续。"""
     kind: CoreWaitKind
     request_id: str
     reason: CoreReason
@@ -506,6 +523,7 @@ class CoreWait:
 
 @dataclass(frozen=True)
 class CallModel:
+    """要求 Driver 调用一次模型。"""
     purpose: ModelPurpose
     directive: CoreDirective
     reason: CoreReason
@@ -528,6 +546,7 @@ class CallModel:
 
 @dataclass(frozen=True)
 class ExecuteTools:
+    """要求 Driver 通过 Tools 端口执行工具批次。"""
     calls: tuple[ToolCall, ...]
     reason: CoreReason
 
@@ -542,6 +561,7 @@ class ExecuteTools:
 
 @dataclass(frozen=True)
 class Wait:
+    """要求 Driver 提交等待状态而不启动后台工作。"""
     wait: CoreWait
 
     def __post_init__(self) -> None:
@@ -551,6 +571,7 @@ class Wait:
 
 @dataclass(frozen=True)
 class Terminate:
+    """要求 Driver 以指定原因结束 Run。"""
     status: TerminationStatus
     reason_code: str
     message: str = ""
@@ -576,6 +597,7 @@ class Terminate:
 
     @property
     def reason(self) -> CoreReason:
+        """返回终止指令对应的结构化原因。"""
         return CoreReason(
             code=self.reason_code,
             message=self.message,
@@ -588,6 +610,7 @@ CoreDecision: TypeAlias = CallModel | ExecuteTools | Wait | Terminate
 
 @dataclass(frozen=True)
 class CoreRunInput:
+    """启动 Core 主循环所需的规范化输入。"""
     session_id: str
     run_id: str
     entry: CoreEntry
@@ -613,7 +636,7 @@ class CoreRunInput:
         object.__setattr__(
             self,
             "state",
-            load_core_state(self.state, original_request=request),
+            load_core_state(self.state),
         )
         object.__setattr__(self, "mode", ensure_run_mode(self.mode))
         if not isinstance(self.model, ModelDescriptor):
@@ -630,11 +653,17 @@ class CoreRunInput:
 
 
 class BoundaryPort(Protocol):
-    def commit(self, boundary: "CoreBoundary") -> None | Awaitable[None]: ...
+    """Core 提交边界事实和 checkpoint 的唯一端口。"""
+    def commit(self, boundary: "CoreBoundary") -> None | Awaitable[None]:
+        """原子提交一次 Core 边界事实。"""
+        ...
 
 
 class CancellationProbe(Protocol):
-    def raise_if_cancelled(self) -> None: ...
+    """Core 查询运行时取消信号的最小端口。"""
+    def raise_if_cancelled(self) -> None:
+        """若 Runtime 已取消本次 Run 则抛出取消异常。"""
+        ...
 
 
 LiveEventSink = Callable[[Mapping[str, object]], None | Awaitable[None]]
@@ -642,6 +671,7 @@ LiveEventSink = Callable[[Mapping[str, object]], None | Awaitable[None]]
 
 @dataclass(frozen=True)
 class CorePorts:
+    """注入 Core 的模型、工具、Context、边界和取消能力。"""
     model: ModelPort
     context: ContextPreparationPort
     boundary: BoundaryPort
@@ -677,6 +707,7 @@ class CorePorts:
 
 @dataclass(frozen=True)
 class CoreBoundary:
+    """一次 Core 迭代提交给 Runtime 的边界快照。"""
     kind: CoreBoundaryKind
     state: CoreState
     new_messages: tuple[Message, ...] = ()
@@ -710,6 +741,7 @@ class CoreBoundary:
 
 @dataclass(frozen=True)
 class CoreOutcome:
+    """Core 主循环的最终结果。"""
     status: CoreOutcomeStatus
     reason: CoreReason
     state: CoreState
@@ -746,6 +778,7 @@ class CoreOutcome:
 
     @property
     def final_text(self) -> str:
+        """提取最终助手消息中的文本内容。"""
         if self.final_message is None:
             return ""
         return "".join(

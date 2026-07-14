@@ -1,3 +1,5 @@
+"""解析 CLI 参数与环境变量，并构造 Runtime 配置输入。"""
+
 from __future__ import annotations
 
 """面向人类用户的 ``codepilot config`` 子命令。

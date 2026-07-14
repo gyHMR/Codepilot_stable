@@ -1,3 +1,5 @@
+"""把 Core 终态、计数器和信号投影为 Runtime 公共契约。"""
+
 from __future__ import annotations
 
 """Runtime projections derived from the single authoritative CoreOutcome."""

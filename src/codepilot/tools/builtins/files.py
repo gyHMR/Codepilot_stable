@@ -244,6 +244,12 @@ def create_file_registrations(
 
 
 @dataclass(frozen=True)
+class _ResolvedFileInput:
+    value: object
+    targets: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
 class _Resolver:
     """文件工具访问解析器 —— 将路径参数解析为权限请求。
 
@@ -287,6 +293,7 @@ class _Resolver:
             else [str(input.path)]
         )
         resources: list[ToolResource] = []
+        targets: list[Path] = []
         for raw in paths:
             target = self.sandbox.resolve_path(raw)
             target = (
@@ -294,6 +301,7 @@ class _Resolver:
                 if self.mutating
                 else self.sandbox.ensure_readable_path(target)
             )
+            targets.append(target)
             resources.append(_resource(self.sandbox, target))
         effects = (
             frozenset({"filesystem_read", "filesystem_write"})
@@ -307,7 +315,7 @@ class _Resolver:
             or estimated_bytes > _AUTO_APPROVE_MAX_BYTES
         )
         return ToolAccessResolution(
-            input=input,
+            input=_ResolvedFileInput(input, tuple(targets)),
             access=ToolAccessRequest(
                 actions=(f"{self.name}.bulk" if bulk else self.name,),
                 resources=tuple(resources),
@@ -357,7 +365,7 @@ class _FileHandler:
     name: str
     unique_edit: bool
 
-    async def __call__(self, input, context: ToolExecutionContext) -> FileOutput:
+    async def __call__(self, resolved: _ResolvedFileInput, context: ToolExecutionContext) -> FileOutput:
         """入口方法 —— 根据工具名称分发到具体处理逻辑。
 
         在开始前检查取消信号（cancellation.raise_if_cancelled）。
@@ -370,17 +378,18 @@ class _FileHandler:
             FileOutput 统一输出
         """
         context.cancellation.raise_if_cancelled()
+        input = resolved.value
         if self.name == "ls":
-            return self._ls(input, context)
+            return self._ls(input, resolved.targets[0], context)
         if self.name == "read":
-            return self._read(input, context)
+            return self._read(input, resolved.targets[0], context)
         if self.name == "write":
-            return self._write(input, context)
+            return self._write(input, resolved.targets[0], context)
         if self.name == "edit":
-            return self._edit(input, context)
-        return self._patch(input, context)
+            return self._edit(input, resolved.targets[0], context)
+        return self._patch(input, resolved.targets, context)
 
-    def _ls(self, input: LsInput, context: ToolExecutionContext) -> FileOutput:
+    def _ls(self, input: LsInput, target: Path, context: ToolExecutionContext) -> FileOutput:
         """列出目录内容。
 
         处理流程:
@@ -397,7 +406,7 @@ class _FileHandler:
         返回:
             FileOutput 包含目录列表文本和元数据
         """
-        target = self.sandbox.ensure_readable_path(self.sandbox.resolve_path(input.path))
+        target = self.sandbox.ensure_readable_path(target)
         if not target.is_dir():
             raise ToolHandlerError("ls.not_directory", f"Directory not found: {input.path}")
         entries = sorted(target.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
@@ -417,7 +426,7 @@ class _FileHandler:
             metadata={"truncated": truncated},
         )
 
-    def _read(self, input: ReadInput, context: ToolExecutionContext) -> FileOutput:
+    def _read(self, input: ReadInput, target: Path, context: ToolExecutionContext) -> FileOutput:
         """读取文件内容。
 
         处理流程:
@@ -438,7 +447,7 @@ class _FileHandler:
         返回:
             FileOutput 包含文件内容和分页/截断元数据
         """
-        target = self.sandbox.ensure_readable_path(self.sandbox.resolve_path(input.path))
+        target = self.sandbox.ensure_readable_path(target)
         if not target.is_file():
             raise ToolHandlerError("read.not_file", f"File not found: {input.path}")
         try:
@@ -477,7 +486,7 @@ class _FileHandler:
             },
         )
 
-    def _write(self, input: WriteInput, context: ToolExecutionContext) -> FileOutput:
+    def _write(self, input: WriteInput, target: Path, context: ToolExecutionContext) -> FileOutput:
         """创建或替换文件。
 
         处理流程:
@@ -497,7 +506,7 @@ class _FileHandler:
         返回:
             FileOutput 包含写入结果（"Updated" 或 "Unchanged"）
         """
-        target = self.sandbox.ensure_mutable_path(self.sandbox.resolve_path(input.path))
+        target = self.sandbox.ensure_mutable_path(target)
         if target.exists() and not input.overwrite:
             raise ToolHandlerError("write.exists", f"File already exists: {input.path}")
         previous = target.read_text(encoding="utf-8") if target.is_file() else None
@@ -507,7 +516,7 @@ class _FileHandler:
             target.write_text(input.content, encoding="utf-8", newline="\n")
         return self._mutation_output(target, changed, context, "write file")
 
-    def _edit(self, input: EditInput, context: ToolExecutionContext) -> FileOutput:
+    def _edit(self, input: EditInput, target: Path, context: ToolExecutionContext) -> FileOutput:
         """对文件执行精确的文本替换。
 
         支持四种替换模式:
@@ -529,7 +538,7 @@ class _FileHandler:
         返回:
             FileOutput 包含编辑结果（含 replacements 计数）
         """
-        target = self.sandbox.ensure_mutable_path(self.sandbox.resolve_path(input.path))
+        target = self.sandbox.ensure_mutable_path(target)
         if not target.is_file():
             raise ToolHandlerError("edit.not_file", f"File not found: {input.path}")
         text = target.read_text(encoding="utf-8")
@@ -557,7 +566,7 @@ class _FileHandler:
         output = self._mutation_output(target, changed, context, "edit file")
         return FileOutput(**{**output.__dict__, "details": {"replacements": replacements}})
 
-    def _patch(self, input: ApplyPatchInput, context: ToolExecutionContext) -> FileOutput:
+    def _patch(self, input: ApplyPatchInput, targets: tuple[Path, ...], context: ToolExecutionContext) -> FileOutput:
         """批量应用文本替换补丁（原子化写入 + 失败回滚）。
 
         原子化保证：
@@ -581,13 +590,13 @@ class _FileHandler:
         staged: dict[Path, str] = {}
         originals: dict[Path, str] = {}
         changed_paths: list[Path] = []
-        for index, edit in enumerate(input.edits):
+        for index, (edit, resolved_target) in enumerate(zip(input.edits, targets, strict=True)):
             path = str(edit.get("path", ""))
             old_text = edit.get("old_text")
             new_text = edit.get("new_text")
             if not isinstance(old_text, str) or not isinstance(new_text, str):
                 raise ToolHandlerError("apply_patch.invalid_edit", f"edits[{index}] requires string old_text/new_text")
-            target = self.sandbox.ensure_mutable_path(self.sandbox.resolve_path(path))
+            target = self.sandbox.ensure_mutable_path(resolved_target)
             if not target.is_file():
                 raise ToolHandlerError("apply_patch.not_file", f"File not found: {path}")
             current = staged.get(target)
@@ -684,6 +693,7 @@ class _FileHandler:
 class _Renderer:
     """渲染器 —— 将 FileOutput 转为 LLM 可消费的 TextContent。"""
     def render(self, data):
+        """渲染文件工具输出为模型可消费的文本内容块。"""
         return (TextContent(text=str(data["text"])),)
 
 

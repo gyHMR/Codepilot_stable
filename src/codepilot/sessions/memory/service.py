@@ -1,3 +1,5 @@
+"""实现 Memory 提案、审批、编辑、禁用、删除和查询用例。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -32,12 +34,7 @@ from .contracts import (
     ShowMemory,
 )
 from .recall import MemoryRecallEngine
-from .repository import (
-    LegacyMemoryMigrator,
-    MemoryMigrationReport,
-    ProjectMemoryRepository,
-    UserMemoryRepository,
-)
+from .repository import ProjectMemoryRepository, UserMemoryRepository
 
 
 class MemoryService:
@@ -49,7 +46,6 @@ class MemoryService:
         workspace_dir: str | Path,
         user_home: str | Path | None = None,
         clock: Callable[[], datetime] | None = None,
-        auto_migrate: bool = True,
     ) -> None:
         self.user_repository = UserMemoryRepository(user_home)
         self.project_repository = ProjectMemoryRepository(workspace_dir)
@@ -59,14 +55,6 @@ class MemoryService:
             self.project_repository,
         )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
-        self.migrator = LegacyMemoryMigrator(
-            self.user_repository,
-            self.project_repository,
-        )
-        if auto_migrate:
-            report = self.migrator.dry_run()
-            if report.required:
-                self.migrator.migrate()
 
     def recall(self, query: MemoryQuery) -> MemoryRecallResult:
         return self.retriever.recall(query)
@@ -227,12 +215,6 @@ class MemoryService:
             )
         )
 
-    def dry_run_legacy_migration(self) -> MemoryMigrationReport:
-        return self.migrator.dry_run()
-
-    def migrate_legacy(self) -> MemoryMigrationReport:
-        return self.migrator.migrate()
-
     def _edit(self, command: EditMemory) -> MemoryRecord:
         old = self._require_status(
             command.memory_id,
@@ -334,6 +316,7 @@ class MemoryService:
 
 
 def render_memory(record: MemoryRecord) -> str:
+    """把 Memory 记录渲染为稳定的命令行展示文本。"""
     return f"[{record.scope}/{record.type}] {record.key}: {record.content}"
 
 

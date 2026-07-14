@@ -238,6 +238,7 @@ def _seed_proposed_plan(
     from codepilot.protocols import UserMessage
     from codepilot.sessions.contracts import WaitingState
     from codepilot.sessions.service import BeginRunRequest, CommitRunBoundaryRequest
+    from codepilot.sessions.workspace import capture_workspace_checkpoint
 
     base_steps = (
         PlanStep(
@@ -290,6 +291,7 @@ def _seed_proposed_plan(
             session_id=session.session_id,
             run_id=run_id,
             user_message=UserMessage(content=request),
+            workspace=capture_workspace_checkpoint(session.workspace_dir),
         ),
         expected_session_revision=session.session_state.revision,
     )
@@ -311,6 +313,7 @@ def _seed_proposed_plan(
             phase="model",
             resume_point="before_model",
             core_state=core_state,
+            workspace=begun.run.checkpoint.workspace,
         )
     )
     committed = session.state_service.commit_run_boundary(
@@ -329,6 +332,7 @@ def _seed_proposed_plan(
                 request_id=plan_id,
                 payload={"plan_id": plan_id, "revision": plan.revision},
             ),
+            workspace=started.run.checkpoint.workspace,
         )
     )
     session.session_state = committed.session

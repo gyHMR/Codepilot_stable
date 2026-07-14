@@ -1,3 +1,5 @@
+"""将用户交互工具适配为 Tools 注册定义。"""
+
 from __future__ import annotations
 
 """Core-owned user interaction tool registration."""
@@ -25,6 +27,7 @@ REQUEST_USER_INPUT_TOOL = "request_user_input"
 
 @dataclass(frozen=True)
 class RequestUserInput:
+    """模型请求用户补充信息的结构化输入。"""
     prompt: str
     options: tuple[str, ...] = ()
     allow_free_text: bool = True
@@ -49,6 +52,7 @@ class RequestUserInput:
 
 
 def create_interaction_registration() -> ToolRegistration:
+    """创建受 Core 等待状态约束的用户交互工具注册。"""
     input_schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",

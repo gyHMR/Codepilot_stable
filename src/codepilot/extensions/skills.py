@@ -1,3 +1,5 @@
+"""发现、校验并读取工作区与用户级 Skill 包。"""
+
 from __future__ import annotations
 
 """Static Skill Package discovery, validation, and resource boundaries."""
@@ -41,6 +43,7 @@ class SkillPackageError(ValueError):
 
 @dataclass(frozen=True)
 class SkillManifest:
+    """Skill 清单中的元数据、命令和资源声明。"""
     name: str
     version: str
     description: str
@@ -52,6 +55,7 @@ class SkillManifest:
 
 @dataclass(frozen=True)
 class SkillPackage:
+    """已校验 Skill 包及其根目录和清单。"""
     manifest: SkillManifest
     root: Path
     entrypoint: Path
@@ -117,6 +121,7 @@ class SkillPackage:
 
 @dataclass
 class SkillCatalog:
+    """按优先级发现和读取可用 Skill 包。"""
     packages: list[SkillPackage] = field(default_factory=list)
     diagnostics: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)

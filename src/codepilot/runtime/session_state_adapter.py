@@ -1,3 +1,5 @@
+"""把 Runtime 的边界操作适配到 Sessions 权威状态服务。"""
+
 from __future__ import annotations
 
 import asyncio

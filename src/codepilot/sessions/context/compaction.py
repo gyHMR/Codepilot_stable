@@ -1,10 +1,11 @@
+"""在上下文高压时生成结构化摘要、artifact 与 checkpoint。"""
+
 from __future__ import annotations
 
 import hashlib
 import inspect
 import json
 import uuid
-from dataclasses import replace
 from pathlib import Path
 
 from codepilot.llm.estimation import estimate_context_tokens, estimate_text_tokens
@@ -21,13 +22,12 @@ from .contracts import (
 
 
 class ContextCompactionError(RuntimeError):
+    """无法生成满足结构约束的上下文压缩结果。"""
     pass
 
 
-_LEGACY_SOURCE_DIGEST = "legacy:unverified"
-
-
 class ContextCompactor:
+    """在压力阈值触发时生成摘要、artifact 和 checkpoint。"""
     def __init__(
         self,
         *,
@@ -147,27 +147,12 @@ class ContextCompactor:
             self._clear()
             return False
         digest = hashlib.sha256(_source_text(source, None).encode("utf-8")).hexdigest()
-        if snapshot.source_digest == _LEGACY_SOURCE_DIGEST:
-            updated = replace(
-                snapshot,
-                source_digest=digest,
-                estimated_tokens_before=estimate_context_tokens(list(source), ""),
-            )
-            if self.current_summary is None:
-                self._clear()
-                return False
-            self._write_snapshot(updated, self.current_summary)
-            self.current_snapshot = updated
-            return True
         if digest != snapshot.source_digest:
             self._clear()
             return False
         return True
 
     def restore_checkpoint_state(self, state: dict[str, object]) -> None:
-        if set(state) == {"compact_summary", "compacted_until_message_id"}:
-            self._restore_legacy_checkpoint(state)
-            return
         checkpoint = ContextCheckpointState.from_mapping(state)
         if checkpoint.compact_snapshot_ref is None:
             self._clear()
@@ -196,41 +181,6 @@ class ContextCompactor:
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             self._clear()
             return
-        self.current_snapshot = snapshot
-        self.current_summary = summary
-
-    def _restore_legacy_checkpoint(self, state: dict[str, object]) -> None:
-        summary_text = str(state.get("compact_summary") or "").strip()
-        cursor = str(state.get("compacted_until_message_id") or "").strip()
-        if not summary_text or not cursor:
-            raise ValueError("legacy context checkpoint requires summary and cursor")
-        digest = hashlib.sha256(
-            f"{self.session_id}\n{cursor}\n{summary_text}".encode("utf-8")
-        ).hexdigest()
-        compact_id = f"compact_legacy_{digest[:12]}"
-        relative = (
-            Path(".codepilot")
-            / "sessions"
-            / self.session_id
-            / "artifacts"
-            / "context"
-            / f"{compact_id}.json"
-        )
-        tokens = estimate_text_tokens(summary_text).total
-        snapshot = CompactSnapshotRef(
-            compact_id=compact_id,
-            path=relative.as_posix(),
-            compacted_until_message_id=cursor,
-            source_digest=_LEGACY_SOURCE_DIGEST,
-            estimated_tokens_before=tokens,
-            estimated_tokens_after=tokens,
-        )
-        summary = CompactSummary(
-            original_goal="Restored legacy session context",
-            important_evidence=(summary_text,),
-            source_refs=(f"message:{cursor}",),
-        )
-        self._write_snapshot(snapshot, summary)
         self.current_snapshot = snapshot
         self.current_summary = summary
 

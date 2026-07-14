@@ -156,7 +156,7 @@ class ToolRuntime:
             raise TypeError("state_store must implement ToolStateStore")
 
     def for_session(self, session_id: str) -> "ToolRuntime":
-        """Create an equivalent runtime with isolated session attempt state."""
+        """创建使用独立 Session 尝试状态、但共享工具注册配置的 Runtime。"""
 
         from .state_store import CheckpointToolStateStore
 
@@ -178,22 +178,6 @@ class ToolRuntime:
     def catalog_snapshot(self, *, mode=None) -> ToolCatalogSnapshot:
         """获取工具目录快照（透传给 Registry）。"""
         return self.registry.catalog_snapshot(mode=mode)
-
-    async def execute(self, request: ToolExecutionRequest) -> ToolResult:
-        """执行一次工具调用（单次执行）。
-
-        参数:
-            request: 工具执行请求
-
-        返回:
-            ToolResult（可能包含审批挑战、用户输入请求等挂起状态）
-        """
-        if not isinstance(request, ToolExecutionRequest):
-            raise TypeError("ToolRuntime.execute expects ToolExecutionRequest")
-        prepared = self._prepare(request)
-        if isinstance(prepared, ToolResult):
-            return prepared
-        return await self._run_handler(prepared)
 
     async def execute_batch(
         self,
@@ -222,7 +206,7 @@ class ToolRuntime:
         self,
         requests: tuple[ToolExecutionRequest, ...] | list[ToolExecutionRequest],
     ) -> ToolBatchPreparation:
-        """Prepare a batch without running any Tool handler."""
+        """只执行批次准入检查，不运行任何 Tool handler。"""
 
         items = tuple(requests)
         if not items:
@@ -259,7 +243,7 @@ class ToolRuntime:
         return ToolBatchPreparation(batch_id=batch_id)
 
     async def execute_prepared(self, batch_id: str) -> tuple[ToolResult, ...]:
-        """Execute a batch that already passed side-effect-free preparation."""
+        """消费已通过无副作用准备阶段的一次性批次句柄。"""
 
         batch_id = str(batch_id).strip()
         if not batch_id:
@@ -410,7 +394,7 @@ class ToolRuntime:
         *,
         intent: Mapping[str, object] | None = None,
     ) -> dict[str, object] | None:
-        """Return Tool-owned state for an opaque Sessions component checkpoint."""
+        """返回供 Sessions 封装的 Tools 私有 checkpoint 状态。"""
 
         runtime_intent: dict[str, object] = {}
         if intent:
@@ -429,7 +413,7 @@ class ToolRuntime:
         return {"intent": runtime_intent} if runtime_intent else None
 
     def restore_checkpoint_state(self, state: Mapping[str, object]) -> None:
-        """Restore pending attempts before Core resumes the owning Run."""
+        """在 Core 恢复所属 Run 前恢复挂起尝试与待执行恢复响应。"""
 
         restore = getattr(self.state_store, "restore_checkpoint_state", None)
         if callable(restore):
@@ -476,34 +460,11 @@ class ToolRuntime:
                 except ValueError:
                     pass
 
-    async def resume(
-        self, response: ApprovalResponse | InteractionResponse
-    ) -> ToolResult:
-        """恢复被挂起的工具执行。
-
-        根据响应类型分发到不同的恢复流程：
-        - ApprovalResponse → _resume_approval（审批响应）
-        - InteractionResponse → _resume_interaction（用户输入响应）
-
-        参数:
-            response: 审批响应或交互响应
-
-        返回:
-            恢复执行后的 ToolResult
-        """
-        if isinstance(response, InteractionResponse):
-            return await self._resume_interaction(response)
-        if isinstance(response, ApprovalResponse):
-            return await self._resume_approval(response)
-        raise TypeError(
-            "ToolRuntime.resume expects ApprovalResponse or InteractionResponse"
-        )
-
     def prepare_resume(
         self,
         response: ApprovalResponse | InteractionResponse,
     ) -> ToolResumePreparation:
-        """Stage a resume response without executing the suspended handler."""
+        """暂存审批或交互响应，不执行被挂起的 handler。"""
 
         if not isinstance(response, (ApprovalResponse, InteractionResponse)):
             raise TypeError(
@@ -519,6 +480,7 @@ class ToolRuntime:
         return ToolResumePreparation(resume_id, checkpoint)
 
     def pending_prepared_resume(self) -> ToolResumePreparation | None:
+        """返回当前唯一待执行恢复句柄；没有或存在多个时按契约报错。"""
         if not self._prepared_resumes:
             return None
         if len(self._prepared_resumes) != 1:
@@ -530,7 +492,7 @@ class ToolRuntime:
         return ToolResumePreparation(resume_id, checkpoint)
 
     async def execute_prepared_resume(self, resume_id: str) -> ToolResult:
-        """Execute a response previously staged by prepare_resume."""
+        """消费此前暂存的恢复响应并继续对应的挂起工具。"""
 
         resume_id = str(resume_id).strip()
         if not resume_id:
@@ -539,7 +501,11 @@ class ToolRuntime:
             response = self._prepared_resumes.pop(resume_id)
         except KeyError as exc:
             raise ValueError(f"Prepared Tool resume not found: {resume_id}") from exc
-        return await self.resume(response)
+        if isinstance(response, InteractionResponse):
+            return await self._resume_interaction(response)
+        if isinstance(response, ApprovalResponse):
+            return await self._resume_approval(response)
+        raise TypeError("Prepared Tool resume response is unsupported")
 
     # ── 准备阶段 ──────────────────────────────────────────────────────────────
 
@@ -1265,9 +1231,11 @@ class _EffectReporter:
 
     @property
     def items(self) -> tuple[ToolEffect, ...]:
+        """返回当前已记录副作用的不可变快照。"""
         return tuple(self._items)
 
     def report(self, effect: object) -> None:
+        """校验并追加一个工具副作用。"""
         if not isinstance(effect, ToolEffect):
             raise TypeError("effect reporter expects ToolEffect")
         self._items.append(effect)

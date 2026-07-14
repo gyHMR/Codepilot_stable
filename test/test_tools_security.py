@@ -4,6 +4,8 @@ import asyncio
 import json
 from pathlib import Path
 
+from tool_runtime_testkit import execute_tool
+
 
 def test_runtime_tools_catalog_is_filtered_by_current_mode(tmp_path: Path) -> None:
     from codepilot.runtime import SessionOpenIntent
@@ -88,7 +90,8 @@ def test_skill_loader_tool_loads_discovered_skill_content(tmp_path: Path) -> Non
     assert entry is not None
 
     observation = asyncio.run(
-        runtime.execute(
+        execute_tool(
+            runtime,
             ToolExecutionRequest(
                 run_id="run1",
                 session_id="session1",
@@ -124,7 +127,8 @@ def test_grep_searches_when_path_is_specific_file(tmp_path: Path) -> None:
     registration_id = registry.register(registration)
 
     result = asyncio.run(
-        ToolRuntime(registry).execute(
+        execute_tool(
+            ToolRuntime(registry),
             ToolExecutionRequest(
                 run_id="run1",
                 session_id="session1",
@@ -163,7 +167,8 @@ def test_grep_skips_repository_metadata_and_dependency_directories(tmp_path: Pat
     registration_id = registry.register(registration)
 
     result = asyncio.run(
-        ToolRuntime(registry).execute(
+        execute_tool(
+            ToolRuntime(registry),
             ToolExecutionRequest(
                 run_id="run1",
                 session_id="session1",
@@ -233,10 +238,11 @@ def test_apply_patch_rolls_back_all_files_when_one_replace_fails(
 
     monkeypatch.setattr("codepilot.tools.builtins.files.os.replace", fail_second_replace)
     result = asyncio.run(
-        ToolRuntime(
-            registry,
-            permission_engine=_permission_engine("workspace-write"),
-        ).execute(
+        execute_tool(
+            ToolRuntime(
+                registry,
+                permission_engine=_permission_engine("workspace-write"),
+            ),
             ToolExecutionRequest(
                 run_id="run_patch",
                 session_id="session_patch",
@@ -250,7 +256,7 @@ def test_apply_patch_rolls_back_all_files_when_one_replace_fails(
                 },
                 mode="execute",
                 registration_id=registration_id,
-            )
+            ),
         )
     )
 

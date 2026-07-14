@@ -1,3 +1,5 @@
+"""定义 Core 产生并交给 Runtime 投影的领域事件信封。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -48,6 +50,7 @@ class CoreDomainEvent:
         )
 
     def to_dict(self) -> dict[str, object]:
+        """返回可交给 Runtime 事件投影的普通字典。"""
         return {
             "kind": self.kind,
             "payload": dict(self.payload),

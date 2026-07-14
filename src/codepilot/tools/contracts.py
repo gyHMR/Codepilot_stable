@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """工具拥有者、Registry、Runtime 和 Core 共享的规范定义。
 
 本文件是整个工具子系统的"契约层"，定义了所有核心类型和协议接口。
 理解 tools 包的关键就是理解这里的类型体系。
 """
+
+from __future__ import annotations
 
 import re
 from collections.abc import Mapping
@@ -187,7 +187,11 @@ class ToolExecutionRequest:
 
 @dataclass(frozen=True)
 class ToolBatchPreparation:
-    """Opaque prepared batch handle or side-effect-free preparation results."""
+    """工具批次的准备结果。
+
+    准备阶段只做注册、参数、权限和审批检查，不执行处理器；通过时返回一次性
+    ``batch_id``，遇到屏障时直接返回与输入顺序对应的终态结果。
+    """
 
     batch_id: str | None = None
     results: tuple["ToolResult", ...] = ()
@@ -211,7 +215,7 @@ class ToolBatchPreparation:
 
 @dataclass(frozen=True)
 class ToolResumePreparation:
-    """Opaque handle produced before a resumed Tool attempt can execute."""
+    """恢复挂起工具前生成的一次性恢复句柄及其 checkpoint 投影。"""
 
     resume_id: str
     checkpoint_state: Mapping[str, object]
@@ -239,9 +243,13 @@ class CancellationToken(Protocol):
     """
 
     @property
-    def cancelled(self) -> bool: ...
+    def cancelled(self) -> bool:
+        """返回工具是否已收到取消信号。"""
+        ...
 
-    def raise_if_cancelled(self) -> None: ...
+    def raise_if_cancelled(self) -> None:
+        """若已取消则抛出取消异常，否则继续执行。"""
+        ...
 
 
 class ProgressReporter(Protocol):
@@ -257,7 +265,9 @@ class ProgressReporter(Protocol):
         *,
         message: str = "",
         data: Mapping[str, object] | None = None,
-    ) -> None: ...
+    ) -> None:
+        """发送一条运行中进度事件，不改变工具结果状态。"""
+        ...
 
 
 class EffectReporter(Protocol):
@@ -267,7 +277,9 @@ class EffectReporter(Protocol):
     这些记录会被用于权限验证（实际效果不超过授权范围）和审计日志。
     """
 
-    def report(self, effect: object) -> None: ...
+    def report(self, effect: object) -> None:
+        """记录一个已观察或声明的工具副作用。"""
+        ...
 
 
 CleanupCallback: TypeAlias = Callable[[], Awaitable[None] | None]
@@ -280,7 +292,9 @@ class CleanupStack(Protocol):
     工具执行完成后这些回调会被逆序执行。
     """
 
-    def push(self, callback: CleanupCallback) -> None: ...
+    def push(self, callback: CleanupCallback) -> None:
+        """登记一个在工具结束时逆序执行的清理回调。"""
+        ...
 
 
 @dataclass(frozen=True)
@@ -353,17 +367,23 @@ class ToolCodec(Protocol, Generic[TInput]):
     """
 
     @property
-    def json_schema(self) -> Mapping[str, object] | None: ...
+    def json_schema(self) -> Mapping[str, object] | None:
+        """返回输入值的 JSON Schema；未提供校验时返回 ``None``。"""
+        ...
 
     # 返回 JSON Schema，None 表示不校验（仅 UnverifiedJsonCodec 使用）
 
-    def decode(self, value: object) -> TInput: ...
+    def decode(self, value: object) -> TInput:
+        """将模型传入的 JSON 值校验并解码为处理器输入类型。"""
+        ...
 
     # 将 JSON 对象解码为类型化的 Python 值
     # 参数 value: 来自 LLM 的原始 JSON 参数
     # 返回: 解码后的类型化对象
 
-    def encode(self, value: TInput) -> object: ...
+    def encode(self, value: TInput) -> object:
+        """将处理器输出编码为可序列化的 JSON 值。"""
+        ...
 
     # 将类型化的 Python 值编码回 JSON 对象
     # 参数 value: 工具处理器的返回值
@@ -404,7 +424,9 @@ class ToolAccessResolver(Protocol, Generic[TInput]):
         self,
         input: TInput,
         request: ToolExecutionRequest,
-    ) -> ToolAccessResolution[TInput]: ...
+    ) -> ToolAccessResolution[TInput]:
+        """根据已解码输入生成资源、效果和风险组成的访问请求。"""
+        ...
 
 
 class ToolOutputRenderer(Protocol):
@@ -415,7 +437,9 @@ class ToolOutputRenderer(Protocol):
     content 字段返回给 LLM。
     """
 
-    def render(self, data: Mapping[str, object]) -> tuple[object, ...]: ...
+    def render(self, data: Mapping[str, object]) -> tuple[object, ...]:
+        """把编码后的结果转换为模型可消费的内容块。"""
+        ...
 
 
 @dataclass(frozen=True)
@@ -492,49 +516,75 @@ class ToolRegistration:
 
 
 class ToolExecutionPort(Protocol):
-    """The only Tool capability exposed to Core."""
+    """唯一暴露给 Core 的工具执行能力。
+
+    Core 只能先准备批次，再用一次性句柄执行；注册物化、权限、审批和状态持久化均
+    由 Tools/Runtime 内部负责，Core 不得直接调用处理器。
+    """
 
     def catalog_snapshot(
         self, *, mode: ToolMode | None = None
-    ) -> ToolCatalogSnapshot: ...
+    ) -> ToolCatalogSnapshot:
+        """返回指定运行模式下稳定的模型可见工具目录快照。"""
+        ...
 
     def prepare_batch(
         self,
         requests: tuple[ToolExecutionRequest, ...] | list[ToolExecutionRequest],
-    ) -> ToolBatchPreparation: ...
+    ) -> ToolBatchPreparation:
+        """执行无副作用准备并返回批次句柄或阻断结果。"""
+        ...
 
-    async def execute_prepared(self, batch_id: str) -> tuple[ToolResult, ...]: ...
+    async def execute_prepared(self, batch_id: str) -> tuple[ToolResult, ...]:
+        """消费一次性批次句柄并执行已通过准备阶段的工具。"""
+        ...
 
 
 class ToolControlPort(Protocol):
-    """Runtime-only approval, interaction, cancellation, and resume controls."""
+    """仅供 Runtime/Interface 使用的审批、交互、取消与恢复控制端口。"""
 
-    def pending_challenges(self) -> tuple[ApprovalChallenge, ...]: ...
+    def pending_challenges(self) -> tuple[ApprovalChallenge, ...]:
+        """返回当前待用户处理的审批挑战。"""
+        ...
 
-    def approval_challenge(self, approval_id: str): ...
+    def approval_challenge(self, approval_id: str):
+        """按审批 ID 获取挑战详情；不存在时返回 ``None``。"""
+        ...
 
-    async def cancel(self, attempt_id: str) -> bool: ...
+    async def cancel(self, attempt_id: str) -> bool:
+        """请求取消指定工具尝试，并返回是否成功发出取消。"""
+        ...
 
     def prepare_resume(
         self,
         response: ApprovalResponse | InteractionResponse,
-    ) -> ToolResumePreparation: ...
+    ) -> ToolResumePreparation:
+        """暂存用户响应并生成可恢复的 opaque 句柄。"""
+        ...
 
-    def pending_prepared_resume(self) -> ToolResumePreparation | None: ...
+    def pending_prepared_resume(self) -> ToolResumePreparation | None:
+        """读取当前待执行的恢复句柄。"""
+        ...
 
-    async def execute_prepared_resume(self, resume_id: str) -> ToolResult: ...
+    async def execute_prepared_resume(self, resume_id: str) -> ToolResult:
+        """消费恢复句柄并继续执行挂起工具。"""
+        ...
 
 
 class ToolCheckpointPort(Protocol):
-    """Runtime-only opaque checkpoint capability."""
+    """仅供 Runtime 保存和恢复 Tools 私有状态的 opaque checkpoint 端口。"""
 
     def checkpoint_state(
         self,
         *,
         intent: Mapping[str, object] | None = None,
-    ) -> dict[str, object] | None: ...
+    ) -> dict[str, object] | None:
+        """导出当前 Tools 私有状态；无活动状态时返回 ``None``。"""
+        ...
 
-    def restore_checkpoint_state(self, state: Mapping[str, object]) -> None: ...
+    def restore_checkpoint_state(self, state: Mapping[str, object]) -> None:
+        """校验并恢复此前导出的 Tools 私有状态。"""
+        ...
 
 
 # ── 内部辅助函数 ──────────────────────────────────────────────────────────────

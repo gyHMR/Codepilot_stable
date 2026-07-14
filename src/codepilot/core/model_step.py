@@ -1,3 +1,5 @@
+"""封装一次模型调用的请求构造、事件归并和失败分类。"""
+
 from __future__ import annotations
 
 import inspect
@@ -32,6 +34,7 @@ from .state import CoreState, FailureRecord
 
 @dataclass(frozen=True)
 class ModelActionResult:
+    """一次模型调用归并后的消息、用量和错误结果。"""
     observation: ModelObservation
     usage: Usage | None = None
     catalog_snapshot: ToolCatalogSnapshot | None = None

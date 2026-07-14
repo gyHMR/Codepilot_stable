@@ -194,7 +194,7 @@ CoreOutcome
 └── error
 ```
 
-Outcome 不重复保存 counters、signals、plan、workspace effects 和 verification 等可从 CoreState 派生的字段。Runtime 可以为兼容接口构造投影。
+Outcome 不重复保存 counters、signals、plan、workspace effects 和 verification 等可从 CoreState 派生的字段。Runtime 只为当前外部契约构造只读投影。
 
 ### 5.5 CoreWait
 
@@ -715,7 +715,7 @@ Sessions 继续保持：
 - `commit_run_boundary` 是唯一持久化入口。
 - Sessions 不解释 CoreState 和组件 checkpoint。
 
-本次兼容范围只覆盖重构开始时当前 Sessions v2 中已保存的旧 Core payload，使 staged migration 可以恢复已有非终态 Run。它不恢复更早的历史 Sessions API、旧目录结构或 Sessions v1 文件。读取旧 Core payload 后，下一次成功 Boundary 只写新 schema。
+Core 恢复只接受当前 schema。缺失 schema、旧 schema、旧目录结构和历史 Sessions payload 均不得进入运行链路；迁移必须在运行系统之外一次性完成。
 
 ### 14.2 Runtime
 
@@ -773,7 +773,7 @@ src/codepilot/core/
 
 | 当前实现 | 目标 |
 |---|---|
-| runner 主循环 | 移入 driver.py；runner 暂时保留兼容 facade |
+| runner 主循环 | 移入 driver.py；旧 runner facade 删除 |
 | RunState | 替换为 CoreState；RunSignalsSummary 变为投影 |
 | PlanState 状态转换方法 | 移入 Reducer |
 | PlanStateManager | 删除 |
@@ -802,7 +802,7 @@ src/codepilot/core/
 
 ### 阶段 D：Core Driver
 
-实现 `run_core()`，使用 fake Ports 验证全部时序和故障路径。`run_agent_loop()` 暂时作为兼容 facade。
+实现 `run_core()`，使用 fake Ports 验证全部时序和故障路径；不保留 `run_agent_loop()` facade。
 
 ### 阶段 E：Plan 命令化
 
@@ -845,7 +845,7 @@ src/codepilot/core/
 | Policy | 固定优先级、完成条件、恢复预算、replan 阈值、外部等待 |
 | Driver | Boundary 顺序、消息/事件 delta、Port 调用顺序、ToolCall settlement |
 | Runtime | 异常归一化、资源释放、deadline、模型重试、mode switch |
-| Sessions | 每个恢复点、commit 幂等、当前旧 Core payload 读取、新 schema 单写 |
+| Sessions | 每个恢复点、commit 幂等、当前 Core schema 严格读取和单写 |
 | Events | Domain/Runtime/Live 分层、live sink 隔离、审计投影兼容 |
 | E2E | Read 回答、Build 修改验证、Approval Resume、Plan 审批与修订 |
 | Regression | Gateway、CLI、Subagent、Observability、Evaluation 和全量测试 |
@@ -870,8 +870,8 @@ src/codepilot/core/
 - `PlanStateManager`、`RunGuard` 和 Core 模型重试已移除。
 - CoreRunInput 不再包含 approval decision、deadline、retry policy 和事件序号。
 - Runtime 不直接修改 PlanState，不解释 CoreDecision。
-- 当前 Sessions v2 的旧 Core payload 可以按约定读取并升级，新提交只写新 schema。
-- Gateway、CLI 和 Subagent 的外部行为保持兼容。
+- Sessions 只接受当前 Core schema，新提交只写当前 schema。
+- Gateway、CLI 和 Subagent 使用统一当前契约，不保留历史调用形态。
 - Observability/Evaluation 不依赖已删除的 Core 内部字段。
 - 新增测试、类型/格式检查和全量测试通过。
 - 不存在长期 feature flag、双状态机、Plan 双写或两套执行入口。

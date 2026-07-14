@@ -1,3 +1,5 @@
+"""提供 Session 事件的 SSE 实时订阅与断线重放。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -28,7 +30,7 @@ async def session_events(
     last_event_id = last_event_id_header or last_event_id_query
 
     async def stream() -> AsyncIterator[str]:
-        replay = hub.replay_after(last_event_id)
+        replay, queue = hub.subscribe_after(last_event_id)
         if replay.expired:
             yield format_sse(
                 WebEvent(
@@ -44,7 +46,6 @@ async def session_events(
             for event in replay.events:
                 yield format_sse(event)
 
-        queue = hub.subscribe()
         try:
             while True:
                 if await request.is_disconnected():

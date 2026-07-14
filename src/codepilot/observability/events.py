@@ -1,3 +1,5 @@
+"""提供 Durable/Live 事件的统计与摘要查询。"""
+
 from __future__ import annotations
 
 # 新手导读：events.py 把原始 Agent 事件归一化成更适合审计和统计的形态。
@@ -167,6 +169,7 @@ def validate_run_event(event: dict[str, Any]) -> list[str]:
 
 
 def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """统计事件类型、错误和工具终态，返回紧凑摘要。"""
     counts: dict[str, int] = {}
     for event in events:
         event_type = str(event.get("type", "unknown"))

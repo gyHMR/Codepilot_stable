@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tool_runtime_testkit import execute_tool
+
 
 _CANONICAL_BUILTIN_NAMES = {
     "workspace_status",
@@ -67,7 +69,7 @@ def _execute(runtime, registration_ids, name: str, arguments: dict[str, object])
         mode="execute",
         registration_id=registration_ids[name],
     )
-    return asyncio.run(runtime.execute(request))
+    return asyncio.run(execute_tool(runtime, request))
 
 
 def test_builtin_registration_catalog_is_complete_and_opaque(tmp_path: Path) -> None:
@@ -88,6 +90,31 @@ def test_builtin_registration_catalog_is_complete_and_opaque(tmp_path: Path) -> 
 
     filtered = create_builtin_registrations(tmp_path, enabled_names=["read", "grep"])
     assert [item.spec.name for item in filtered] == ["read", "grep"]
+
+
+def test_file_handler_consumes_resolver_canonical_path_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from codepilot.tools.sandbox import WorkspaceSandbox
+
+    target = tmp_path / "sample.txt"
+    target.write_text("sample\n", encoding="utf-8", newline="\n")
+    calls = 0
+    original = WorkspaceSandbox.resolve_path
+
+    def counting_resolve(self, path):
+        nonlocal calls
+        calls += 1
+        return original(self, path)
+
+    monkeypatch.setattr(WorkspaceSandbox, "resolve_path", counting_resolve)
+    runtime, ids = _runtime(tmp_path, enabled_names=["read"])
+
+    result = _execute(runtime, ids, "read", {"path": "sample.txt"})
+
+    assert result.status == "success"
+    assert calls == 1
 
 
 @pytest.mark.parametrize(

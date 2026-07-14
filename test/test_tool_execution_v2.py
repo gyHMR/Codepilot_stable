@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import pytest
 
+from tool_runtime_testkit import execute_tool
+
 
 def test_execution_timeout_preserves_effects_and_runs_cleanup_lifo() -> None:
     from codepilot.tools.execution import ExecutionController
@@ -43,7 +45,7 @@ def test_execution_timeout_preserves_effects_and_runs_cleanup_lifo() -> None:
     )
     request = _request("slow", registration_id, "timeout")
 
-    result = asyncio.run(runtime.execute(request))
+    result = asyncio.run(execute_tool(runtime, request))
 
     assert result.status == "timed_out"
     assert result.error is not None
@@ -77,7 +79,7 @@ def test_runtime_cancel_sets_token_and_runs_cleanup() -> None:
             controller=ExecutionController(),
         )
         request = _request("cancel_me", registration_id, "cancel")
-        task = asyncio.create_task(runtime.execute(request))
+        task = asyncio.create_task(execute_tool(runtime, request))
         await started.wait()
         assert await runtime.cancel(attempt_id_for(request)) is True
         return await task
@@ -110,7 +112,10 @@ def test_requested_timeout_can_extend_default_up_to_policy_maximum() -> None:
     )
 
     result = asyncio.run(
-        runtime.execute(_request("requested_timeout", registration_id, "run"))
+        execute_tool(
+            runtime,
+            _request("requested_timeout", registration_id, "run"),
+        )
     )
 
     assert result.status == "success"

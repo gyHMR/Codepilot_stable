@@ -1,3 +1,5 @@
+"""定义 Core 可消费的计划与运行控制命令及其严格序列化契约。"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -19,6 +21,7 @@ CommandStatus = Literal["applied", "rejected"]
 
 @dataclass(frozen=True)
 class SubmitPlan:
+    """提交一份新的执行计划。"""
     command_id: str
     definition: PlanDefinition
     steps: tuple[PlanStepDefinition, ...]
@@ -32,6 +35,7 @@ class SubmitPlan:
 
 @dataclass(frozen=True)
 class UpdatePlanProgress:
+    """更新当前计划项状态和验证信息。"""
     command_id: str
     expected_revision: int
     updates: tuple[PlanStepUpdate, ...]
@@ -55,6 +59,7 @@ class UpdatePlanProgress:
 
 @dataclass(frozen=True)
 class ProposePlanRevision:
+    """提出对活动计划的结构化修订。"""
     command_id: str
     expected_revision: int
     reason: PlanRevisionReason
@@ -76,6 +81,7 @@ class ProposePlanRevision:
 
 @dataclass(frozen=True)
 class RequestPlanClose:
+    """请求关闭活动计划。"""
     command_id: str
     expected_revision: int
     summary: str
@@ -97,6 +103,7 @@ class RequestPlanClose:
 
 @dataclass(frozen=True)
 class ApprovePlan:
+    """批准待审批计划并允许进入执行阶段。"""
     command_id: str
     expected_revision: int
 
@@ -111,6 +118,7 @@ class ApprovePlan:
 
 @dataclass(frozen=True)
 class RejectPlan:
+    """拒绝待审批计划并保留拒绝原因。"""
     command_id: str
     expected_revision: int
     reason: str = "user_rejected"
@@ -127,6 +135,7 @@ class RejectPlan:
 
 @dataclass(frozen=True)
 class ApprovePlanRevision:
+    """批准待处理的计划修订。"""
     command_id: str
     expected_revision: int
 
@@ -141,6 +150,7 @@ class ApprovePlanRevision:
 
 @dataclass(frozen=True)
 class RejectPlanRevision:
+    """拒绝待处理的计划修订。"""
     command_id: str
     expected_revision: int
     reason: str = "user_rejected"
@@ -157,6 +167,7 @@ class RejectPlanRevision:
 
 @dataclass(frozen=True)
 class AbandonPlan:
+    """明确放弃当前活动计划。"""
     command_id: str
     expected_revision: int
     reason: str
@@ -173,6 +184,7 @@ class AbandonPlan:
 
 @dataclass(frozen=True)
 class ReportVerificationUnavailable:
+    """记录当前环境无法完成验证的事实。"""
     command_id: str
     reason: str
     attempted_checks: tuple[str, ...] = ()
@@ -222,6 +234,7 @@ _CORE_COMMAND_TYPES = (
 
 @dataclass(frozen=True)
 class CommandResult:
+    """Core 命令处理后的统一结果。"""
     command_id: str
     status: CommandStatus
     reason: str = ""
@@ -236,10 +249,12 @@ class CommandResult:
 
 
 def is_core_command(value: object) -> bool:
+    """判断对象是否为 Core 支持的命令类型。"""
     return isinstance(value, _CORE_COMMAND_TYPES)
 
 
 def core_command_to_dict(command: CoreCommand) -> dict[str, object]:
+    """将 Core 命令编码为严格可持久化字典。"""
     if isinstance(command, SubmitPlan):
         return {
             "kind": "submit_plan",
@@ -305,6 +320,7 @@ def core_command_to_dict(command: CoreCommand) -> dict[str, object]:
 
 
 def core_command_from_mapping(raw: Mapping[str, object]) -> CoreCommand:
+    """从严格字段映射解码 Core 命令。"""
     kind = _required_text(raw.get("kind"), "kind")
     command_id = _required_text(raw.get("command_id"), "command_id")
     if kind == "submit_plan":

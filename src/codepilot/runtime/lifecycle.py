@@ -1,3 +1,5 @@
+"""跟踪单次 Run 的严格生命周期阶段与终止状态。"""
+
 from __future__ import annotations
 
 """In-process Runtime execution lifecycle; never persisted by Sessions."""
@@ -22,6 +24,7 @@ _TRANSITIONS: dict[RuntimeExecutionState, frozenset[RuntimeExecutionState]] = {
 
 @dataclass
 class RuntimeLifecycle:
+    """校验并记录单次 Run 的运行时生命周期转换。"""
     run_id: str
     state: RuntimeExecutionState = "new"
     terminal_outcome: TerminalOutcome | None = None

@@ -1,3 +1,5 @@
+"""协调 Session 输入、命令、等待恢复、Run 执行和终态提交。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -236,6 +238,7 @@ class RuntimeSessionCoordinator:
             ),
             expected_session_revision=self.session_state.revision,
         )
+        run_id = begun.run.run_id
         self.session_state = begun.session
         if not begun.reused:
             await self._run_lifecycle_hooks(
@@ -282,10 +285,7 @@ class RuntimeSessionCoordinator:
                 run_id=run_id,
                 entry=ModelEntry(),
                 messages=tuple(messages),
-                state=load_core_state(
-                    begun.run.core_state,
-                    original_request=intent.text,
-                ),
+                state=load_core_state(begun.run.core_state),
                 model=model,
                 mode=effective_mode,
                 limits=self.core_limits(effective_mode),
@@ -515,7 +515,6 @@ class RuntimeSessionCoordinator:
         result: AgentRunResult,
         *,
         events: tuple[dict[str, object], ...] = (),
-        store_outcome: bool,
     ) -> SessionRunRecord:
         state_port = (
             prepared.state_port
@@ -527,9 +526,8 @@ class RuntimeSessionCoordinator:
                 terminal_status = {
                     "completed": "completed",
                     "failed": "failed",
-                    "aborted": "cancelled",
                     "cancelled": "cancelled",
-                }.get(result.status, "failed")
+                }[outcome.status]
                 terminal_messages = tuple(
                     message
                     for message in outcome.new_messages
@@ -567,34 +565,19 @@ class RuntimeSessionCoordinator:
                 for message, record in zip(terminal_messages, finished.committed_messages, strict=True):
                     state_port.committed_message_ids[id(message)] = record.message_id
             self.session_state = state_port.session
-        if store_outcome:
-            for event in events:
-                payload = dict(event)
+        for event in events:
+            payload = dict(event)
+            try:
                 await self.conversation.dispatch_event(payload)
-            committed_messages = list(outcome.new_messages)
-            self.conversation.append_messages(committed_messages)
-            for message in committed_messages:
-                message_id = state_port.committed_message_ids.get(id(message)) if state_port else None
-                if message_id is not None:
-                    _set_session_message_id(message, message_id)
-            self.conversation.remember_result(result)
-
-        if _is_terminal_outcome(outcome):
-            self._submit_captured_memory_proposals(result)
-
-        if prepared.rollback_baseline is not None:
-            self._write_rollback_metadata(
-                result,
-                self._rollback_baseline(prepared.rollback_baseline),
-            )
-            if _is_terminal_outcome(outcome):
-                self._discard_rollback_baseline(prepared.rollback_baseline)
-        self._calibrate_context_usage(result)
-        await self._run_lifecycle_hooks(
-            text=_prompt_text(prepared),
-            is_continue=_is_continue_text(_prompt_text(prepared)),
-            hooks=self.after_prompt_hooks,
-        )
+            except Exception as exc:
+                logger.warning("failed to project committed runtime event: %s", exc)
+        committed_messages = list(outcome.new_messages)
+        self.conversation.append_messages(committed_messages)
+        for message in committed_messages:
+            message_id = state_port.committed_message_ids.get(id(message)) if state_port else None
+            if message_id is not None:
+                _set_session_message_id(message, message_id)
+        self.conversation.remember_result(result)
 
         record = SessionRunRecord(
             run_id=result.run_id,
@@ -612,7 +595,47 @@ class RuntimeSessionCoordinator:
                 "rollback": prepared.rollback_baseline,
             },
         )
+        await self._run_post_commit_effects(prepared, outcome, result)
         return record
+
+    async def _run_post_commit_effects(
+        self,
+        prepared: PreparedAgentRun,
+        outcome: CoreOutcome,
+        result: AgentRunResult,
+    ) -> None:
+        """Run non-authoritative effects after the Sessions commit has succeeded."""
+
+        terminal = _is_terminal_outcome(outcome)
+        if terminal:
+            try:
+                self._submit_captured_memory_proposals(result)
+            except Exception as exc:
+                logger.warning("failed to finalize memory proposals: %s", exc)
+
+        rollback_ref = prepared.rollback_baseline
+        if rollback_ref is not None:
+            try:
+                self._write_rollback_metadata(
+                    result,
+                    self._rollback_baseline(rollback_ref),
+                )
+            except Exception as exc:
+                logger.warning("failed to write rollback metadata: %s", exc)
+            finally:
+                if terminal:
+                    self._discard_rollback_baseline(rollback_ref)
+
+        self._calibrate_context_usage(result)
+        try:
+            prompt_text = _prompt_text(prepared)
+            await self._run_lifecycle_hooks(
+                text=prompt_text,
+                is_continue=_is_continue_text(prompt_text),
+                hooks=self.after_prompt_hooks,
+            )
+        except Exception as exc:
+            logger.warning("failed to run after-prompt hook: %s", exc)
 
     def describe(self, *, last_run_id: str | None) -> SessionView:
         return SessionView(
@@ -748,11 +771,7 @@ class RuntimeSessionCoordinator:
         if run is None:
             return None
         try:
-            core = load_core_state(
-                run.core_state,
-                original_request=self._last_substantive_user_request()
-                or "Continue the current task",
-            )
+            core = load_core_state(run.core_state)
         except (TypeError, ValueError):
             return None
         plan = core.task.plan
@@ -931,11 +950,7 @@ class RuntimeSessionCoordinator:
         run = self.state_service.get_run(run_id) if run_id is not None else None
         if run is None or run.checkpoint is None:
             raise ValueError("No active Core run owns the current Task Plan")
-        core = load_core_state(
-            run.core_state,
-            original_request=self._last_substantive_user_request()
-            or "Continue the current task",
-        )
+        core = load_core_state(run.core_state)
         reduction = apply_core_command(
             core,
             command,
@@ -1175,6 +1190,7 @@ class RuntimeSessionCoordinator:
                 baseline,
                 affected_paths=list(result.affected_paths),
                 workspace_changed=bool(result.workspace_changed),
+                workspace_dir=self.workspace_dir,
             ),
         )
 

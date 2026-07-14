@@ -25,6 +25,26 @@ class _Summarizer:
         )
 
 
+def test_context_compactor_rejects_legacy_inline_summary_checkpoint(tmp_path: Path) -> None:
+    compactor = ContextCompactor(
+        workspace_dir=tmp_path,
+        session_id="session_1",
+        summarizer=None,
+    )
+
+    try:
+        compactor.restore_checkpoint_state(
+            {
+                "compact_summary": "legacy summary",
+                "compacted_until_message_id": "msg_1",
+            }
+        )
+    except ValueError:
+        pass
+    else:  # pragma: no cover - guards removal of the compatibility path
+        raise AssertionError("legacy inline Context checkpoints must be rejected")
+
+
 def test_checkpoint_restores_snapshot_and_missing_artifact_degrades_to_empty(
     tmp_path: Path,
 ) -> None:

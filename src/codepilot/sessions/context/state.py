@@ -1,3 +1,5 @@
+"""保存 Session 拥有的 Context 活动文件、证据和仓库快照状态。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -12,6 +14,7 @@ from codepilot.sessions.workspace import build_repository_bootstrap, file_state_
 
 @dataclass
 class ActiveFile:
+    """当前工作集中的活动文件及其角色和新鲜度。"""
     path: str
     role: str
     reason: str
@@ -23,6 +26,7 @@ class ActiveFile:
 
 @dataclass
 class ContextEvidence:
+    """可注入模型上下文的结构化证据。"""
     evidence_id: str
     kind: str
     summary: str
@@ -39,6 +43,7 @@ class ContextEvidence:
 
 @dataclass
 class ContextState:
+    """Session 拥有的 Context 状态。"""
     workspace_dir: Path
     active_files: dict[str, ActiveFile] = field(default_factory=dict)
     evidence: dict[str, ContextEvidence] = field(default_factory=dict)
@@ -204,6 +209,7 @@ class ContextState:
 
 
 class RepositoryTracker:
+    """采集工作区快照并计算仓库事实变化。"""
     def __init__(self, workspace_dir: str | Path) -> None:
         self.workspace_dir = Path(workspace_dir).resolve()
 
@@ -267,6 +273,7 @@ def compare_snapshots(
     previous: RepositorySnapshot | None,
     current: RepositorySnapshot,
 ) -> RepositoryDelta:
+    """比较两个仓库快照并返回结构化差异。"""
     if previous is None:
         return RepositoryDelta()
     old_status = _status_map(previous.git_status)
@@ -306,6 +313,7 @@ def compare_snapshots(
 
 
 def repository_summary(snapshot: RepositorySnapshot, delta: RepositoryDelta) -> str:
+    """把仓库快照和差异渲染为紧凑上下文摘要。"""
     lines = [
         f"Repository fingerprint: {snapshot.fingerprint[:12]}",
         f"Project type: {snapshot.project_type or 'unknown'}",

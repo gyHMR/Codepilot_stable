@@ -1,3 +1,5 @@
+"""把历史消息、仓库事实和 Memory 召回投影为模型工作集。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -250,6 +252,7 @@ def render_context_attachment(
     compact_summary: CompactSummary | None,
     projection_ref: str,
 ) -> str:
+    """把选中的分层上下文项渲染为模型可见附件。"""
     lines = [
         "[Codepilot Context Attachment]",
         f"projection_ref={projection_ref}",

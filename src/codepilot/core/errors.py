@@ -1,3 +1,5 @@
+"""Core 专用错误类型，表示决策循环无法继续的领域失败。"""
+
 from __future__ import annotations
 
 

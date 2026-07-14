@@ -1,3 +1,5 @@
+"""提供 Web 服务健康状态和只读配置检查路由。"""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Request

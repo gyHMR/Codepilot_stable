@@ -1,3 +1,5 @@
+"""把模型工具调用转换为 Tools 端口请求并归并执行结果。"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -27,6 +29,7 @@ from .errors import CoreInvariantError
 
 @dataclass(frozen=True)
 class PreparedCoreToolBatch:
+    """模型工具调用转换后的 Core 批次及其注册快照。"""
     calls: tuple[ToolCall, ...]
     preparation: ToolBatchPreparation
 
@@ -37,6 +40,7 @@ def prepare_core_tool_batch(
     decision: ExecuteTools,
     catalog_snapshot: ToolCatalogSnapshot | None,
 ) -> PreparedCoreToolBatch:
+    """把助手消息中的 ToolCall 转换为严格 Tools 请求批次。"""
     if ports.tools is None:
         return PreparedCoreToolBatch(
             calls=decision.calls,
@@ -80,6 +84,7 @@ async def execute_core_tool_batch(
     ports: CorePorts,
     prepared: PreparedCoreToolBatch,
 ) -> tuple[ToolResult, ...]:
+    """通过唯一工具端口执行准备完成的批次。"""
     if ports.tools is None or prepared.preparation.batch_id is None:
         raise RuntimeError("Prepared Tool batch is not executable")
     for call in prepared.calls:
@@ -101,6 +106,7 @@ async def execute_core_tool_batch(
 def project_final_tool_messages(
     results: tuple[ToolResult, ...] | list[ToolResult],
 ) -> tuple[ToolResultMessage, ...]:
+    """把终态 ToolResult 投影为追加回对话记录的消息。"""
     return tuple(
         to_tool_result_message(result)
         for result in results
@@ -199,6 +205,7 @@ def interrupted_tool_results(
     code: str,
     message: str,
 ) -> tuple[ToolResult, ...]:
+    """为因前序屏障未执行的调用构造 interrupted 结果。"""
     return tuple(
         ToolResult(
             tool_call_id=call.id,
@@ -220,6 +227,7 @@ def interrupted_tool_results(
 def unavailable_tool_results(
     calls: tuple[ToolCall, ...] | list[ToolCall],
 ) -> tuple[ToolResult, ...]:
+    """为缺少工具端口的调用构造稳定失败结果。"""
     return tuple(
         ToolResult(
             tool_call_id=call.id,
@@ -250,6 +258,7 @@ async def _emit_core_live_event(ports: CorePorts, event: dict[str, Any]) -> None
 
 
 def tool_end_event(result: ToolResult) -> dict[str, Any]:
+    """根据工具终态构造统一 Core 领域事件载荷。"""
     approval = result.approval
     error = result.error
     uris, workspace_changed = workspace_effect_summary(result.effects)

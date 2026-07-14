@@ -1,3 +1,5 @@
+"""把 HTTP/SSE 用例映射到 Runtime Gateway，不持有业务权威状态。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -18,6 +20,7 @@ from .schemas import AcceptedAction
 
 
 class WebServiceError(RuntimeError):
+    """Web 用例映射失败的基础异常。"""
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
@@ -25,14 +28,17 @@ class WebServiceError(RuntimeError):
 
 
 class WebConflict(WebServiceError):
+    """请求与当前 Session/Run 状态冲突。"""
     pass
 
 
 class WebNotFound(WebServiceError):
+    """请求的 Session、Run 或审批不存在。"""
     pass
 
 
 class WebService:
+    """面向路由的 Runtime Gateway 用例门面。"""
     def __init__(
         self,
         *,

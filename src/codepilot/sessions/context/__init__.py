@@ -1,3 +1,5 @@
+"""导出 Session 范围的上下文治理服务、契约和状态模型。"""
+
 from .budget import (
     ContextBudgetConfig,
     ContextBudgetExceededError,

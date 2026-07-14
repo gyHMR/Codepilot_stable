@@ -1,3 +1,5 @@
+"""从权威 Run 状态和事件构建可读摘要与审计报告。"""
+
 from __future__ import annotations
 
 # 新手导读：summary.py 根据事件和指标生成可读运行摘要。
@@ -13,6 +15,7 @@ from .trace import RunTrace, build_run_trace
 
 @dataclass(frozen=True)
 class RunSummary:
+    """从 Run 权威事实派生的紧凑可读摘要。"""
     run_id: str
     session_id: str | None
     status: str = ""
@@ -33,6 +36,7 @@ class RunSummary:
 
 
 def build_run_summary(trace: RunTrace) -> RunSummary:
+    """从完整 RunTrace 构建结构化摘要。"""
     duration = (
         max(0, trace.finished_at_ms - trace.started_at_ms)
         if trace.started_at_ms is not None
@@ -62,6 +66,7 @@ def build_run_report(
     *,
     events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """从 Run 结果和事件构建结构化审计报告。"""
     trace = build_run_trace(events or [], result=result)
     summary = build_run_summary(trace)
     return {

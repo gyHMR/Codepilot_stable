@@ -5,6 +5,8 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 
+from tool_runtime_testkit import execute_tool
+
 
 def _workspace_runtime(workspace: Path, *, registration=None):
     from codepilot.tools.builtins.workspace import create_workspace_status_registration
@@ -41,7 +43,7 @@ def test_workspace_status_executes_through_canonical_runtime(tmp_path: Path) -> 
     runtime, _, registration_id = _workspace_runtime(tmp_path)
     snapshot = runtime.catalog_snapshot(mode="execute")
 
-    result = asyncio.run(runtime.execute(_request(registration_id)))
+    result = asyncio.run(execute_tool(runtime, _request(registration_id)))
 
     assert isinstance(result, ToolResult)
     assert result.status == "success"
@@ -71,7 +73,9 @@ def test_canonical_runtime_rejects_invalid_input_before_handler(tmp_path: Path) 
         registration=replace(registration, handler=handler),
     )
 
-    result = asyncio.run(runtime.execute(_request(registration_id, arguments={"extra": True})))
+    result = asyncio.run(
+        execute_tool(runtime, _request(registration_id, arguments={"extra": True}))
+    )
 
     assert result.status == "error"
     assert result.error is not None
@@ -94,7 +98,7 @@ def test_canonical_runtime_converts_invalid_output_to_standard_error(tmp_path: P
         registration=replace(registration, handler=invalid_handler),
     )
 
-    result = asyncio.run(runtime.execute(_request(registration_id)))
+    result = asyncio.run(execute_tool(runtime, _request(registration_id)))
 
     assert result.status == "error"
     assert result.error is not None
@@ -143,7 +147,7 @@ def test_runtime_rejects_effect_resource_outside_authorized_scope(tmp_path: Path
             access_resolver=Resolver(),
         ),
     )
-    result = asyncio.run(runtime.execute(_request(registration_id)))
+    result = asyncio.run(execute_tool(runtime, _request(registration_id)))
 
     assert result.status == "error"
     assert result.error.code == "tool.effect.resource_violation"
@@ -174,7 +178,7 @@ def test_runtime_requires_policy_opt_in_for_structural_output(tmp_path: Path) ->
             output_codec=StructuralCodec(),
         ),
     )
-    result = asyncio.run(runtime.execute(_request(registration_id)))
+    result = asyncio.run(execute_tool(runtime, _request(registration_id)))
 
     assert result.status == "error"
     assert result.error.code == "tool.output.invalid"
@@ -195,7 +199,7 @@ def test_runtime_rejects_stale_model_call_without_starting_reloaded_handler(
 
     runtime.registry.register(replace(registration, handler=reloaded_handler), replace=True)
 
-    result = asyncio.run(runtime.execute(_request(stale_id)))
+    result = asyncio.run(execute_tool(runtime, _request(stale_id)))
 
     assert result.status == "error"
     assert result.error is not None

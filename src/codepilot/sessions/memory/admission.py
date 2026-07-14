@@ -1,3 +1,5 @@
+"""执行 Memory 候选的规范化、敏感信息检查和准入判断。"""
+
 from __future__ import annotations
 
 import re
@@ -30,6 +32,7 @@ _SECRET_PATTERNS = (
 
 @dataclass(frozen=True)
 class AdmissionResult:
+    """Memory 候选经过规范化和安全检查后的准入结果。"""
     disposition: AdmissionDisposition
     proposal: MemoryProposal
     reason: str
@@ -134,10 +137,12 @@ class AdmissionPolicy:
 
 
 def normalize_content(content: str) -> str:
+    """规范空白和控制字符，生成可比较的 Memory 内容。"""
     return re.sub(r"\s+", " ", str(content or "")).strip()
 
 
 def contains_sensitive_content(content: str) -> bool:
+    """检测内容是否包含禁止写入长期 Memory 的敏感模式。"""
     return any(pattern.search(content) is not None for pattern in _SECRET_PATTERNS)
 
 

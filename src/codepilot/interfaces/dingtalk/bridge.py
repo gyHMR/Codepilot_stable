@@ -1,3 +1,5 @@
+"""桥接 DingTalk 会话与 Runtime Gateway，并转发运行帧。"""
+
 from __future__ import annotations
 
 # 新手导读：bridge.py 是钉钉消息和 Runtime UserAction/RuntimeFrame 之间的薄适配层。

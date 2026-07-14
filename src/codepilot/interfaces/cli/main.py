@@ -1,3 +1,5 @@
+"""CLI 程序入口：装配 Runtime 并选择交互或单次执行模式。"""
+
 from __future__ import annotations
 
 """Codepilot 命令行入口。

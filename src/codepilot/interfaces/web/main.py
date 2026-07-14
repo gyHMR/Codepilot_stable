@@ -1,3 +1,5 @@
+"""Web 服务的配置、启动和关闭入口。"""
+
 from __future__ import annotations
 
 import os
@@ -8,6 +10,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class WebServerOptions:
+    """Web 服务监听地址、端口和 Runtime 配置。"""
     host: str = "127.0.0.1"
     port: int = 8000
     workspace: Path = Path(".")

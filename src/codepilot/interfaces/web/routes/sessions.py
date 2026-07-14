@@ -1,3 +1,5 @@
+"""提供 Session 创建、查询、消息读取和删除路由。"""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Request, Response, status

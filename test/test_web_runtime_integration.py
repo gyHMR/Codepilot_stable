@@ -22,7 +22,7 @@ def unit_model():
         base_url="",
         reasoning=False,
         input=["text"],
-        context_window=4000,
+        context_window=32_000,
         max_tokens=500,
     )
 

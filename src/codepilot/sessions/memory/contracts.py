@@ -1,3 +1,5 @@
+"""定义长期 Memory 记录、候选、召回和管理命令的唯一契约。"""
+
 from __future__ import annotations
 
 import re
@@ -41,6 +43,7 @@ _KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$")
 
 @dataclass(frozen=True)
 class MemoryRecord:
+    """长期 Memory 的权威记录及生命周期状态。"""
     id: str
     scope: MemoryScope
     type: MemoryType
@@ -104,6 +107,7 @@ class MemoryRecord:
 
 @dataclass(frozen=True)
 class MemoryProposal:
+    """尚未写入权威存储的 Memory 候选。"""
     scope: MemoryScope
     type: MemoryType
     key: str
@@ -125,6 +129,7 @@ class MemoryProposal:
 
 @dataclass(frozen=True)
 class MemoryProposalBatch:
+    """一次 Run 产生的一组 Memory 候选。"""
     session_id: str
     run_id: str
     origin: MemoryProposalOrigin
@@ -148,6 +153,7 @@ class MemoryProposalBatch:
 
 @dataclass(frozen=True)
 class MemoryProposalReceipt:
+    """Memory 候选提交后的接收与拒绝结果。"""
     records: tuple[MemoryRecord, ...] = ()
     rejected: tuple[str, ...] = ()
 
@@ -165,6 +171,7 @@ class MemoryProposalReceipt:
 
 @dataclass(frozen=True)
 class MemoryQuery:
+    """按作用域、文本和预算召回 Memory 的查询。"""
     user_request: str
     task_goal: str
     current_step: str | None = None
@@ -188,6 +195,7 @@ class MemoryQuery:
 
 @dataclass(frozen=True)
 class RecalledMemory:
+    """带排名和召回理由的 Memory 投影。"""
     memory_id: str
     scope: MemoryScope
     type: MemoryType
@@ -212,6 +220,7 @@ class RecalledMemory:
 
 @dataclass(frozen=True)
 class MemoryRecallResult:
+    """一次召回的命中、丢弃和预算统计。"""
     retrieved: tuple[RecalledMemory, ...] = ()
     dropped: Mapping[str, str] = field(default_factory=dict)
 
@@ -238,6 +247,7 @@ class MemoryRecallResult:
 
 @dataclass(frozen=True)
 class MemoryActor:
+    """执行 Memory 管理操作的主体身份。"""
     user_id: str
 
     def __post_init__(self) -> None:
@@ -246,6 +256,7 @@ class MemoryActor:
 
 @dataclass(frozen=True)
 class AddMemory:
+    """显式新增一条 Memory 的命令。"""
     scope: MemoryScope
     type: MemoryType
     key: str
@@ -261,6 +272,7 @@ class AddMemory:
 
 @dataclass(frozen=True)
 class ListMemory:
+    """列出指定范围 Memory 的命令。"""
     scope: MemoryScope | None = None
     status: MemoryStatus | None = None
 
@@ -281,21 +293,25 @@ class _MemoryIdCommand:
 
 @dataclass(frozen=True)
 class ShowMemory(_MemoryIdCommand):
+    """查看单条 Memory 的命令。"""
     pass
 
 
 @dataclass(frozen=True)
 class ApproveMemory(_MemoryIdCommand):
+    """批准候选 Memory 的命令。"""
     pass
 
 
 @dataclass(frozen=True)
 class RejectMemory(_MemoryIdCommand):
+    """拒绝候选 Memory 的命令。"""
     pass
 
 
 @dataclass(frozen=True)
 class EditMemory(_MemoryIdCommand):
+    """编辑 Memory 并保留历史的命令。"""
     content: str
 
     def __post_init__(self) -> None:
@@ -305,21 +321,25 @@ class EditMemory(_MemoryIdCommand):
 
 @dataclass(frozen=True)
 class DisableMemory(_MemoryIdCommand):
+    """停用 Memory、阻止后续召回的命令。"""
     pass
 
 
 @dataclass(frozen=True)
 class EnableMemory(_MemoryIdCommand):
+    """重新启用 Memory 的命令。"""
     pass
 
 
 @dataclass(frozen=True)
 class DeleteMemory(_MemoryIdCommand):
+    """将 Memory 标记为删除的命令。"""
     pass
 
 
 @dataclass(frozen=True)
 class HistoryMemory:
+    """查询 Memory 生命周期历史的命令。"""
     scope: MemoryScope
     key: str
 
@@ -333,6 +353,7 @@ class HistoryMemory:
 
 @dataclass(frozen=True)
 class PurgeMemory(_MemoryIdCommand):
+    """永久清理已删除 Memory 的命令。"""
     pass
 
 
@@ -353,6 +374,7 @@ MemoryCommand: TypeAlias = (
 
 @dataclass(frozen=True)
 class MemoryCommandResult:
+    """Memory 管理命令的统一结果。"""
     records: tuple[MemoryRecord, ...] = ()
     message: str = ""
 
@@ -365,10 +387,12 @@ class MemoryCommandResult:
 
 
 class MemoryRecallPort(Protocol):
+    """Context 可使用的 Memory 召回端口。"""
     def recall(self, query: MemoryQuery) -> MemoryRecallResult: ...
 
 
 class MemoryProposalPort(Protocol):
+    """Runtime 提交自动 Memory 候选的端口。"""
     def submit_proposals(
         self,
         batch: MemoryProposalBatch,
@@ -376,6 +400,7 @@ class MemoryProposalPort(Protocol):
 
 
 class MemoryManagementPort(Protocol):
+    """Memory 生命周期管理端口。"""
     def execute(
         self,
         command: MemoryCommand,

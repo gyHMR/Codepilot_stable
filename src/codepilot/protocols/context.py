@@ -1,9 +1,10 @@
+"""定义跨层共享的上下文治理数据契约。
+
+这里保存仓库快照、上下文压力、裁剪报告和结构化 checkpoint 的稳定形状，供 Context、
+Sessions、Runtime 与评测代码交换事实；具体的召回、预算分配和压缩算法不在本模块实现。
+"""
+
 from __future__ import annotations
-
-# 新手导读：context.py 定义上下文治理报告等跨层上下文协议。
-# 关注点：它描述报告形状，不实现具体投影逻辑。
-
-"""跨层共享的上下文治理数据契约。"""
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, cast
@@ -72,6 +73,8 @@ class RepositoryDelta:
 
     @property
     def changed(self) -> bool:
+        """只要路径、分支、HEAD 或指令文件任一发生变化就返回 ``True``。"""
+
         return bool(
             self.added_paths
             or self.modified_paths
@@ -197,6 +200,8 @@ class RunnerPreflightReport:
     snipped_messages: int = 0
 
     def to_dict(self) -> dict[str, int]:
+        """返回可持久化的普通字典副本。"""
+
         return asdict(self)
 
 
@@ -235,6 +240,8 @@ class ContextReport:
     estimation: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """递归转换为可序列化字典，避免调用方依赖 dataclass 实例。"""
+
         return asdict(self)
 
 

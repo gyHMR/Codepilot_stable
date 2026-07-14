@@ -1,3 +1,5 @@
+"""按配置装配 Provider、Tools、MCP、Skill 与系统提示词。"""
+
 from __future__ import annotations
 
 """Open one runtime session by wiring config, model, tools, prompt, and ports."""
@@ -40,6 +42,7 @@ from .subagents.tools import create_subagent_registrations
 
 @dataclass
 class RuntimeTools:
+    """Runtime 装配后的工具注册表、执行器和扩展能力集合。"""
     registry: ToolRegistry
     mcp_manager: MCPManager | None = None
     commands: dict[str, RegisteredCommand] = field(default_factory=dict)

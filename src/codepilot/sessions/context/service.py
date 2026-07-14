@@ -1,3 +1,5 @@
+"""协调仓库追踪、Memory 召回、预算与压缩，物化模型上下文。"""
+
 from __future__ import annotations
 
 import hashlib

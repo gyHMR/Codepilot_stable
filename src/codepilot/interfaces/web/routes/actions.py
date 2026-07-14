@@ -1,3 +1,5 @@
+"""定义提交消息、命令、审批和取消请求的 HTTP 路由。"""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Request, status

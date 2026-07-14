@@ -1,3 +1,5 @@
+"""定义扩展加载结果、钩子和能力集合的稳定类型。"""
+
 from __future__ import annotations
 
 # 新手导读：extensions/types.py 描述扩展加载后的统一能力集合。

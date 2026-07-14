@@ -1,3 +1,5 @@
+"""把 Runtime 状态、消息、审批和事件渲染为终端文本。"""
+
 from __future__ import annotations
 
 """CLI 终端渲染工具。
@@ -522,8 +524,7 @@ class TerminalRenderer:
         """渲染一次 run 的最终结果。
 
         Args:
-            record: ``RunFinishedFrame.record``。可能是 run record，也可能直接是
-                ``AssistantMessage``，因此通过 ``_final_message_from_record`` 统一提取。
+            record: ``RunFinishedFrame.record``。
 
         如果模型已经通过增量事件流式输出，这里只补一个换行；如果没有流式输出，
         则从最终记录中提取完整助手文本并显示。
@@ -1112,25 +1113,19 @@ class SimpleRenderer:
 
 
 def _final_message_from_record(record: Any | None) -> AssistantMessage | None:
-    """从不同形态的 run record 中提取最终助手消息。
+    """从当前 SessionRunRecord 的 CoreOutcome 提取最终助手消息。
 
     Args:
-        record: runtime 返回的完成记录。兼容直接传入 ``AssistantMessage``、
-            ``record.outcome.final_message`` 和 ``record.final_message`` 三种形态。
+        record: runtime 返回的完成记录。
 
     Returns:
         ``AssistantMessage`` 或 ``None``。
     """
     if record is None:
         return None
-    if isinstance(record, AssistantMessage):
-        return record
     outcome = getattr(record, "outcome", None)
-    if outcome is not None:
-        message = getattr(outcome, "final_message", None)
-        if message is not None:
-            return message
-    return getattr(record, "final_message", None)
+    message = getattr(outcome, "final_message", None) if outcome is not None else None
+    return message if isinstance(message, AssistantMessage) else None
 
 
 def _assistant_text(message: AssistantMessage) -> str:
