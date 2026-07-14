@@ -65,8 +65,6 @@ class SessionOpenIntent:
     extension_commands: dict[str, Any] = field(default_factory=dict)
     before_prompt_hooks: list[Any] = field(default_factory=list)
     after_prompt_hooks: list[Any] = field(default_factory=list)
-    prepare_context: Any | None = None
-
     def __post_init__(self) -> None:
         if any(
             not isinstance(message, (UserMessage, AssistantMessage, ToolResultMessage))

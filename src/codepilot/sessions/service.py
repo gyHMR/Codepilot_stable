@@ -190,6 +190,13 @@ class ResumeRunRequest:
     run_id: str
     checkpoint_id: str
     request_id: str | None = None
+    components: tuple[ComponentCheckpoint, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "components", tuple(self.components))
+        owners = [component.owner for component in self.components]
+        if len(owners) != len(set(owners)):
+            raise ValueError("Resume component owners must be unique")
 
 
 # ── 服务类 ──────────────────────────────────────────────────────────────────
@@ -526,7 +533,14 @@ class SessionStateService:
             raise SessionStateConflictError("Waiting request changed before resume")
 
         now = _utc_now_iso()
-        checkpoint = replace(run.checkpoint, waiting=None)
+        checkpoint = replace(
+            run.checkpoint,
+            waiting=None,
+            components=_merge_component_checkpoints(
+                run.checkpoint.components,
+                request.components,
+            ),
+        )
         updated = replace(
             run,
             status="running",
@@ -1231,6 +1245,21 @@ def _new_id(prefix: str) -> str:
 def _utc_now_iso() -> str:
     """获取当前 UTC 时间的 ISO 8601 字符串表示。"""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _merge_component_checkpoints(
+    current: tuple[ComponentCheckpoint, ...],
+    replacements: tuple[ComponentCheckpoint, ...],
+) -> tuple[ComponentCheckpoint, ...]:
+    if not replacements:
+        return current
+    replacement_by_owner = {component.owner: component for component in replacements}
+    merged = [
+        replacement_by_owner.pop(component.owner, component)
+        for component in current
+    ]
+    merged.extend(replacement_by_owner.values())
+    return tuple(merged)
 
 
 __all__ = [

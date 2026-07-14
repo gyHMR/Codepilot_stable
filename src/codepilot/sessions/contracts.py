@@ -41,20 +41,16 @@ from uuid import uuid4
 
 from codepilot.core.contracts import (
     BoundaryPort,
+    ContextPreparationPort,
     CoreOutcome,
     CoreRunInput,
-    ContextPort,
 )
-from codepilot.core.plan import PlanningBudgetProfile, RunMode, ensure_run_mode
+from codepilot.core.plan import PlanningBudgetProfile, RunMode
 from codepilot.llm.provider_types import ProviderSimpleStreamFn
 from codepilot.protocols import (
     AgentEvent,
     AgentRunStatus,
-    AssistantMessage,
-    ContextReport,
     Message,
-    Tool,
-    ToolResultMessage,
     UserMessage,
 )
 from codepilot.protocols import Model
@@ -119,7 +115,12 @@ ResumePoint = Literal[
 #   - tool_approval:    等待工具审批
 #   - user_input:       等待用户输入
 #   - plan_confirmation: 等待计划确认
-WaitingKind = Literal["tool_approval", "user_input", "plan_confirmation"]
+WaitingKind = Literal[
+    "tool_approval",
+    "user_input",
+    "plan_confirmation",
+    "continuation",
+]
 
 # CheckpointOwner: 检查点所有者
 #   - tools:   工具子系统
@@ -147,7 +148,9 @@ _RUN_PHASES = frozenset({"received", "model", "tools", "finalizing", "finished"}
 _RESUME_POINTS = frozenset(
     {"before_model", "after_model", "before_tools", "after_tools", "before_finalization"}
 )
-_WAITING_KINDS = frozenset({"tool_approval", "user_input", "plan_confirmation"})
+_WAITING_KINDS = frozenset(
+    {"tool_approval", "user_input", "plan_confirmation", "continuation"}
+)
 _CHECKPOINT_OWNERS = frozenset({"tools", "context", "rollback"})
 _RECOVERY_STATUSES = frozenset({"ready", "needs_validation", "blocked", "not_found"})
 _WORKSPACE_RECOVERY_STATUSES = frozenset({"unchanged", "changed", "missing", "unknown"})
@@ -757,55 +760,6 @@ def validate_run_transition(previous: RunState, current: RunState) -> None:
 # ── 意图类型（会话层接收的外部请求） ──────────────────────────────────────────
 
 
-@dataclass
-class AgentContext:
-    """Sessions-owned model context before projection and compression."""
-
-    system_prompt: str
-    messages: list[Message]
-    tools: list[Tool] = field(default_factory=list)
-    mode: RunMode = "build"
-    plan_state: dict[str, object] | None = None
-    run_signals: dict[str, object] | None = None
-    runtime_state: dict[str, object] | None = None
-
-    def __post_init__(self) -> None:
-        self.system_prompt = str(self.system_prompt or "")
-        self.messages = list(self.messages)
-        if any(
-            not isinstance(message, (UserMessage, AssistantMessage, ToolResultMessage))
-            for message in self.messages
-        ):
-            raise TypeError("AgentContext messages must contain Message values")
-        self.tools = list(self.tools)
-        if any(not isinstance(tool, Tool) for tool in self.tools):
-            raise TypeError("AgentContext tools must contain Tool values")
-        self.mode = ensure_run_mode(self.mode)
-        self.plan_state = _optional_mapping_copy(self.plan_state, "plan_state")
-        self.run_signals = _optional_mapping_copy(self.run_signals, "run_signals")
-        self.runtime_state = _optional_mapping_copy(self.runtime_state, "runtime_state")
-
-
-@dataclass(frozen=True)
-class ContextPreparationRequest:
-    session_id: str | None
-    model_context_window: int
-    model_max_output_tokens: int
-    signal: Any | None = None
-
-
-@dataclass
-class PreparedAgentContext:
-    system_prompt: str
-    messages: list[Message]
-    tools: list[Tool]
-    report: ContextReport
-
-
-PrepareContextFn = Callable[
-    [AgentContext, ContextPreparationRequest],
-    PreparedAgentContext | Awaitable[PreparedAgentContext],
-]
 ConvertToLlmFn = Callable[[list[Message]], list[Message] | Awaitable[list[Message]]]
 SystemPromptBuilder = Callable[[RunMode], str]
 SessionContinuationKind = Literal[
@@ -855,7 +809,6 @@ class SessionOptions:
         before_prompt_hooks: 提示前钩子
         after_prompt_hooks: 提示后钩子
         stream_fn: 流式函数
-        prepare_context: 上下文准备函数
     """
     model: Model
     workspace_dir: str | Path
@@ -878,7 +831,6 @@ class SessionOptions:
     before_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
     after_prompt_hooks: list[LifecycleHook] = field(default_factory=list)
     stream_fn: ProviderSimpleStreamFn | None = None
-    prepare_context: PrepareContextFn | None = None
 
 
 @dataclass(frozen=True)
@@ -1072,7 +1024,7 @@ class PreparedAgentRun:
     run_id: str
     session_id: str
     loop_input: CoreRunInput
-    context_port: ContextPort | None = None
+    context_port: ContextPreparationPort | None = None
     state_port: BoundaryPort | None = None
     input_messages: list[Message] = field(default_factory=list)
     rollback_baseline: RollbackBaselineRef | None = None
@@ -1190,30 +1142,17 @@ def _serializable_mapping(value: object, field_name: str) -> dict[str, object]:
     return result
 
 
-def _optional_mapping_copy(
-    value: Mapping[str, object] | None,
-    field_name: str,
-) -> dict[str, object] | None:
-    if value is None:
-        return None
-    return _serializable_mapping(value, field_name)
-
-
 __all__ = [
-    "AgentContext",
     "CHECKPOINT_SCHEMA_VERSION",
     "CancelRunIntent",
     "CheckpointOwner",
     "ComponentCheckpoint",
-    "ContextPreparationRequest",
     "ConvertToLlmFn",
     "MESSAGE_RECORD_SCHEMA_VERSION",
     "MessageCursor",
     "MessageRecord",
     "ModelRef",
     "PreparedAgentRun",
-    "PreparedAgentContext",
-    "PrepareContextFn",
     "RUN_STATE_SCHEMA_VERSION",
     "RecoveryBundle",
     "RecoveryIssue",

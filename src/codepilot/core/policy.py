@@ -126,19 +126,19 @@ class CorePolicy:
             and latest_failure.recoverable
             and _needs_recovery(state, observation)
         ):
-            if (
-                state.facts.counters.total_recoveries
-                < context.limits.max_recovery_attempts
-            ):
-                return _call_model(
-                    "recovery",
-                    "recovery.required",
-                    latest_failure.evidence_refs,
-                )
             if any(item.kind == "replan_required" for item in state.task.blockers):
                 return _call_model(
                     "replan",
                     "replan.required",
+                    latest_failure.evidence_refs,
+                )
+            if (
+                state.facts.failures.count_for(latest_failure.code)
+                <= context.limits.max_recovery_attempts
+            ):
+                return _call_model(
+                    "recovery",
+                    "recovery.required",
                     latest_failure.evidence_refs,
                 )
             return Terminate(
@@ -179,7 +179,9 @@ class CorePolicy:
                             for ref in item.evidence_refs
                         ),
                     )
-                return Terminate("completed", "plan.completed")
+                if _is_final_response_candidate(observation):
+                    return Terminate("completed", "plan.completed")
+                return _call_model("final_response", "final_response.required")
             if plan.close_request is not None or all_steps_completed:
                 return _call_model("plan_closeout", "plan.closeout_required")
             if _is_final_candidate(observation):
@@ -330,6 +332,14 @@ def _is_final_candidate(observation: CoreObservation) -> bool:
     return any(
         isinstance(block, TextContent) and bool(block.text.strip())
         for block in observation.message.content
+    )
+
+
+def _is_final_response_candidate(observation: CoreObservation) -> bool:
+    return (
+        isinstance(observation, ModelObservation)
+        and observation.purpose == "final_response"
+        and _is_final_candidate(observation)
     )
 
 

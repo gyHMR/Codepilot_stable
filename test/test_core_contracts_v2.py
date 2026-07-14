@@ -15,6 +15,7 @@ from codepilot.core.contracts import (
     CoreRunInput,
     CoreWait,
     ModelEntry,
+    PreparedModelContext,
     ToolResultEntry,
 )
 from codepilot.core.errors import CoreContractError
@@ -32,8 +33,13 @@ class _ModelPort:
 
 
 class _ContextPort:
-    async def prepare(self, _request):
-        return {}
+    async def prepare(self, request):
+        return PreparedModelContext(
+            system_prompt="",
+            messages=request.messages,
+            tools=(),
+            projection_ref="context:test",
+        )
 
 
 class _BoundaryPort:
@@ -47,6 +53,7 @@ def _state() -> CoreState:
 
 def _input(**changes) -> CoreRunInput:
     values = {
+        "session_id": "session_contracts",
         "run_id": "run_contracts",
         "entry": ModelEntry(),
         "messages": (UserMessage(content="inspect the repository"),),
@@ -64,11 +71,14 @@ def test_core_run_input_requires_a_typed_entry_and_freezes_inputs() -> None:
     run_input = _input()
 
     assert isinstance(run_input.entry, ModelEntry)
+    assert run_input.session_id == "session_contracts"
     assert run_input.state.schema_version == CORE_STATE_SCHEMA_VERSION
     assert run_input.context_seed == {"source": "session"}
 
     with pytest.raises(CoreContractError, match="entry"):
         _input(entry="prompt")
+    with pytest.raises(ValueError, match="session_id"):
+        _input(session_id="")
     with pytest.raises(TypeError):
         run_input.context_seed["source"] = "changed"  # type: ignore[index]
 

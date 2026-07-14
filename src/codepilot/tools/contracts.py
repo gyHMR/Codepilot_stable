@@ -209,6 +209,28 @@ class ToolBatchPreparation:
         object.__setattr__(self, "results", results)
 
 
+@dataclass(frozen=True)
+class ToolResumePreparation:
+    """Opaque handle produced before a resumed Tool attempt can execute."""
+
+    resume_id: str
+    checkpoint_state: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "resume_id",
+            _require_text(self.resume_id, "resume_id"),
+        )
+        if not isinstance(self.checkpoint_state, Mapping):
+            raise TypeError("checkpoint_state must be a mapping")
+        object.__setattr__(
+            self,
+            "checkpoint_state",
+            _freeze_json_mapping(self.checkpoint_state, "checkpoint_state"),
+        )
+
+
 class CancellationToken(Protocol):
     """取消令牌 —— 工具处理器检查取消状态的协议接口。
 
@@ -469,34 +491,12 @@ class ToolRegistration:
         object.__setattr__(self, "source", cast(ToolSource, source))
 
 
-class ToolPort(Protocol):
-    """工具端口 —— ToolRuntime 对外暴露的标准服务接口。
-
-    ToolPort 是 runtime 层与 core 层之间的边界接口协议。
-    Core 通过此端口与工具子系统交互，不直接依赖 ToolRuntime 实现。
-
-    提供的方法包括：
-    - catalog_snapshot(): 获取当前可用工具的快照（给 LLM 生成调用）
-    - execute(): 执行单个工具调用
-    - execute_batch(): 批量执行工具调用（自动并行化）
-    - cancel(): 取消正在执行的工具
-    - pending_challenges(): 获取所有待审批的挑战
-    - approval_challenge(): 获取指定审批挑战详情
-    - resume(): 恢复被挂起的工具执行（审批通过或用户输入后）
-    """
+class ToolExecutionPort(Protocol):
+    """The only Tool capability exposed to Core."""
 
     def catalog_snapshot(
         self, *, mode: ToolMode | None = None
     ) -> ToolCatalogSnapshot: ...
-
-    def pending_challenges(self) -> tuple[ApprovalChallenge, ...]: ...
-
-    async def execute(self, request: ToolExecutionRequest) -> ToolResult: ...
-
-    async def execute_batch(
-        self,
-        requests: tuple[ToolExecutionRequest, ...] | list[ToolExecutionRequest],
-    ) -> list[ToolResult]: ...
 
     def prepare_batch(
         self,
@@ -505,13 +505,28 @@ class ToolPort(Protocol):
 
     async def execute_prepared(self, batch_id: str) -> tuple[ToolResult, ...]: ...
 
-    async def cancel(self, attempt_id: str) -> bool: ...
+
+class ToolControlPort(Protocol):
+    """Runtime-only approval, interaction, cancellation, and resume controls."""
+
+    def pending_challenges(self) -> tuple[ApprovalChallenge, ...]: ...
 
     def approval_challenge(self, approval_id: str): ...
 
-    async def resume(
-        self, response: ApprovalResponse | InteractionResponse
-    ) -> ToolResult: ...
+    async def cancel(self, attempt_id: str) -> bool: ...
+
+    def prepare_resume(
+        self,
+        response: ApprovalResponse | InteractionResponse,
+    ) -> ToolResumePreparation: ...
+
+    def pending_prepared_resume(self) -> ToolResumePreparation | None: ...
+
+    async def execute_prepared_resume(self, resume_id: str) -> ToolResult: ...
+
+
+class ToolCheckpointPort(Protocol):
+    """Runtime-only opaque checkpoint capability."""
 
     def checkpoint_state(
         self,
@@ -573,15 +588,18 @@ __all__ = [
     "ProgressReporter",
     "ToolAccessResolver",
     "ToolBatchPreparation",
+    "ToolCheckpointPort",
+    "ToolControlPort",
     "ToolCategory",
     "ToolCodec",
     "ToolExecutionContext",
+    "ToolExecutionPort",
     "ToolExecutionRequest",
     "ToolHandler",
     "ToolHandlerError",
     "ToolOutputRenderer",
-    "ToolPort",
     "ToolRegistration",
+    "ToolResumePreparation",
     "ToolSource",
     "ToolSpec",
 ]

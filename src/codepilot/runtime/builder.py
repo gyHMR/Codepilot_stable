@@ -193,7 +193,6 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         before_prompt_hooks=before_prompt_hooks,
         after_prompt_hooks=after_prompt_hooks,
         stream_fn=intent.stream_fn,
-        prepare_context=intent.prepare_context,
     )
 
     controller = create_session_controller(session_options)

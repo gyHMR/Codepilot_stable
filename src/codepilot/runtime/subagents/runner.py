@@ -24,7 +24,7 @@ from codepilot.llm.ports import ModelDescriptor, ModelPort
 from codepilot.protocols import UserMessage
 from codepilot.sessions.contracts import PreparedAgentRun
 from codepilot.sessions.workspace import file_state_for_path
-from codepilot.tools.contracts import ToolPort
+from codepilot.tools.contracts import ToolExecutionPort
 
 from ..contracts import terminal_outcome_for_status
 from ..environment import RunEnvironmentFactory
@@ -194,7 +194,7 @@ class SubagentRunner:
     session_id: str
     model: ModelDescriptor
     model_port: ModelPort
-    tool_port: ToolPort
+    tool_port: ToolExecutionPort
     timeout_seconds: int = SUBAGENT_TIMEOUT_SECONDS
 
     async def run(
@@ -208,6 +208,7 @@ class SubagentRunner:
         subrun_id = f"subrun_{uuid4().hex[:12]}"
         user_prompt = _subagent_user_prompt(task, peer_assignments, previous_report)
         loop_input = CoreRunInput(
+            session_id=self.session_id,
             run_id=subrun_id,
             entry=ModelEntry(),
             messages=(UserMessage(content=user_prompt),),
@@ -222,7 +223,6 @@ class SubagentRunner:
                 repeated_tool_call_limit=3,
             ),
             context_seed={
-                "session_id": self.session_id,
                 "system_prompt": _subagent_system_prompt(self.workspace),
             },
         )
@@ -286,7 +286,7 @@ class ExplorationCoordinator:
     session_id: str
     model: ModelDescriptor
     model_port: ModelPort | None
-    tool_port: ToolPort | None
+    tool_port: ToolExecutionPort | None
     store: SubagentStore
     runner_factory: Callable[[], SubagentRunner] | None = None
 

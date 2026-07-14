@@ -335,13 +335,14 @@ def test_core_delegates_tool_turn_batch_to_tool_port() -> None:
 
     port = BatchPort()
     input_value = CoreRunInput(
+        session_id="session-core-batch",
         run_id="run-core-batch",
         entry=ModelEntry(),
         messages=(UserMessage(content="inspect"),),
         state=CoreState.new("inspect"),
         mode="build",
         model=ModelDescriptor(provider="unit", model_id="unit"),
-        context_seed={"session_id": "session-core-batch"},
+        context_seed={},
     )
     ports = CorePorts(
         model=ModelPort(),
@@ -434,13 +435,14 @@ def test_core_emits_tool_started_before_batch_execution() -> None:
     )
     prepared = prepare_core_tool_batch(
         CoreRunInput(
+            session_id="session-start-order",
             run_id="run-start-order",
             entry=ModelEntry(),
             messages=(UserMessage(content="inspect"),),
             state=CoreState.new("inspect"),
             mode="build",
             model=ModelDescriptor(provider="unit", model_id="unit"),
-            context_seed={"session_id": "session-start-order"},
+            context_seed={},
         ),
         ports,
         ExecuteTools(

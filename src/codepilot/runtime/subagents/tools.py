@@ -12,15 +12,14 @@ from codepilot.tools.codecs import JsonObjectCodec
 from codepilot.tools.contracts import (
     ToolExecutionRequest,
     ToolBatchPreparation,
+    ToolExecutionPort,
     ToolHandlerError,
-    ToolPort,
     ToolRegistration,
     ToolSpec,
 )
 from codepilot.tools.registry import ToolCatalogSnapshot
 from codepilot.tools.results import TextContent, ToolError, ToolResult
 from codepilot.tools.security import (
-    ApprovalResponse,
     ConcurrencyPolicy,
     OutputLimits,
     OutputTrustPolicy,
@@ -31,7 +30,6 @@ from codepilot.tools.security import (
     ToolPolicy,
     ToolResource,
 )
-from codepilot.tools.state import InteractionResponse
 
 from .runner import (
     DEFAULT_READ_ONLY_TOOL_NAMES,
@@ -49,10 +47,10 @@ _MUTATING_EFFECTS = frozenset(
 
 
 @dataclass
-class RestrictedToolPort(ToolPort):
-    """Runtime-owned read-only ToolPort used only by exploration subagents."""
+class RestrictedToolPort:
+    """Read-only ToolExecutionPort used by exploration subagents."""
 
-    base: ToolPort | None
+    base: ToolExecutionPort | None
     allowed_names: frozenset[str] = DEFAULT_READ_ONLY_TOOL_NAMES
     forced_mode: str = "plan"
     _prepared_batches: dict[str, tuple[ToolExecutionRequest, ...]] = field(
@@ -99,7 +97,16 @@ class RestrictedToolPort(ToolPort):
         }
         if allowed.get(request.tool_name) != request.registration_id:
             return _restricted_denied(request, "restricted_registration_denied")
-        result = await self.base.execute(replace(request, mode=self.forced_mode))
+        preparation = self.base.prepare_batch(
+            (replace(request, mode=self.forced_mode),)
+        )
+        if preparation.results:
+            result = preparation.results[0]
+        else:
+            results = await self.base.execute_prepared(preparation.batch_id or "")
+            if len(results) != 1:
+                raise RuntimeError("Restricted Tool execution returned an invalid batch")
+            result = results[0]
         if any(effect.kind in _MUTATING_EFFECTS for effect in result.effects):
             return _restricted_denied(
                 request,
@@ -134,49 +141,6 @@ class RestrictedToolPort(ToolPort):
         except KeyError as exc:
             raise ValueError(f"Restricted prepared batch not found: {batch_id}") from exc
         return tuple(await self.execute_batch(requests))
-
-    async def cancel(self, attempt_id: str) -> bool:
-        return False if self.base is None else await self.base.cancel(attempt_id)
-
-    def approval_challenge(self, approval_id: str):
-        return None
-
-    async def resume(self, response: ApprovalResponse | InteractionResponse) -> ToolResult:
-        if isinstance(response, InteractionResponse):
-            return ToolResult(
-                tool_call_id=response.tool_call_id,
-                tool_name=response.tool_name,
-                status="denied",
-                content=(TextContent("Restricted tool ports cannot resume suspended calls."),),
-                error=ToolError(
-                    code="restricted_resume_denied",
-                    kind="permission",
-                    message="Restricted tool ports cannot resume suspended calls.",
-                ),
-                registration_id=response.registration_id,
-            )
-        challenge = (
-            self.base.approval_challenge(response.approval_id)
-            if self.base is not None
-            else None
-        )
-        return ToolResult(
-            tool_call_id=challenge.tool_call_id if challenge is not None else "approval_resume",
-            tool_name=challenge.tool_name if challenge is not None else "approval_resume",
-            status="denied",
-            content=(TextContent("Restricted tool ports cannot resume approvals."),),
-            error=ToolError(
-                code="restricted_resume_denied",
-                kind="permission",
-                message="Restricted tool ports cannot resume approvals.",
-            ),
-            registration_id=(
-                challenge.registration_id
-                if challenge is not None
-                else "registration_unavailable"
-            ),
-        )
-
 
 def _restricted_denied(
     request: ToolExecutionRequest,

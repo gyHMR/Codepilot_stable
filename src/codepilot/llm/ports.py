@@ -68,10 +68,12 @@ class LLMCorrelation:
     """
     run_id: str = ""
     session_id: str = ""
+    purpose: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_id", str(self.run_id).strip())
         object.__setattr__(self, "session_id", str(self.session_id).strip())
+        object.__setattr__(self, "purpose", str(self.purpose).strip())
 
 
 @dataclass(frozen=True)
@@ -146,6 +148,7 @@ class LLMCompleted:
     """
     message: AssistantMessage
     usage: Usage | None = None
+    attempts: int = 1
     kind: Literal["completed"] = "completed"
 
 
@@ -157,6 +160,7 @@ class LLMFailed:
         error: 错误信息（LLMErrorInfo / Exception / dict）
     """
     error: LLMErrorInfo | Exception | dict[str, object]
+    attempts: int = 1
     kind: Literal["failed"] = "failed"
 
 

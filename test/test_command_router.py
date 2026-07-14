@@ -362,7 +362,7 @@ async def _run_context_command_case(tmp_path: Path) -> None:
 
     runtime, session_id = _create_runtime_session(tmp_path)
     session = _persistent_session(runtime, session_id)
-    session.latest_context_report = {
+    session.context_service.latest_report = {
         "context_id": "ctx_1",
         "repository_fingerprint": "abcdef1234567890",
         "total_budget_tokens": 1000,

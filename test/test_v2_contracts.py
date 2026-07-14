@@ -171,12 +171,12 @@ def test_core_ports_use_named_live_event_sink_contract() -> None:
 def test_prepared_agent_run_context_port_uses_core_context_port_contract() -> None:
     from typing import get_type_hints
 
-    from codepilot.core.contracts import ContextPort
+    from codepilot.core.contracts import ContextPreparationPort
     from codepilot.sessions.contracts import PreparedAgentRun
 
     hints = get_type_hints(PreparedAgentRun)
 
-    assert hints["context_port"] == ContextPort | None
+    assert hints["context_port"] == ContextPreparationPort | None
 
 
 def test_prepared_agent_run_rollback_baseline_is_public_ref() -> None:
@@ -305,3 +305,15 @@ def test_v2_contract_modules_export_only_named_contract_surface() -> None:
         assert not any(name.startswith("_") for name in exported)
         assert "_require_text" not in exported
         assert "_validate_capabilities" not in exported
+
+
+def test_sessions_waiting_contract_accepts_core_continuation() -> None:
+    from codepilot.sessions.contracts import WaitingState
+
+    waiting = WaitingState(
+        kind="continuation",
+        request_id="continuation:run.max_model_turns",
+        payload={"stop_reason": "run.max_model_turns"},
+    )
+
+    assert waiting.kind == "continuation"

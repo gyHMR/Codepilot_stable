@@ -291,7 +291,9 @@ Core     -> load_core_state 后从统一入口继续
 inspect_recovery
   -> validate checkpoint and workspace
   -> restore Tools/Context components
-  -> resume_run(waiting -> running)（仅 waiting 场景）
+  -> ToolControlPort.prepare_resume（无副作用）
+  -> resume_run 原子保存 prepared tools component 并清除 waiting
+  -> ToolControlPort.execute_prepared_resume
   -> Runtime prepare CoreRunInput
   -> RunExecutor -> run_core
 ```
@@ -317,13 +319,13 @@ Sessions 持久化的是 JSON `core_state`，不解释字段。恢复时 Runtime
 
 ## Context 边界
 
-Context 位于 `sessions/context/`，共享源码命名空间但保持独立领域职责。Context preparation DTO 当前由 `sessions/contracts.py` 定义：
+Context 位于 `sessions/context/`，共享源码命名空间但保持独立领域职责。Core 定义消费端契约：
 
 ```text
-AgentContext
-ContextPreparationRequest
-PreparedAgentContext
-PrepareContextFn
+ContextPrepareRequest
+CoreContextView
+PreparedModelContext
+ContextPreparationPort
 ```
 
 Context 负责：
@@ -331,16 +333,16 @@ Context 负责：
 - Repository snapshot、active files 和 evidence freshness。
 - token 压力、消息选择和压缩。
 - Memory recall 集成。
-- 生成 ContextReport 和 Context component checkpoint。
-- 生成 `context_projected` 等 durable event payload。
+- 生成内部诊断信息和 Context component checkpoint。
+- 通过统一 ProjectionPlan 保证 L2 工具证据与 L4 工具消息一致。
 
-Context 不直接写 Session/Run 文件。Runtime Context Port 调用 Context service，并将事件排队到下一次权威边界。
+Context 不直接写 Session/Run 文件。Runtime 将 `ContextService` 作为 `ContextPreparationPort` 注入 Core，并由 Boundary Adapter 在权威边界收集其不透明 checkpoint。
 
 ## Memory 边界
 
-Memory 位于 `sessions/memory/`，拥有 workspace 级长期记录和独立 repository。Memory 负责准入、召回、冲突、状态演化和 Run 后经验提炼。
+Memory 位于 `sessions/memory/`，拥有 User/Project 两个独立 repository。Memory 负责准入、召回、冲突和五态生命周期；自动提取只形成 Candidate。
 
-Sessions State Service 不解释 Memory Record。Context 通过窄 Recall 接口使用 Memory；Memory 通过 Evidence Reader 验证来源，不读取 Sessions 文件布局。
+Sessions State Service 不解释 Memory Record。Context 只通过 `MemoryRecallPort` 读取 Active Memory；Runtime 在 Terminal Commit 成功后调用 `MemoryProposalPort`，Memory 不读取 Sessions 文件布局。
 
 ## 持久化布局
 

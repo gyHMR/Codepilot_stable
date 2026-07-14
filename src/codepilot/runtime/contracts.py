@@ -85,7 +85,7 @@ def external_stop_reason(reason: CoreReason) -> str:
 def project_core_counters(outcome: CoreOutcome) -> AgentRunCounters:
     counters = outcome.state.facts.counters
     return AgentRunCounters(
-        model_attempts=counters.model_turns,
+        model_attempts=int(counters.model_attempts or 0),
         tool_iterations=counters.tool_iterations,
         tool_calls=counters.tool_calls,
     )

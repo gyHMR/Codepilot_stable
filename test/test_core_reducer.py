@@ -32,6 +32,21 @@ def test_reducer_applies_observation_idempotently() -> None:
     assert second.events == ()
 
 
+def test_model_observation_tracks_logical_turn_and_provider_attempts() -> None:
+    reduction = reduce_observation(
+        CoreState.new("answer the question"),
+        ModelObservation(
+            observation_id="model_1",
+            message=AssistantMessage(content=[TextContent(text="answer")]),
+            attempts=3,
+        ),
+        _context(),
+    )
+
+    assert reduction.state.facts.counters.model_turns == 1
+    assert reduction.state.facts.counters.model_attempts == 3
+
+
 def test_tool_batch_mutation_makes_same_batch_verification_stale() -> None:
     state = CoreState.new("change the file")
     result = ToolResult(
@@ -209,6 +224,77 @@ def test_tool_failure_records_failure_and_blocker() -> None:
     assert reduction.state.facts.failures.latest.code == "tool_not_found"
     assert reduction.state.facts.failures.count_for("tool_not_found") == 1
     assert [item.kind for item in reduction.state.task.blockers] == ["tool_unavailable"]
+
+
+def test_successful_alternative_tool_clears_recoverable_tool_blockers() -> None:
+    failed = reduce_observation(
+        CoreState.new("use the required tool"),
+        ToolBatchObservation(
+            observation_id="tools_1",
+            results=(
+                ToolResult(
+                    tool_call_id="tool_1",
+                    tool_name="missing",
+                    status="error",
+                    error=ToolError(
+                        code="tool_not_found",
+                        kind="unavailable",
+                        message="tool is unavailable",
+                        retryable=True,
+                    ),
+                    registration_id="missing",
+                ),
+            ),
+        ),
+        _context(),
+    ).state
+
+    recovered = reduce_observation(
+        failed,
+        ToolBatchObservation(
+            observation_id="tools_2",
+            results=(
+                ToolResult(
+                    tool_call_id="tool_2",
+                    tool_name="read",
+                    status="success",
+                    registration_id="read@1",
+                ),
+            ),
+        ),
+        _context(),
+    ).state
+
+    assert not recovered.task.blockers
+
+
+def test_fifth_repeated_failure_requires_replan() -> None:
+    state = CoreState.new("repair the implementation")
+    for index in range(1, 6):
+        state = reduce_observation(
+            state,
+            ToolBatchObservation(
+                observation_id=f"tools_{index}",
+                results=(
+                    ToolResult(
+                        tool_call_id=f"tool_{index}",
+                        tool_name="command",
+                        status="error",
+                        error=ToolError(
+                            code="command_exit_nonzero",
+                            kind="execution",
+                            message="tests failed",
+                            retryable=True,
+                        ),
+                        registration_id="command@1",
+                    ),
+                ),
+            ),
+            _context(),
+        ).state
+
+    assert state.facts.failures.count_for("command_exit_nonzero") == 5
+    assert [item.kind for item in state.task.blockers] == ["replan_required"]
 
 
 def test_tool_batch_deduplicates_repeated_result_ids_within_the_batch() -> None:

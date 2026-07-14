@@ -9,7 +9,7 @@ def test_context_is_an_independent_source_module() -> None:
     assert hasattr(context, "__path__")
 
 
-def test_session_runtime_uses_governor_and_slim_layout(tmp_path: Path) -> None:
+def test_session_runtime_uses_context_service_and_slim_layout(tmp_path: Path) -> None:
     from codepilot.protocols import Model
     from codepilot.sessions.contracts import SessionOptions
     from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
@@ -33,8 +33,10 @@ def test_session_runtime_uses_governor_and_slim_layout(tmp_path: Path) -> None:
     )
     try:
         session_dir = tmp_path / ".codepilot" / "sessions" / session.session_id
-        assert session.context_governor is not None
-        assert session.prepare_context == session.context_governor.prepare
+        assert session.context_service is not None
+        assert callable(session.context_service.prepare)
+        assert not hasattr(session, "prepare_context")
+        assert not hasattr(session, "context_governor")
         assert (session_dir / "session.json").exists()
         assert not (session_dir / "context.jsonl").exists()
         assert not (session_dir / "context_ledger.jsonl").exists()

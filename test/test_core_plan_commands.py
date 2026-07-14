@@ -28,6 +28,7 @@ from codepilot.core.state import (
     LoopGuardFacts,
 )
 from codepilot.core.tool_step import project_core_command_results, project_core_commands
+from codepilot.protocols import AssistantMessage, TextContent
 from codepilot.tools.results import ToolResult
 
 
@@ -344,10 +345,22 @@ def test_close_is_a_request_and_completion_policy_owns_terminal_transition() -> 
         ToolBatchObservation("tools-after-close"),
         PolicyContext("build"),
     )
-    assert isinstance(decision, Terminate)
-    assert decision.status == "completed"
+    assert isinstance(decision, CallModel)
+    assert decision.purpose == "final_response"
 
-    completed = apply_decision(requested, decision, _context()).state
+    terminal = CorePolicy.decide(
+        requested,
+        ModelObservation(
+            "model-final",
+            message=AssistantMessage(content=[TextContent(text="计划已完成。")]),
+            purpose="final_response",
+        ),
+        PolicyContext("build"),
+    )
+    assert isinstance(terminal, Terminate)
+    assert terminal.status == "completed"
+
+    completed = apply_decision(requested, terminal, _context()).state
     assert completed.task.status == "satisfied"
     assert completed.task.plan is not None
     assert completed.task.plan.status == "completed"

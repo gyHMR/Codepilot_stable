@@ -40,7 +40,7 @@ from .contracts import (
     ToolExecutionContext,
     ToolExecutionRequest,
     ToolHandlerError,
-    ToolPort,
+    ToolResumePreparation,
 )
 from .execution import (
     ExecutionController,
@@ -108,10 +108,10 @@ class _Prepared:
 
 
 @dataclass
-class ToolRuntime(ToolPort):
+class ToolRuntime:
     """工具运行时 —— 工具端口的标准实现。
 
-    这是 ToolPort 协议的唯一实现，是工具子系统的核心编排者。
+    同时实现 ToolExecutionPort、ToolControlPort 和 ToolCheckpointPort。
 
     职责：
     1. 接收和执行 ToolExecutionRequest
@@ -144,6 +144,12 @@ class ToolRuntime(ToolPort):
         repr=False,
     )
     _prepared_sequence: int = field(default=0, init=False, repr=False)
+    _prepared_resumes: dict[str, ApprovalResponse | InteractionResponse] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _prepared_resume_sequence: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not callable(getattr(self.state_store, "compare_and_set", None)):
@@ -167,7 +173,7 @@ class ToolRuntime(ToolPort):
             progress_callback=self.progress_callback,
         )
 
-    # ── ToolPort 接口实现 ──────────────────────────────────────────────────────
+    # ── 窄工具端口实现 ─────────────────────────────────────────────────────────
 
     def catalog_snapshot(self, *, mode=None) -> ToolCatalogSnapshot:
         """获取工具目录快照（透传给 Registry）。"""
@@ -406,18 +412,69 @@ class ToolRuntime(ToolPort):
     ) -> dict[str, object] | None:
         """Return Tool-owned state for an opaque Sessions component checkpoint."""
 
+        runtime_intent: dict[str, object] = {}
+        if intent:
+            runtime_intent["boundary_intent"] = dict(intent)
+        if self._prepared_resumes:
+            runtime_intent["prepared_resumes"] = [
+                {
+                    "resume_id": resume_id,
+                    "response": _resume_response_to_dict(response),
+                }
+                for resume_id, response in sorted(self._prepared_resumes.items())
+            ]
         snapshot = getattr(self.state_store, "checkpoint_state", None)
         if callable(snapshot):
-            return snapshot(intent=intent)
-        return dict(intent) if intent else None
+            return snapshot(intent=runtime_intent or None)
+        return {"intent": runtime_intent} if runtime_intent else None
 
     def restore_checkpoint_state(self, state: Mapping[str, object]) -> None:
         """Restore pending attempts before Core resumes the owning Run."""
 
         restore = getattr(self.state_store, "restore_checkpoint_state", None)
-        if not callable(restore):
-            raise RuntimeError("Configured ToolStateStore cannot restore checkpoints")
-        restore(state)
+        if callable(restore):
+            restore(state)
+        elif set(state) != {"intent"}:
+            raise RuntimeError("Configured ToolStateStore cannot restore checkpoint state")
+        intent = state.get("intent")
+        if intent is None:
+            return
+        if not isinstance(intent, Mapping):
+            raise ValueError("Tool checkpoint intent must be a mapping")
+        allowed = {"boundary_intent", "prepared_resumes"}
+        unknown = sorted(set(intent) - allowed)
+        if unknown:
+            raise ValueError("Unknown Tool runtime checkpoint fields: " + ", ".join(unknown))
+        prepared = intent.get("prepared_resumes")
+        if prepared is None:
+            return
+        if not isinstance(prepared, (list, tuple)):
+            raise ValueError("prepared_resumes must be a sequence")
+        restored_resumes: dict[str, ApprovalResponse | InteractionResponse] = {}
+        for raw in prepared:
+            if not isinstance(raw, Mapping) or set(raw) != {"resume_id", "response"}:
+                raise ValueError("Prepared resume checkpoint entry is invalid")
+            resume_id = str(raw["resume_id"]).strip()
+            response = raw["response"]
+            if not resume_id or not isinstance(response, Mapping):
+                raise ValueError("Prepared resume checkpoint entry is invalid")
+            if resume_id in restored_resumes:
+                raise ValueError("Prepared resume IDs must be unique")
+            restored_resumes[resume_id] = _resume_response_from_dict(response)
+        if self._prepared_resumes:
+            if self._prepared_resumes == restored_resumes:
+                return
+            raise ValueError("Prepared resume state conflicts with restored checkpoint")
+        self._prepared_resumes.update(restored_resumes)
+        for resume_id in restored_resumes:
+            if resume_id.startswith("resume:"):
+                try:
+                    self._prepared_resume_sequence = max(
+                        self._prepared_resume_sequence,
+                        int(resume_id.split(":", 1)[1]),
+                    )
+                except ValueError:
+                    pass
 
     async def resume(
         self, response: ApprovalResponse | InteractionResponse
@@ -441,6 +498,48 @@ class ToolRuntime(ToolPort):
         raise TypeError(
             "ToolRuntime.resume expects ApprovalResponse or InteractionResponse"
         )
+
+    def prepare_resume(
+        self,
+        response: ApprovalResponse | InteractionResponse,
+    ) -> ToolResumePreparation:
+        """Stage a resume response without executing the suspended handler."""
+
+        if not isinstance(response, (ApprovalResponse, InteractionResponse)):
+            raise TypeError(
+                "ToolRuntime.prepare_resume expects ApprovalResponse or InteractionResponse"
+            )
+        self._prepared_resume_sequence += 1
+        resume_id = f"resume:{self._prepared_resume_sequence}"
+        self._prepared_resumes[resume_id] = response
+        checkpoint = self.checkpoint_state()
+        if checkpoint is None:
+            self._prepared_resumes.pop(resume_id, None)
+            raise RuntimeError("Prepared Tool resume produced no checkpoint")
+        return ToolResumePreparation(resume_id, checkpoint)
+
+    def pending_prepared_resume(self) -> ToolResumePreparation | None:
+        if not self._prepared_resumes:
+            return None
+        if len(self._prepared_resumes) != 1:
+            raise RuntimeError("Tool runtime has multiple prepared resumes")
+        resume_id = next(iter(self._prepared_resumes))
+        checkpoint = self.checkpoint_state()
+        if checkpoint is None:
+            raise RuntimeError("Prepared Tool resume produced no checkpoint")
+        return ToolResumePreparation(resume_id, checkpoint)
+
+    async def execute_prepared_resume(self, resume_id: str) -> ToolResult:
+        """Execute a response previously staged by prepare_resume."""
+
+        resume_id = str(resume_id).strip()
+        if not resume_id:
+            raise ValueError("resume_id is required")
+        try:
+            response = self._prepared_resumes.pop(resume_id)
+        except KeyError as exc:
+            raise ValueError(f"Prepared Tool resume not found: {resume_id}") from exc
+        return await self.resume(response)
 
     # ── 准备阶段 ──────────────────────────────────────────────────────────────
 
@@ -1190,13 +1289,21 @@ def _failure(
     details=None,
 ) -> ToolResult:
     """构建失败结果。"""
+    error_details = dict(details or {})
+    verification = error_details.get("verification")
+    data = (
+        {"verification": dict(verification)}
+        if isinstance(verification, Mapping)
+        else {}
+    )
     return ToolResult(
         request.tool_call_id,
         request.tool_name,
         status,
         content=(TextContent(text=message),),
+        data=data,
         error=ToolError(
-            code, kind, message, retryable=retryable, details=details or {}
+            code, kind, message, retryable=retryable, details=error_details
         ),
         effects=tuple(effects),
         timing=_timing(started),
@@ -1290,6 +1397,77 @@ def _guard_output(data, content, limits) -> None:
         raise ValueError("Tool content exceeds output limit")
     if artifacts > limits.max_artifacts or artifact_bytes > limits.max_artifact_bytes:
         raise ValueError("Tool artifacts exceed output limit")
+
+
+def _resume_response_to_dict(
+    response: ApprovalResponse | InteractionResponse,
+) -> dict[str, object]:
+    if isinstance(response, ApprovalResponse):
+        return {
+            "kind": "approval",
+            "approval_id": response.approval_id,
+            "request_fingerprint": response.request_fingerprint,
+            "decision": response.decision,
+            "scope": response.scope,
+            "reason": response.reason,
+        }
+    return {
+        "kind": "interaction",
+        "interaction_id": response.interaction_id,
+        "request_fingerprint": response.request_fingerprint,
+        "session_id": response.session_id,
+        "tool_call_id": response.tool_call_id,
+        "tool_name": response.tool_name,
+        "registration_id": response.registration_id,
+        "answers": dict(response.answers),
+    }
+
+
+def _resume_response_from_dict(
+    raw: Mapping[str, object],
+) -> ApprovalResponse | InteractionResponse:
+    kind = raw.get("kind")
+    if kind == "approval":
+        expected = {
+            "kind",
+            "approval_id",
+            "request_fingerprint",
+            "decision",
+            "scope",
+            "reason",
+        }
+        if set(raw) != expected:
+            raise ValueError("Approval resume checkpoint fields are invalid")
+        return ApprovalResponse(
+            approval_id=str(raw["approval_id"]),
+            request_fingerprint=str(raw["request_fingerprint"]),
+            decision=str(raw["decision"]),  # type: ignore[arg-type]
+            scope=str(raw["scope"]),  # type: ignore[arg-type]
+            reason=str(raw["reason"]),
+        )
+    if kind == "interaction":
+        expected = {
+            "kind",
+            "interaction_id",
+            "request_fingerprint",
+            "session_id",
+            "tool_call_id",
+            "tool_name",
+            "registration_id",
+            "answers",
+        }
+        if set(raw) != expected or not isinstance(raw["answers"], Mapping):
+            raise ValueError("Interaction resume checkpoint fields are invalid")
+        return InteractionResponse(
+            interaction_id=str(raw["interaction_id"]),
+            request_fingerprint=str(raw["request_fingerprint"]),
+            session_id=str(raw["session_id"]),
+            tool_call_id=str(raw["tool_call_id"]),
+            tool_name=str(raw["tool_name"]),
+            registration_id=str(raw["registration_id"]),
+            answers=raw["answers"],
+        )
+    raise ValueError("Unknown prepared resume response kind")
 
 
 def _effect_resources_authorized(effects, resources) -> bool:

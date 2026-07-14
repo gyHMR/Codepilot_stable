@@ -48,11 +48,10 @@ def prepare_core_tool_batch(
         item.spec.name: item
         for item in (catalog_snapshot.entries if catalog_snapshot is not None else ())
     }
-    session_id = str(input.context_seed.get("session_id") or f"run:{input.run_id}")
     requests = tuple(
         ToolExecutionRequest(
             run_id=input.run_id,
-            session_id=session_id,
+            session_id=input.session_id,
             tool_call_id=call.id,
             tool_name=call.name,
             arguments=dict(call.arguments),
@@ -226,7 +225,7 @@ def unavailable_tool_results(
             tool_call_id=call.id,
             tool_name=call.name,
             status="error",
-            content=(TextContent("No ToolPort is available for this run."),),
+            content=(TextContent("No ToolExecutionPort is available for this run."),),
             error=ToolError(
                 code="tool_not_found",
                 kind="unavailable",

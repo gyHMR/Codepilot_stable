@@ -11,6 +11,14 @@ from .state import FailureRecord
 
 
 ModelObservationStatus = Literal["completed", "failed"]
+ModelObservationPurpose = Literal[
+    "reasoning",
+    "recovery",
+    "verification",
+    "replan",
+    "plan_closeout",
+    "final_response",
+]
 
 
 @dataclass(frozen=True)
@@ -19,6 +27,8 @@ class ModelObservation:
     message: AssistantMessage | None = None
     status: ModelObservationStatus = "completed"
     error: FailureRecord | None = None
+    purpose: ModelObservationPurpose = "reasoning"
+    attempts: int = 1
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -28,12 +38,27 @@ class ModelObservation:
         )
         if self.status not in {"completed", "failed"}:
             raise ValueError(f"Unknown model observation status: {self.status}")
+        if self.purpose not in {
+            "reasoning",
+            "recovery",
+            "verification",
+            "replan",
+            "plan_closeout",
+            "final_response",
+        }:
+            raise ValueError(f"Unknown model observation purpose: {self.purpose}")
         if self.message is not None and not isinstance(self.message, AssistantMessage):
             raise TypeError("message must be AssistantMessage or None")
         if self.error is not None and not isinstance(self.error, FailureRecord):
             raise TypeError("error must be FailureRecord or None")
         if self.status == "failed" and self.error is None:
             raise ValueError("failed model observation requires an error")
+        if (
+            not isinstance(self.attempts, int)
+            or isinstance(self.attempts, bool)
+            or self.attempts <= 0
+        ):
+            raise ValueError("model attempts must be a positive integer")
 
 
 @dataclass(frozen=True)

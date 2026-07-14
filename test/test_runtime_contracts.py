@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -22,7 +23,11 @@ from codepilot.core.contracts import (
     CoreReason,
     CoreWait,
 )
-from codepilot.core.errors import CoreContractError, CoreInvariantError
+from codepilot.core.errors import (
+    CoreBoundaryCommitError,
+    CoreContractError,
+    CoreInvariantError,
+)
 from codepilot.core.events import CoreDomainEvent
 from codepilot.core.state import CoreCounters, CoreState, RunFacts, WorkspaceFacts
 from codepilot.protocols import AssistantMessage, TextContent
@@ -282,6 +287,22 @@ def test_run_executor_preserves_structured_core_fault_code(monkeypatch) -> None:
     assert outcome.error["code"] == "runtime.core_invariant_error"
 
 
+def test_run_executor_does_not_terminalize_boundary_commit_failure(monkeypatch) -> None:
+    async def broken(_input, _ports):
+        raise CoreBoundaryCommitError("before_tools", RuntimeError("store unavailable"))
+
+    monkeypatch.setattr("codepilot.runtime.executor.run_core", broken)
+
+    with pytest.raises(CoreBoundaryCommitError, match="before_tools"):
+        asyncio.run(
+            _collect_execution(
+                RunExecutor(),
+                _environment(),
+                SimpleNamespace(loop_input=SimpleNamespace(state=CoreState.new("test"))),
+            )
+        )
+
+
 def test_run_executor_normalizes_task_cancellation(monkeypatch) -> None:
     async def cancelled(_input, _ports):
         raise asyncio.CancelledError
@@ -314,6 +335,54 @@ def test_run_executor_maps_deadline_cancellation_to_failed_timeout(monkeypatch) 
 
     assert outcome.status == "failed"
     assert external_stop_reason(outcome.reason) == "deadline_exceeded"
+
+
+def test_run_executor_preserves_core_state_when_deadline_wins(monkeypatch) -> None:
+    latest = CoreState.new("latest")
+    environment = _environment()
+
+    async def cancelled(_input, _ports):
+        environment.cancellation.cancel("deadline_exceeded")
+        return CoreOutcome(
+            status="cancelled",
+            reason=CoreReason("run.cancelled"),
+            state=latest,
+            error={"code": "run.cancelled", "message": "cancelled"},
+        )
+
+    monkeypatch.setattr("codepilot.runtime.executor.run_core", cancelled)
+    prepared = SimpleNamespace(
+        loop_input=SimpleNamespace(state=CoreState.new("initial"))
+    )
+
+    outcome = asyncio.run(_collect_execution(RunExecutor(), environment, prepared))
+
+    assert outcome.status == "failed"
+    assert outcome.state is latest
+    assert external_stop_reason(outcome.reason) == "deadline_exceeded"
+
+
+def test_runtime_projects_provider_attempt_count_separately_from_model_turns() -> None:
+    state = CoreState.new("count attempts")
+    state = replace(
+        state,
+        facts=replace(
+            state.facts,
+            counters=replace(
+                state.facts.counters,
+                model_turns=1,
+                model_attempts=3,
+            ),
+        ),
+    )
+    outcome = CoreOutcome(
+        status="completed",
+        reason=CoreReason("task.completed"),
+        state=state,
+        final_message=AssistantMessage(content=[TextContent(text="done")]),
+    )
+
+    assert project_core_counters(outcome).model_attempts == 3
 
 
 def test_run_executor_uses_same_core_entry_for_resume(monkeypatch) -> None:

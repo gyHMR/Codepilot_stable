@@ -87,6 +87,7 @@ class CommandAssessment:
     requires_shell: bool
     destructive: bool
     network: bool
+    verification: bool
 
 # ---------------------------------------------------------------------------
 # 内部保留目录名集合
@@ -799,10 +800,12 @@ def assess_command(
             "high_risk": "destructive",
             "unknown": "unknown",
         }[shell_class]
+        verification = shell_class == "verification"
     else:
         if isinstance(command, (str, bytes)):
             raise TypeError("argv command assessment expects a sequence")
         profile = _parse_argv_profile(command)
+        verification = _argv_is_verification(command)
     effects = {"process_spawn", "filesystem_read"}
     if profile in {"repository_execution", "bounded_mutation", "external_effect", "unknown"}:
         effects.add("filesystem_write")
@@ -821,7 +824,41 @@ def assess_command(
         requires_shell=requires_shell,
         destructive=profile == "destructive",
         network=network,
+        verification=verification,
     )
+
+
+def _argv_is_verification(argv: Sequence[str]) -> bool:
+    if isinstance(argv, (str, bytes)) or not argv:
+        return False
+    parts = tuple(str(item).strip() for item in argv)
+    if any(not item for item in parts):
+        return False
+    executable = _command_executable(parts[0])
+    args = tuple(item.lower() for item in parts[1:])
+    if executable in {"pytest", "mypy", "pyright"}:
+        return True
+    if executable == "ruff":
+        return bool(args and args[0] == "check")
+    if executable == "go":
+        return bool(args and args[0] == "test")
+    if executable == "cargo":
+        return bool(args and args[0] in {"test", "check"})
+    if executable in {"npm", "pnpm", "yarn"}:
+        if args and args[0] == "test":
+            return True
+        return bool(
+            len(args) > 1
+            and args[0] == "run"
+            and args[1] in {"test", "lint", "build"}
+        )
+    if executable in {"python", "python3", "py"}:
+        return bool(
+            len(args) >= 2
+            and args[0] == "-m"
+            and args[1] in {"pytest", "compileall"}
+        )
+    return False
 
 
 def is_sensitive_workspace_path(path: str | Path) -> bool:

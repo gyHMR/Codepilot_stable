@@ -4,19 +4,21 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Awaitable, Callable, Literal, Protocol, TypeAlias
+from typing import Awaitable, Callable, Literal, Protocol, TypeAlias
 
 from codepilot.llm.ports import ModelDescriptor, ModelPort
 from codepilot.protocols import (
     AssistantMessage,
     Message,
     TextContent,
+    Tool,
     ToolCall,
     ToolResultMessage,
     Usage,
     UserMessage,
 )
-from codepilot.tools.contracts import ToolPort
+from codepilot.tools.contracts import ToolExecutionPort
+from codepilot.tools.registry import ToolCatalogSnapshot
 from codepilot.tools.results import ToolResult
 from .errors import CoreContractError
 from .events import CoreDomainEvent
@@ -44,15 +46,305 @@ ModelPurpose = Literal[
     "recovery",
     "verification",
     "replan",
-    "plan_publish",
     "plan_closeout",
     "final_response",
 ]
 TerminationStatus = Literal["completed", "failed", "cancelled"]
+ContextPurpose = Literal["reasoning", "verification", "finalization"]
 
 
-class ContextPort(Protocol):
-    def prepare(self, request: Any) -> Any | Awaitable[Any]: ...
+@dataclass(frozen=True)
+class TaskStepView:
+    step_id: str
+    step: str
+    details: str
+    verification: str
+    status: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "step_id", _required_core_text(self.step_id, "step_id"))
+        object.__setattr__(self, "step", _required_core_text(self.step, "step"))
+        object.__setattr__(self, "details", _required_core_text(self.details, "details"))
+        object.__setattr__(
+            self,
+            "verification",
+            _required_core_text(self.verification, "verification"),
+        )
+        if self.status not in {"pending", "in_progress", "completed"}:
+            raise CoreContractError(f"Unknown task step status: {self.status}")
+
+
+@dataclass(frozen=True)
+class TaskPlanView:
+    plan_id: str
+    origin: str
+    status: str
+    revision: int
+    definition: Mapping[str, object]
+    steps: tuple[TaskStepView, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "plan_id", _required_core_text(self.plan_id, "plan_id"))
+        object.__setattr__(self, "origin", _required_core_text(self.origin, "plan origin"))
+        object.__setattr__(self, "status", _required_core_text(self.status, "plan status"))
+        _require_non_negative(self.revision, "plan revision")
+        if not isinstance(self.definition, Mapping):
+            raise CoreContractError("plan definition must be a mapping")
+        object.__setattr__(
+            self,
+            "definition",
+            MappingProxyType(deepcopy(dict(self.definition))),
+        )
+        steps = tuple(self.steps)
+        if any(not isinstance(step, TaskStepView) for step in steps):
+            raise CoreContractError("plan steps must contain TaskStepView values")
+        object.__setattr__(self, "steps", steps)
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "plan_id": self.plan_id,
+            "origin": self.origin,
+            "status": self.status,
+            "revision": self.revision,
+            "definition": deepcopy(dict(self.definition)),
+            "steps": [
+                {
+                    "step_id": step.step_id,
+                    "step": step.step,
+                    "details": step.details,
+                    "verification": step.verification,
+                    "status": step.status,
+                }
+                for step in self.steps
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class VerificationView:
+    status: str
+    verified_revision: int | None = None
+    attempted_checks: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
+    unavailable_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in {
+            "none",
+            "unknown",
+            "passed",
+            "failed",
+            "stale",
+            "unavailable",
+        }:
+            raise CoreContractError(f"Unknown verification status: {self.status}")
+        if self.verified_revision is not None:
+            _require_non_negative(self.verified_revision, "verified_revision")
+        object.__setattr__(
+            self,
+            "attempted_checks",
+            tuple(
+                _required_core_text(value, "attempted check")
+                for value in self.attempted_checks
+            ),
+        )
+        object.__setattr__(
+            self,
+            "evidence_refs",
+            tuple(
+                _required_core_text(value, "evidence ref")
+                for value in self.evidence_refs
+            ),
+        )
+        object.__setattr__(
+            self,
+            "unavailable_reason",
+            _optional_core_text(self.unavailable_reason),
+        )
+
+
+@dataclass(frozen=True)
+class CoreContextView:
+    original_request: str
+    goal: str
+    mode: RunMode
+    task_status: str
+    plan: TaskPlanView | None
+    current_step: TaskStepView | None
+    verification: VerificationView
+    blocked_reason: str | None = None
+    workspace_revision: int = 0
+    workspace_changed: bool = False
+    affected_paths: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "original_request",
+            _required_core_text(self.original_request, "original_request"),
+        )
+        object.__setattr__(self, "goal", _required_core_text(self.goal, "goal"))
+        object.__setattr__(self, "mode", ensure_run_mode(self.mode))
+        object.__setattr__(
+            self,
+            "task_status",
+            _required_core_text(self.task_status, "task_status"),
+        )
+        if self.plan is not None and not isinstance(self.plan, TaskPlanView):
+            raise CoreContractError("plan must be TaskPlanView or None")
+        if self.current_step is not None and not isinstance(
+            self.current_step, TaskStepView
+        ):
+            raise CoreContractError("current_step must be TaskStepView or None")
+        if not isinstance(self.verification, VerificationView):
+            raise CoreContractError("verification must be VerificationView")
+        object.__setattr__(
+            self,
+            "blocked_reason",
+            _optional_core_text(self.blocked_reason),
+        )
+        _require_non_negative(self.workspace_revision, "workspace_revision")
+        if not isinstance(self.workspace_changed, bool):
+            raise CoreContractError("workspace_changed must be bool")
+        object.__setattr__(
+            self,
+            "affected_paths",
+            tuple(
+                sorted(
+                    {
+                        _required_core_text(path, "affected path")
+                        for path in self.affected_paths
+                    }
+                )
+            ),
+        )
+
+    @classmethod
+    def from_state(cls, state: CoreState, mode: RunMode) -> "CoreContextView":
+        plan = state.task.plan
+        plan_view = None
+        current_step = None
+        if plan is not None:
+            steps = tuple(
+                TaskStepView(
+                    step_id=step.step_id,
+                    step=step.step,
+                    details=step.details,
+                    verification=step.verification,
+                    status=step.status,
+                )
+                for step in plan.steps
+            )
+            plan_view = TaskPlanView(
+                plan_id=plan.plan_id,
+                origin=plan.origin,
+                status=plan.status,
+                revision=plan.revision,
+                definition=plan.definition.to_dict(),
+                steps=steps,
+            )
+            current_step = next(
+                (step for step in steps if step.status == "in_progress"),
+                next((step for step in steps if step.status == "pending"), None),
+            )
+        verification = state.facts.verification
+        blocked_reason = "; ".join(
+            blocker.reason for blocker in state.task.blockers
+        ) or None
+        if blocked_reason is None and state.facts.failures.latest is not None:
+            blocked_reason = state.facts.failures.latest.message
+        workspace = state.facts.workspace
+        return cls(
+            original_request=state.task.original_request,
+            goal=state.task.current_goal,
+            mode=mode,
+            task_status=state.task.status,
+            plan=plan_view,
+            current_step=current_step,
+            verification=VerificationView(
+                status=verification.status,
+                verified_revision=verification.verified_revision,
+                attempted_checks=verification.attempted_checks,
+                evidence_refs=verification.evidence_refs,
+                unavailable_reason=verification.unavailable_reason,
+            ),
+            blocked_reason=blocked_reason,
+            workspace_revision=workspace.revision,
+            workspace_changed=workspace.changed,
+            affected_paths=workspace.affected_paths,
+        )
+
+
+@dataclass(frozen=True)
+class ContextPrepareRequest:
+    session_id: str
+    run_id: str
+    purpose: ContextPurpose
+    directive: str | None
+    messages: tuple[Message, ...]
+    core_view: CoreContextView
+    model: ModelDescriptor
+    tool_catalog: ToolCatalogSnapshot | None
+    seed: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "session_id",
+            _required_core_text(self.session_id, "session_id"),
+        )
+        object.__setattr__(self, "run_id", _required_core_text(self.run_id, "run_id"))
+        if self.purpose not in {"reasoning", "verification", "finalization"}:
+            raise CoreContractError(f"Unknown context purpose: {self.purpose}")
+        object.__setattr__(self, "directive", _optional_core_text(self.directive))
+        object.__setattr__(self, "messages", _core_messages(self.messages))
+        if not isinstance(self.core_view, CoreContextView):
+            raise CoreContractError("core_view must be CoreContextView")
+        if not isinstance(self.model, ModelDescriptor):
+            raise CoreContractError("context model must be ModelDescriptor")
+        if self.tool_catalog is not None and not isinstance(
+            self.tool_catalog, ToolCatalogSnapshot
+        ):
+            raise CoreContractError("tool_catalog must be ToolCatalogSnapshot or None")
+        if not isinstance(self.seed, Mapping):
+            raise CoreContractError("context seed must be a mapping")
+        object.__setattr__(
+            self,
+            "seed",
+            MappingProxyType(deepcopy(dict(self.seed))),
+        )
+
+
+@dataclass(frozen=True)
+class PreparedModelContext:
+    system_prompt: str
+    messages: tuple[Message, ...]
+    tools: tuple[Tool, ...]
+    projection_ref: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "system_prompt",
+            _clean_core_text(self.system_prompt),
+        )
+        object.__setattr__(self, "messages", _core_messages(self.messages))
+        tools = tuple(self.tools)
+        if any(not isinstance(tool, Tool) for tool in tools):
+            raise CoreContractError("prepared tools must contain Tool values")
+        object.__setattr__(self, "tools", tools)
+        object.__setattr__(
+            self,
+            "projection_ref",
+            _required_core_text(self.projection_ref, "projection_ref"),
+        )
+
+
+class ContextPreparationPort(Protocol):
+    def prepare(
+        self,
+        request: ContextPrepareRequest,
+    ) -> PreparedModelContext | Awaitable[PreparedModelContext]: ...
 
 
 @dataclass(frozen=True)
@@ -101,7 +393,7 @@ class CoreLimits:
     max_tool_iterations: int = 240
     max_tool_calls_per_turn: int | None = 16
     max_tool_calls: int | None = None
-    max_recovery_attempts: int = 3
+    max_recovery_attempts: int = 5
     repeated_tool_call_limit: int = 3
 
     def __post_init__(self) -> None:
@@ -224,7 +516,6 @@ class CallModel:
             "recovery",
             "verification",
             "replan",
-            "plan_publish",
             "plan_closeout",
             "final_response",
         }:
@@ -239,7 +530,6 @@ class CallModel:
 class ExecuteTools:
     calls: tuple[ToolCall, ...]
     reason: CoreReason
-    catalog_snapshot_id: str | None = None
 
     def __post_init__(self) -> None:
         calls = tuple(self.calls)
@@ -248,11 +538,6 @@ class ExecuteTools:
         object.__setattr__(self, "calls", calls)
         if not isinstance(self.reason, CoreReason):
             raise TypeError("tool decision reason must be CoreReason")
-        object.__setattr__(
-            self,
-            "catalog_snapshot_id",
-            _optional_core_text(self.catalog_snapshot_id),
-        )
 
 
 @dataclass(frozen=True)
@@ -303,6 +588,7 @@ CoreDecision: TypeAlias = CallModel | ExecuteTools | Wait | Terminate
 
 @dataclass(frozen=True)
 class CoreRunInput:
+    session_id: str
     run_id: str
     entry: CoreEntry
     messages: tuple[Message, ...]
@@ -313,6 +599,11 @@ class CoreRunInput:
     context_seed: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "session_id",
+            _required_core_text(self.session_id, "session_id"),
+        )
         object.__setattr__(self, "run_id", _required_core_text(self.run_id, "run_id"))
         if not isinstance(self.entry, (ModelEntry, ToolResultEntry)):
             raise CoreContractError("CoreRunInput entry must be a typed Core entry")
@@ -352,9 +643,9 @@ LiveEventSink = Callable[[Mapping[str, object]], None | Awaitable[None]]
 @dataclass(frozen=True)
 class CorePorts:
     model: ModelPort
-    context: ContextPort
+    context: ContextPreparationPort
     boundary: BoundaryPort
-    tools: ToolPort | None = None
+    tools: ToolExecutionPort | None = None
     live_events: LiveEventSink | None = None
     cancellation: CancellationProbe | None = None
 
@@ -515,10 +806,13 @@ def _required_core_text(value: object, field_name: str) -> str:
 
 
 __all__ = [
-    "ContextPort",
     "BoundaryPort",
     "CallModel",
     "CancellationProbe",
+    "ContextPreparationPort",
+    "ContextPrepareRequest",
+    "ContextPurpose",
+    "CoreContextView",
     "CoreBoundaryKind",
     "CoreBoundary",
     "CoreDecision",
@@ -536,8 +830,12 @@ __all__ = [
     "LiveEventSink",
     "ModelEntry",
     "ModelPurpose",
+    "PreparedModelContext",
+    "TaskPlanView",
+    "TaskStepView",
     "Terminate",
     "TerminationStatus",
     "ToolResultEntry",
+    "VerificationView",
     "Wait",
 ]

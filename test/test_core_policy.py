@@ -221,7 +221,7 @@ def test_policy_replans_after_recovery_budget_is_exhausted() -> None:
     assert decision.purpose == "replan"
 
 
-def test_policy_recovers_before_replanning_while_budget_remains() -> None:
+def test_policy_replans_immediately_when_replan_blocker_exists() -> None:
     base = CoreState.new("repair the implementation")
     state = replace(
         base,
@@ -256,7 +256,7 @@ def test_policy_recovers_before_replanning_while_budget_remains() -> None:
     )
 
     assert isinstance(decision, CallModel)
-    assert decision.purpose == "recovery"
+    assert decision.purpose == "replan"
 
 
 def test_policy_fails_on_nonrecoverable_task_failure() -> None:

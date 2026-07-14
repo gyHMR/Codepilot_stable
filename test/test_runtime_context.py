@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 
@@ -142,3 +143,71 @@ def test_base_prompt_does_not_embed_plan_mode_policy(tmp_path: Path) -> None:
     assert "- write:" not in prompt
     assert "- edit:" not in prompt
     assert "- apply_patch:" not in prompt
+
+
+def test_runtime_context_adapter_returns_typed_prepared_context(tmp_path: Path) -> None:
+    from codepilot.core.contracts import (
+        ContextPrepareRequest,
+        CoreContextView,
+        PreparedModelContext,
+    )
+    from codepilot.llm.ports import ModelDescriptor
+    from codepilot.protocols import Model
+    from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
+    from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
+
+    model = Model(
+        id="unit",
+        name="Unit",
+        api="unit",
+        provider="unit",
+        base_url="",
+        reasoning=False,
+        input=["text"],
+        context_window=4000,
+        max_tokens=500,
+    )
+
+    async def run_case() -> PreparedModelContext:
+        coordinator = RuntimeSessionCoordinator(
+            SessionOptions(
+                model=model,
+                workspace_dir=tmp_path,
+                session_id="session_context_adapter",
+                memory_enabled=False,
+            )
+        )
+        try:
+            prepared_run = await coordinator._prepare_run(  # noqa: SLF001
+                SessionRunIntent(text="inspect the project", request_id="request_1"),
+                run_id="run_context_adapter",
+                model=ModelDescriptor(provider="unit", model_id="unit"),
+            )
+            context_port = prepared_run.context_port
+            assert context_port is not None
+            loop_input = prepared_run.loop_input
+            result = context_port.prepare(
+                ContextPrepareRequest(
+                    session_id=loop_input.session_id,
+                    run_id=loop_input.run_id,
+                    purpose="reasoning",
+                    directive="core.reasoning",
+                    messages=loop_input.messages,
+                    core_view=CoreContextView.from_state(
+                        loop_input.state,
+                        loop_input.mode,
+                    ),
+                    model=loop_input.model,
+                    tool_catalog=None,
+                    seed=loop_input.context_seed,
+                )
+            )
+            return await result if asyncio.iscoroutine(result) else result
+        finally:
+            coordinator.close()
+
+    prepared = asyncio.run(run_case())
+
+    assert isinstance(prepared, PreparedModelContext)
+    assert prepared.projection_ref
+    assert prepared.messages

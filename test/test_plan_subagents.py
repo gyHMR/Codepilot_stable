@@ -392,7 +392,7 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
                     base_url="",
                     reasoning=False,
                     input=["text"],
-                    context_window=4000,
+                    context_window=32000,
                     max_tokens=500,
                 ),
             )

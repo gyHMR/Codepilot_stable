@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from codepilot.core.contracts import CoreOutcome, CoreReason
 from codepilot.core.driver import run_core
+from codepilot.core.errors import CoreBoundaryCommitError
 from codepilot.sessions.contracts import PreparedAgentRun
 
 from .environment import RunEnvironment
@@ -85,7 +86,11 @@ class RunExecutor:
             _bind_tool_checkpoint_reader(environment)
             environment.cancellation.raise_if_cancelled()
             outcome = await run_core(prepared.loop_input, environment.ports())
-            environment.cancellation.raise_if_cancelled()
+            if environment.cancellation.cancelled:
+                return _cancelled_outcome(
+                    outcome,
+                    environment.cancellation.reason or "cancelled",
+                )
             return outcome
         except asyncio.CancelledError:
             reason = environment.cancellation.reason or "cancelled"
@@ -113,6 +118,8 @@ class RunExecutor:
                 state=prepared.loop_input.state,
                 error=error,
             )
+        except CoreBoundaryCommitError:
+            raise
         except Exception as exc:
             error = runtime_error_payload(exc)
             return CoreOutcome(
@@ -125,6 +132,30 @@ class RunExecutor:
                 state=prepared.loop_input.state,
                 error=error,
             )
+
+
+def _cancelled_outcome(outcome: CoreOutcome, reason: str) -> CoreOutcome:
+    timed_out = reason == "deadline_exceeded"
+    error = {
+        "code": "runtime.deadline_exceeded" if timed_out else "runtime.cancelled",
+        "message": (
+            f"Run deadline exceeded: {reason}"
+            if timed_out
+            else f"Run cancelled: {reason}"
+        ),
+    }
+    return replace(
+        outcome,
+        status="failed" if timed_out else "cancelled",
+        reason=CoreReason(
+            "runtime.deadline_exceeded" if timed_out else "runtime.cancelled",
+            message=error["message"],
+            source="runtime",
+            details={"cancellation_reason": reason},
+        ),
+        wait=None,
+        error=error,
+    )
 
 
 @dataclass(frozen=True)

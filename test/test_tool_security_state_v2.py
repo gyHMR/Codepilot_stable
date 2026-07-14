@@ -144,6 +144,8 @@ def test_checkpoint_tool_state_store_round_trips_pending_approval_strictly() -> 
 
     snapshot = store.checkpoint_state()
     assert snapshot is not None
+    store.restore_checkpoint_state(snapshot)
+    assert store.pending_challenges() == (challenge,)
     reopened = CheckpointToolStateStore(session_id=request.session_id)
     reopened.restore_checkpoint_state(snapshot)
     assert reopened.pending_challenges() == (challenge,)

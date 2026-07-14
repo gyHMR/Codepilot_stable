@@ -195,6 +195,9 @@ def _reduce_model(state: CoreState, observation: ModelObservation) -> CoreReduct
     counters = replace(
         state.facts.counters,
         model_turns=state.facts.counters.model_turns + 1,
+        model_attempts=(
+            int(state.facts.counters.model_attempts or 0) + observation.attempts
+        ),
     )
     next_state = replace(state, facts=replace(state.facts, counters=counters))
     events: list[CoreDomainEvent] = [CoreDomainEvent("model_observed")]
@@ -278,6 +281,8 @@ def _reduce_tools(
         )
     next_state = _sync_verification_blocker(next_state)
 
+    clean_success = bool(results) and all(result.status == "success" for result in results)
+
     for result in results:
         failure = _failure_from_tool_result(result)
         if failure is not None:
@@ -296,6 +301,7 @@ def _reduce_tools(
                         recoverable=failure.recoverable,
                     ),
                 )
+    next_state = _sync_replan_blocker(next_state)
 
     command_results: list[CommandResult] = []
     for command in observation.commands:
@@ -303,6 +309,14 @@ def _reduce_tools(
         next_state = command_reduction.state
         events.extend(command_reduction.events)
         command_results.extend(command_reduction.command_results)
+
+    if clean_success:
+        next_state = _remove_blocker(next_state, "tool_unavailable")
+        next_state = _remove_blocker(next_state, "replan_required")
+        next_state = replace(
+            next_state,
+            facts=replace(next_state.facts, failures=FailureFacts()),
+        )
 
     loop_guards = _reduce_loop_guards(
         next_state.facts.loop_guards, observation.calls, results
@@ -502,6 +516,7 @@ def _update_plan_progress(
         close_request=None,
     )
     next_state = replace(state, task=replace(state.task, plan=next_plan))
+    next_state = _remove_blocker(next_state, "replan_required")
     return _applied_plan_command(
         next_state,
         command,
@@ -561,6 +576,7 @@ def _propose_plan_revision(
         )
         event_type = "plan_revision_proposed"
     next_state = replace(state, task=replace(state.task, plan=next_plan))
+    next_state = _remove_blocker(next_state, "replan_required")
     return _applied_plan_command(
         next_state,
         command,
@@ -928,6 +944,23 @@ def _sync_verification_blocker(state: CoreState) -> CoreState:
     if verification.status in {"passed", "unavailable"}:
         return _remove_blocker(state, "verification_failed")
     return state
+
+
+def _sync_replan_blocker(state: CoreState) -> CoreState:
+    latest = state.facts.failures.latest
+    if latest is None or not latest.recoverable:
+        return state
+    if state.facts.failures.count_for(latest.code) < QUALIFIED_FAILURES_FOR_REVISION:
+        return state
+    return _put_blocker(
+        state,
+        TaskBlocker(
+            kind="replan_required",
+            reason=f"Repeated failure requires replanning: {latest.code}",
+            evidence_refs=latest.evidence_refs,
+            recoverable=True,
+        ),
+    )
 
 
 def _failure_from_tool_result(result: ToolResult) -> FailureRecord | None:

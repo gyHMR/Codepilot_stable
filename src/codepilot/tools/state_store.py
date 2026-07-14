@@ -208,14 +208,26 @@ class CheckpointToolStateStore(InMemoryToolStateStore):
         intent = payload.get("intent")
         if intent is not None and not isinstance(intent, Mapping):
             raise ValueError("Tool checkpoint intent must be an object or null")
+        restored: dict[str, ToolAttemptRecord] = {}
+        for raw in attempts:
+            record = _record_from_dict(_mapping(raw, "tool attempt"))
+            self._validate_record_session(record)
+            if record.state in _TERMINAL_STATES:
+                raise ValueError("Tool checkpoint cannot contain terminal attempts")
+            if record.attempt_id in restored:
+                raise ValueError("Tool checkpoint attempt IDs must be unique")
+            restored[record.attempt_id] = record
         with self._lock:
             if self._attempts:
-                raise ValueError("Tool state can only be restored into an empty store")
-            for raw in attempts:
-                record = _record_from_dict(_mapping(raw, "tool attempt"))
-                self._validate_record_session(record)
-                if record.state in _TERMINAL_STATES:
-                    raise ValueError("Tool checkpoint cannot contain terminal attempts")
+                current = {
+                    attempt_id: record
+                    for attempt_id, record in self._attempts.items()
+                    if record.state not in _TERMINAL_STATES
+                }
+                if current == restored:
+                    return
+                raise ValueError("Tool state conflicts with restored checkpoint")
+            for record in restored.values():
                 super().create(record)
 
     def _validate_record_session(self, record: ToolAttemptRecord) -> None:

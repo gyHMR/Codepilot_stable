@@ -135,8 +135,10 @@ def test_tools_contracts_expose_only_canonical_execution_types() -> None:
 
     expected = {
         "ToolExecutionContext",
+        "ToolExecutionPort",
         "ToolExecutionRequest",
-        "ToolPort",
+        "ToolControlPort",
+        "ToolCheckpointPort",
         "ToolRegistration",
         "ToolSpec",
     }

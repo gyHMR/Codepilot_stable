@@ -59,6 +59,8 @@ docs/*
 !docs/examples/**
 !docs/design/
 !docs/design/**
+!docs/audit/
+!docs/audit/**
 参考文档/
 working/
 .worktrees/

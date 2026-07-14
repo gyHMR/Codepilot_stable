@@ -28,6 +28,7 @@ def _model() -> Model:
 
 def _core_input(run_id: str = "run_core_entry") -> CoreRunInput:
     return CoreRunInput(
+        session_id="session_core_entry",
         run_id=run_id,
         entry=ModelEntry(),
         messages=(UserMessage(content="inspect the project"),),
@@ -117,6 +118,8 @@ def test_main_run_preparation_produces_core_input(tmp_path) -> None:
 
     assert isinstance(prepared.loop_input, CoreRunInput)
     assert isinstance(prepared.loop_input.entry, ModelEntry)
+    assert prepared.context_port is not None
+    assert prepared.context_port.__class__.__name__ == "ContextService"
     assert not hasattr(prepared.loop_input, "approval_id")
     assert not hasattr(prepared.loop_input, "retry_policy")
 

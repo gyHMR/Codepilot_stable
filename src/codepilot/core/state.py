@@ -119,13 +119,17 @@ class TaskState:
 @dataclass(frozen=True)
 class CoreCounters:
     model_turns: int = 0
+    model_attempts: int | None = None
     tool_iterations: int = 0
     tool_calls: int = 0
     total_recoveries: int = 0
 
     def __post_init__(self) -> None:
+        if self.model_attempts is None:
+            object.__setattr__(self, "model_attempts", self.model_turns)
         for name in (
             "model_turns",
+            "model_attempts",
             "tool_iterations",
             "tool_calls",
             "total_recoveries",
@@ -422,6 +426,12 @@ class CoreState:
             facts=RunFacts(
                 counters=CoreCounters(
                     model_turns=_non_negative_int(counters_raw.get("model_turns")),
+                    model_attempts=_non_negative_int(
+                        counters_raw.get(
+                            "model_attempts",
+                            counters_raw.get("model_turns"),
+                        )
+                    ),
                     tool_iterations=_non_negative_int(
                         counters_raw.get("tool_iterations")
                     ),
@@ -651,6 +661,12 @@ def _upgrade_current_sessions_v2_state(
             counters=CoreCounters(
                 model_turns=_non_negative_int(
                     raw.get("model_turns", counters.get("model_attempts"))
+                ),
+                model_attempts=_non_negative_int(
+                    counters.get(
+                        "model_attempts",
+                        raw.get("model_turns"),
+                    )
                 ),
                 tool_iterations=_non_negative_int(counters.get("tool_iterations")),
                 tool_calls=_non_negative_int(counters.get("tool_calls")),

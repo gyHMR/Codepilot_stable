@@ -10,7 +10,7 @@ methods and performs no persistence.
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeAlias, cast
+from typing import Any, Literal, cast
 
 from codepilot.protocols import PlanSummary
 
@@ -26,10 +26,6 @@ PlanRevisionReason = Literal[
     "new_evidence",
 ]
 
-# Transitional names used by the legacy runner.  Stage G removes that runner
-# and these aliases with it.
-PlanItemStatus: TypeAlias = PlanStepStatus
-PlanChangeReason: TypeAlias = PlanRevisionReason
 PlanOperation = Literal[
     "propose_plan",
     "create_build_plan",
@@ -447,52 +443,6 @@ class PlanState:
         ):
             raise TypeError("close_request must be PlanCloseRequest or None")
 
-    # Transitional read-only projections for the legacy runner.  They do not
-    # duplicate state and cannot be used to transition it.
-    @property
-    def origin_mode(self) -> RunMode:
-        return "plan" if self.origin == "plan_mode" else "build"
-
-    @property
-    def items(self) -> tuple[PlanStep, ...]:
-        return self.steps
-
-    @property
-    def summary(self) -> str:
-        return self.definition.summary
-
-    @property
-    def completion_criteria(self) -> tuple[str, ...]:
-        return self.definition.completion_criteria
-
-    @property
-    def task_understanding(self) -> str:
-        return self.definition.task_understanding
-
-    @property
-    def current_implementation(self) -> str:
-        return self.definition.current_implementation
-
-    @property
-    def target_design(self) -> str:
-        return self.definition.target_design
-
-    @property
-    def impact_scope(self) -> str:
-        return self.definition.impact_scope
-
-    @property
-    def risks_and_open_questions(self) -> tuple[str, ...]:
-        return self.definition.risks_and_open_questions
-
-    @property
-    def verification_plan(self) -> str:
-        return self.definition.verification_plan
-
-    @property
-    def explanation(self) -> str:
-        return self.definition.explanation
-
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
@@ -558,24 +508,24 @@ class PlanState:
         )
 
     def to_summary(self) -> PlanSummary:
-        """Project into the legacy run result until that contract is removed in G."""
+        """Project canonical plan state into the public runtime result contract."""
 
         return PlanSummary(
             schema_version=self.schema_version,
             plan_id=self.plan_id,
             owner_run_id=self.plan_id,
             status=self.status,
-            origin_mode=self.origin_mode,
+            origin_mode="plan" if self.origin == "plan_mode" else "build",
             raw_user_request="",
             interpreted_goal="",
-            summary=self.summary,
-            task_understanding=self.task_understanding,
-            current_implementation=self.current_implementation,
-            target_design=self.target_design,
-            impact_scope=self.impact_scope,
-            risks_and_open_questions=list(self.risks_and_open_questions),
-            verification_plan=self.verification_plan,
-            completion_criteria=list(self.completion_criteria),
+            summary=self.definition.summary,
+            task_understanding=self.definition.task_understanding,
+            current_implementation=self.definition.current_implementation,
+            target_design=self.definition.target_design,
+            impact_scope=self.definition.impact_scope,
+            risks_and_open_questions=list(self.definition.risks_and_open_questions),
+            verification_plan=self.definition.verification_plan,
+            completion_criteria=list(self.definition.completion_criteria),
             items=[
                 {
                     "id": item.step_id,
@@ -587,11 +537,8 @@ class PlanState:
                 for item in self.steps
             ],
             revision=self.revision,
-            explanation=self.explanation,
+            explanation=self.definition.explanation,
         )
-
-
-PlanItem: TypeAlias = PlanStep
 
 
 def load_plan_state(raw: object) -> PlanState | None:
@@ -652,21 +599,11 @@ def ensure_plan_step_status(value: object) -> PlanStepStatus:
     return cast(PlanStepStatus, text)
 
 
-def ensure_plan_item_status(value: object) -> PlanItemStatus:
-    return ensure_plan_step_status(value)
-
-
 def ensure_plan_revision_reason(value: object) -> PlanRevisionReason:
     text = str(value).strip() if value is not None else ""
     if text not in _REVISION_REASONS:
         raise PlanValidationError(f"Unknown plan revision reason: {value}")
     return cast(PlanRevisionReason, text)
-
-
-def ensure_plan_change_reason(value: object) -> PlanChangeReason | None:
-    if value is None or not str(value).strip():
-        return None
-    return ensure_plan_revision_reason(value)
 
 
 def ensure_plan_operation(value: object) -> PlanOperation:
@@ -819,11 +756,8 @@ __all__ = [
     "PLAN_STATE_SCHEMA_VERSION",
     "QUALIFIED_FAILURES_FOR_REVISION",
     "PendingPlanRevision",
-    "PlanChangeReason",
     "PlanCloseRequest",
     "PlanDefinition",
-    "PlanItem",
-    "PlanItemStatus",
     "PlanOperation",
     "PlanOrigin",
     "PlanRevisionReason",
@@ -836,8 +770,6 @@ __all__ = [
     "PlanValidationError",
     "PlanningBudgetProfile",
     "RunMode",
-    "ensure_plan_change_reason",
-    "ensure_plan_item_status",
     "ensure_plan_operation",
     "ensure_plan_origin",
     "ensure_plan_revision_reason",

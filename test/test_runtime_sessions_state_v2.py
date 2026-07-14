@@ -27,7 +27,7 @@ def _model() -> Model:
         base_url="",
         reasoning=False,
         input=["text"],
-        context_window=4000,
+        context_window=32000,
         max_tokens=500,
     )
 
@@ -129,7 +129,7 @@ def test_runtime_prompt_preserves_images_in_model_and_session_messages(tmp_path:
     asyncio.run(run_case())
 
 
-def test_context_projection_event_waits_for_run_boundary(tmp_path: Path) -> None:
+def test_context_projection_report_stays_internal_to_context(tmp_path: Path) -> None:
     async def run_case() -> None:
         started = asyncio.Event()
         release = asyncio.Event()
@@ -161,7 +161,8 @@ def test_context_projection_event_waits_for_run_boundary(tmp_path: Path) -> None
         release.set()
         await run_task
         after_terminal = coordinator.state_service.load_events(opened.session_id)
-        assert any(event.get("type") == "context_projected" for event in after_terminal)
+        assert not any(event.get("type") == "context_projected" for event in after_terminal)
+        assert coordinator.context_service.latest_report
 
     asyncio.run(run_case())
 
@@ -274,10 +275,12 @@ def test_opening_session_restores_active_plan_and_context_checkpoint(tmp_path: P
     reopened = RuntimeSessionCoordinator(options)
 
     assert reopened.current_plan_state() == migrated_plan.to_dict()
-    assert reopened.context_governor.checkpoint_state() == {
-        "compacted_until_message_id": "msg_10",
-        "compact_summary": "saved summary",
-    }
+    context_checkpoint = reopened.context_service.checkpoint_state()
+    assert context_checkpoint["compacted_until_message_id"] == "msg_10"
+    assert "compact_summary" not in context_checkpoint
+    snapshot_ref = context_checkpoint["compact_snapshot_ref"]
+    assert isinstance(snapshot_ref, str)
+    assert (tmp_path / snapshot_ref).is_file()
 
 
 def test_reopened_progress_checkpoint_continues_same_run(tmp_path: Path) -> None:

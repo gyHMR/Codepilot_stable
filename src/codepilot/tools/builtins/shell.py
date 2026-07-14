@@ -100,6 +100,7 @@ class BashOutput:
     exit_code: int
     details: dict[str, Any]
     metadata: dict[str, Any]
+    verification: dict[str, Any] | None = None
 
 
 # ── 注册创建函数 ──────────────────────────────────────────────────────────────
@@ -224,6 +225,7 @@ def create_command_registration(
             timeout=timeout,
             operation=" ".join(argv),
             profile=profile,
+            verification=assessment.verification,
             effects=assessment.effects,
             error_prefix="command",
             resource=ToolResource("workspace:///" + sandbox.relative_path(cwd)),
@@ -439,7 +441,15 @@ def create_shell_registration(
             raise ToolHandlerError(
                 "shell_exit_nonzero",
                 text or f"Shell command exited with code {proc.returncode}",
-                details={**details, "exit_code": proc.returncode},
+                details={
+                    **details,
+                    "exit_code": proc.returncode,
+                    **_verification_detail(
+                        assessment.verification,
+                        input.command,
+                        "failed",
+                    ),
+                },
             )
         return BashOutput(
             text=text,
@@ -453,6 +463,11 @@ def create_shell_registration(
                     "reliable_for_reasoning": not stdout.truncated and not stderr.truncated,
                 }
             },
+            verification=_verification_value(
+                assessment.verification,
+                input.command,
+                "passed",
+            ),
         )
 
     class Renderer:
@@ -514,6 +529,7 @@ async def _collect_process_result(
     timeout: int,
     operation: str,
     profile: CommandProfile,
+    verification: bool,
     effects: frozenset[ToolEffectKind],
     error_prefix: str,
     resource: ToolResource,
@@ -612,7 +628,11 @@ async def _collect_process_result(
         raise ToolHandlerError(
             f"{error_prefix}_exit_nonzero",
             text or f"Command exited with code {proc.returncode}",
-            details={**result_details, "exit_code": proc.returncode},
+            details={
+                **result_details,
+                "exit_code": proc.returncode,
+                **_verification_detail(verification, operation, "failed"),
+            },
         )
     return BashOutput(
         text=text,
@@ -626,6 +646,7 @@ async def _collect_process_result(
                 "reliable_for_reasoning": not stdout.truncated and not stderr.truncated,
             }
         },
+        verification=_verification_value(verification, operation, "passed"),
     )
 
 
@@ -641,10 +662,43 @@ def _output_schema() -> dict[str, Any]:
             "exit_code": {"type": "integer"},
             "details": {"type": "object"},
             "metadata": {"type": "object"},
+            "verification": {
+                "anyOf": [
+                    {"type": "object"},
+                    {"type": "null"},
+                ]
+            },
         },
-        "required": ["text", "stdout", "stderr", "exit_code", "details", "metadata"],
+        "required": [
+            "text",
+            "stdout",
+            "stderr",
+            "exit_code",
+            "details",
+            "metadata",
+            "verification",
+        ],
         "additionalProperties": False,
     }
+
+
+def _verification_value(
+    verification: bool,
+    operation: str,
+    status: str,
+) -> dict[str, str] | None:
+    if not verification:
+        return None
+    return {"status": status, "command": operation}
+
+
+def _verification_detail(
+    verification: bool,
+    operation: str,
+    status: str,
+) -> dict[str, object]:
+    value = _verification_value(verification, operation, status)
+    return {"verification": value} if value is not None else {}
 
 
 __all__ = ["create_command_registration", "create_shell_registration"]

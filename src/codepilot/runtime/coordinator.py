@@ -37,7 +37,7 @@ from .contracts import (
 from .environment import RunEnvironment, RunEnvironmentFactory
 from .errors import runtime_error_info
 from .executor import RunExecutionUpdate, RunExecutor
-from .model import RetryingModelPort
+from .model import RetryingModelPort, RuntimeContextSummarizer
 from .session_coordinator import RuntimeSessionCoordinator, new_run_id
 
 
@@ -94,18 +94,25 @@ class RunCoordinator:
         model: Any | None,
         tools: Any | None,
     ) -> RunEnvironment:
+        runtime_model = (
+            RetryingModelPort(
+                model,
+                enabled=bool(self.session.retry_enabled),
+                max_retries=max(0, int(self.session.max_retries)),
+                base_delay_ms=max(0, int(self.session.retry_base_delay_ms)),
+                finalization_sink=self.session.capture_memory_proposals,
+            )
+            if model is not None
+            else None
+        )
+        self.session.context_service.set_summarizer(
+            RuntimeContextSummarizer(runtime_model, prepared.loop_input.model)
+            if runtime_model is not None
+            else None
+        )
         return self._environment_factory.create(
             prepared,
-            model=(
-                RetryingModelPort(
-                    model,
-                    enabled=bool(self.session.retry_enabled),
-                    max_retries=max(0, int(self.session.max_retries)),
-                    base_delay_ms=max(0, int(self.session.retry_base_delay_ms)),
-                )
-                if model is not None
-                else None
-            ),
+            model=runtime_model,
             tools=tools,
             # Core events are streamed by RunExecutor and become durable only
             # when the next Sessions boundary is committed.

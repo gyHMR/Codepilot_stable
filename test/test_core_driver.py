@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +10,7 @@ from codepilot.core.contracts import (
     CorePorts,
     CoreRunInput,
     ModelEntry,
+    PreparedModelContext,
     ToolResultEntry,
 )
 from codepilot.core.driver import run_core
@@ -25,6 +25,7 @@ from codepilot.protocols import (
     UserMessage,
 )
 from codepilot.tools.contracts import ToolBatchPreparation
+from codepilot.tools.registry import ToolCatalogSnapshot
 from codepilot.tools.results import ToolResult
 from codepilot.tools.security import ApprovalChallenge
 
@@ -41,6 +42,17 @@ class FakeModel:
         yield LLMCompleted(message=self.messages.pop(0))
 
 
+class FailingAfterFirstModel(FakeModel):
+    async def stream(self, request):
+        if self.messages:
+            async for event in super().stream(request):
+                yield event
+            return
+        raise RuntimeError("model transport disconnected")
+        if False:  # pragma: no cover - keeps this an async iterator
+            yield None
+
+
 class FakeContext:
     def __init__(self, trace=None) -> None:
         self.requests = []
@@ -49,11 +61,12 @@ class FakeContext:
     async def prepare(self, request):
         self.trace.append("context.prepare")
         self.requests.append(request)
-        return {
-            "system_prompt": "system",
-            "messages": request["messages"],
-            "tools": request["tools"],
-        }
+        return PreparedModelContext(
+            system_prompt="system",
+            messages=request.messages,
+            tools=(),
+            projection_ref="context:driver",
+        )
 
 
 class FakeBoundary:
@@ -78,7 +91,7 @@ class FakeTools:
         self.executed = False
 
     def catalog_snapshot(self, *, mode=None):
-        return SimpleNamespace(entries=(), snapshot_id=f"catalog:{mode}")
+        return ToolCatalogSnapshot(f"catalog:{mode}", (), 0)
 
     def prepare_batch(self, requests):
         self.trace.append("tools.prepare")
@@ -93,12 +106,19 @@ class FakeTools:
         self.executed = True
         return self.results
 
-    async def execute_batch(self, _requests):  # legacy ToolPort surface
-        raise AssertionError("Core Driver must use prepare_batch/execute_prepared")
 
+class FailingTools(FakeTools):
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self.error = error
+
+    async def execute_prepared(self, batch_id):
+        assert batch_id == "batch_1"
+        raise self.error
 
 def _input(*, entry=None, messages=None, limits=None, state=None) -> CoreRunInput:
     return CoreRunInput(
+        session_id="session_driver",
         run_id="run_driver",
         entry=entry or ModelEntry(),
         messages=messages or (UserMessage(content="inspect"),),
@@ -106,7 +126,7 @@ def _input(*, entry=None, messages=None, limits=None, state=None) -> CoreRunInpu
         mode="build",
         model=ModelDescriptor(provider="unit-test", model_id="driver-model"),
         limits=limits or CoreLimits(),
-        context_seed={"session_id": "session_driver"},
+        context_seed={},
     )
 
 
@@ -211,6 +231,42 @@ def test_driver_commits_before_tools_before_any_execution() -> None:
     assert outcome.state.facts.counters.tool_calls == 1
 
 
+def test_context_receives_latest_core_state_after_tool_reduction() -> None:
+    boundary = FakeBoundary()
+    context = FakeContext()
+    tools = FakeTools(
+        results=(
+            ToolResult(
+                tool_call_id="call_1",
+                tool_name="read",
+                status="success",
+                data={
+                    "verification": {
+                        "status": "passed",
+                        "command": "pytest -q",
+                    }
+                },
+                registration_id="read@1",
+            ),
+        )
+    )
+
+    outcome = asyncio.run(
+        run_core(
+            _input(),
+            _ports(
+                FakeModel([_tool_request(), _final()]),
+                boundary,
+                tools=tools,
+                context=context,
+            ),
+        )
+    )
+
+    assert outcome.state.facts.verification.status == "passed"
+    assert context.requests[1].core_view.verification.status == "passed"
+
+
 def test_driver_returns_waiting_only_after_waiting_boundary_commits() -> None:
     boundary = FakeBoundary()
     tools = FakeTools(preparation_results=(_approval_result(),))
@@ -286,6 +342,90 @@ def test_driver_settles_unexecuted_tool_calls_before_budget_wait() -> None:
     assert len(tool_messages) == 1
     assert tool_messages[0].tool_call_id == "call_1"
     assert tool_messages[0].status == "interrupted"
+
+
+def test_tool_execution_cancellation_settles_persisted_calls_before_terminal() -> None:
+    boundary = FakeBoundary()
+
+    outcome = asyncio.run(
+        run_core(
+            _input(),
+            _ports(
+                FakeModel([_tool_request()]),
+                boundary,
+                tools=FailingTools(asyncio.CancelledError("user_cancelled")),
+            ),
+        )
+    )
+
+    assert outcome.status == "cancelled"
+    assert [item.kind for item in boundary.boundaries] == [
+        "before_model",
+        "after_model",
+        "before_tools",
+        "after_tools",
+        "before_terminal",
+    ]
+    result = boundary.boundaries[3].new_messages[0]
+    assert isinstance(result, ToolResultMessage)
+    assert result.tool_call_id == "call_1"
+    assert result.status == "interrupted"
+
+
+def test_tool_execution_exception_settles_persisted_calls_before_failure() -> None:
+    boundary = FakeBoundary()
+
+    outcome = asyncio.run(
+        run_core(
+            _input(),
+            _ports(
+                FakeModel([_tool_request()]),
+                boundary,
+                tools=FailingTools(RuntimeError("tool transport disconnected")),
+            ),
+        )
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.reason.code == "core.execution_error"
+    result = boundary.boundaries[3].new_messages[0]
+    assert isinstance(result, ToolResultMessage)
+    assert result.status == "interrupted"
+
+
+def test_model_exception_returns_latest_reduced_state() -> None:
+    boundary = FakeBoundary()
+    tools = FakeTools(
+        results=(
+            ToolResult(
+                tool_call_id="call_1",
+                tool_name="read",
+                status="success",
+                data={
+                    "verification": {
+                        "status": "passed",
+                        "command": "pytest -q",
+                    }
+                },
+                registration_id="read@1",
+            ),
+        )
+    )
+
+    outcome = asyncio.run(
+        run_core(
+            _input(),
+            _ports(
+                FailingAfterFirstModel([_tool_request()]),
+                boundary,
+                tools=tools,
+            ),
+        )
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.reason.code == "core.execution_error"
+    assert outcome.state.facts.verification.status == "passed"
 
 
 def test_driver_accepts_final_tool_result_entry_without_reexecuting_tool() -> None:

@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import os
 import asyncio
+import json
+import re
 from collections import Counter
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Any
 
 from codepilot.llm.catalog import get_env_api_key_name, get_model
-from codepilot.llm.ports import LLMFailed
+from codepilot.llm.ports import (
+    LLMCompleted,
+    LLMCorrelation,
+    LLMFailed,
+    LLMOptions,
+    LLMRequest,
+    LLMStarted,
+    LLMTextDelta,
+    ModelDescriptor,
+)
 from codepilot.protocols import (
     AssistantMessage,
     Message,
@@ -18,7 +30,14 @@ from codepilot.protocols import (
     ThinkingContent,
     ToolCall,
     ToolResultMessage,
+    UserMessage,
 )
+from codepilot.sessions.context.contracts import (
+    CompactSummary,
+    ContextSummaryRequest,
+    ContextSummaryResult,
+)
+from codepilot.sessions.memory import MemoryProposal
 
 from .config import ConfigValueSource, RuntimeConfig
 from .actions import SessionOpenIntent
@@ -45,11 +64,19 @@ class RetryingModelPort:
     enabled: bool = True
     max_retries: int = 0
     base_delay_ms: int = 0
+    finalization_sink: (
+        Callable[[str, tuple[MemoryProposal, ...], str | None], None] | None
+    ) = None
 
     async def stream(self, request):
+        if request.correlation.purpose == "finalization":
+            async for event in self._stream_finalization(request):
+                yield event
+            return
         retries = max(0, self.max_retries) if self.enabled else 0
         for attempt in range(retries + 1):
             retry = False
+            buffered = []
             async for event in self.base.stream(request):
                 if (
                     isinstance(event, LLMFailed)
@@ -58,11 +85,116 @@ class RetryingModelPort:
                 ):
                     retry = True
                     break
-                yield event
+                buffered.append(event)
             if not retry:
+                attempts = attempt + 1
+                for event in buffered:
+                    if isinstance(event, (LLMCompleted, LLMFailed)):
+                        event = replace(event, attempts=attempts)
+                    yield event
                 return
             if self.base_delay_ms > 0:
                 await asyncio.sleep(self.base_delay_ms / 1000)
+
+    async def _stream_finalization(self, request):
+        retries = max(0, self.max_retries) if self.enabled else 0
+        for attempt in range(retries + 1):
+            retry = False
+            buffered = []
+            async for event in self.base.stream(request):
+                if (
+                    isinstance(event, LLMFailed)
+                    and attempt < retries
+                    and _retryable_error(event.error)
+                ):
+                    retry = True
+                    break
+                buffered.append(event)
+            if retry:
+                if self.base_delay_ms > 0:
+                    await asyncio.sleep(self.base_delay_ms / 1000)
+                continue
+            completed = next(
+                (event for event in reversed(buffered) if isinstance(event, LLMCompleted)),
+                None,
+            )
+            if completed is None:
+                for event in buffered:
+                    yield event
+                return
+            cleaned, proposals, error = _extract_memory_sidecar(completed.message)
+            if self.finalization_sink is not None:
+                self.finalization_sink(
+                    request.correlation.run_id,
+                    proposals,
+                    error,
+                )
+            if any(isinstance(event, LLMStarted) for event in buffered):
+                yield LLMStarted()
+            visible_text = _assistant_text(cleaned)
+            if visible_text:
+                yield LLMTextDelta(visible_text)
+            yield LLMCompleted(cleaned, completed.usage, attempts=attempt + 1)
+            return
+
+
+@dataclass(frozen=True)
+class RuntimeContextSummarizer:
+    model_port: Any
+    model: ModelDescriptor
+
+    async def summarize(self, request: ContextSummaryRequest) -> ContextSummaryResult:
+        payload = {
+            "original_goal": request.original_goal,
+            "previous_summary": (
+                request.previous_summary.to_mapping()
+                if request.previous_summary is not None
+                else None
+            ),
+            "messages": [_summary_message(message) for message in request.messages],
+        }
+        llm_request = LLMRequest(
+            model=self.model,
+            system_prompt=(
+                "Summarize the supplied coding-agent history as one JSON object. "
+                "Return only these fields: user_constraints, decisions, completed_work, "
+                "files_and_symbols, important_evidence, errors_and_resolutions, "
+                "verification_state, open_questions, next_actions. Values except "
+                "verification_state must be arrays of concise strings. Do not call tools, "
+                "do not propose long-term memory, and do not include raw tool output."
+            ),
+            messages=(
+                UserMessage(
+                    content=json.dumps(payload, ensure_ascii=False),
+                    metadata={"context_summary_request": True},
+                ),
+            ),
+            tools=(),
+            options=LLMOptions(temperature=0.0, max_tokens=1200, reasoning="low"),
+            correlation=LLMCorrelation(
+                run_id="context_summary",
+                session_id="",
+                purpose="context_summary",
+            ),
+        )
+        completed: LLMCompleted | None = None
+        async for event in self.model_port.stream(llm_request):
+            if isinstance(event, LLMFailed):
+                raise RuntimeError(f"Context summarizer failed: {event.error}")
+            if isinstance(event, LLMCompleted):
+                completed = event
+        if completed is None:
+            raise RuntimeError("Context summarizer returned no completed message")
+        raw = _json_object(_assistant_text(completed.message))
+        raw["original_goal"] = request.original_goal
+        raw["source_refs"] = [
+            f"message:{_message_id(message)}" for message in request.messages
+        ]
+        summary = CompactSummary.from_mapping(raw)
+        return ContextSummaryResult(
+            summary=summary,
+            compacted_until_message_id=_message_id(request.messages[-1]),
+        )
 
 
 def convert_to_llm(
@@ -174,6 +306,122 @@ def _retryable_error(error: object) -> bool:
     if isinstance(error, dict):
         return bool(error.get("retryable", False))
     return bool(getattr(error, "retryable", False))
+
+
+_MEMORY_SIDECAR = re.compile(
+    r"<codepilot-memory-proposals>(.*?)</codepilot-memory-proposals>",
+    re.DOTALL,
+)
+
+
+def _extract_memory_sidecar(
+    message: AssistantMessage,
+) -> tuple[AssistantMessage, tuple[MemoryProposal, ...], str | None]:
+    full_text = _assistant_text(message)
+    matches = list(_MEMORY_SIDECAR.finditer(full_text))
+    cleaned_text = _MEMORY_SIDECAR.sub("", full_text).strip()
+    non_text = [block for block in message.content if not isinstance(block, TextContent)]
+    cleaned = _assistant_with_content(
+        message,
+        [*non_text, TextContent(text=cleaned_text)],
+    )
+    if not matches:
+        return cleaned, (), None
+    if len(matches) != 1:
+        return cleaned, (), "finalization sidecar must appear at most once"
+    try:
+        payload = json.loads(matches[0].group(1))
+        if not isinstance(payload, dict) or set(payload) != {"proposals"}:
+            raise ValueError("sidecar must contain only proposals")
+        raw_proposals = payload["proposals"]
+        if not isinstance(raw_proposals, list) or len(raw_proposals) > 3:
+            raise ValueError("sidecar proposals must be a list with at most three items")
+        proposals = tuple(
+            MemoryProposal(
+                scope=raw["scope"],
+                type=raw["type"],
+                key=raw["key"],
+                content=raw["content"],
+            )
+            for raw in raw_proposals
+            if isinstance(raw, dict)
+            and set(raw) == {"scope", "type", "key", "content"}
+        )
+        if len(proposals) != len(raw_proposals):
+            raise ValueError("sidecar proposal fields are invalid")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return cleaned, (), str(exc)
+    return cleaned, proposals, None
+
+
+def _assistant_text(message: AssistantMessage) -> str:
+    return "".join(
+        block.text for block in message.content if isinstance(block, TextContent)
+    ).strip()
+
+
+def _summary_message(message: Message) -> dict[str, object]:
+    if isinstance(message, AssistantMessage):
+        content = [
+            block.text
+            if isinstance(block, TextContent)
+            else {
+                "tool_call_id": block.id,
+                "tool_name": block.name,
+                "arguments": block.arguments,
+            }
+            if isinstance(block, ToolCall)
+            else "[thinking omitted]"
+            for block in message.content
+        ]
+    elif isinstance(message, ToolResultMessage):
+        content = {
+            "tool_call_id": message.tool_call_id,
+            "tool_name": message.tool_name,
+            "status": message.status,
+            "text": "".join(
+                block.text
+                for block in message.content
+                if isinstance(block, TextContent)
+            )[:1200],
+            "affected_paths": list(message.affected_paths),
+            "verification": message.verification,
+        }
+    elif isinstance(message, UserMessage):
+        content = (
+            message.content
+            if isinstance(message.content, str)
+            else [
+                block.text if isinstance(block, TextContent) else "[image]"
+                for block in message.content
+            ]
+        )
+    else:
+        content = ""
+    return {
+        "message_id": _message_id(message),
+        "role": message.role,
+        "content": content,
+    }
+
+
+def _json_object(text: str) -> dict[str, object]:
+    value = text.strip()
+    if value.startswith("```"):
+        value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE)
+        value = re.sub(r"\s*```$", "", value)
+    payload = json.loads(value)
+    if not isinstance(payload, dict):
+        raise ValueError("Context summary must be a JSON object")
+    return payload
+
+
+def _message_id(message: Message) -> str:
+    value = message.metadata.get("session_message_id")
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        raise ValueError("Context summary messages require session_message_id")
+    return text
 
 
 def resolve_runtime_model(
@@ -289,6 +537,7 @@ def _credential_source(
 
 __all__ = [
     "RetryingModelPort",
+    "RuntimeContextSummarizer",
     "RuntimeModel",
     "convert_to_llm",
     "resolve_runtime_model",

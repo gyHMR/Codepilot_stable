@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import inspect
+import hashlib
 import json
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +19,16 @@ from codepilot.sessions.rollback import (
     plan_run_rollback,
     revert_run_changes,
 )
-from codepilot.sessions.memory import MemoryRecord, MemoryWriteContext, render_memory
+from codepilot.sessions.memory import (
+    AddMemory,
+    ApproveMemory,
+    DeleteMemory,
+    DisableMemory,
+    EditMemory,
+    ListMemory,
+    MemoryActor,
+    MemoryRecord,
+)
 from codepilot.sessions.service import new_session_id
 
 from .actions import CommandDescriptor
@@ -125,20 +134,26 @@ def switch_to_entry(session: Any, entry_id: str) -> None:
 
 
 def memory_summary(session: Any) -> dict[str, int]:
-    records = session.memory_store.all_records()
+    records = session.memory_service.execute(
+        ListMemory(),
+        _memory_actor(session),
+    ).records
     return {
         "active": sum(record.status == "active" for record in records),
         "candidate": sum(record.status == "candidate" for record in records),
+        "disabled": sum(record.status == "disabled" for record in records),
         "superseded": sum(record.status == "superseded" for record in records),
         "deleted": sum(record.status == "deleted" for record in records),
     }
 
 
 def list_memory_records(session: Any, scope: str) -> list[dict[str, str]]:
-    records = session.memory_store.all_records()
-    if scope in {"project", "workspace", "global"}:
+    records = list(
+        session.memory_service.execute(ListMemory(), _memory_actor(session)).records
+    )
+    if scope in {"project", "user"}:
         records = [record for record in records if record.scope == scope]
-    elif scope in {"correction", "constraint", "decision", "experience", "workflow", "preference"}:
+    elif scope in {"profile", "feedback", "project", "experience", "reference"}:
         records = [record for record in records if record.type == scope]
     elif scope in {"candidate", "active", "deleted", "superseded", "disabled"}:
         records = [record for record in records if record.status == scope]
@@ -152,18 +167,15 @@ def search_memory_records(session: Any, query: str) -> list[dict[str, str]]:
     if not terms:
         return []
     rows = []
-    for record in session.memory_store.all_records():
+    records = session.memory_service.execute(ListMemory(), _memory_actor(session)).records
+    for record in records:
         haystack = " ".join(
             [
                 record.id,
                 record.type,
                 record.scope,
-                record.subject,
-                record.predicate,
-                record.value,
+                record.key,
                 record.content,
-                " ".join(record.keywords),
-                " ".join(record.paths),
             ]
         ).lower()
         if all(term in haystack for term in terms):
@@ -172,64 +184,69 @@ def search_memory_records(session: Any, query: str) -> list[dict[str, str]]:
 
 
 def add_project_memory(session: Any, text: str) -> str:
-    record = session.memory_writer.add_explicit(
-        text,
-        context=_memory_context(session, "memory_record_add_requested"),
-    )
+    content = str(text or "").strip()
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+    record = session.memory_service.execute(
+        AddMemory(
+            scope="project",
+            type="project",
+            key=f"project.note.{digest}",
+            content=content,
+        ),
+        _memory_actor(session),
+    ).records[0]
     _record_memory_event(session, "memory_record_created", record)
     return record.id
 
 
 def approve_memory(session: Any, memory_id: str) -> str:
-    record = session.memory_writer.approve(
-        memory_id,
-        context=_memory_context(session, "memory_record_approve_requested"),
-    )
+    record = session.memory_service.execute(
+        ApproveMemory(memory_id),
+        _memory_actor(session),
+    ).records[0]
     _record_memory_event(session, "memory_record_approved", record)
     return record.id
 
 
 def edit_memory(session: Any, memory_id: str, content: str) -> str:
-    record = session.memory_writer.edit_as_supersede(
-        memory_id,
-        content,
-        context=_memory_context(session, "memory_record_edit_requested"),
-    )
+    record = session.memory_service.execute(
+        EditMemory(memory_id, content),
+        _memory_actor(session),
+    ).records[0]
     _record_memory_event(session, "memory_record_edited", record, source_memory_id=memory_id)
     return record.id
 
 
 def disable_memory(session: Any, memory_id: str) -> str:
-    record = session.memory_writer.disable(
-        memory_id,
-        context=_memory_context(session, "memory_record_disable_requested"),
-    )
+    record = session.memory_service.execute(
+        DisableMemory(memory_id),
+        _memory_actor(session),
+    ).records[0]
     _record_memory_event(session, "memory_record_disabled", record)
     return record.id
 
 
 def delete_memory(session: Any, memory_id: str) -> str:
-    record = session.memory_writer.delete(
-        memory_id,
-        context=_memory_context(session, "memory_record_delete_requested"),
-    )
+    record = session.memory_service.execute(
+        DeleteMemory(memory_id),
+        _memory_actor(session),
+    ).records[0]
     _record_memory_event(session, "memory_record_deleted", record)
     return record.id
 
 
 def supersede_memory(session: Any, memory_id: str, content: str) -> str:
-    record = session.memory_writer.supersede(
-        memory_id,
-        content,
-        context=_memory_context(session, "memory_record_supersede_requested"),
-    )
+    record = session.memory_service.execute(
+        EditMemory(memory_id, content),
+        _memory_actor(session),
+    ).records[0]
     _record_memory_event(session, "memory_record_superseded", record, source_memory_id=memory_id)
     return record.id
 
 
 def context_command_view(session: Any, detail: str) -> dict[str, Any]:
-    report = session.latest_context_report
-    if report is None:
+    report = dict(session.context_service.latest_report)
+    if not report:
         return {"available": False}
     if detail == "items":
         return {
@@ -884,14 +901,8 @@ def _memory_id_action(
     return _record(session_id, text, output_lines=[f"memory {verb}: {memory_id}"])
 
 
-def _memory_context(session: Any, event_type: str) -> MemoryWriteContext:
-    event_id = f"event_{uuid.uuid4().hex[:12]}"
-    session.append_event({"type": event_type, "event_id": event_id})
-    return MemoryWriteContext(
-        session_id=session.session_id,
-        source_event_id=event_id,
-        evidence_refs=[f"event:{event_id}", f"session:{session.session_id}"],
-    )
+def _memory_actor(session: Any) -> MemoryActor:
+    return MemoryActor(user_id=str(session.session_id))
 
 
 def _record_memory_event(
@@ -919,7 +930,7 @@ def _memory_row(record: MemoryRecord) -> dict[str, str]:
         "scope": str(record.scope),
         "type": str(record.type),
         "status": str(record.status),
-        "text": render_memory(record),
+        "text": f"{record.key}: {record.content}",
     }
 
 
@@ -1026,7 +1037,6 @@ def _open_derived_runtime(session: Any, session_id: str) -> Any:
             before_prompt_hooks=list(session.before_prompt_hooks),
             after_prompt_hooks=list(session.after_prompt_hooks),
             stream_fn=session.stream_fn,
-            prepare_context=session._custom_prepare_context,
         )
     )
 

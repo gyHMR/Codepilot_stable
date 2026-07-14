@@ -3,7 +3,6 @@ from __future__ import annotations
 import inspect
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
 from codepilot.llm.ports import (
     LLMCompleted,
@@ -14,13 +13,21 @@ from codepilot.llm.ports import (
     LLMTextDelta,
     LLMToolCallDelta,
 )
-from codepilot.protocols import AssistantMessage, Message, Tool, Usage, tool_mode_for_run_mode
-from codepilot.tools.codecs import json_value
+from codepilot.protocols import AssistantMessage, Message, Usage, tool_mode_for_run_mode
 from codepilot.tools.registry import ToolCatalogSnapshot
 
-from .contracts import CoreDirective, CorePorts, CoreRunInput
+from .contracts import (
+    ContextPrepareRequest,
+    ContextPurpose,
+    CoreContextView,
+    CoreDirective,
+    CorePorts,
+    CoreRunInput,
+    ModelPurpose,
+    PreparedModelContext,
+)
 from .observations import ModelObservation
-from .state import FailureRecord
+from .state import CoreState, FailureRecord
 
 
 @dataclass(frozen=True)
@@ -34,6 +41,8 @@ async def call_model_once(
     input: CoreRunInput,
     ports: CorePorts,
     messages: tuple[Message, ...],
+    state: CoreState,
+    purpose: ModelPurpose,
     directive: CoreDirective,
     *,
     observation_id: str,
@@ -41,41 +50,38 @@ async def call_model_once(
     """Prepare context and perform exactly one model action."""
 
     snapshot = _core_tool_catalog(input, ports)
-    tools = _tools_from_snapshot(snapshot)
-    request_data: dict[str, Any] = {
-        **dict(input.context_seed),
-        "run_id": input.run_id,
-        "mode": input.mode,
-        "model": input.model,
-        "messages": list(messages),
-        "tools": tools,
-        "directive": {
-            "code": directive.code,
-            "constraints": list(directive.constraints),
-            "evidence_refs": list(directive.evidence_refs),
-        },
-        "context": dict(input.context_seed),
-    }
-    prepared = ports.context.prepare(request_data)
+    prepared = ports.context.prepare(
+        ContextPrepareRequest(
+            session_id=input.session_id,
+            run_id=input.run_id,
+            purpose=_context_purpose(purpose),
+            directive=_directive_text(directive),
+            messages=messages,
+            core_view=CoreContextView.from_state(state, input.mode),
+            model=input.model,
+            tool_catalog=snapshot,
+            seed=input.context_seed,
+        )
+    )
     if inspect.isawaitable(prepared):
         prepared = await prepared
-    if prepared is not None:
-        if not isinstance(prepared, Mapping):
-            raise TypeError("ContextPort.prepare must return a mapping or None")
-        request_data.update(dict(prepared))
+    if not isinstance(prepared, PreparedModelContext):
+        raise TypeError("ContextPreparationPort.prepare must return PreparedModelContext")
 
     request = LLMRequest(
-        model=request_data.get("model", input.model),
-        messages=tuple(request_data.get("messages", messages)),
-        system_prompt=str(request_data.get("system_prompt", "")),
-        tools=tuple(request_data.get("tools", tools)),
+        model=input.model,
+        messages=prepared.messages,
+        system_prompt=prepared.system_prompt,
+        tools=prepared.tools,
         correlation=LLMCorrelation(
             run_id=input.run_id,
-            session_id=_optional_text(input.context_seed.get("session_id")) or "",
+            session_id=input.session_id,
+            purpose=_context_purpose(purpose),
         ),
     )
     assistant: AssistantMessage | None = None
     usage = None
+    attempts = 1
     async for event in ports.model.stream(request):
         if isinstance(event, LLMFailed):
             return ModelActionResult(
@@ -83,6 +89,8 @@ async def call_model_once(
                     observation_id=observation_id,
                     status="failed",
                     error=_model_failure(event.error, observation_id),
+                    purpose=purpose,
+                    attempts=event.attempts,
                 ),
                 catalog_snapshot=snapshot,
             )
@@ -125,6 +133,7 @@ async def call_model_once(
         if isinstance(event, LLMCompleted):
             assistant = event.message
             usage = event.usage
+            attempts = event.attempts
 
     if assistant is None:
         return ModelActionResult(
@@ -138,6 +147,8 @@ async def call_model_once(
                     recoverable=False,
                     evidence_refs=(observation_id,),
                 ),
+                purpose=purpose,
+                attempts=attempts,
             ),
             catalog_snapshot=snapshot,
         )
@@ -145,6 +156,8 @@ async def call_model_once(
         observation=ModelObservation(
             observation_id=observation_id,
             message=assistant,
+            purpose=purpose,
+            attempts=attempts,
         ),
         usage=usage,
         catalog_snapshot=snapshot,
@@ -160,17 +173,20 @@ def _core_tool_catalog(
     return ports.tools.catalog_snapshot(mode=tool_mode_for_run_mode(input.mode))
 
 
-def _tools_from_snapshot(snapshot: ToolCatalogSnapshot | None) -> list[Tool]:
-    if snapshot is None:
-        return []
-    return [
-        Tool(
-            name=item.spec.name,
-            description=item.spec.description,
-            parameters=json_value(item.spec.input_schema),
-        )
-        for item in snapshot.entries
-    ]
+def _context_purpose(purpose: ModelPurpose) -> ContextPurpose:
+    if purpose == "verification":
+        return "verification"
+    if purpose == "final_response":
+        return "finalization"
+    return "reasoning"
+
+
+def _directive_text(directive: CoreDirective) -> str:
+    lines = [directive.code]
+    lines.extend(directive.constraints)
+    if directive.evidence_refs:
+        lines.append("evidence: " + ", ".join(directive.evidence_refs))
+    return "\n".join(lines)
 
 
 def _model_failure(error: object, observation_id: str) -> FailureRecord:

@@ -248,32 +248,32 @@ PlanningDiscovery
 
 > 设计文档：[docs/design/2context-design.md](docs/design/2context-design.md)
 
-Codepilot **不将全部历史消息和工具输出直接塞入 prompt**。每次模型调用前，`ContextGovernor.prepare()` 从 Session 事实源投影出精炼的上下文视图。
+Codepilot **不将全部历史消息和工具输出直接塞入 prompt**。每次模型调用前，Core 通过类型化 `ContextPreparationPort` 调用 `ContextService.prepare()`，从消息、Core 只读状态、工具目录和长期记忆中物化受预算约束的模型上下文。
 
 ### 治理链路
 
 ```
-SessionSnapshotBuilder
-  → RepositoryTracker 刷新仓库快照与 delta
-  → SessionContextState 记录 active files、evidence、verification
-  → ToolArtifactLedger 归档工具输出
-  → MemoryRetriever 召回长期记忆
-  → ContextPressurePolicy 判断 normal / tight / critical
-  → ContextProjector 组装 prompt
-  → ContextReport 记录选择结果与 token 分布
+ContextService 接收 ContextPrepareRequest
+  → ContextState 刷新派生工作状态
+  → MemoryRecallPort 召回 Active Memory
+  → ProjectionPlan 统一生成 L2 工具证据与 L4 工具消息
+  → BudgetSelector 判断 normal / tight / critical / overflow
+  → ContextCompactor 在 critical 压力下调用辅助 LLM
+  → Provider 调用前执行最终硬预算校验
+  → 返回 PreparedModelContext
 ```
 
 ### 上下文层次
 
 | 层 | 内容 |
 |---|---|
-| **Stable Rules** | 稳定规则与项目约束 |
-| **Working State** | 当前任务、Checkpoint、活跃文件、变更文件 |
-| **Memory Recall** | 召回的 correction / constraint / decision / experience |
-| **Evidence** | 新鲜工具证据、验证结果、Artifact 引用与过期提醒 |
-| **Recent Turns** | 少量最近对话摘要 |
+| **L0** | 核心规则与作用域指令，不参与预算裁剪 |
+| **L1** | 运行能力、任务状态、计划与验证状态 |
+| **L2** | 当前工作集、工具证据与 Artifact 安全投影 |
+| **L3** | 通过 MemoryRecallPort 召回的 Active Memory |
+| **L4** | 对话连续性、Compact Summary 与未压缩消息尾部 |
 
-> 当上下文压力达到 `critical` 时，系统自动创建结构化 Checkpoint；长工具输出写入 Artifact，以摘要+引用形式进入 prompt。
+> 当上下文压力达到 `critical` 时，Context 使用同一 ModelPort 的摘要用途生成结构化 Compact Snapshot；摘要属于工作上下文，不进入长期 Memory。
 
 ---
 
@@ -287,18 +287,21 @@ Memory v2 的边界定义十分严格：**仅保存跨任务可复用的长期�
 
 | 类型 | 来源 | 用途 |
 |---|---|---|
-| `correction` | 用户纠正 | 最高优先级召回，修正 Agent 的错误认知 |
-| `constraint` | 用户显式记忆、项目边界 | 长期规则与偏好 |
-| `decision` | `/memory add` 等命令 | 项目设计决策 |
-| `experience` | 失败→修复→验证闭环 | 可复用的修复经验 |
+| `profile` | 用户明确表达 | 稳定偏好、环境与工作方式 |
+| `feedback` | 用户纠正 | 修正 Agent 的错误认知或行为 |
+| `project` | 用户或已验证运行 | 项目约束、设计决策和固定命令 |
+| `experience` | 已验证运行 | 可跨任务复用的解决经验 |
+| `reference` | 用户明确提供 | 需要长期复用的外部参考信息 |
 
 ### 记忆介入时机
 
-1. **Run 开始前** — `MemoryWriter.admit_prompt_memory()` 仅接收明确的长期记忆意图
-2. **每次模型调用前** — `MemoryRetriever.recall()` 根据任务文本、活跃路径、动作意图、近期错误与检索模式进行召回
-3. **Run 结束后** — `ExperienceExtractor` 从已验证的失败→修复→验证闭环中提炼经验，`MemoryConsolidator` 合并重复经验并提升高频经验
+1. **用户明确表达时** — Memory Service 通过确定性准入规则直接写入 Active Memory
+2. **每次模型调用前** — Context 通过 `MemoryRecallPort` 召回最多 5 条 Active Memory
+3. **最终回答阶段** — 同一模型可附带 `scope + type + key + content` Proposal sidecar
+4. **Terminal Commit 成功后** — Runtime 通过 `MemoryProposalPort` 将自动 Proposal 写为 Candidate
+5. **用户管理时** — `MemoryManagementPort` 执行审批、编辑、禁用、启用、逻辑删除和 Purge
 
-> 当前任务恢复由 `TaskRecoveryStore` 独立维护，与长期记忆系统分离。
+> 当前任务摘要、Context Compact Snapshot 和 Session 恢复状态都不属于长期 Memory。
 
 ---
 

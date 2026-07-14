@@ -211,6 +211,35 @@ def test_controlled_command_executes_without_shell_parsing(tmp_path: Path) -> No
     assert "process_spawn" in {effect.kind for effect in result.effects}
 
 
+def test_verification_command_projects_passed_and_failed_evidence(tmp_path: Path) -> None:
+    runtime, registration_ids = _runtime(tmp_path, enabled_names=["command"])
+    executable = str(Path(sys.executable))
+
+    passed = _execute(
+        runtime,
+        registration_ids,
+        "command",
+        {"argv": [executable, "-m", "pytest", "--version"]},
+    )
+    failed = _execute(
+        runtime,
+        registration_ids,
+        "command",
+        {"argv": [executable, "-m", "pytest", "--definitely-invalid-option"]},
+    )
+
+    assert passed.status == "success"
+    assert passed.data["verification"] == {
+        "status": "passed",
+        "command": f"{executable} -m pytest --version",
+    }
+    assert failed.status == "error"
+    assert failed.data["verification"] == {
+        "status": "failed",
+        "command": f"{executable} -m pytest --definitely-invalid-option",
+    }
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [

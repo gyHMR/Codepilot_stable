@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # 新手导读：memory_retrieval.py 是离线记忆检索评测器。
-# 关注点：它评估 MemoryRetriever 的排序/过滤能力，不跑模型，也不改正常 Agent 记忆链路。
+# 关注点：它评估 Memory Recall 的排序/过滤能力，不跑模型，也不改正常 Agent 记忆链路。
 
 """Offline memory retrieval benchmark.
 
@@ -19,8 +19,8 @@ from typing import Any
 from codepilot.sessions.memory import (
     MemoryQuery,
     MemoryRecord,
-    MemoryRetriever,
 )
+from codepilot.sessions.memory.recall import MemoryRecallEngine
 
 
 DEFAULT_MEMORY_CASES_PATH = Path("benchmarks/evaluation_memory/cases.json")
@@ -57,8 +57,8 @@ _HIGHER_IS_BETTER = {
 
 
 class _InMemoryStore:
-    def __init__(self, records: list[MemoryRecord]) -> None:
-        self._records = records
+    def __init__(self, records: list[MemoryRecord], *, scope: str) -> None:
+        self._records = [record for record in records if record.scope == scope]
 
     def all_records(self) -> list[MemoryRecord]:
         return list(self._records)
@@ -115,20 +115,19 @@ def _run_memory_case(
     workspace_dir: Path | str,
 ) -> dict[str, Any]:
     query = _memory_query(case)
-    retriever = MemoryRetriever(
-        store=_InMemoryStore(corpus),  # type: ignore[arg-type]
-        workspace_dir=workspace_dir,
+    del workspace_dir
+    retriever = MemoryRecallEngine(
+        _InMemoryStore(corpus, scope="user"),  # type: ignore[arg-type]
+        _InMemoryStore(corpus, scope="project"),  # type: ignore[arg-type]
     )
     recall = retriever.recall(query)
     ranked = [
         {
-            "id": item.record.id,
-            "score": item.score,
-            "reasons": list(item.reasons),
-            "type": item.record.type,
-            "status": item.record.status,
-            "subject": item.record.subject,
-            "paths": list(item.record.paths),
+            "id": item.memory_id,
+            "reasons": list(item.rank_reasons),
+            "type": item.type,
+            "status": "active",
+            "key": item.key,
         }
         for item in recall.retrieved
     ]
@@ -148,36 +147,34 @@ def _run_memory_case(
 
 def _memory_query(case: dict[str, Any]) -> MemoryQuery:
     query = case.get("query") if isinstance(case.get("query"), dict) else {}
+    current_step = " ".join(
+        text
+        for text in (
+            _optional_text(query.get("current_step_title")),
+            _optional_text(query.get("current_step_kind")),
+        )
+        if text
+    )
     return MemoryQuery(
-        latest_user_message=str(query.get("latest_user_message") or query.get("text") or ""),
-        raw_user_request=str(query.get("raw_user_request") or ""),
-        goal=str(query.get("goal") or ""),
-        current_mode=_optional_text(query.get("current_mode")),
-        current_step_title=_optional_text(query.get("current_step_title")),
-        current_step_kind=_optional_text(query.get("current_step_kind")),
-        verification_status=_optional_text(query.get("verification_status")),
-        blocked_reason=_optional_text(query.get("blocked_reason")),
-        active_paths=_string_list(query.get("active_paths")),
-        changed_paths=_string_list(query.get("changed_paths")),
-        artifact_summaries=_string_list(query.get("artifact_summaries")),
-        session_id=_optional_text(query.get("session_id")),
-        run_id=_optional_text(query.get("run_id")),
-        limit=_positive_int(query.get("limit"), default=5),
+        user_request=str(
+            query.get("latest_user_message")
+            or query.get("text")
+            or query.get("raw_user_request")
+            or ""
+        ),
+        task_goal=str(query.get("goal") or query.get("raw_user_request") or ""),
+        current_step=current_step or None,
+        active_paths=tuple(_string_list(query.get("active_paths"))),
+        limit=min(5, _positive_int(query.get("limit"), default=5)),
     )
 
 
 def _query_payload(query: MemoryQuery) -> dict[str, Any]:
     return {
-        "latest_user_message": query.latest_user_message,
-        "raw_user_request": query.raw_user_request,
-        "goal": query.goal,
-        "current_mode": query.current_mode,
-        "current_step_title": query.current_step_title,
-        "current_step_kind": query.current_step_kind,
-        "verification_status": query.verification_status,
-        "blocked_reason": query.blocked_reason,
+        "user_request": query.user_request,
+        "task_goal": query.task_goal,
+        "current_step": query.current_step,
         "active_paths": list(query.active_paths),
-        "changed_paths": list(query.changed_paths),
         "limit": query.limit,
     }
 

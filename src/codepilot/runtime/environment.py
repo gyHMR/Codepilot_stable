@@ -11,12 +11,16 @@ from typing import Any, Literal
 
 from codepilot.core.contracts import (
     BoundaryPort,
+    ContextPreparationPort,
+    ContextPrepareRequest,
     CorePorts,
-    ContextPort,
+    PreparedModelContext,
     ToolResultEntry,
 )
+from codepilot.protocols import Tool
 from codepilot.sessions.contracts import PreparedAgentRun
-from codepilot.tools.contracts import ToolExecutionRequest
+from codepilot.tools.codecs import json_value
+from codepilot.tools.contracts import ToolExecutionPort, ToolExecutionRequest
 from .lifecycle import RuntimeLifecycle
 
 
@@ -221,14 +225,13 @@ class RunEnvironment:
     session_id: str
     trigger: RunTrigger
     model: Any | None
-    tools: Any | None
-    context: ContextPort | None
+    tools: ToolExecutionPort | None
+    context: ContextPreparationPort | None
     state: BoundaryPort | None
     cancellation: RunCancellationToken
     deadline_at_ms: int | None
     event_sink: Callable[[dict[str, Any]], None] | None
     resources: RunResourceScope
-    memory: Any | None = None
     lifecycle: RuntimeLifecycle | None = None
 
     def __post_init__(self) -> None:
@@ -267,9 +270,8 @@ class RunEnvironmentFactory:
         prepared: PreparedAgentRun,
         *,
         model: Any | None,
-        tools: Any | None,
+        tools: ToolExecutionPort | None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
-        memory: Any | None = None,
         deadline_at_ms: int | None = None,
     ) -> RunEnvironment:
         trigger: RunTrigger = (
@@ -292,7 +294,6 @@ class RunEnvironmentFactory:
             deadline_at_ms=deadline_at_ms,
             event_sink=event_sink,
             resources=resources,
-            memory=memory,
         )
 
 
@@ -308,8 +309,13 @@ class _UnavailableModelPort:
 
 
 class _PassthroughContextPort:
-    def prepare(self, _request: Any) -> None:
-        return None
+    def prepare(self, request: ContextPrepareRequest) -> PreparedModelContext:
+        return PreparedModelContext(
+            system_prompt=str(request.seed.get("system_prompt") or ""),
+            messages=request.messages,
+            tools=_tools_from_catalog(request),
+            projection_ref=f"context:passthrough:{request.run_id}",
+        )
 
 
 class _NoopBoundaryPort:
@@ -320,7 +326,7 @@ class _NoopBoundaryPort:
 class _RunScopedToolPort:
     """Apply Runtime-owned execution limits before Core reaches Tools."""
 
-    def __init__(self, delegate: Any, *, deadline_at_ms: int) -> None:
+    def __init__(self, delegate: ToolExecutionPort, *, deadline_at_ms: int) -> None:
         self._delegate = delegate
         self._deadline_at_ms = deadline_at_ms
 
@@ -346,6 +352,20 @@ class _RunScopedToolPort:
 
     async def execute_prepared(self, batch_id: str):
         return await self._delegate.execute_prepared(batch_id)
+
+
+def _tools_from_catalog(request: ContextPrepareRequest) -> tuple[Tool, ...]:
+    snapshot = request.tool_catalog
+    if snapshot is None:
+        return ()
+    return tuple(
+        Tool(
+            name=item.spec.name,
+            description=item.spec.description,
+            parameters=json_value(item.spec.input_schema),
+        )
+        for item in snapshot.entries
+    )
 
 
 def _current_task() -> asyncio.Task[Any] | None:

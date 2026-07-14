@@ -1,23 +1,30 @@
-from .service import (
-    ActiveFile,
-    ContextEvidence,
-    ContextGovernor,
-    ContextPressurePolicy,
-    FileSummary,
-    RepositoryTracker,
-    SessionContextState,
-    build_context_freshness_notice,
+from .budget import (
+    ContextBudgetConfig,
+    ContextBudgetExceededError,
     calibrate_context_usage,
 )
+from .contracts import (
+    CompactSnapshotRef,
+    CompactSummary,
+    ContextCheckpointPort,
+    ContextCheckpointState,
+    ContextSummarizerPort,
+    ContextSummaryRequest,
+    ContextSummaryResult,
+)
+from .service import ContextService
+
 
 __all__ = [
-    "ActiveFile",
-    "ContextEvidence",
-    "ContextGovernor",
-    "ContextPressurePolicy",
-    "FileSummary",
-    "RepositoryTracker",
-    "SessionContextState",
-    "build_context_freshness_notice",
+    "CompactSnapshotRef",
+    "CompactSummary",
+    "ContextBudgetConfig",
+    "ContextBudgetExceededError",
+    "ContextCheckpointPort",
+    "ContextCheckpointState",
+    "ContextService",
+    "ContextSummarizerPort",
+    "ContextSummaryRequest",
+    "ContextSummaryResult",
     "calibrate_context_usage",
 ]

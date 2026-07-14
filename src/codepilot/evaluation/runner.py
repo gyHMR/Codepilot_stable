@@ -21,19 +21,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from codepilot.sessions.contracts import (
-    AgentContext,
-    ContextPreparationRequest,
-    PreparedAgentContext,
-)
-from codepilot.llm.estimation import estimate_context, estimate_context_tokens
 from codepilot.observability import RunTrace, build_run_trace, load_run_trace
 from codepilot.protocols import (
     AssistantMessage,
-    ContextPressure,
-    ContextReport,
-    ContextSectionReport,
-    ContextView,
     TextContent,
     ToolResultMessage,
     UserMessage,
@@ -46,7 +36,7 @@ from codepilot.runtime.actions import (
     RunFinishedFrame,
     RunPausedFrame,
 )
-from codepilot.sessions.memory import MEMORY_SCHEMA_VERSION
+from codepilot.sessions.memory import MemoryRecord
 
 from .artifacts import EvaluationArtifacts
 from .evidence import (
@@ -457,82 +447,23 @@ def _context_compression_session_options(
 ) -> Any:
     profile = case.context_profile
     messages = [*list(options.session_options.messages), *seeded_messages]
-    prepare_context = _raw_context_preparer(case) if variant == "raw" else None
+    context_window = _positive_int(
+        profile.get("model_context_window"),
+        default=8192,
+    )
+    if variant == "raw":
+        context_window = max(context_window, 1_000_000)
     return replace(
         options.session_options,
         workspace_dir=workspace,
         messages=messages,
-        model_context_window=_positive_int(profile.get("model_context_window"), default=8192),
+        model_context_window=context_window,
         model_max_output_tokens=_positive_int(
             profile.get("model_max_output_tokens"),
             default=512,
         ),
-        prepare_context=prepare_context,
         **options.runtime_overrides,
     )
-
-
-def _raw_context_preparer(case: EvalCase):
-    expected_level = _context_profile_pressure(case)
-
-    async def prepare(
-        context: AgentContext,
-        request: ContextPreparationRequest,
-    ) -> PreparedAgentContext:
-        estimate = estimate_context(context.messages, context.system_prompt, context.tools)
-        effective_budget = max(
-            128,
-            request.model_context_window
-            - request.model_max_output_tokens
-            - 1024,
-        )
-        selected_items = _raw_selected_items(context.messages)
-        conversation_text = _raw_conversation_preview(context.messages)
-        report = ContextReport(
-            context_id=f"ctx_raw_{_hash_text(conversation_text)}",
-            repository_fingerprint="raw-context",
-            total_budget_tokens=effective_budget,
-            estimated_tokens_before=estimate.total,
-            estimated_tokens_after=estimate.total,
-            sections=[
-                ContextSectionReport(
-                    name="raw_messages",
-                    budget_tokens=effective_budget,
-                    candidate_items=len(context.messages),
-                    selected_items=len(context.messages),
-                    estimated_tokens_before=estimate.total,
-                    estimated_tokens_after=estimate.total,
-                    reduction_policy="raw_passthrough",
-                )
-            ],
-            selected_items=selected_items,
-            pressure=ContextPressure(
-                level=expected_level,
-                effective_budget=effective_budget,
-                estimated_tokens=estimate.total,
-                reasons=["raw_passthrough"],
-            ),
-            context_view=ContextView(conversation=[conversation_text] if conversation_text else []),
-            tokens_by_layer={
-                "runtime": 0,
-                "conversation": estimate_context_tokens(context.messages, ""),
-                "tools": estimate_context_tokens([], "", context.tools),
-            },
-            estimation={
-                "raw_estimate": estimate.total,
-                "estimated_after": estimate.total,
-                "by_type": dict(estimate.by_type),
-                "variant": "raw",
-            },
-        )
-        return PreparedAgentContext(
-            system_prompt=context.system_prompt,
-            messages=list(context.messages),
-            tools=list(context.tools),
-            report=report,
-        )
-
-    return prepare
 
 
 def _context_profile_messages(workspace: Path, case: EvalCase) -> list[Any]:
@@ -653,39 +584,6 @@ def _read_workspace_excerpt(workspace: Path, path: str, *, limit: int = 1800) ->
         return target.read_text(encoding="utf-8", errors="replace")[:limit]
     except OSError:
         return ""
-
-
-def _raw_selected_items(messages: list[Any]) -> list[dict[str, Any]]:
-    selected: list[dict[str, Any]] = []
-    for index, message in enumerate(messages):
-        if not isinstance(message, ToolResultMessage):
-            continue
-        paths = list(message.affected_paths)
-        if not paths:
-            paths = _profile_paths(message.metadata.get("read_paths"))
-        tokens = estimate_context_tokens([message], "")
-        for path in paths or [f"message:{index}"]:
-            selected.append(
-                {
-                    "id": f"raw:{path}",
-                    "kind": "raw_tool_result",
-                    "path": path,
-                    "source": message.tool_name,
-                    "tokens": tokens,
-                    "freshness": "unknown",
-                }
-            )
-    return selected
-
-
-def _raw_conversation_preview(messages: list[Any], *, limit: int = 4000) -> str:
-    parts: list[str] = []
-    for message in messages[-12:]:
-        if isinstance(message, UserMessage):
-            parts.append(str(message.content))
-        elif isinstance(message, ToolResultMessage):
-            parts.append(_tool_result_text(message))
-    return "\n".join(part for part in parts if part).strip()[:limit]
 
 
 def _tool_result_text(message: ToolResultMessage) -> str:
@@ -885,144 +783,7 @@ def _seed_structured_memory(workspace: Path) -> None:
 
 
 def _canonical_memory_seed(raw: dict[str, Any]) -> dict[str, Any]:
-    if raw.get("schema_version") == MEMORY_SCHEMA_VERSION:
-        return dict(raw)
-    content = _memory_text(raw.get("content") or raw.get("text") or raw.get("value"))
-    memory_type = _memory_type(raw.get("type") or raw.get("kind"))
-    source = _memory_source(raw.get("source"))
-    return {
-        "schema_version": MEMORY_SCHEMA_VERSION,
-        "id": _memory_text(raw.get("id")),
-        "type": memory_type,
-        "scope": _memory_scope(raw.get("scope")),
-        "subject": _memory_text(raw.get("subject") or raw.get("key") or raw.get("id")),
-        "predicate": _memory_text(raw.get("predicate") or "is"),
-        "value": _memory_text(raw.get("value") or content),
-        "content": content,
-        "keywords": _memory_list(raw.get("keywords") or raw.get("triggers")),
-        "paths": _memory_list(raw.get("paths") or raw.get("related_paths")),
-        "status": _memory_status(raw.get("status")),
-        "source": source,
-        "confidence": _memory_confidence(raw.get("confidence"), source=source),
-        "priority": _memory_priority(raw.get("priority"), memory_type=memory_type),
-        "created_by_session_id": _optional_text(raw.get("created_by_session_id")),
-        "created_by_run_id": _optional_text(raw.get("created_by_run_id")),
-        "source_message_id": _optional_text(raw.get("source_message_id")),
-        "source_event_id": _optional_text(raw.get("source_event_id")),
-        "evidence_refs": _memory_evidence_refs(raw.get("evidence_refs")),
-        "supersedes": _memory_list(raw.get("supersedes")),
-        "superseded_by": _optional_text(raw.get("superseded_by")),
-        "occurrences": _positive_memory_count(raw.get("occurrences")),
-        "created_at": _memory_text(raw.get("created_at") or "2026-01-01T00:00:00+00:00"),
-        "updated_at": _memory_text(raw.get("updated_at") or "2026-01-01T00:00:00+00:00"),
-    }
-
-
-def _memory_text(value: object) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise ValueError("memory seed field cannot be empty")
-    return text
-
-
-def _memory_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    out: list[str] = []
-    for item in value:
-        text = str(item).strip()
-        if text and text not in out:
-            out.append(text)
-    return out
-
-
-def _memory_type(value: object) -> str:
-    text = str(value or "").strip()
-    if text in {"preference", "constraint", "decision", "workflow", "correction", "experience"}:
-        return text
-    return "constraint"
-
-
-def _memory_scope(value: object) -> str:
-    text = str(value or "").strip()
-    if text in {"project", "workspace", "global"}:
-        return text
-    return "project"
-
-
-def _memory_status(value: object) -> str:
-    text = str(value or "").strip()
-    if text in {"candidate", "active", "disabled", "superseded", "deleted"}:
-        return text
-    return "active"
-
-
-def _memory_source(value: object) -> str:
-    text = str(value or "").strip()
-    if text in {"user", "user_explicit"}:
-        return "user_explicit"
-    if text in {"run", "task_experience"}:
-        return "task_experience"
-    if text in {"approved", "user_approved"}:
-        return "user_approved"
-    if text in {"manual", "manual_edit"}:
-        return "manual_edit"
-    if text in {"user_correction"}:
-        return "user_correction"
-    return "manual_edit"
-
-
-def _memory_confidence(value: object, *, source: str) -> str:
-    text = str(value or "").strip()
-    if text in {"explicit", "observed", "inferred"}:
-        return text
-    if source in {"user_explicit", "user_approved", "manual_edit"}:
-        return "explicit"
-    if source == "task_experience":
-        return "observed"
-    return "inferred"
-
-
-def _memory_priority(value: object, *, memory_type: str) -> int:
-    if isinstance(value, bool):
-        return 1
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = {"constraint": 5, "decision": 4, "experience": 3}.get(memory_type, 2)
-    return min(5, max(0, number))
-
-
-def _positive_memory_count(value: object) -> int:
-    if isinstance(value, bool):
-        return 1
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return 1
-    return max(1, number)
-
-
-def _memory_evidence_refs(value: object) -> list[str]:
-    refs = []
-    for item in _memory_list(value):
-        refs.append(item if _has_memory_ref_prefix(item) else f"artifact:{item}")
-    return refs or ["artifact:.codepilot/memory/memories.jsonl"]
-
-
-def _has_memory_ref_prefix(value: str) -> bool:
-    return any(
-        value.startswith(prefix)
-        for prefix in (
-            "message:",
-            "event:",
-            "run:",
-            "tool:",
-            "verification:",
-            "artifact:",
-            "session:",
-        )
-    )
+    return MemoryRecord.from_dict(raw).to_dict()
 
 
 def _initialize_workspace_git(workspace: Path) -> None:

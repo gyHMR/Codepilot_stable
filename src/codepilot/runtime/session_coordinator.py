@@ -33,28 +33,24 @@ from codepilot.core.plan import (
 from codepilot.core.reducer import ReductionContext, apply_core_command
 from codepilot.core.state import CoreState, load_core_state
 from codepilot.core.tool_step import interrupted_tool_results
+from codepilot.core.transcript import last_assistant_message, unsettled_tool_calls
 from codepilot.llm.ports import ModelDescriptor
 from codepilot.protocols import (
     AgentRunResult,
-    AssistantMessage,
     ImageContent,
     Message,
     TextContent,
-    ToolCall,
-    ToolResultMessage,
     UserMessage,
 )
 from codepilot.protocols.commands import SessionLifecycleContext, SessionLifecycleView
 
 from codepilot.sessions.context import (
-    ContextGovernor,
-    SessionContextState,
+    ContextBudgetConfig,
+    ContextService,
     calibrate_context_usage,
 )
 from codepilot.sessions.contracts import (
-    AgentContext,
     ComponentCheckpoint,
-    ContextPreparationRequest,
     ModelRef,
     PreparedAgentRun,
     RecoveryRequest,
@@ -70,11 +66,9 @@ from codepilot.sessions.contracts import (
 from .registry import SessionConversationState
 from codepilot.sessions.rollback import GitRollbackBaseline, build_rollback_metadata, capture_git_baseline
 from codepilot.sessions.memory import (
-    MemoryRepository,
-    MemoryRetriever,
-    MemoryStore,
-    MemoryWriteContext,
-    MemoryWriter,
+    MemoryProposal,
+    MemoryProposalBatch,
+    MemoryService,
 )
 from codepilot.sessions.workspace import capture_workspace_checkpoint
 from codepilot.sessions.service import (
@@ -86,6 +80,7 @@ from codepilot.sessions.service import (
     new_session_id,
 )
 from codepilot.tools.security import ApprovalResponse
+from codepilot.tools.codecs import json_value
 from .session_state_adapter import RuntimeSessionStateAdapter
 from .contracts import project_core_domain_event
 
@@ -181,21 +176,14 @@ class RuntimeSessionCoordinator:
         )
 
         self.memory_enabled = bool(options.memory_enabled)
-        self.memory_store = MemoryStore(MemoryRepository(self.workspace_dir))
-        self.memory_writer = MemoryWriter(
-            store=self.memory_store,
+        self.memory_service = MemoryService(
             workspace_dir=self.workspace_dir,
         )
-        self.memory_retriever = MemoryRetriever(
-            store=self.memory_store,
-            workspace_dir=self.workspace_dir,
-        )
+        self._pending_memory_proposals: dict[str, tuple[MemoryProposal, ...]] = {}
+        self._memory_proposal_errors: dict[str, str] = {}
         self._rollback_baselines: dict[str, GitRollbackBaseline] = {}
-        self.context_governor = self._new_context_governor()
+        self.context_service = self._new_context_service(options)
         self._restore_active_checkpoint()
-        self._custom_prepare_context = options.prepare_context
-        self.prepare_context = self._custom_prepare_context or self.context_governor.prepare
-        self.latest_context_report: dict[str, Any] | None = None
 
         self.max_tool_calls_per_turn = options.max_tool_calls_per_turn
         self.retry_enabled = options.retry_enabled
@@ -274,7 +262,7 @@ class RuntimeSessionCoordinator:
             self.state_service,
             begun.session,
             begun.run,
-            context_state=self.context_governor.checkpoint_state,
+            context_state=self.context_service.checkpoint_state,
             workspace_state=self._capture_workspace_checkpoint,
         )
         if not is_continue and not begun.reused:
@@ -290,6 +278,7 @@ class RuntimeSessionCoordinator:
             run_id=run_id,
             session_id=self.session_id,
             loop_input=CoreRunInput(
+                session_id=self.session_id,
                 run_id=run_id,
                 entry=ModelEntry(),
                 messages=tuple(messages),
@@ -302,7 +291,7 @@ class RuntimeSessionCoordinator:
                 limits=self.core_limits(effective_mode),
                 context_seed=self._loop_context(effective_mode),
             ),
-            context_port=RuntimeSessionContextPort(self, state_port),
+            context_port=self.context_service,
             state_port=state_port,
             input_messages=[] if begun.reused else [user_message],
             rollback_baseline=rollback_ref,
@@ -330,6 +319,7 @@ class RuntimeSessionCoordinator:
             raise ValueError(f"Run is not recoverable: {run_id}")
         if tools is None:
             raise ValueError("Tool approval recovery requires a Tool port")
+        self._restore_tool_checkpoint(tools, recovery.bundle.run)
         challenge = tools.approval_challenge(intent.approval_id)
         if challenge is None:
             raise ValueError(f"Approval not found: {intent.approval_id}")
@@ -338,12 +328,27 @@ class RuntimeSessionCoordinator:
         self._ensure_workspace_recovery(recovery.bundle.workspace_status)
         self._restore_context_checkpoint(recovery.bundle.run)
         self._restore_rollback_checkpoint(recovery.bundle.run)
+        prepared_resume = tools.prepare_resume(
+            ApprovalResponse(
+                approval_id=intent.approval_id,
+                request_fingerprint=challenge.request_fingerprint,
+                decision=intent.decision,
+                reason=intent.reason,
+            )
+        )
         resumed_run = self.state_service.resume_run(
             ResumeRunRequest(
                 session_id=self.session_id,
                 run_id=run_id,
                 checkpoint_id=recovery.bundle.run.checkpoint.checkpoint_id,  # type: ignore[union-attr]
                 request_id=intent.approval_id,
+                components=(
+                    ComponentCheckpoint(
+                        owner="tools",
+                        schema_version=1,
+                        state=json_value(prepared_resume.checkpoint_state),
+                    ),
+                ),
             ),
             expected_run_revision=recovery.bundle.run.revision,
         )
@@ -352,22 +357,16 @@ class RuntimeSessionCoordinator:
             self.state_service,
             self.session_state,
             resumed_run,
-            context_state=self.context_governor.checkpoint_state,
+            context_state=self.context_service.checkpoint_state,
             workspace_state=self._capture_workspace_checkpoint,
         )
         messages = [record.message for record in recovery.bundle.messages]
         self.conversation.set_messages(messages)
-        result = tools.resume(
-            ApprovalResponse(
-                approval_id=intent.approval_id,
-                request_fingerprint=challenge.request_fingerprint,
-                decision=intent.decision,
-                reason=intent.reason,
-            )
-        )
+        result = tools.execute_prepared_resume(prepared_resume.resume_id)
         if inspect.isawaitable(result):
             result = await result
         loop_input = CoreRunInput(
+            session_id=self.session_id,
             run_id=run_id,
             entry=ToolResultEntry((result,)),
             messages=tuple(messages),
@@ -381,7 +380,7 @@ class RuntimeSessionCoordinator:
             run_id=run_id,
             session_id=self.session_id,
             loop_input=loop_input,
-            context_port=RuntimeSessionContextPort(self, state_port),
+            context_port=self.context_service,
             state_port=state_port,
             plan_refs={"plan_state": self.active_plan_state()},
             rollback_baseline=self._rollback_baseline_ref(run_id),
@@ -416,17 +415,28 @@ class RuntimeSessionCoordinator:
         self._ensure_workspace_recovery(recovery.bundle.workspace_status)
         self._restore_context_checkpoint(recovery.bundle.run)
         self._restore_rollback_checkpoint(recovery.bundle.run)
+        pending_tool_resume = None
+        if tools is not None:
+            self._restore_tool_checkpoint(tools, recovery.bundle.run)
+            pending_tool_resume = tools.pending_prepared_resume()
         checkpoint = recovery.bundle.run.checkpoint
         waiting = checkpoint.waiting
-        resumed_run = self.state_service.resume_run(
-            ResumeRunRequest(
-                session_id=self.session_id,
-                run_id=run_id,
-                checkpoint_id=checkpoint.checkpoint_id,
-                request_id=waiting.request_id if waiting is not None else None,
-            ),
-            expected_run_revision=recovery.bundle.run.revision,
-        )
+        if pending_tool_resume is not None:
+            if intent.kind != "automatic_continuation":
+                raise ValueError(
+                    "Prepared Tool resume requires automatic continuation"
+                )
+            resumed_run = recovery.bundle.run
+        else:
+            resumed_run = self.state_service.resume_run(
+                ResumeRunRequest(
+                    session_id=self.session_id,
+                    run_id=run_id,
+                    checkpoint_id=checkpoint.checkpoint_id,
+                    request_id=waiting.request_id if waiting is not None else None,
+                ),
+                expected_run_revision=recovery.bundle.run.revision,
+            )
         self.session_state = recovery.bundle.session
         input_messages: list[Message] = []
         if intent.text:
@@ -455,7 +465,7 @@ class RuntimeSessionCoordinator:
             self.state_service,
             self.session_state,
             resumed_run,
-            context_state=self.context_governor.checkpoint_state,
+            context_state=self.context_service.checkpoint_state,
             workspace_state=self._capture_workspace_checkpoint,
         )
         mode = ensure_run_mode(intent.target_mode or self.current_mode)
@@ -463,9 +473,17 @@ class RuntimeSessionCoordinator:
         synthetic_control = _continuation_control(intent.kind)
         messages = [record.message for record in self.state_service.load_messages(self.session_id)]
         self.conversation.set_messages(messages)
+        if pending_tool_resume is not None:
+            result = tools.execute_prepared_resume(pending_tool_resume.resume_id)
+            if inspect.isawaitable(result):
+                result = await result
+            entry = ToolResultEntry((result,))
+        else:
+            entry = _continuation_entry(checkpoint, waiting, messages)
         loop_input = CoreRunInput(
+            session_id=self.session_id,
             run_id=run_id,
-            entry=_continuation_entry(checkpoint, waiting, messages),
+            entry=entry,
             messages=tuple(messages),
             state=resumed_run.core_state,
             model=model,
@@ -481,7 +499,7 @@ class RuntimeSessionCoordinator:
             run_id=run_id,
             session_id=self.session_id,
             loop_input=loop_input,
-            context_port=RuntimeSessionContextPort(self, state_port),
+            context_port=self.context_service,
             state_port=state_port,
             input_messages=input_messages,
             context_refs={"context": "session_context", "continuation": intent.kind},
@@ -561,6 +579,9 @@ class RuntimeSessionCoordinator:
                     _set_session_message_id(message, message_id)
             self.conversation.remember_result(result)
 
+        if _is_terminal_outcome(outcome):
+            self._submit_captured_memory_proposals(result)
+
         if prepared.rollback_baseline is not None:
             self._write_rollback_metadata(
                 result,
@@ -569,9 +590,6 @@ class RuntimeSessionCoordinator:
             if _is_terminal_outcome(outcome):
                 self._discard_rollback_baseline(prepared.rollback_baseline)
         self._calibrate_context_usage(result)
-        if self.memory_enabled:
-            self._finalize_memory(result)
-        self.context_governor.finalize_run(result)
         await self._run_lifecycle_hooks(
             text=_prompt_text(prepared),
             is_continue=_is_continue_text(_prompt_text(prepared)),
@@ -672,6 +690,7 @@ class RuntimeSessionCoordinator:
                 "tool_approval": "tool_approval",
                 "plan_confirmation": "plan_approval",
                 "user_input": str(waiting.payload.get("stop_reason") or "waiting_user"),
+                "continuation": "continuation",
             }[waiting.kind]
         return {
             "checkpoint_id": checkpoint.checkpoint_id,
@@ -1019,33 +1038,21 @@ class RuntimeSessionCoordinator:
         state_port: RuntimeSessionStateAdapter,
     ) -> None:
         try:
-            event_id = f"event_{uuid4().hex[:12]}"
-            result = self.memory_writer.admit_prompt_memory(
+            receipt = self.memory_service.admit_user_prompt(
                 text,
-                context=MemoryWriteContext(
-                    session_id=self.session_id,
-                    run_id=run_id,
-                    source_message_id=source_message_id,
-                    source_event_id=event_id,
-                    evidence_refs=[
-                        f"event:{event_id}",
-                        *([f"message:{source_message_id}"] if source_message_id else []),
-                        *([f"run:{run_id}"] if run_id else []),
-                    ],
-                ),
+                session_id=self.session_id,
+                run_id=run_id or "prompt",
             )
-            if result is None:
-                return
-            record, decision = result
-            state_port.queue_durable_event(
-                {
-                    "type": decision.reason,
-                    "event_id": event_id,
-                    "run_id": run_id,
-                    "memory_id": record.id,
-                    "status": record.status,
-                }
-            )
+            for record in receipt.records:
+                state_port.queue_durable_event(
+                    {
+                        "type": "memory_user_explicit_admitted",
+                        "run_id": run_id,
+                        "source_message_id": source_message_id,
+                        "memory_id": record.id,
+                        "status": record.status,
+                    }
+                )
         except Exception as exc:
             logger.warning("failed to admit prompt memory: %s", exc)
             state_port.queue_durable_event(
@@ -1055,6 +1062,67 @@ class RuntimeSessionCoordinator:
                     "message": str(exc),
                 }
             )
+
+    def capture_memory_proposals(
+        self,
+        run_id: str,
+        proposals: tuple[MemoryProposal, ...],
+        error: str | None,
+    ) -> None:
+        if proposals:
+            self._pending_memory_proposals[run_id] = tuple(proposals)
+        else:
+            self._pending_memory_proposals.pop(run_id, None)
+        if error:
+            self._memory_proposal_errors[run_id] = str(error)
+        else:
+            self._memory_proposal_errors.pop(run_id, None)
+
+    def _submit_captured_memory_proposals(self, result: AgentRunResult) -> None:
+        proposals = self._pending_memory_proposals.pop(result.run_id, ())
+        sidecar_error = self._memory_proposal_errors.pop(result.run_id, None)
+        if sidecar_error:
+            self.state_service.append_event(
+                self.session_id,
+                {
+                    "type": "memory_proposal_invalid",
+                    "message": sidecar_error,
+                },
+                run_id=result.run_id,
+            )
+        if not self.memory_enabled or result.status != "completed" or not proposals:
+            return
+        verification_passed = result.signals.verification_status == "passed"
+        try:
+            receipt = self.memory_service.submit_proposals(
+                MemoryProposalBatch(
+                    session_id=self.session_id,
+                    run_id=result.run_id,
+                    origin="agent_finalization",
+                    verification_passed=verification_passed,
+                    proposals=proposals,
+                )
+            )
+        except Exception as exc:
+            logger.warning("failed to submit memory proposals: %s", exc)
+            self.state_service.append_event(
+                self.session_id,
+                {
+                    "type": "memory_proposal_failed",
+                    "message": str(exc),
+                },
+                run_id=result.run_id,
+            )
+            return
+        self.state_service.append_event(
+            self.session_id,
+            {
+                "type": "memory_proposals_submitted",
+                "memory_ids": [record.id for record in receipt.records],
+                "rejected": list(receipt.rejected),
+            },
+            run_id=result.run_id,
+        )
 
     def _plan_state_for_run(
         self,
@@ -1079,37 +1147,6 @@ class RuntimeSessionCoordinator:
                 return text
         return None
 
-    def _finalize_memory(self, result: AgentRunResult) -> None:
-        try:
-            event_id = f"event_{uuid4().hex[:12]}"
-            records = self.memory_writer.finalize_run(
-                result,
-                context=MemoryWriteContext(
-                    session_id=self.session_id,
-                    run_id=result.run_id,
-                    source_event_id=event_id,
-                    evidence_refs=[f"event:{event_id}", f"run:{result.run_id}"],
-                ),
-            )
-            for record in records:
-                self.append_event(
-                    {
-                        "type": "memory_candidate_created",
-                        "run_id": result.run_id,
-                        "memory_id": record.id,
-                        "status": record.status,
-                    }
-                )
-        except Exception as exc:
-            logger.warning("failed to finalize memory: %s", exc)
-            self.append_event(
-                {
-                    "type": "memory_warning",
-                    "operation": "finalize_run",
-                    "message": str(exc),
-                }
-            )
-
     def _calibrate_context_usage(self, result: AgentRunResult) -> None:
         try:
             usage = getattr(result, "usage", None)
@@ -1121,7 +1158,7 @@ class RuntimeSessionCoordinator:
                 workspace_dir=self.workspace_dir,
                 provider=getattr(model, "provider", None),
                 model=getattr(model, "id", None),
-                report=self.latest_context_report,
+                report=(dict(self.context_service.latest_report) or None),
                 actual_input_tokens=actual_input,
             )
         except Exception as exc:
@@ -1179,11 +1216,9 @@ class RuntimeSessionCoordinator:
         synthetic_control: dict[str, object] | None = None,
         checkpoint_phase: str = "",
     ) -> dict[str, object]:
-        normalized = ensure_run_mode(mode or self.current_mode)
+        ensure_run_mode(mode or self.current_mode)
         values: dict[str, Any] = {
             "system_prompt": self.conversation.system_prompt,
-            "session_id": self.session_id,
-            "mode": normalized,
         }
         if synthetic_control:
             values["synthetic_control"] = dict(synthetic_control)
@@ -1206,12 +1241,28 @@ class RuntimeSessionCoordinator:
             return str(fallback or "")
         return str(self._system_prompt_builder(ensure_run_mode(mode)) or "")
 
-    def _new_context_governor(self) -> ContextGovernor:
-        return ContextGovernor(
+    def _new_context_service(self, options: SessionOptions) -> ContextService:
+        return ContextService(
             workspace_dir=self.workspace_dir,
             session_id=self.session_id,
-            state=SessionContextState(workspace_dir=self.workspace_dir),
-            memory_retriever=self.memory_retriever if self.memory_enabled else None,
+            budget_config=ContextBudgetConfig(
+                context_window=options.model.context_window,
+                max_output_tokens=options.model.max_tokens,
+                safety_margin_tokens=min(
+                    max(
+                        0,
+                        options.model.context_window
+                        - options.model.max_tokens
+                        - 128,
+                    ),
+                    min(
+                        8192,
+                        max(1024, int(options.model.context_window * 0.05)),
+                    ),
+                ),
+            ),
+            memory_recall=self.memory_service if self.memory_enabled else None,
+            summarizer=None,
         )
 
     def _restore_context_checkpoint(self, run: Any) -> None:
@@ -1220,7 +1271,17 @@ class RuntimeSessionCoordinator:
             return
         for component in checkpoint.components:
             if component.owner == "context":
-                self.context_governor.restore_checkpoint_state(component.state)
+                self.context_service.restore_checkpoint_state(dict(component.state))
+                return
+
+    @staticmethod
+    def _restore_tool_checkpoint(tools: Any, run: Any) -> None:
+        checkpoint = run.checkpoint
+        if checkpoint is None:
+            return
+        for component in checkpoint.components:
+            if component.owner == "tools":
+                tools.restore_checkpoint_state(dict(component.state))
                 return
 
     def _restore_active_checkpoint(self) -> None:
@@ -1305,91 +1366,6 @@ class RuntimeSessionCoordinator:
         ]
         return len(events), max(turn_ids, default=0)
 
-
-class RuntimeSessionContextPort:
-    def __init__(
-        self,
-        session: RuntimeSessionCoordinator,
-        state_port: RuntimeSessionStateAdapter,
-    ) -> None:
-        self._session = session
-        self._state_port = state_port
-
-    async def prepare(self, request: dict[str, Any]) -> dict[str, Any]:
-        session = self._session
-        request_context = request.get("context")
-        request_context = request_context if isinstance(request_context, dict) else {}
-        run_signals = request_context.get("run_signals")
-        request_mode = _optional_text(request.get("mode"))
-        session_mode = ensure_run_mode(session.current_mode)
-        plan_state = session.context_plan_state_for_mode(request_mode or session_mode)
-        mode = ensure_run_mode(request_mode or session_mode)
-        checkpoint = session.runtime_checkpoint()
-        runtime_state: dict[str, object] = {
-            "run_id": str(request.get("run_id") or ""),
-            "mode": mode,
-            "checkpoint_phase": str(
-                request_context.get("checkpoint_phase")
-                or (checkpoint or {}).get("phase")
-                or "running"
-            ),
-            "mode_policy": _mode_policy(mode),
-        }
-        synthetic_control = request_context.get("synthetic_control")
-        if isinstance(synthetic_control, dict):
-            runtime_state["synthetic_control"] = dict(synthetic_control)
-        if isinstance(plan_state, dict):
-            runtime_state["plan_state_status"] = str(plan_state.get("status") or "")
-        if isinstance(run_signals, dict):
-            runtime_state["verification_status"] = str(
-                run_signals.get("verification_status") or "unknown"
-            )
-        prepared = session.prepare_context(
-                AgentContext(
-                    system_prompt=str(request.get("system_prompt", "")),
-                    messages=list(request.get("messages", ())),
-                    tools=list(request.get("tools", ())),
-                    mode=mode,
-                    plan_state=plan_state,
-                    run_signals=run_signals if isinstance(run_signals, dict) else None,
-                    runtime_state=runtime_state,
-                ),
-                ContextPreparationRequest(
-                    session_id=session.session_id,
-                    model_context_window=session.conversation.model.context_window,
-                    model_max_output_tokens=session.conversation.model.max_tokens,
-                    signal={
-                        "run_id": request.get("run_id"),
-                        "provider": getattr(session.conversation.model, "provider", None),
-                        "model": getattr(session.conversation.model, "id", None),
-                    },
-                ),
-            )
-        if inspect.isawaitable(prepared):
-            prepared = await prepared
-        report = prepared.report.to_dict()
-        session.latest_context_report = report
-        self._state_port.queue_durable_event(
-            {
-                "type": "context_projected",
-                "report": report,
-            }
-        )
-        memory_ids = report.get("retrieved_memory_ids")
-        if session.memory_enabled and isinstance(memory_ids, list) and memory_ids:
-            self._state_port.queue_durable_event(
-                {
-                    "type": "memory_retrieved",
-                    "memory_ids": memory_ids,
-                    "reasons": report.get("memory_retrieval_reasons", {}),
-                }
-            )
-        return {
-            "system_prompt": prepared.system_prompt,
-            "messages": list(prepared.messages),
-            "tools": list(prepared.tools),
-            "context_report": report,
-        }
 
 def _user_message(intent: SessionRunIntent) -> UserMessage:
     content: list[TextContent | ImageContent] = [TextContent(text=intent.text)]
@@ -1559,9 +1535,9 @@ def _continuation_entry(
     if resume_point in {"before_model", "after_tools"}:
         return ModelEntry()
     if resume_point in {"after_model", "before_finalization"}:
-        return ModelEntry(_last_assistant_message(messages))
+        return ModelEntry(last_assistant_message(messages))
     if resume_point == "before_tools":
-        calls = _unsettled_tool_calls(messages)
+        calls = unsettled_tool_calls(messages)
         if not calls:
             raise ValueError("before_tools checkpoint has no unsettled Tool calls")
         return ToolResultEntry(
@@ -1575,30 +1551,6 @@ def _continuation_entry(
             )
         )
     raise ValueError(f"Unsupported continuation checkpoint: {resume_point}")
-
-
-def _last_assistant_message(messages: list[Message]) -> AssistantMessage | None:
-    return next(
-        (
-            message
-            for message in reversed(messages)
-            if isinstance(message, AssistantMessage)
-        ),
-        None,
-    )
-
-
-def _unsettled_tool_calls(messages: list[Message]) -> tuple[ToolCall, ...]:
-    calls: dict[str, ToolCall] = {}
-    settled: set[str] = set()
-    for message in messages:
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, ToolCall):
-                    calls[block.id] = block
-        elif isinstance(message, ToolResultMessage):
-            settled.add(message.tool_call_id)
-    return tuple(call for call_id, call in calls.items() if call_id not in settled)
 
 
 def _is_continue_text(value: object) -> bool:
@@ -1678,7 +1630,6 @@ def _hash_text(text: str) -> str:
 
 
 __all__ = [
-    "RuntimeSessionContextPort",
     "RuntimeSessionCoordinator",
     "new_run_id",
     "runtime_retry_policy",

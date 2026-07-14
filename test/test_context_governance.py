@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+
+from codepilot.protocols import TextContent, ToolResultMessage
+from codepilot.sessions.context.state import ContextState, RepositoryTracker
 
 
 def test_repository_tracker_detects_external_dirty_file_changes(tmp_path: Path) -> None:
-    from codepilot.sessions.context import RepositoryTracker
-
     tracked = tmp_path / "app.py"
     tracked.write_text("value = 1\n", encoding="utf-8", newline="\n")
     _git(tmp_path, "init")
@@ -13,232 +15,58 @@ def test_repository_tracker_detects_external_dirty_file_changes(tmp_path: Path) 
     _git(tmp_path, "config", "user.name", "Test")
     _git(tmp_path, "add", "app.py")
     _git(tmp_path, "commit", "-m", "initial")
-
     tracker = RepositoryTracker(tmp_path)
     first = tracker.snapshot()
+
     tracked.write_text("value = 2\n", encoding="utf-8", newline="\n")
     second, first_delta = tracker.refresh(first)
     tracked.write_text("value = 3\n", encoding="utf-8", newline="\n")
     third, second_delta = tracker.refresh(second)
 
-    assert first.fingerprint != second.fingerprint
-    assert second.fingerprint != third.fingerprint
+    assert first.fingerprint != second.fingerprint != third.fingerprint
     assert "app.py" in first_delta.modified_paths
     assert "app.py" in second_delta.modified_paths
 
 
-def test_repository_tracker_ignores_codepilot_internal_artifacts(tmp_path: Path) -> None:
-    from codepilot.sessions.context import RepositoryTracker
-
-    tracked = tmp_path / "app.py"
-    tracked.write_text("value = 1\n", encoding="utf-8", newline="\n")
+def test_repository_tracker_ignores_codepilot_artifacts(tmp_path: Path) -> None:
     _git(tmp_path, "init")
     _git(tmp_path, "config", "user.email", "test@example.com")
     _git(tmp_path, "config", "user.name", "Test")
-    _git(tmp_path, "add", "app.py")
-    _git(tmp_path, "commit", "-m", "initial")
-
     tracker = RepositoryTracker(tmp_path)
     first = tracker.snapshot()
-    artifact = (
-        tmp_path
-        / ".codepilot"
-        / "sessions"
-        / "session_1"
-        / "artifacts"
-        / "tool_outputs"
-        / "call_1.txt"
-    )
+    artifact = tmp_path / ".codepilot" / "runs" / "run_1" / "artifacts" / "output.txt"
     artifact.parent.mkdir(parents=True)
-    artifact.write_text("tool output\n", encoding="utf-8")
+    artifact.write_text("output", encoding="utf-8")
+
     second, delta = tracker.refresh(first)
 
     assert first.fingerprint == second.fingerprint
     assert not delta.changed
-    assert ".codepilot/" not in second.top_level_entries
 
 
-def test_context_state_records_reject_unknown_enum_values() -> None:
-    import pytest
-    from codepilot.sessions.context import ActiveFile, ContextEvidence, FileSummary
-
-    with pytest.raises(ValueError, match="Unknown active file role"):
-        ActiveFile(path="src/app.py", role="scratch", reason="bad role")
-
-    with pytest.raises(ValueError, match="Unknown context freshness"):
-        FileSummary(
-            path="src/app.py",
-            summary="summary",
-            source_hash="hash",
-            freshness="expired",
-        )
-
-    with pytest.raises(ValueError, match="Unknown context trust"):
-        ContextEvidence(
-            kind="tool_result",
-            content="content",
-            trust="maybe",
-            source="read",
-        )
-
-    with pytest.raises(ValueError, match="Unknown context evidence kind"):
-        ContextEvidence(
-            kind="mystery",
-            content="content",
-            trust="observed",
-            source="read",
-        )
-
-
-def test_context_protocol_records_reject_unknown_enum_values() -> None:
-    import pytest
-    from codepilot.protocols import ContextItem, DroppedContextItem
-
-    with pytest.raises(ValueError, match="Unknown context trust"):
-        ContextItem(
-            id="bad-trust",
-            kind="active_file",
-            content="content",
-            source="test",
-            trust="certain",
-            priority=1,
-            estimated_tokens=1,
-        )
-
-    with pytest.raises(ValueError, match="Unknown context freshness"):
-        ContextItem(
-            id="bad-freshness",
-            kind="active_file",
-            content="content",
-            source="test",
-            trust="observed",
-            priority=1,
-            estimated_tokens=1,
-            freshness="expired",
-        )
-
-    with pytest.raises(ValueError, match="Unknown dropped context reason"):
-        DroppedContextItem(
-            item_id="item-1",
-            section="memory",
-            reason="too_old",
-            source="test",
-        )
-
-
-def test_context_freshness_notice_summarizes_stale_run_files(
-    tmp_path: Path,
-) -> None:
-    from codepilot.protocols import TextContent, UserMessage
-    from codepilot.sessions.context import build_context_freshness_notice
-    from codepilot.sessions.contracts import WorkspaceRecoveryState
-
-    result = WorkspaceRecoveryState(
-        status="changed",
-        changed_paths=["src/app.py"],
-        missing_paths=["src/missing.py"],
+def test_context_state_links_tool_evidence_to_committed_message(tmp_path: Path) -> None:
+    state = ContextState(workspace_dir=tmp_path)
+    result = ToolResultMessage(
+        tool_call_id="read_1",
+        tool_name="read",
+        content=[TextContent(text="print('hello')")],
+        status="success",
+        metadata={
+            "session_message_id": "msg_result",
+            "read_paths": ["src/app.py"],
+            "file_state": {"path": "src/app.py", "sha256": "abc"},
+        },
     )
 
-    notice = build_context_freshness_notice(result)
+    state.observe_messages((result,), repository_fingerprint="fp_1")
 
-    assert isinstance(notice, UserMessage)
-    assert notice.metadata == {
-        "context_freshness": {
-            "status": "changed",
-            "changed_paths": ["src/app.py"],
-            "missing_paths": ["src/missing.py"],
-        }
-    }
-    assert len(notice.content) == 1
-    block = notice.content[0]
-    assert isinstance(block, TextContent)
-    assert "[Context Freshness]" in block.text
-    assert "status=changed" in block.text
-    assert "changed_files=src/app.py" in block.text
-    assert "missing_files=src/missing.py" in block.text
-    assert "旧工具结果可能已过期" in block.text
+    assert state.evidence["message:msg_result"].source_tool_call_id == "read_1"
+    assert state.active_files["src/app.py"].role == "target"
+    assert state.active_files["src/app.py"].source_hash == "abc"
 
 
-def test_context_freshness_notice_is_absent_for_valid_state(tmp_path: Path) -> None:
-    from codepilot.sessions.context import build_context_freshness_notice
-    from codepilot.sessions.contracts import WorkspaceRecoveryState
-
-    result = WorkspaceRecoveryState(status="unchanged")
-
-    assert build_context_freshness_notice(result) is None
-
-
-def test_session_context_state_caps_verification_only_evidence(
-    tmp_path: Path,
-) -> None:
-    from codepilot.protocols import ToolResultMessage
-    from codepilot.sessions.context import SessionContextState
-
-    state = SessionContextState(workspace_dir=tmp_path)
-    for index in range(90):
-        state.observe_tool_result(
-            ToolResultMessage(
-                tool_call_id=f"verify_{index}",
-                tool_name="bash",
-                verification={
-                    "status": "passed",
-                    "command": f"pytest #{index}",
-                    "exit_code": 0,
-                },
-            ),
-            repository_fingerprint="fp",
-        )
-
-    assert len(state.evidence) == 80
-
-
-def test_session_context_state_promotes_successful_read_paths_to_active_targets(
-    tmp_path: Path,
-) -> None:
-    from codepilot.protocols import TextContent, ToolResultMessage
-    from codepilot.sessions.context import SessionContextState
-
-    state = SessionContextState(workspace_dir=tmp_path)
-
-    state.observe_tool_result(
-        ToolResultMessage(
-            tool_call_id="read_1",
-            tool_name="read",
-            content=[TextContent(text="1\tprint('hello')")],
-            status="success",
-            metadata={
-                "read_paths": ["src/app.py"],
-                "file_state": {"path": "src/app.py", "sha256": "abc"},
-            },
-        )
-    )
-
-    active = state.active_files["src/app.py"]
-    assert active.role == "target"
-    assert active.source_hash == "abc"
-    assert active.freshness == "fresh"
-
-
-def test_session_context_state_caps_active_files_by_relevance(tmp_path: Path) -> None:
-    from codepilot.sessions.context import SessionContextState
-
-    state = SessionContextState(workspace_dir=tmp_path, max_active_files=3)
-    state.touch_file("docs/old.md", role="reference", reason="read")
-    state.touch_file("src/service.py", role="target", reason="edit", source_hash="abc")
-    state.touch_file("test/test_service.py", role="test", reason="verify", source_hash="def")
-    state.touch_file("src/dependency.py", role="dependency", reason="read")
-
-    assert list(state.active_files) == [
-        "src/service.py",
-        "test/test_service.py",
-        "src/dependency.py",
-    ]
-
-
-def test_session_context_state_never_prunes_recent_target_file(tmp_path: Path) -> None:
-    from codepilot.sessions.context import SessionContextState
-
-    state = SessionContextState(workspace_dir=tmp_path, max_active_files=2)
+def test_context_state_caps_active_files_without_dropping_targets(tmp_path: Path) -> None:
+    state = ContextState(workspace_dir=tmp_path, max_active_files=2)
     state.touch_file("docs/reference.md", role="reference", reason="read")
     state.touch_file("src/current.py", role="target", reason="edit")
     state.touch_file("docs/other.md", role="reference", reason="read")
@@ -248,8 +76,6 @@ def test_session_context_state_never_prunes_recent_target_file(tmp_path: Path) -
 
 
 def _git(root: Path, *args: str) -> None:
-    import subprocess
-
     subprocess.run(
         ["git", *args],
         cwd=root,
