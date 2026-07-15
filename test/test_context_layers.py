@@ -7,7 +7,13 @@ from pathlib import Path
 from codepilot.core.contracts import ContextPrepareRequest, CoreContextView
 from codepilot.core.state import CoreState
 from codepilot.llm.ports import ModelDescriptor
-from codepilot.protocols import UserMessage
+from codepilot.protocols import (
+    AssistantMessage,
+    TextContent,
+    ToolCall,
+    ToolResultMessage,
+    UserMessage,
+)
 from codepilot.sessions.context import ContextBudgetConfig, ContextService
 from codepilot.sessions.memory import MemoryRecallResult, RecalledMemory
 
@@ -101,6 +107,45 @@ def test_memory_recall_failure_degrades_to_empty_l3(tmp_path: Path) -> None:
 
     assert "## L3 Recalled Memory\n- (none)" in str(prepared.messages[0].content)
     assert service.latest_report["memory_error"] == "memory store unavailable"
+
+
+def test_l2_does_not_duplicate_read_source_body_from_l4(tmp_path: Path) -> None:
+    assistant = AssistantMessage(
+        content=[ToolCall(id="read_1", name="read", arguments={"path": "src/app.py"})],
+        metadata={"session_message_id": "msg_assistant"},
+    )
+    result = ToolResultMessage(
+        tool_call_id="read_1",
+        tool_name="read",
+        content=[TextContent(text="UNIQUE_LOGIN_SOURCE = True")],
+        details={
+            "path": "src/app.py",
+            "sha256": "hash-a",
+            "offset": 1,
+            "returned_lines": 1,
+        },
+        metadata={"session_message_id": "msg_result"},
+    )
+    base = _request()
+    request = replace(base, messages=(base.messages[0], assistant, result))
+    service = ContextService(
+        workspace_dir=tmp_path,
+        session_id="session_1",
+        budget_config=ContextBudgetConfig(
+            context_window=8000,
+            max_output_tokens=500,
+            safety_margin_tokens=0,
+        ),
+    )
+
+    prepared = asyncio.run(service.prepare(request))
+
+    attachment = str(prepared.messages[0].content)
+    assert "UNIQUE_LOGIN_SOURCE" not in attachment
+    projected_result = next(
+        message for message in prepared.messages if isinstance(message, ToolResultMessage)
+    )
+    assert "UNIQUE_LOGIN_SOURCE" in str(projected_result.content[0].text)
 
 
 def test_runtime_control_is_compiled_into_system_prompt_not_user_attachment(

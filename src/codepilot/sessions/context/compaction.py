@@ -53,6 +53,7 @@ class ContextCompactor:
         run_id: str,
         messages: tuple[Message, ...],
         original_goal: str,
+        keep_tokens: int | None = None,
     ) -> CompactSnapshotRef | None:
         previous_snapshot = self.current_snapshot
         previous_summary = self.current_summary
@@ -71,8 +72,7 @@ class ContextCompactor:
                 if previous_snapshot is not None:
                     return previous_snapshot
                 raise ContextCompactionError("no legal message prefix is large enough to compact")
-            keep_groups = max(3, (len(groups) * 3 + 9) // 10)
-            compact_group_count = max(1, len(groups) - keep_groups)
+            compact_group_count = _compact_group_count(groups, keep_tokens)
             protected_group = latest_unconsumed_tool_batch(groups)
             if protected_group is not None:
                 compact_group_count = min(compact_group_count, protected_group)
@@ -269,6 +269,26 @@ def _validate_message_groups(groups: tuple[tuple[Message, ...], ...]) -> None:
             raise ContextCompactionError("orphan tool result is not compactable")
         if isinstance(message, AssistantMessage) and tool_batch_call_ids(group):
             raise ContextCompactionError("tool call batch is not closed")
+
+
+def _compact_group_count(
+    groups: tuple[tuple[Message, ...], ...],
+    keep_tokens: int | None,
+) -> int:
+    if keep_tokens is None:
+        keep_groups = max(3, (len(groups) * 3 + 9) // 10)
+        return max(1, len(groups) - keep_groups)
+    if keep_tokens < 0:
+        raise ContextCompactionError("keep_tokens must be non-negative")
+    kept = 0
+    used = 0
+    for group in reversed(groups):
+        group_tokens = estimate_context_tokens(list(group), "")
+        if kept and used + group_tokens > keep_tokens:
+            break
+        kept += 1
+        used += group_tokens
+    return max(1, len(groups) - kept)
 
 
 def _messages_after_cursor(

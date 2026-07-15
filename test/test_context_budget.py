@@ -33,6 +33,20 @@ def test_pressure_thresholds_include_overflow() -> None:
     assert manager.assess(raw_tokens=901, conversation_tokens=100).level == "overflow"
 
 
+def test_default_pressure_thresholds_use_tight_at_60_and_critical_at_80() -> None:
+    manager = ContextBudgetManager(
+        ContextBudgetConfig(
+            context_window=1000,
+            max_output_tokens=100,
+            safety_margin_tokens=0,
+        )
+    )
+
+    assert manager.assess(raw_tokens=539, conversation_tokens=100).level == "normal"
+    assert manager.assess(raw_tokens=540, conversation_tokens=100).level == "tight"
+    assert manager.assess(raw_tokens=720, conversation_tokens=100).level == "critical"
+
+
 def test_l0_overflow_fails_instead_of_clipping_rules(tmp_path: Path) -> None:
     state = CoreState.new("Small task")
     request = ContextPrepareRequest(

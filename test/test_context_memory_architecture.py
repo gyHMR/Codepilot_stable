@@ -136,6 +136,8 @@ def test_stage_three_uses_the_target_context_layout_and_service_port() -> None:
         "service.py",
         "state.py",
         "projection.py",
+        "layers.py",
+        "thinning.py",
         "budget.py",
         "compaction.py",
     }

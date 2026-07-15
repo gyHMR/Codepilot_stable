@@ -174,7 +174,7 @@ class RuntimeContextSummarizer:
                 ),
             ),
             tools=(),
-            options=LLMOptions(temperature=0.0, max_tokens=1200, reasoning="low"),
+            options=LLMOptions(temperature=0.0, max_tokens=4096, reasoning="low"),
             correlation=LLMCorrelation(
                 run_id="context_summary",
                 session_id="",

@@ -10,7 +10,7 @@
 
 - Context 使用五层逻辑结构。
 - 每次模型调用前重新物化 Context。
-- 长工具输出使用 Run Artifact 保存，模型只消费投影。
+- 工具结果先以有硬上限的完整正文提交；只有请求进入 `tight` 后，旧且可恢复的结果才在本次请求中替换为 Run Artifact 引用。
 - 输入预算必须在调用 Provider 前通过硬校验。
 - 确定性瘦身处理冗余和工具输出，语义删除由辅助 LLM 完成。
 - Working Summary / Compact Summary 属于 Context，不属于长期 Memory。
@@ -347,20 +347,9 @@ L1-L3 使用类型化 Context Attachment，再由 Provider Adapter 渲染为安�
 
 #### ToolResult
 
-ToolResult 属于 Session Messages，用于维持合法工具消息链。短输出可以保存完整内容，长输出只保存模型可见投影。
+ToolResult 属于 Session Messages，用于维持合法工具消息链。工具执行层必须对单次结果和并行批次设置硬上限，限额内的正文完整提交到 Session；ContextProjector 不因长度、路径或文件 Hash 改变而替换正文。
 
-长输出投影至少包含：
-
-```text
-tool_name
-status / exit_code
-summary
-affected_paths
-verification
-artifact_ref
-original_size
-content_hash
-```
+请求进入 `tight` 后，ContextThinner 可以把旧且可恢复的 ToolResult 在本次模型请求中替换为确定性首尾摘录和 `artifact_ref`。这个替换不回写 Session。失败、验证、工作区变更、最新未消费工具批次以及仍无替代覆盖的唯一 read 正文不可这样删除。
 
 #### Artifact
 
@@ -389,10 +378,9 @@ Artifact 写入失败时不能提交一个引用不存在原文的 ToolResult。
 
 #### Evidence
 
-L2 Evidence 是 ToolResult 的派生视图。第一版保留四类：
+L2 Evidence 是 ToolResult 的派生状态视图。第一版只注入需要脱离消息正文持续可见的三类：
 
 ```text
-observation
 mutation
 verification
 error
@@ -419,8 +407,9 @@ ContextEvidence(
 
 ### 7.2 Artifact 触发规则
 
-- 短文本完整保留在 ToolResult。
-- 长文本原文写 Artifact，ToolResult 只保存投影。
+- 每种工具先在执行层限制单次结果；read 还限制行数、字符数和并行批次总字符数。
+- 限额内文本完整保留在 Session ToolResult。
+- 只有 `tight` 请求级瘦身真正省略旧输出时，才写 Artifact 并在该次请求中使用引用。
 - 二进制或 Provider 不可直接消费的内容只保存 Artifact 和描述。
 - 文件修改结果优先保留 affected paths、diff summary 和文件 Hash。
 - 验证结果优先保留命令、退出码、passed/failed、失败摘要和 Workspace fingerprint。
@@ -471,8 +460,8 @@ trust = observed_untrusted
 
 ```text
 Session ToolResultMessage 是事实来源。
-L2 Evidence 是派生视图。
-L4 ProjectedMessage 是本次请求的消息投影。
+L2 Evidence 是错误、变更和验证的派生状态视图。
+L4 ProjectedMessage 是接近无损的本次请求消息视图。
 ```
 
 引用关系：
@@ -488,13 +477,11 @@ L2 和 L4 不能分别维护两份没有来源关系的工具事实。
 
 ### 9.2 统一投影计划
 
-每次准备 Context 时，使用同一份 Workspace/Freshness 快照同时决定 L2 和 L4：
+每次准备 Context 时，使用同一份 Workspace/Freshness 快照构建 L2 状态和 L4 消息。Projector 只做协议修复、compact cursor 应用、完全相同 read 的整批去重和 stale 警告；压力驱动的输出省略由独立 Thinner 处理：
 
 ```python
 ContextProjectionPlan(
     message_actions,
-    evidence_actions,
-    compaction_action,
 )
 ```
 
@@ -503,10 +490,10 @@ ContextProjectionPlan(
 | L4 Message | L2 Evidence |
 |---|---|
 | keep_full | 只显示状态，不重复正文 |
-| keep_projected | 显示结构化状态和 freshness |
-| replace_with_artifact_ref | 必要时显示摘要和引用 |
+| keep_projected | 仅用于完全相同 read 的去重标记 |
+| request_thinned | L2 保留必要状态，L4 显示摘录和 Artifact 引用 |
 | covered_by_compact_summary | 仅保留仍然 fresh 且当前相关的 Evidence |
-| stale | 显示失效原因，不能作为通过依据 |
+| stale | 保留历史正文并添加失效警告，不能作为当前通过依据 |
 
 例如历史消息表示 `pytest passed`，但后续文件已经修改，则 L4 投影必须显示该结果属于历史 Workspace，L1 当前 verification status 必须变为 `stale` 或 `required`。
 
@@ -545,9 +532,9 @@ Provider message overhead
 
 | 等级 | Raw Context / Effective Budget | 行为 |
 |---|---:|---|
-| normal | `< 70%` | 保留完整近期上下文 |
-| tight | `70% - 85%` | 确定性瘦身和低价值裁剪 |
-| critical | `85% - 100%` | 触发辅助 LLM 压缩并重新物化 |
+| normal | `< 60%` | 保留接近无损的上下文视图 |
+| tight | `60% - 80%` | 确定性瘦身和低价值裁剪，目标回落到 55% |
+| critical | `80% - 100%` | 触发辅助 LLM 压缩并重新物化 |
 | overflow | `> 100%` | 禁止普通模型调用，必须压缩或失败 |
 
 阈值属于配置默认值，不应散落在选择算法中。
@@ -597,8 +584,14 @@ retention class
 第一版默认建议：
 
 ```text
-inline tool result:
-  min(configured_max, effective_budget * 8%)
+read result:
+  <= 30,000 chars and <= 1,000 lines
+
+parallel read batch:
+  <= 100,000 chars
+
+recent consumed tool protection under tight pressure:
+  min(40,000 tokens, effective_budget * 20%)
 
 single evidence summary:
   <= 512 tokens
@@ -637,9 +630,9 @@ Raw estimate
 
 ### 11.1 L1-L3 处理
 
-- 删除重复运行状态和重复投影。
-- 丢弃 stale、missing 且不再有提醒价值的证据。
-- 将旧工具结果降为摘要和 Artifact 引用。
+- 删除重复运行状态和重复 L2 投影。
+- 按保留等级丢弃低价值 L2/L3 条目；stale 本身不等于正文不可见。
+- 将旧且可恢复的工具结果降为确定性摘录和 Artifact 引用。
 - 减少低相关 Memory 的注入。
 - 不生成新的 Compact Summary，不移动 compact cursor。
 
@@ -649,13 +642,12 @@ Artifact 化不能完全解决长聊天问题。用户与助手文本、大量�
 
 L4 可以安全执行：
 
-- 排除当前 compact cursor 之前的消息。
-- 移除旧 reasoning/thinking。
-- 将已 Artifact 化 ToolResult 替换为摘要和引用。
-- 将 stale verification 渲染为历史失效结果。
-- 移除重复 Runtime Attachment。
-- 修复孤立 tool call/result，保持合法 API round。
-- 删除相同动态状态的重复投影。
+- 排除当前 compact cursor 之前、已经由 Compact Summary 覆盖的消息。
+- 按 `path + hash + line range` 删除完全相同的旧 read；只按路径或 stale 状态不能删除。
+- 将旧的成功 shell/search/list 类输出替换为确定性摘录和 Artifact 引用。
+- 仅当较新的 read 区间完整覆盖旧区间时，才允许省略旧 read 正文。
+- 为 stale read 保留正文并添加历史状态警告。
+- 对 ToolCall 及其全部 ToolResult 按完整并行批次保护和裁剪。
 
 L4 不能确定性执行：
 
@@ -668,22 +660,20 @@ L4 不能确定性执行：
 
 ### 11.3 L4 压力信号
 
-除总压力外，还应观察：
+审计报告同时记录原始、无损投影和最终请求压力：
 
 ```text
 conversation_pressure
   = L4 tokens / effective_input_budget
 ```
 
-确定性瘦身后，如果总压力仍然过高、L4 占比过高或已经存在足够大的可压缩前缀，可以在整体压力尚为 `tight` 时提前执行 LLM 压缩。
+当前实现只在无损投影达到 `critical` 或 `overflow` 时执行 LLM 压缩；`tight` 不提前调用摘要模型。
 
 ## 12. 辅助 LLM 语义压缩
 
 ### 12.1 触发条件
 
 - 总压力进入 `critical`。
-- 确定性瘦身后仍无法达到目标预算。
-- L4 长对话占比过高且存在合法可压缩前缀。
 - `overflow` 恢复流程要求强制压缩。
 
 ### 12.2 可压缩范围
@@ -703,7 +693,7 @@ conversation_pressure
 - 最新 unresolved error。
 - 保留窗口中的近期消息。
 
-建议保留最近约 30% 的 L4 预算，并保证至少若干完整 API round。具体值后续通过测试调整。
+当前保留最近约 15% 的有效输入预算，最少 512、最多 8,000 token，并始终按完整 API round 确定边界。
 
 ### 12.3 Context Summarizer
 

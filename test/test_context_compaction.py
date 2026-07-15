@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from codepilot.core.contracts import ContextPrepareRequest, CoreContextView
 from codepilot.core.state import CoreState
 from codepilot.llm.ports import ModelDescriptor
@@ -14,7 +16,11 @@ from codepilot.protocols import (
     ToolResultMessage,
     UserMessage,
 )
-from codepilot.sessions.context import ContextBudgetConfig, ContextService
+from codepilot.sessions.context import (
+    ContextBudgetConfig,
+    ContextBudgetExceededError,
+    ContextService,
+)
 from codepilot.sessions.context.compaction import ContextCompactor
 from codepilot.sessions.context.contracts import (
     CompactSummary,
@@ -187,7 +193,7 @@ def test_compactor_excludes_the_unconsumed_parallel_batch_from_its_prefix(
     )
 
 
-def test_projected_read_history_below_budget_does_not_trigger_compaction(
+def test_large_unique_read_history_triggers_semantic_compaction_instead_of_projection(
     tmp_path: Path,
 ) -> None:
     summarizer = _Summarizer()
@@ -251,10 +257,11 @@ def test_projected_read_history_below_budget_does_not_trigger_compaction(
 
     prepared = asyncio.run(service.prepare(request))
 
-    assert summarizer.requests == []
-    assert service.checkpoint_state()["compact_snapshot_ref"] is None
+    assert summarizer.requests
+    assert service.checkpoint_state()["compact_snapshot_ref"] is not None
     assert service.latest_report["raw_estimate_tokens"] > 5_500
     assert service.latest_report["estimated_tokens_after"] < 5_500
+    assert service.latest_report["stage"] in {"critical", "critical+tight"}
     assert prepared.messages
 
 
@@ -290,6 +297,103 @@ def test_critical_service_pressure_uses_the_summarizer_before_returning(
     assert summarizer.requests
     assert service.checkpoint_state()["compact_snapshot_ref"]
     assert len(prepared.messages) < len(request.messages) + 1
+
+
+def test_critical_pressure_without_a_summarizer_fails_explicitly(
+    tmp_path: Path,
+) -> None:
+    state = CoreState.new("Refactor context governance")
+    request = ContextPrepareRequest(
+        session_id="session_1",
+        run_id="run_missing_summarizer",
+        purpose="reasoning",
+        directive=None,
+        messages=_messages(),
+        core_view=CoreContextView.from_state(state, "build"),
+        model=ModelDescriptor(provider="unit", model_id="unit"),
+        tool_catalog=None,
+        seed={"system_prompt": "L0 rules."},
+    )
+    service = ContextService(
+        workspace_dir=tmp_path,
+        session_id="session_1",
+        summarizer=None,
+        budget_config=ContextBudgetConfig(
+            context_window=1_800,
+            max_output_tokens=200,
+            safety_margin_tokens=0,
+        ),
+    )
+
+    with pytest.raises(
+        ContextBudgetExceededError,
+        match="context_compaction_failed: Context summarizer is not configured",
+    ):
+        asyncio.run(service.prepare(request))
+
+
+def test_latest_unconsumed_batch_is_not_split_when_it_exceeds_the_budget(
+    tmp_path: Path,
+) -> None:
+    summarizer = _Summarizer()
+    call_id = "large_read"
+    assistant = AssistantMessage(
+        content=[ToolCall(id=call_id, name="read", arguments={"path": "large.py"})],
+        metadata={"session_message_id": "large_read_assistant"},
+    )
+    result = ToolResultMessage(
+        tool_call_id=call_id,
+        tool_name="read",
+        content=[TextContent(text="source_line = True\n" * 1_000)],
+        details={
+            "path": "large.py",
+            "sha256": "large-hash",
+            "offset": 1,
+            "returned_lines": 1_000,
+        },
+        metadata={"session_message_id": "large_read_result"},
+    )
+    state = CoreState.new("Inspect the large file")
+    request = ContextPrepareRequest(
+        session_id="session_1",
+        run_id="run_large_batch",
+        purpose="reasoning",
+        directive=None,
+        messages=(*_messages(6), assistant, result),
+        core_view=CoreContextView.from_state(state, "build"),
+        model=ModelDescriptor(provider="unit", model_id="unit"),
+        tool_catalog=None,
+        seed={"system_prompt": "L0 rules."},
+    )
+    service = ContextService(
+        workspace_dir=tmp_path,
+        session_id="session_1",
+        summarizer=summarizer,
+        budget_config=ContextBudgetConfig(
+            context_window=2_500,
+            max_output_tokens=200,
+            safety_margin_tokens=0,
+        ),
+    )
+
+    with pytest.raises(ContextBudgetExceededError):
+        asyncio.run(service.prepare(request))
+
+    assert summarizer.requests
+    summarized_ids = {
+        _message_id(message) for message in summarizer.requests[0].messages
+    }
+    assert "large_read_assistant" not in summarized_ids
+    assert "large_read_result" not in summarized_ids
+    tool_artifacts = (
+        tmp_path
+        / ".codepilot"
+        / "runs"
+        / "run_large_batch"
+        / "artifacts"
+        / "tool_outputs"
+    )
+    assert not tool_artifacts.exists()
 
 
 def _messages_with_prefix(prefix: str, count: int) -> tuple[Message, ...]:

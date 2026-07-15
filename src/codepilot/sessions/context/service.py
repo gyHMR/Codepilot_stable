@@ -20,11 +20,13 @@ from .budget import (
 )
 from .compaction import ContextCompactionError, ContextCompactor
 from .contracts import (
-    ContextPressure,
     ContextSummarizerPort,
+    ProjectionPlan,
 )
-from .projection import ContextProjector, render_context_attachment
+from .layers import materialize_context_items, render_context_attachment
+from .projection import ContextProjector
 from .state import ContextState, RepositoryTracker
+from .thinning import ContextThinner, ThinningResult
 
 
 class ContextService:
@@ -50,6 +52,7 @@ class ContextService:
             workspace_dir=self.workspace_dir,
             session_id=session_id,
         )
+        self.thinner = ContextThinner(workspace_dir=self.workspace_dir)
         self.compactor = ContextCompactor(
             workspace_dir=self.workspace_dir,
             session_id=session_id,
@@ -115,8 +118,11 @@ class ContextService:
             raw_tokens=raw_estimate.total,
             conversation_tokens=conversation_tokens,
         )
+        projection = self._project(request)
         prepared, report = self._materialize(
             request=request,
+            projection=projection,
+            base_messages=projection.model_messages,
             tools=tools,
             system_prompt=system_prompt,
             snapshot=snapshot,
@@ -124,22 +130,59 @@ class ContextService:
             stale_items=stale_items,
             memory=memory,
             memory_error=memory_error,
-            pressure=raw_pressure,
             raw_estimate=raw_estimate,
             correction_factors=correction_factors,
             allow_budget_overflow=True,
+            stage="lossless",
         )
-        projected_pressure = self.budget.assess(
+        lossless_pressure = self.budget.assess(
             raw_tokens=int(report["estimated_tokens_after"]),
             conversation_tokens=self.budget.estimate_messages(
                 prepared.messages,
                 correction_factors=correction_factors,
             ),
         )
-        if projected_pressure.level in {"critical", "overflow"}:
+        critical_requested = lossless_pressure.level in {"critical", "overflow"}
+        thinning_actions: tuple[str, ...] = ()
+        if lossless_pressure.level == "tight":
+            thinned = self._thin(
+                projection.model_messages,
+                run_id=request.run_id,
+                report=report,
+                correction_factors=correction_factors,
+            )
+            thinning_actions = thinned.actions
+            if thinning_actions:
+                prepared, report = self._materialize(
+                    request=request,
+                    projection=projection,
+                    base_messages=thinned.messages,
+                    tools=tools,
+                    system_prompt=system_prompt,
+                    snapshot=snapshot,
+                    delta=delta,
+                    stale_items=stale_items,
+                    memory=memory,
+                    memory_error=memory_error,
+                    raw_estimate=raw_estimate,
+                    correction_factors=correction_factors,
+                    allow_budget_overflow=True,
+                    stage="tight",
+                )
+        final_pressure = self.budget.assess(
+            raw_tokens=int(report["estimated_tokens_after"]),
+            conversation_tokens=self.budget.estimate_messages(
+                prepared.messages,
+                correction_factors=correction_factors,
+            ),
+        )
+        if critical_requested:
             await self._compact(request)
+            projection = self._project(request)
             prepared, report = self._materialize(
                 request=request,
+                projection=projection,
+                base_messages=projection.model_messages,
                 tools=tools,
                 system_prompt=system_prompt,
                 snapshot=snapshot,
@@ -147,21 +190,55 @@ class ContextService:
                 stale_items=stale_items,
                 memory=memory,
                 memory_error=memory_error,
-                pressure=projected_pressure,
                 raw_estimate=raw_estimate,
                 correction_factors=correction_factors,
                 allow_budget_overflow=False,
+                stage="critical",
             )
-            projected_pressure = self.budget.assess(
+            final_pressure = self.budget.assess(
                 raw_tokens=int(report["estimated_tokens_after"]),
                 conversation_tokens=self.budget.estimate_messages(
                     prepared.messages,
                     correction_factors=correction_factors,
                 ),
             )
+            if final_pressure.level != "normal":
+                thinned = self._thin(
+                    projection.model_messages,
+                    run_id=request.run_id,
+                    report=report,
+                    correction_factors=correction_factors,
+                )
+                thinning_actions = (*thinning_actions, *thinned.actions)
+                if thinned.actions:
+                    prepared, report = self._materialize(
+                        request=request,
+                        projection=projection,
+                        base_messages=thinned.messages,
+                        tools=tools,
+                        system_prompt=system_prompt,
+                        snapshot=snapshot,
+                        delta=delta,
+                        stale_items=stale_items,
+                        memory=memory,
+                        memory_error=memory_error,
+                        raw_estimate=raw_estimate,
+                        correction_factors=correction_factors,
+                        allow_budget_overflow=False,
+                        stage="critical+tight",
+                    )
+                    final_pressure = self.budget.assess(
+                        raw_tokens=int(report["estimated_tokens_after"]),
+                        conversation_tokens=self.budget.estimate_messages(
+                            prepared.messages,
+                            correction_factors=correction_factors,
+                        ),
+                    )
         final_tokens = int(report["estimated_tokens_after"])
         report["raw_pressure"] = _pressure_mapping(raw_pressure)
-        report["pressure"] = _pressure_mapping(projected_pressure)
+        report["lossless_pressure"] = _pressure_mapping(lossless_pressure)
+        report["pressure"] = _pressure_mapping(final_pressure)
+        report["thinning_actions"] = list(dict.fromkeys(thinning_actions))
         self.budget.ensure_final_fit(final_tokens)
         unsettled = unsettled_tool_calls(prepared.messages)
         if unsettled:
@@ -181,12 +258,61 @@ class ContextService:
     def restore_checkpoint_state(self, state: dict[str, object]) -> None:
         self.compactor.restore_checkpoint_state(state)
 
+    def _project(self, request: ContextPrepareRequest) -> ProjectionPlan:
+        return self.projector.build(
+            messages=request.messages,
+            state=self.state,
+            compacted_until_message_id=(
+                self.compactor.current_snapshot.compacted_until_message_id
+                if self.compactor.current_snapshot is not None
+                else None
+            ),
+        )
+
+    def _thin(
+        self,
+        messages: tuple[Message, ...],
+        *,
+        run_id: str,
+        report: dict[str, object],
+        correction_factors: dict[str, float],
+    ) -> ThinningResult:
+        message_tokens = self.budget.estimate_messages(
+            messages,
+            correction_factors=correction_factors,
+        )
+        fixed_tokens = max(
+            0,
+            int(report["estimated_tokens_after"]) - message_tokens,
+        )
+        target_total = int(self.budget.budget.effective_input_tokens * 0.55)
+        target_messages = max(0, target_total - fixed_tokens)
+        recent_tool_tokens = min(
+            40_000,
+            max(512, int(self.budget.budget.effective_input_tokens * 0.20)),
+        )
+        return self.thinner.thin(
+            messages,
+            state=self.state,
+            run_id=run_id,
+            target_tokens=target_messages,
+            recent_tool_tokens=recent_tool_tokens,
+            estimate_tokens=lambda values: self.budget.estimate_messages(
+                values,
+                correction_factors=correction_factors,
+            ),
+        )
+
     async def _compact(self, request: ContextPrepareRequest) -> None:
         try:
             await self.compactor.compact(
                 run_id=request.run_id,
                 messages=request.messages,
                 original_goal=request.core_view.goal,
+                keep_tokens=min(
+                    8_000,
+                    max(512, int(self.budget.budget.effective_input_tokens * 0.15)),
+                ),
             )
         except ContextCompactionError as exc:
             raise ContextBudgetExceededError(
@@ -197,6 +323,8 @@ class ContextService:
         self,
         *,
         request: ContextPrepareRequest,
+        projection: ProjectionPlan,
+        base_messages: tuple[Message, ...],
         tools: tuple[Tool, ...],
         system_prompt: str,
         snapshot,
@@ -204,32 +332,19 @@ class ContextService:
         stale_items: tuple[str, ...],
         memory: MemoryRecallResult,
         memory_error: str | None,
-        pressure: ContextPressure,
         raw_estimate,
         correction_factors: dict[str, float],
         allow_budget_overflow: bool,
+        stage: str,
     ) -> tuple[PreparedModelContext, dict[str, object]]:
-        projection = self.projector.build(
-            messages=request.messages,
-            state=self.state,
-            run_id=request.run_id,
-            pressure=pressure.level,
-            compacted_until_message_id=(
-                self.compactor.current_snapshot.compacted_until_message_id
-                if self.compactor.current_snapshot is not None
-                else None
-            ),
-        )
-        items = self.projector.materialize_items(
+        items = materialize_context_items(
             request=request,
             state=self.state,
-            plan=projection,
             memory=memory,
             snapshot=snapshot,
             delta=delta,
             budget=self.budget,
         )
-        base_messages = projection.model_messages
         base_tokens = self.budget.estimate(
             system_prompt=system_prompt,
             messages=base_messages,
@@ -304,10 +419,7 @@ class ContextService:
             "estimated_tokens_after": final_estimate.total,
             "raw_estimate_tokens": raw_estimate.total,
             "estimation_by_type": dict(raw_estimate.by_type),
-            "pressure": {
-                "level": pressure.level,
-                "reasons": list(pressure.reasons),
-            },
+            "stage": stage,
             "layers": layers,
             "sections": sections,
             "selected_items": [item.item_id for item in selected],
@@ -322,9 +434,9 @@ class ContextService:
             "memory_error": memory_error,
             "source_refs": [item.source_ref for item in projection.messages],
             "artifact_refs": [
-                str(item.message.metadata["artifact_ref"])
-                for item in projection.messages
-                if "artifact_ref" in item.message.metadata
+                str(message.metadata["artifact_ref"])
+                for message in base_messages
+                if "artifact_ref" in message.metadata
             ],
             "compact_snapshot_ref": (
                 self.compactor.current_snapshot.path

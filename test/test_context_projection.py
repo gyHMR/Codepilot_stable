@@ -181,7 +181,45 @@ def test_same_read_version_with_different_ranges_keeps_both_bodies(
     ]
 
 
-def test_mixed_batch_replaces_only_superseded_read_body_and_remains_closed(
+def test_session_regression_keeps_all_unique_ranges_from_one_large_file(
+    tmp_path: Path,
+) -> None:
+    messages = []
+    expected = []
+    for index, offset in enumerate((1, 200, 400, 600, 800)):
+        text = f"register.py lines {offset}-{offset + 199}"
+        expected.append(text)
+        messages.extend(
+            _read_batch(
+                f"segment_{index}",
+                "agent-test/register.py",
+                text,
+                sha256="same-file-version",
+                offset=offset,
+                returned_lines=200,
+            )
+        )
+    messages.append(AssistantMessage(content=[TextContent(text="consumed")]))
+
+    plan = ContextProjector(
+        workspace_dir=tmp_path,
+        session_id="session_83a27f93be18",
+    ).build(
+        messages=tuple(messages),
+        state=_observed_state(tmp_path, messages),
+        pressure="normal",
+    )
+
+    visible_results = [
+        message
+        for message in plan.model_messages
+        if isinstance(message, ToolResultMessage)
+    ]
+    assert [_text(message) for message in visible_results] == expected
+    assert transcript.unsettled_tool_calls(plan.model_messages) == ()
+
+
+def test_new_file_hash_does_not_hide_an_unreplaced_historical_read(
     tmp_path: Path,
 ) -> None:
     old_assistant = AssistantMessage(
@@ -225,15 +263,13 @@ def test_mixed_batch_replaces_only_superseded_read_body_and_remains_closed(
         if isinstance(message, ToolResultMessage)
     }
 
-    assert _text(projected["call_old"]) == (
-        "read result superseded: path=src/app.py newer_version_available"
-    )
+    assert _text(projected["call_old"]) == "obsolete source"
     assert _text(projected["call_shell"]) == "working tree clean"
     assert _text(projected["call_new"]) == "current source"
     assert transcript.unsettled_tool_calls(plan.model_messages) == ()
 
 
-def test_l2_and_l4_share_one_source_ref_for_projected_tool_results(
+def test_consumed_large_tool_result_remains_full_in_lossless_projection(
     tmp_path: Path,
 ) -> None:
     assistant = AssistantMessage(
@@ -269,17 +305,47 @@ def test_l2_and_l4_share_one_source_ref_for_projected_tool_results(
     projected_result = next(
         item for item in plan.messages if isinstance(item.message, ToolResultMessage)
     )
-    evidence = next(item for item in plan.evidence if item.source_ref == projected_result.source_ref)
-    artifact_ref = projected_result.message.metadata["artifact_ref"]
 
-    assert projected_result.action == "replace_with_artifact_ref"
-    assert evidence.action == "show_projected_status"
-    assert str(artifact_ref).startswith(".codepilot/runs/run_1/artifacts/tool_outputs/")
-    assert (tmp_path / str(artifact_ref)).is_file()
+    assert projected_result.action == "keep_full"
+    assert _text(projected_result.message) == "failure output\n" * 800
+    assert "artifact_ref" not in projected_result.message.metadata
+    assert not hasattr(plan, "evidence")
     assert [type(item.message) for item in plan.messages[-3:-1]] == [
         AssistantMessage,
         ToolResultMessage,
     ]
+
+
+def test_stale_read_keeps_its_body_and_adds_a_historical_warning(
+    tmp_path: Path,
+) -> None:
+    assistant, result = _read_batch(
+        "old",
+        "src/app.py",
+        "def login():\n    return True",
+        sha256="old-hash",
+        returned_lines=2,
+    )
+    state = _observed_state(tmp_path, (assistant, result))
+    state.invalidate_paths(["src/app.py"])
+
+    plan = ContextProjector(
+        workspace_dir=tmp_path,
+        session_id="session_1",
+    ).build(
+        messages=(assistant, result, AssistantMessage(content=[TextContent(text="used")])),
+        state=state,
+        pressure="normal",
+    )
+
+    projected = next(
+        message
+        for message in plan.model_messages
+        if isinstance(message, ToolResultMessage)
+    )
+    text = _text(projected)
+    assert "freshness=stale" in text
+    assert "def login():\n    return True" in text
 
 
 def test_orphan_tool_result_is_removed_from_the_provider_message_chain(

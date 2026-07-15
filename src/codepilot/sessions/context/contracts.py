@@ -16,16 +16,9 @@ ContextPressureLevel = Literal["normal", "tight", "critical", "overflow"]
 ProjectionAction = Literal[
     "keep_full",
     "keep_projected",
-    "replace_with_artifact_ref",
     "covered_by_compact_summary",
     "covered_by_newer_read",
     "discard_orphan",
-]
-EvidenceAction = Literal[
-    "show_status_only",
-    "show_projected_status",
-    "show_stale_warning",
-    "discard",
 ]
 
 _LAYERS = frozenset({"l0", "l1", "l2", "l3", "l4"})
@@ -140,34 +133,15 @@ class ProjectedMessage:
 
 
 @dataclass(frozen=True)
-class ProjectedEvidence:
-    """证据在投影中的精简表示。"""
-    source_ref: str
-    content: str
-    action: EvidenceAction
-    freshness: str
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "source_ref", _required_text(self.source_ref, "source ref"))
-        object.__setattr__(self, "content", _required_text(self.content, "evidence content"))
-        object.__setattr__(self, "freshness", _required_text(self.freshness, "freshness"))
-
-
-@dataclass(frozen=True)
 class ProjectionPlan:
-    """消息与证据投影动作组成的不可变计划。"""
+    """本次模型请求的消息投影计划。"""
     messages: tuple[ProjectedMessage, ...] = ()
-    evidence: tuple[ProjectedEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         messages = tuple(self.messages)
-        evidence = tuple(self.evidence)
         if any(not isinstance(item, ProjectedMessage) for item in messages):
             raise TypeError("projection messages must contain ProjectedMessage")
-        if any(not isinstance(item, ProjectedEvidence) for item in evidence):
-            raise TypeError("projection evidence must contain ProjectedEvidence")
         object.__setattr__(self, "messages", messages)
-        object.__setattr__(self, "evidence", evidence)
 
     @property
     def model_messages(self) -> tuple[Message, ...]:
@@ -427,8 +401,6 @@ __all__ = [
     "ContextSummarizerPort",
     "ContextSummaryRequest",
     "ContextSummaryResult",
-    "EvidenceAction",
-    "ProjectedEvidence",
     "ProjectedMessage",
     "ProjectionAction",
     "ProjectionPlan",

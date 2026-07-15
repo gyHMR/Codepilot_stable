@@ -22,10 +22,8 @@ class ContextBudgetConfig:
     context_window: int
     max_output_tokens: int
     safety_margin_tokens: int = 1024
-    tight_ratio: float = 0.70
-    critical_ratio: float = 0.85
-    conversation_compaction_ratio: float = 0.55
-    inline_tool_result_ratio: float = 0.08
+    tight_ratio: float = 0.60
+    critical_ratio: float = 0.80
     single_evidence_tokens: int = 512
     single_memory_tokens: int = 600
 
@@ -43,8 +41,6 @@ class ContextBudgetConfig:
             raise ValueError("context window must exceed output reserve and safety margin")
         if not 0 < self.tight_ratio < self.critical_ratio < 1:
             raise ValueError("pressure ratios must satisfy 0 < tight < critical < 1")
-        if not 0 < self.conversation_compaction_ratio <= 1:
-            raise ValueError("conversation_compaction_ratio must be in (0, 1]")
 
 
 class ContextBudgetManager:
@@ -59,7 +55,7 @@ class ContextBudgetManager:
             ),
             output_reserve_tokens=config.max_output_tokens,
             safety_margin_tokens=config.safety_margin_tokens,
-            layer_weights={"l1": 0.10, "l2": 0.35, "l3": 0.10, "l4": 0.45},
+            layer_weights={},
         )
 
     def assess(
@@ -70,7 +66,6 @@ class ContextBudgetManager:
     ) -> ContextPressure:
         effective = self.budget.effective_input_tokens
         ratio = raw_tokens / effective
-        conversation_ratio = conversation_tokens / effective
         reasons: list[str] = []
         if ratio > 1:
             level = "overflow"
@@ -83,8 +78,6 @@ class ContextBudgetManager:
             reasons.append("tight_budget_pressure")
         else:
             level = "normal"
-        if conversation_ratio >= self.config.conversation_compaction_ratio:
-            reasons.append("conversation_pressure")
         return ContextPressure(
             level=level,  # type: ignore[arg-type]
             raw_tokens=max(0, raw_tokens),

@@ -340,6 +340,10 @@ def _message_source_ref(message: ToolResultMessage) -> str:
 
 def _message_paths(message: ToolResultMessage) -> list[str]:
     paths = [str(path) for path in message.affected_paths if str(path).strip()]
+    if message.tool_name == "read" and isinstance(message.details, dict):
+        detail_path = str(message.details.get("path") or "").strip()
+        if detail_path:
+            paths.append(detail_path)
     raw = message.metadata.get("read_paths")
     if isinstance(raw, list):
         paths.extend(str(path) for path in raw if str(path).strip())
