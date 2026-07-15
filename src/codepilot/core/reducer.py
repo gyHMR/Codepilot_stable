@@ -343,6 +343,19 @@ def _reduce_user_input(
     blockers = tuple(
         item for item in state.task.blockers if item.kind != "user_input_required"
     )
+    plan = state.task.plan
+    if (
+        plan is not None
+        and plan.status == "proposed"
+        and observation.text != state.task.current_goal
+    ):
+        blockers = (
+            *(item for item in blockers if item.kind != "plan_incomplete"),
+            TaskBlocker(
+                "plan_incomplete",
+                "User feedback requires a new canonical plan revision.",
+            ),
+        )
     task = replace(
         state.task,
         current_goal=observation.current_goal or state.task.current_goal,
@@ -447,6 +460,7 @@ def _submit_plan(
             close_request=None,
         )
         next_state = replace(state, task=replace(state.task, plan=plan))
+        next_state = _remove_blocker(next_state, "plan_incomplete")
         return _applied_plan_command(
             next_state,
             command,
@@ -466,6 +480,7 @@ def _submit_plan(
         ),
     )
     next_state = replace(state, task=replace(state.task, plan=plan))
+    next_state = _remove_blocker(next_state, "plan_incomplete")
     return _applied_plan_command(
         next_state,
         command,

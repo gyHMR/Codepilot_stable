@@ -449,7 +449,11 @@ def to_tool_result_message(result: ToolResult) -> ToolResultMessage:
         affected_paths=list(affected_paths),
         workspace_changed=workspace_changed,
         verification=verification,
-        details=_plain_json(result.error.details) if result.error is not None else None,
+        details=(
+            _plain_json(result.error.details)
+            if result.error is not None
+            else _plain_json(result.data.get("details"))
+        ),
         metadata=metadata,
     )
 

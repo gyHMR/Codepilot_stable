@@ -454,6 +454,19 @@ def resolve_runtime_model(
 
     restored = config.restored
     if restored and restored.provider and restored.model_id:
+        local_model = config.local_model
+        if (
+            local_model is not None
+            and local_model.provider == restored.provider
+            and local_model.model_id == restored.model_id
+        ):
+            return _with_credentials(
+                intent,
+                config,
+                model=local_model.to_model(),
+                get_api_key=intent.get_api_key or local_model.build_api_key_resolver(),
+                source=ConfigValueSource("project", ".codepilot/model.local.json"),
+            )
         return _with_credentials(
             intent,
             config,

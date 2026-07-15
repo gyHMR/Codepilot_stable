@@ -657,6 +657,7 @@ class RuntimeSessionCoordinator:
             "current_mode": self.current_mode,
             "planning_budget_profile": self.planning_budget_profile,
             "plan_summary": self.plan_summary(),
+            "current_plan": self.current_plan_state(),
             "pending_plan_approval": self.pending_plan_approval(),
         }
 
@@ -1232,9 +1233,10 @@ class RuntimeSessionCoordinator:
         synthetic_control: dict[str, object] | None = None,
         checkpoint_phase: str = "",
     ) -> dict[str, object]:
-        ensure_run_mode(mode or self.current_mode)
+        normalized_mode = ensure_run_mode(mode or self.current_mode)
         values: dict[str, Any] = {
             "system_prompt": self.conversation.system_prompt,
+            "mode_policy": _mode_policy(normalized_mode),
         }
         if synthetic_control:
             values["synthetic_control"] = dict(synthetic_control)
@@ -1424,28 +1426,23 @@ def new_run_id() -> str:
 def _continuation_control(kind: str) -> dict[str, object] | None:
     instruction = {
         "plan_approved": (
-            "The canonical Task Plan has been approved and is active. Continue the same task "
-            "in build mode from the first unfinished plan item. Execute the approved plan "
-            "directly: do not restate it, redesign it, or create another Task Plan, and do not "
-            "call create_build_plan while this active plan exists. Use update_plan_progress only "
-            "to record progress on the existing plan and close_plan for final closeout. Every "
-            "active-plan update must preserve the canonical item IDs exactly as supplied in the "
-            "current plan. Preserve the approved goal, scope, constraints, and completion criteria."
+            "canonical Task Plan 已获批准并处于 active 状态。从第一个未完成步骤继续执行，"
+            "不要复述、重新设计或创建第二份计划。保留现有 step_id；仅用 "
+            "update_plan_progress 更新进度，最终用 close_plan 提交关闭证据。"
         ),
         "plan_rejected": (
-            "The user rejected the proposed plan. Ask one concise question about what "
-            "should change; do not create a replacement plan until feedback is provided."
+            "用户拒绝了 proposed plan，但尚未给出修改方向。只询问一个会实质影响方案的具体问题；"
+            "收到反馈前不要创建替代计划。"
         ),
         "plan_feedback": (
-            "The latest user message is feedback on the proposed plan. Revise the same "
-            "plan with propose_plan, then summarize the canonical revision."
+            "最新用户消息是对当前 proposed plan 的修改意见。保留未被否定的内容，提交完整修订版；"
+            "本轮必须成功调用 propose_plan，不能只输出文字方案。"
         ),
         "plan_clarification": (
-            "Continue planning from the user's clarification. Publish a decision-complete "
-            "plan with propose_plan when enough information is available."
+            "把用户补充信息合并到当前规划。证据充分后在本轮调用 propose_plan 提交可执行方案。"
         ),
-        "mode_changed": "Continue the same task using the current mode policy.",
-        "automatic_continuation": "Continue the same task from the saved checkpoint.",
+        "mode_changed": "保持同一个工程目标，严格按当前 mode policy 继续。",
+        "automatic_continuation": "从 Runtime 保存的 checkpoint 继续同一任务，不重复已经提交的动作。",
     }.get(kind, "")
     if not instruction:
         return None
@@ -1469,54 +1466,29 @@ def _continuation_control(kind: str) -> dict[str, object] | None:
 def _mode_policy(mode: str) -> str:
     if mode == "plan":
         return (
-            "当前 mode=plan。你仍是同一个 Coding Agent，处理同一个用户任务，但本轮只允许只读调查和方案设计，禁止修改工作区。"
-            "Plan 是固定的宏观工作流，遵循五阶段：理解任务 → Subagent 探索 → 主 Agent 设计 → 审查并发布 canonical plan → 框架审批和切换 Build。"
-            "框架负责模式、工具边界、canonical plan 状态、审批状态和 Plan 到 Build 的切换；主 Agent 负责理解目标、拆分探索任务、"
-            "决定 Subagent 的关注范围、综合证据、识别真正阻塞的问题，并设计最终方案。不得自行假设计划已获批准或切换模式。"
-            "阶段一，理解任务：分离对象级任务和控制级指令。代码、行为、测试和配置目标属于对象级；“给方案”“先分析”“不要修改”等"
-            "只约束交付方式，不能成为计划摘要或执行步骤。识别用户目标、约束、当前证据和真正阻塞的歧义；"
-            "只有缺少会实质改变实现范围或设计的必要信息时，才提出一个具体澄清问题。"
-            "阶段二，Subagent 探索：探索阶段默认使用 dispatch_exploration 派发只读 Subagent 探索仓库，并按最少必要原则选择 0 到 3 个。"
-            "上下文已经充分或任务真正微小时使用 0 个；已知文件或单一范围需要确认时使用 1 个；存在两个独立调查方向时使用 2 个；"
-            "只有跨模块、架构不明或风险较高时使用 3 个。多个任务必须具有不同且具体的调查范围，分别覆盖相关实现、调用链、测试或风险，"
-            "不得重复搜索同一区域。主 Agent 不应先用大量 ls/read/grep/find 顺序扫描仓库，这些工具只用于报告后的局部确认和缺口补充。"
-            "dispatch_exploration 的 reuse=auto 会自动复用未过期报告；只有需要查看、筛选或比较已有报告时才使用 list_exploration_agents。"
-            "阶段三，主 Agent 设计：综合用户上下文、Subagent 报告和必要的定点核查，选择一个推荐实现方案。Subagent 只提供仓库事实、"
-            "风险、设计约束和验证线索，主 Agent 对最终设计、影响范围、执行步骤和验证方式负责。"
-            "阶段四，审查并发布：检查方案是否覆盖用户目标、当前实现、目标设计、影响范围、风险、执行步骤、完成标准和验证方式。"
-            "若仍有阻塞性问题，直接询问用户；若证据充分且方案已可交给 Build 执行，必须在当前回合直接调用 propose_plan。"
-            "propose_plan 用于发布初始计划，或在批准前根据用户反馈修订同一个 proposed plan；"
-            "task_understanding、current_implementation、target_design、impact_scope、risks_and_open_questions、verification_plan "
-            "必须分别记录任务理解、仓库证据、目标设计、影响范围、风险待确认项和验证方案；"
-            "summary 只做压缩概括，不能替代这些结构化字段。"
-            "items 只能描述批准后实际要执行的代码修改与验证，不能写分析需求、查看代码、撰写方案、回复用户或等待审批。"
-            "普通文本方案不是可审批的 Task Plan。不要先完整展示文本草案、询问用户方向是否合适，或等待用户认可文本草案后才调用 propose_plan；"
-            "运行时会在 propose_plan 成功后统一展示 canonical plan 并发起审批。"
-            "阶段五，框架审批和切换 Build：propose_plan 只表示计划已提交，不表示用户已经批准。审批阶段所有条目保持 pending；"
-            "发布后等待用户审查、拒绝、批准或提出修改。未经运行时确认批准，不得执行实现、推进步骤、"
-            "声称已经开始实现，或承诺下一步立即修改代码。"
-            "用户反馈只能用于继续规划、修改同一个 proposed plan、拒绝或等待批准。只有高置信审批命令会由运行时转换为状态变化。"
+            "当前 mode=plan。只允许只读调查、澄清和方案设计，禁止修改工作区、执行实现或自行切换模式。"
+            "先识别用户真正的软件目标、约束和阻塞性歧义，再读取足以支撑设计的仓库事实。"
+            "已知文件或局部问题直接用 read/grep/find；只有调查开放、跨模块或可拆成独立问题时才调用 dispatch_exploration，"
+            "任务范围必须互不重复并优先 reuse=auto。Subagent 只提供证据，最终设计由主 Agent 综合。"
+            "仅当缺失信息会实质改变实现范围或架构时，才用 request_user_input 提出一个具体问题。"
+            "证据充分后必须在当前回合调用 propose_plan；普通文本方案不是提交。计划需覆盖当前实现、目标设计、影响范围、"
+            "风险、完成标准和验证方式，items 只写批准后要执行的实现或验证工作。"
+            "propose_plan 成功只表示等待用户审查，不表示已获批准；提交后不得开始实现。"
         )
     if mode == "read":
         return (
-            "当前 mode=read。你仍是同一个 Coding Agent，处理同一个用户任务，但本轮只做只读探索、定位、解释、审查和状态说明。"
-            "目标是回答用户当前问题，并区分代码事实、合理推断和建议；不要默认生成实施计划。"
-            "不得修改工作区、运行会产生副作用的命令，不得创建、推进或完成 Task Plan，也不得继续执行未完成步骤。"
-            "可以引用当前 Task Plan 作为背景并说明其状态，但它不改变 read 模式的只读边界。代码定位优先用 read/grep/find。"
+            "当前 mode=read。只做只读探索、定位、解释、审查和状态说明；不得修改工作区、运行有副作用的命令，"
+            "也不得创建、推进或关闭 Task Plan。用 read/grep/find 获取必要证据，区分已观察事实、合理推断和建议，"
+            "然后直接回答当前问题。"
         )
     return (
-        "当前 mode=build。你仍是同一个 Coding Agent，处理同一个用户任务，本轮可以在权限允许范围内读取、修改、运行命令并验证。"
-        "没有 current Task Plan 且任务复杂时，可以用 create_build_plan 创建简要 active 执行计划；简单任务可直接实现和验证。"
-        "已有 active plan 时，其中的执行目标、完成标准和步骤是本次任务的执行契约，必须直接推进而不是重新制定方案；"
-        "进度更新只提交发生变化的步骤、expected_revision、完成说明和证据引用，不得回传整份计划快照。"
-        "结构调整必须作为带原因的正式 revision 提交；来自 Plan 模式的已批准计划需要用户再次确认 revision。"
-        "用户的“给方案”等控制级表达不能替换执行目标。只有用户明确要求修改，或当前步骤已发生"
-        "五次有效实现/验证失败，或实际代码与计划基础明显不一致时，才可用 update_plan_progress 提议 revision。"
-        "精确修改优先 apply_patch，"
-        "单点替换用 edit，新建或整体重写才用 write。代码定位优先用 read/grep/find，shell 主要用于测试和项目命令。"
-        "执行 active plan 时尽量每完成一个主要步骤就更新状态，但中间状态更新是软约束。"
-        "最终答复前必须检查当前 Task Plan 是否完成，并依据 completion criteria、实际改动和最新验证结果调用 close_plan；"
-        "close_plan 只提交关闭请求、expected_revision、总结和证据引用，最终完成状态由 Core 策略判定。"
+        "当前 mode=build。可以在权限范围内读取、修改、运行项目命令并验证。修改前读取相关实现，优先使用专用文件工具，"
+        "command 用于 argv 形式的项目命令，只有需要 Shell 语法时才用 bash。"
+        "存在 active canonical Task Plan 时，直接执行第一个未完成步骤，不得创建第二份计划；进度变化用 "
+        "update_plan_progress 提交并保留现有 step_id。没有计划且任务确实复杂时才用 create_build_plan，简单任务直接完成。"
+        "若新证据使原计划基础失效，按工具协议提交 revision，不能在文本中悄悄改变范围。"
+        "完成实现后运行与风险相称的验证；存在计划时，最终答复前用 close_plan 提交完成情况和证据，"
+        "是否完成由 Core 判定。"
     )
 
 

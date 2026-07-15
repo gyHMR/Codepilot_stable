@@ -7,6 +7,27 @@ export type SessionSummary = {
   is_running: boolean;
   message_count: number;
   pending_approvals: Approval[];
+  plan?: TaskPlan | null;
+};
+
+export type PlanStep = {
+  step_id: string;
+  step: string;
+  details: string;
+  verification: string;
+  status: "pending" | "in_progress" | "completed";
+};
+
+export type TaskPlan = {
+  plan_id: string;
+  status: "proposed" | "active" | "completed" | "rejected" | "abandoned";
+  revision: number;
+  definition: {
+    summary: string;
+    completion_criteria: string[];
+    [key: string]: unknown;
+  };
+  steps: PlanStep[];
 };
 
 export type Approval = {

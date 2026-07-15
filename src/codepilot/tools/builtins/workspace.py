@@ -164,7 +164,7 @@ def create_workspace_status_registration(sandbox: WorkspaceSandbox) -> ToolRegis
         implementation_version="2",
         spec=ToolSpec(
             "workspace_status",
-            "Summarize the workspace root, visible entries, and Git repository presence.",
+            "Return a bounded orientation snapshot of the workspace root, visible top-level entries, and Git repository presence. Use once when the repository shape is unknown; use ls, find, grep, and read for targeted follow-up rather than repeatedly requesting the same snapshot.",
             input_schema,
             output_schema,
         ),

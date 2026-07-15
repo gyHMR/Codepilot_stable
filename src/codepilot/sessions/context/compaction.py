@@ -8,8 +8,14 @@ import json
 import uuid
 from pathlib import Path
 
+from codepilot.core.transcript import (
+    is_closed_tool_batch,
+    latest_unconsumed_tool_batch,
+    message_groups,
+    tool_batch_call_ids,
+)
 from codepilot.llm.estimation import estimate_context_tokens, estimate_text_tokens
-from codepilot.protocols import AssistantMessage, Message, ToolCall, ToolResultMessage
+from codepilot.protocols import AssistantMessage, Message, ToolResultMessage
 
 from .contracts import (
     CompactSnapshotRef,
@@ -59,14 +65,29 @@ class ContextCompactor:
                 if previous_snapshot is not None
                 else None,
             )
-            groups = _message_groups(pending)
+            groups = message_groups(pending)
+            _validate_message_groups(groups)
             if len(groups) < 4:
                 if previous_snapshot is not None:
                     return previous_snapshot
                 raise ContextCompactionError("no legal message prefix is large enough to compact")
             keep_groups = max(3, (len(groups) * 3 + 9) // 10)
-            compact_groups = groups[: max(1, len(groups) - keep_groups)]
+            compact_group_count = max(1, len(groups) - keep_groups)
+            protected_group = latest_unconsumed_tool_batch(groups)
+            if protected_group is not None:
+                compact_group_count = min(compact_group_count, protected_group)
+            if compact_group_count < 1:
+                if previous_snapshot is not None:
+                    return previous_snapshot
+                raise ContextCompactionError(
+                    "no legal message prefix exists before the unconsumed tool batch"
+                )
+            compact_groups = groups[:compact_group_count]
             compact_messages = tuple(message for group in compact_groups for message in group)
+            if any(_message_id(message) is None for message in compact_messages):
+                raise ContextCompactionError(
+                    "compaction requires committed message ids for the complete prefix"
+                )
             expected_cursor = _message_id(compact_messages[-1])
             if expected_cursor is None:
                 raise ContextCompactionError("compaction cursor requires committed message ids")
@@ -135,6 +156,7 @@ class ContextCompactor:
         ).to_mapping()
 
     def validate_messages(self, messages: tuple[Message, ...]) -> bool:
+        _validate_message_groups(message_groups(messages))
         snapshot = self.current_snapshot
         if snapshot is None:
             return True
@@ -236,6 +258,19 @@ def _snapshot_from_mapping(raw: dict[str, object]) -> CompactSnapshotRef:
     )
 
 
+def _validate_message_groups(groups: tuple[tuple[Message, ...], ...]) -> None:
+    for group in groups:
+        if is_closed_tool_batch(group):
+            continue
+        if len(group) != 1:
+            raise ContextCompactionError("tool call batch is not closed")
+        message = group[0]
+        if isinstance(message, ToolResultMessage):
+            raise ContextCompactionError("orphan tool result is not compactable")
+        if isinstance(message, AssistantMessage) and tool_batch_call_ids(group):
+            raise ContextCompactionError("tool call batch is not closed")
+
+
 def _messages_after_cursor(
     messages: tuple[Message, ...],
     cursor: str | None,
@@ -256,34 +291,6 @@ def _prefix_through_cursor(
         if _message_id(message) == cursor:
             return messages[: index + 1]
     raise ContextCompactionError("compaction cursor is not present in the message chain")
-
-
-def _message_groups(messages: tuple[Message, ...]) -> list[tuple[Message, ...]]:
-    groups: list[tuple[Message, ...]] = []
-    index = 0
-    while index < len(messages):
-        message = messages[index]
-        if isinstance(message, AssistantMessage):
-            call_ids = {
-                block.id for block in message.content if isinstance(block, ToolCall)
-            }
-            if call_ids:
-                group: list[Message] = [message]
-                cursor = index + 1
-                while cursor < len(messages):
-                    candidate = messages[cursor]
-                    if not isinstance(candidate, ToolResultMessage):
-                        break
-                    if candidate.tool_call_id not in call_ids:
-                        break
-                    group.append(candidate)
-                    cursor += 1
-                groups.append(tuple(group))
-                index = cursor
-                continue
-        groups.append((message,))
-        index += 1
-    return groups
 
 
 def _source_text(

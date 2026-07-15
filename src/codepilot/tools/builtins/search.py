@@ -125,8 +125,18 @@ def create_search_registrations(
         ToolRegistration 列表
     """
     configs = (
-        ("grep", GrepInput, _grep_schema(), "Search UTF-8 workspace files with a regular expression and return file:line matches. Skips repository metadata, virtual environments, dependency directories, and bounded scan limits."),
-        ("find", FindInput, _find_schema(), "Find workspace files whose relative paths match one glob pattern. Skips repository metadata, virtual environments, dependency directories, and bounded scan limits."),
+        (
+            "grep",
+            GrepInput,
+            _grep_schema(),
+            "Search UTF-8 workspace file contents with a regular expression and return bounded file:line matches. Use path and glob to narrow known code areas; use find for path-name discovery. Repository metadata, environments, dependency directories, and oversized scans are skipped. Check truncation and scan-limit metadata before concluding a symbol is absent.",
+        ),
+        (
+            "find",
+            FindInput,
+            _find_schema(),
+            "Find workspace files whose relative paths match one glob pattern. Use this for file-name or extension discovery, then read or grep the relevant results; do not use it for content search. Metadata, environments, dependency directories, and oversized scans are skipped, and results are bounded.",
+        ),
     )
     result: list[ToolRegistration] = []
     for name, input_type, schema, description in configs:

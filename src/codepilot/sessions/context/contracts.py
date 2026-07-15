@@ -18,6 +18,7 @@ ProjectionAction = Literal[
     "keep_projected",
     "replace_with_artifact_ref",
     "covered_by_compact_summary",
+    "covered_by_newer_read",
     "discard_orphan",
 ]
 EvidenceAction = Literal[
@@ -173,7 +174,12 @@ class ProjectionPlan:
         return tuple(
             item.message
             for item in self.messages
-            if item.action not in {"covered_by_compact_summary", "discard_orphan"}
+            if item.action
+            not in {
+                "covered_by_compact_summary",
+                "covered_by_newer_read",
+                "discard_orphan",
+            }
         )
 
 

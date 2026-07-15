@@ -241,7 +241,7 @@ def create_command_registration(
         implementation_version="1",
         spec=ToolSpec(
             "command",
-            "Run a recognized project command as an argv array without Shell parsing. Inspection commands may run directly; repository tests, lint, and builds require approval before the first matching session or project capability is granted. Use bash only when Shell syntax is required.",
+            "Run one recognized project or inspection command as an argv array without Shell parsing. Prefer this for tests, lint, builds, version-control inspection, and other commands that do not require pipes, redirects, expansion, or chaining. Each call has bounded output and timeout metadata; inspect the exit code before claiming success. Capability approval may be required for the first matching command. Use bash only when Shell syntax is essential.",
             input_schema,
             output_schema,
         ),
@@ -479,7 +479,7 @@ def create_shell_registration(
         implementation_version="2",
         spec=ToolSpec(
             "bash",
-            "Run one approved raw Shell command with workspace cwd. Use only when pipes, redirection, command chaining, or other Shell syntax cannot be expressed with the command tool.",
+            "Run one approved raw Shell command with the workspace as cwd. Use only when pipes, redirection, command chaining, variable expansion, or another Shell feature cannot be expressed by command or a dedicated file/search tool. Keep the command scoped and inspect exit code plus truncation metadata; do not use Shell syntax to bypass tool permissions or overwrite unrelated user work.",
             input_schema,
             output_schema,
         ),

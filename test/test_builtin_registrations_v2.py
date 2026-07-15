@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
 import sys
 from pathlib import Path
@@ -92,6 +93,28 @@ def test_builtin_registration_catalog_is_complete_and_opaque(tmp_path: Path) -> 
     assert [item.spec.name for item in filtered] == ["read", "grep"]
 
 
+def test_builtin_tool_descriptions_explain_selection_and_bounded_results(
+    tmp_path: Path,
+) -> None:
+    from codepilot.tools import create_builtin_registrations
+
+    descriptions = {
+        item.spec.name: item.spec.description
+        for item in create_builtin_registrations(tmp_path)
+    }
+
+    assert "offset and limit" in descriptions["read"]
+    assert "hard line and character bounds" in descriptions["read"]
+    assert "first unreturned line" in descriptions["read"]
+    assert "use find for path-name discovery" in descriptions["grep"]
+    assert "do not use it for content search" in descriptions["find"]
+    assert "full rewrites" in descriptions["write"]
+    assert "expected_file_hash" in descriptions["edit"]
+    assert "prevents the batch from being partially applied" in descriptions["apply_patch"]
+    assert "argv array without Shell parsing" in descriptions["command"]
+    assert "Use only when pipes" in descriptions["bash"]
+
+
 def test_file_handler_consumes_resolver_canonical_path_once(
     tmp_path: Path,
     monkeypatch,
@@ -140,6 +163,97 @@ def test_readonly_builtins_execute_through_canonical_runtime(
     assert result.status == "success"
     assert expected_text in result.data["text"]
     assert {effect.kind for effect in result.effects} == {"filesystem_read"}
+
+
+def test_read_schema_enforces_hard_result_limits(tmp_path: Path) -> None:
+    from codepilot.tools import create_builtin_registrations
+
+    registration = next(
+        item
+        for item in create_builtin_registrations(tmp_path, enabled_names=["read"])
+        if item.spec.name == "read"
+    )
+    properties = registration.spec.input_schema["properties"]
+
+    assert properties["max_chars"]["maximum"] == 30_000
+    assert properties["limit"]["maximum"] == 1_000
+
+
+def test_read_result_projects_file_identity_into_session_message(tmp_path: Path) -> None:
+    from codepilot.tools.results import to_tool_result_message
+
+    content = "first line\nsecond line\n"
+    (tmp_path / "sample.py").write_text(content, encoding="utf-8", newline="\n")
+    runtime, registration_ids = _runtime(tmp_path, enabled_names=["read"])
+
+    result = _execute(runtime, registration_ids, "read", {"path": "sample.py"})
+    message = to_tool_result_message(result)
+
+    assert result.data["details"]["sha256"] == hashlib.sha256(
+        content.encode("utf-8")
+    ).hexdigest()
+    assert message.details == result.data["details"]
+    assert "text" not in message.details
+
+
+def test_read_batch_rejects_aggregate_output_budget_before_handlers(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from codepilot.tools.contracts import ToolExecutionRequest
+
+    for index in range(6):
+        (tmp_path / f"sample-{index}.py").write_text(
+            f"value_{index} = True\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+    runtime, registration_ids = _runtime(
+        tmp_path, enabled_names=["read", "write"]
+    )
+    read_requests = tuple(
+        ToolExecutionRequest(
+            run_id="run-read-budget",
+            session_id="session-read-budget",
+            tool_call_id=f"call-read-{index}",
+            tool_name="read",
+            arguments={"path": f"sample-{index}.py"},
+            mode="execute",
+            registration_id=registration_ids["read"],
+        )
+        for index in range(6)
+    )
+    requests = (
+        *read_requests,
+        ToolExecutionRequest(
+            run_id="run-read-budget",
+            session_id="session-read-budget",
+            tool_call_id="call-write",
+            tool_name="write",
+            arguments={"path": "must-not-exist.txt", "content": "blocked\n"},
+            mode="execute",
+            registration_id=registration_ids["write"],
+        ),
+    )
+
+    def unexpected_read(_path: Path) -> bytes:
+        raise AssertionError("read handler must not run for a rejected batch")
+
+    monkeypatch.setattr(Path, "read_bytes", unexpected_read)
+    results = asyncio.run(runtime.execute_batch(requests))
+
+    assert [result.status for result in results] == ["error"] * 7
+    assert [result.error.code for result in results] == [
+        "tool.batch.output_budget_exceeded"
+    ] * 7
+    assert all(
+        result.error.details == {
+            "requested_chars": 120_000,
+            "max_chars": 100_000,
+        }
+        for result in results
+    )
+    assert not (tmp_path / "must-not-exist.txt").exists()
 
 
 def test_write_edit_and_apply_patch_share_one_canonical_result_shape(tmp_path: Path) -> None:

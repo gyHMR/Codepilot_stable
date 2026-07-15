@@ -82,11 +82,26 @@ class CorePolicy:
 
         plan = state.task.plan
         if plan is not None and plan.status == "proposed":
+            calls = (
+                _tool_calls(observation)
+                if isinstance(observation, ModelObservation)
+                else ()
+            )
+            if calls:
+                return ExecuteTools(
+                    calls,
+                    CoreReason("model.requested_tools", recoverable=True),
+                )
             if (
                 isinstance(observation, UserInputObservation)
                 and observation.text != state.task.current_goal
             ):
                 return _call_model("replan", "plan.feedback_received")
+            if any(item.kind == "plan_incomplete" for item in state.task.blockers):
+                budget_wait = _budget_wait(state, observation, context)
+                if budget_wait is not None:
+                    return budget_wait
+                return _call_model("replan", "plan.revision_submission_required")
             return Wait(
                 CoreWait(
                     "plan_confirmation",

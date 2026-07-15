@@ -323,9 +323,12 @@ async def run_core(input: CoreRunInput, ports: CorePorts) -> CoreOutcome:
 
 
 def _initial_observation(input: CoreRunInput) -> CoreObservation:
+    entry_sequence = (
+        len(input.state.facts.observation_ledger.applied_observation_ids) + 1
+    )
     if isinstance(input.entry, ToolResultEntry):
         return UserInputObservation(
-            observation_id="core:entry:tool_results",
+            observation_id=f"core:entry:tool_results:{entry_sequence}",
             text=input.state.task.current_goal,
             current_goal=input.state.task.current_goal,
         )
@@ -333,11 +336,11 @@ def _initial_observation(input: CoreRunInput) -> CoreObservation:
         raise TypeError(f"Unknown Core entry: {type(input.entry).__name__}")
     if input.entry.message is not None:
         return ModelObservation(
-            observation_id="core:entry:persisted_model",
+            observation_id=f"core:entry:persisted_model:{entry_sequence}",
             message=input.entry.message,
         )
     return UserInputObservation(
-        observation_id="core:entry:model",
+        observation_id=f"core:entry:model:{entry_sequence}",
         text=_last_user_text(input.messages) or input.state.task.original_request,
         current_goal=input.state.task.current_goal,
     )

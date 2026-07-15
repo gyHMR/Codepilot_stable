@@ -364,18 +364,16 @@ def _step_definitions_schema() -> dict[str, object]:
 def _plan_description(operation: str) -> str:
     return {
         PROPOSE_PLAN_TOOL: (
-            "Plan mode only. Submit a detailed Task Plan proposal as a Core command. "
-            "The user approves or rejects the resulting proposal separately."
+            "Plan mode only. Submit the session's complete canonical proposed Task Plan for user review once repository evidence is sufficient. On user feedback, submit the full revised plan and preserve decisions the feedback did not change; plain text is not a submission. Each item must describe post-approval implementation or verification work, never exploration, writing the plan, replying, or waiting for approval. A successful call means stop planning and wait for Runtime review; it does not authorize implementation."
         ),
         CREATE_BUILD_PLAN_TOOL: (
-            "Build mode only. Submit a lightweight active Task Plan as a Core command."
+            "Build mode only. Create one lightweight active Task Plan when the implementation is genuinely multi-step and no canonical plan exists. Items must be concrete implementation or verification work with independently checkable outcomes. Do not call this for a simple task or while an active plan already exists."
         ),
         UPDATE_PLAN_PROGRESS_TOOL: (
-            "Build mode only. Submit delta progress updates or a controlled Plan revision."
+            "Build mode only. Update the existing active plan using its current expected_revision. For normal progress, submit only changed step IDs with status, completion note, and evidence; never resend the whole plan. Use revision only when user direction, repeated failure, or new repository evidence invalidates the approved structure, and provide the complete revised definition and items."
         ),
         CLOSE_PLAN_TOOL: (
-            "Build mode only. Request Plan closeout with evidence. Core completion policy "
-            "decides whether the task may finish."
+            "Build mode only. Request closeout of the current active plan using its expected_revision, an accurate summary, and concrete evidence references. Call only after checking every completion criterion and the latest verification state. This submits evidence to Core; Core decides whether the plan completes or remains active."
         ),
     }[operation]
 

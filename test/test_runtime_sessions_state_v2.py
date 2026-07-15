@@ -840,6 +840,49 @@ def test_target_boundary_collects_component_checkpoints_in_runtime(
     asyncio.run(run_case())
 
 
+def test_progress_commit_projects_message_id_for_context_compaction(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        from codepilot.core.contracts import CoreBoundary
+        from codepilot.core.state import CoreState
+        from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
+        from codepilot.sessions.contracts import SessionOptions, SessionRunIntent
+
+        coordinator = RuntimeSessionCoordinator(
+            SessionOptions(
+                model=_model(),
+                workspace_dir=tmp_path,
+                session_id="session_context_cursor",
+                memory_enabled=False,
+            )
+        )
+        prepared = await coordinator._prepare_run(  # noqa: SLF001
+            SessionRunIntent(text="inspect", request_id="request_context_cursor"),
+            run_id="run_context_cursor",
+            model=ModelDescriptor(provider="unit-test", model_id="runtime-state-v2"),
+        )
+        adapter = prepared.state_port
+        assert adapter is not None
+        message = AssistantMessage(
+            content=[TextContent(text="inspection complete")]
+        )
+
+        await adapter.commit(
+            CoreBoundary(
+                kind="after_model",
+                state=CoreState.new("inspect"),
+                new_messages=(message,),
+            )
+        )
+
+        assert message.metadata["session_message_id"] == (
+            adapter.committed_message_ids[id(message)]
+        )
+
+    asyncio.run(run_case())
+
+
 def test_target_waiting_boundary_maps_to_sessions_waiting_state(tmp_path: Path) -> None:
     async def run_case() -> None:
         from codepilot.core.contracts import CoreBoundary, CoreReason, CoreWait

@@ -43,16 +43,11 @@ def runtime_frame_to_event(
     run_id = _run_id(frame)
     if kind == "progress":
         payload = _json_dict(getattr(frame, "event", {}))
-        progress_type = str(payload.get("type", ""))
-        event_type = (
-            "message_delta"
-            if progress_type == "text_delta"
-            else "tool_activity"
-            if progress_type.startswith("tool_")
-            else "progress"
-        )
+        event_type, payload = _project_progress(payload)
     elif kind == "approval_required":
         payload = _json_dict(getattr(frame, "approval", {}))
+        if "risk_level" not in payload and "risk" in payload:
+            payload["risk_level"] = payload["risk"]
         event_type = kind
     elif kind in {"run_paused", "run_finished", "command_finished"}:
         payload = _json_dict(getattr(frame, "record", {}))
@@ -145,12 +140,35 @@ def _json_dict(value: Any) -> dict[str, Any]:
     return converted if isinstance(converted, dict) else {"value": converted}
 
 
+def _project_progress(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Project Runtime's internal progress envelope to the stable Web protocol."""
+
+    progress_type = str(payload.get("type", ""))
+    if progress_type == "message_update":
+        assistant_event = payload.get("assistant_message_event")
+        if isinstance(assistant_event, Mapping):
+            projected = _json_dict(assistant_event)
+            assistant_type = str(projected.get("type", ""))
+            if assistant_type == "text_delta":
+                return "message_delta", {
+                    "type": "text_delta",
+                    "delta": str(projected.get("delta", "")),
+                }
+            if assistant_type.startswith("tool_call"):
+                return "tool_activity", projected
+    if progress_type == "text_delta":
+        return "message_delta", payload
+    if progress_type.startswith("tool_"):
+        return "tool_activity", payload
+    return "progress", payload
+
+
 def _json_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Mapping):
         return {str(key): _json_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
+    if isinstance(value, (list, tuple, set, frozenset)):
         return [_json_value(item) for item in value]
     if hasattr(value, "model_dump"):
         return _json_value(value.model_dump())

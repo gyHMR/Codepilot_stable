@@ -77,7 +77,7 @@ codepilot config init
 {
   "api": "openai-compatible",
   "provider": "deepseek",
-  "model_id": "deepseek-chat",
+  "model_id": "deepseek-v4-flash",
   "base_url": "https://api.deepseek.com/v1",
   "api_key_env": "DEEPSEEK_API_KEY",
   "context_window": 64000,

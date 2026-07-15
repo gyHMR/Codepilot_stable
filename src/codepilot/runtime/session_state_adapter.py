@@ -147,7 +147,9 @@ class RuntimeSessionStateAdapter:
         for message, record in zip(
             new_messages, result.committed_messages, strict=True
         ):
-            self.committed_message_ids[id(message)] = record.message_id
+            message_id = record.message_id
+            self.committed_message_ids[id(message)] = message_id
+            message.metadata.setdefault("session_message_id", message_id)
 
 
 def _target_boundary_state(boundary: CoreBoundary) -> tuple[str, str, str]:

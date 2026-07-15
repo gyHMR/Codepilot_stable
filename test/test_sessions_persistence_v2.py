@@ -168,7 +168,9 @@ def test_begin_run_creates_authoritative_session_run_and_message_files(tmp_path:
     assert begun.run.status == "created"
     assert begun.run.checkpoint is not None
     assert begun.run.checkpoint.resume_point == "before_model"
-    assert service.load_messages("session_1")[-1].message_id == "message_user"
+    loaded = service.load_messages("session_1")[-1]
+    assert loaded.message_id == "message_user"
+    assert loaded.message.metadata["session_message_id"] == loaded.message_id
 
 
 def test_repository_message_append_is_idempotent_and_rejects_conflicts(tmp_path: Path) -> None:

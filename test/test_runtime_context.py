@@ -115,10 +115,10 @@ def test_default_runtime_prompt_describes_coding_agent_workflow(tmp_path: Path) 
 
     prompt = build_system_prompt(workspace=tmp_path, config=config, tools=tools)
 
-    assert "本地仓库中工作的 coding agent" in prompt
-    assert "Task Plan" in prompt
-    assert "propose_plan" in prompt
-    assert "close_plan" in prompt
+    assert "本地代码仓库中工作的 coding agent" in prompt
+    assert "canonical Task Plan" in prompt
+    assert "Codepilot Runtime Control" in prompt
+    assert "不编造文件、符号、调用链" in prompt
     assert "验证" in prompt
     assert "当前模式：" not in prompt
 

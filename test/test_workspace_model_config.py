@@ -17,7 +17,12 @@ from codepilot.runtime.model import resolve_runtime_model
 from codepilot.runtime import SessionOpenIntent
 
 
-def _write_model_config(workspace, *, api_key: str = "local-key") -> None:
+def _write_model_config(
+    workspace,
+    *,
+    api_key: str = "local-key",
+    model_id: str = "deepseek-chat",
+) -> None:
     root = workspace / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
     (root / "model.local.json").write_text(
@@ -25,7 +30,7 @@ def _write_model_config(workspace, *, api_key: str = "local-key") -> None:
             {
                 "api": "openai-compatible",
                 "provider": "deepseek",
-                "model_id": "deepseek-chat",
+                "model_id": model_id,
                 "base_url": "https://api.deepseek.com/v1",
                 "api_key": api_key,
                 "api_key_env": "DEEPSEEK_API_KEY",
@@ -65,6 +70,33 @@ def test_runtime_resolves_workspace_model_and_key(tmp_path) -> None:
     resolved = resolve_runtime_model(intent, load_runtime_config(intent))
 
     assert resolved.model.provider == "deepseek"
+    assert resolved.get_api_key is not None
+    assert resolved.get_api_key("deepseek") == "local-key"
+
+
+def test_runtime_restores_custom_workspace_model_from_local_config(tmp_path) -> None:
+    from codepilot.sessions.contracts import ModelRef
+    from codepilot.sessions.service import CreateSessionRequest, SessionStateService
+
+    _write_model_config(tmp_path, model_id="deepseek-v4-flash")
+    SessionStateService(tmp_path).create_session(
+        CreateSessionRequest(
+            workspace_root=str(tmp_path),
+            model=ModelRef(provider="deepseek", model="deepseek-v4-flash"),
+            current_mode="plan",
+            system_prompt_hash="test-system-prompt",
+            session_id="session_custom_model",
+        )
+    )
+
+    intent = SessionOpenIntent(
+        workspace_dir=tmp_path,
+        session_id="session_custom_model",
+    )
+    resolved = resolve_runtime_model(intent, load_runtime_config(intent))
+
+    assert resolved.model.id == "deepseek-v4-flash"
+    assert resolved.model.context_window == 64000
     assert resolved.get_api_key is not None
     assert resolved.get_api_key("deepseek") == "local-key"
 

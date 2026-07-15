@@ -61,14 +61,12 @@ def test_plan_policy_prioritizes_subagents_for_broad_repository_analysis() -> No
 
     policy = _mode_policy("plan")
 
-    assert "固定的宏观工作流" in policy
-    assert "探索阶段默认使用 dispatch_exploration" in policy
-    assert "主 Agent 不应先用大量 ls/read/grep/find" in policy
-    assert "主 Agent 负责" in policy
-    assert "框架负责" in policy
-    assert "list_exploration_agents" in policy
+    assert "已知文件或局部问题直接用 read/grep/find" in policy
+    assert "调查开放、跨模块或可拆成独立问题" in policy
     assert "dispatch_exploration" in policy
     assert "reuse=auto" in policy
+    assert "普通文本方案不是提交" in policy
+    assert "propose_plan 成功只表示等待用户审查" in policy
 
 
 def test_exploration_tool_descriptions_explain_preferred_and_reuse_behavior(tmp_path) -> None:
@@ -86,10 +84,10 @@ def test_exploration_tool_descriptions_explain_preferred_and_reuse_behavior(tmp_
     listed = tools["list_exploration_agents"].spec.description
     assert "Plan mode only" in dispatch
     assert "read-only exploration subagents" in dispatch
-    assert "distinct scopes" in dispatch
-    assert "integrate the returned evidence" in dispatch
+    assert "distinct purpose and scope" in dispatch
+    assert "main agent must integrate and verify" in dispatch
     assert "reuse=auto" in dispatch
-    assert "does not create or run subagents" in listed
+    assert "without creating or running subagents" in listed
     assert "reports already produced by dispatch_exploration" in listed
 
 
@@ -140,18 +138,13 @@ def test_mode_policies_keep_one_agent_identity_and_separate_control_from_task() 
     build = _mode_policy("build")
     read = _mode_policy("read")
 
-    assert "同一个 Coding Agent" in plan
-    assert "对象级" in plan
-    assert "控制级" in plan
-    assert "派发只读 Subagent 探索仓库" in plan
+    assert "只允许只读调查" in plan
     assert "禁止修改工作区" in plan
-    assert "普通文本方案不是可审批的 Task Plan" in plan
-    assert "不要先完整展示文本草案" in plan
-    assert "未经运行时确认批准" in plan
-    assert "声称已经开始实现" in plan
-    assert "执行目标" in build
-    assert "不是重新制定方案" in build
-    assert "不得创建、推进或完成" in read
+    assert "普通文本方案不是提交" in plan
+    assert "提交后不得开始实现" in plan
+    assert "直接执行第一个未完成步骤" in build
+    assert "不得创建第二份计划" in build
+    assert "不得创建、推进或关闭 Task Plan" in read
 
 
 def test_plan_approved_continuation_executes_existing_plan_without_replanning() -> None:
@@ -162,10 +155,9 @@ def test_plan_approved_continuation_executes_existing_plan_without_replanning() 
     assert control is not None
     assert control["scope"] == "approved_plan_execution_only"
     instruction = str(control["instruction"])
-    assert "first unfinished plan item" in instruction
-    assert "do not restate it, redesign it, or create another Task Plan" in instruction
-    assert "do not call create_build_plan" in instruction
-    assert "preserve the canonical item IDs exactly" in instruction
+    assert "第一个未完成步骤" in instruction
+    assert "不要复述、重新设计或创建第二份计划" in instruction
+    assert "保留现有 step_id" in instruction
     assert "update_plan_progress" in instruction
     assert "close_plan" in instruction
 
@@ -453,5 +445,122 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
             for message in messages
             if getattr(message, "role", "") == "assistant"
         )
+
+    asyncio.run(run_case())
+
+
+def test_plan_feedback_must_publish_a_new_canonical_revision(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.llm.ports import LLMCompleted
+        from codepilot.protocols import AssistantMessage, Model, TextContent, ToolCall
+        from codepilot.runtime import RuntimeGateway, SessionOpenIntent
+        from codepilot.runtime.actions import PromptSubmitted, RunPausedFrame
+
+        def plan_arguments(summary: str, phase_one: str) -> dict[str, object]:
+            return {
+                "task_understanding": "用户要完善登录模块并先审批方案。",
+                "current_implementation": "当前登录模块仍是演示实现。",
+                "target_design": "形成可验证的完整登录服务。",
+                "impact_scope": "影响登录实现和相关测试。",
+                "risks_and_open_questions": ["暂无阻塞待确认项。"],
+                "verification_plan": "运行登录相关测试。",
+                "summary": summary,
+                "completion_criteria": ["登录相关测试通过"],
+                "items": [
+                    {
+                        "step": phase_one,
+                        "details": "实现可独立运行和验证的第一阶段。",
+                        "verification": "运行第一阶段登录测试。",
+                    }
+                ],
+            }
+
+        class ModelPort:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.contexts: list[str] = []
+
+            async def stream(self, request):
+                self.calls += 1
+                self.contexts.append(
+                    request.system_prompt
+                    + "\n"
+                    + "\n".join(str(item.content) for item in request.messages)
+                )
+                if self.calls == 2:
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[TextContent(text="这是重新设计后的普通文本方案。")]
+                        )
+                    )
+                    return
+                revised = self.calls >= 3
+                yield LLMCompleted(
+                    message=AssistantMessage(
+                        content=[
+                            ToolCall(
+                                id="plan-revised" if revised else "plan-initial",
+                                name="propose_plan",
+                                arguments=plan_arguments(
+                                    "重新设计后的登录方案" if revised else "初始登录方案",
+                                    "交付可运行的最小登录 API"
+                                    if revised
+                                    else "创建登录模块骨架",
+                                ),
+                            )
+                        ]
+                    )
+                )
+
+        model_port = ModelPort()
+        gateway = RuntimeGateway(model_port=model_port)
+        ref = gateway.open_session(
+            SessionOpenIntent(
+                workspace_dir=tmp_path,
+                current_mode="plan",
+                memory_enabled=False,
+                model=Model(
+                    id="unit",
+                    name="Unit",
+                    api="unit",
+                    provider="unit",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=32_000,
+                    max_tokens=500,
+                ),
+            )
+        )
+
+        first_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                PromptSubmitted(text="完善登录模块，先给方案"),
+            )
+        ]
+        feedback_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                PromptSubmitted(text="我不满意第一阶段，重新设计"),
+            )
+        ]
+        session = gateway._require_session(ref.session_id)._session  # noqa: SLF001
+        plan = session.current_plan_state()
+
+        assert any(isinstance(frame, RunPausedFrame) for frame in first_frames)
+        assert any(isinstance(frame, RunPausedFrame) for frame in feedback_frames)
+        assert model_port.calls == 3
+        assert plan is not None
+        assert plan["revision"] == 2
+        assert plan["definition"]["summary"] == "重新设计后的登录方案"
+        assert plan["steps"][0]["step"] == "交付可运行的最小登录 API"
+        assert "当前 mode=plan" in model_port.contexts[0]
+        assert "Continuation event: plan_feedback" in model_port.contexts[1]
+        assert "本轮必须成功调用 propose_plan" in model_port.contexts[1]
+
+        await gateway.close_all()
 
     asyncio.run(run_case())

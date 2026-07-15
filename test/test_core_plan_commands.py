@@ -12,7 +12,7 @@ from codepilot.core.commands import (
     SubmitPlan,
     UpdatePlanProgress,
 )
-from codepilot.core.contracts import CallModel, Terminate, Wait
+from codepilot.core.contracts import CallModel, ExecuteTools, Terminate, Wait
 from codepilot.core.observations import (
     ModelObservation,
     ToolBatchObservation,
@@ -20,7 +20,12 @@ from codepilot.core.observations import (
 )
 from codepilot.core.plan import PlanDefinition, PlanStepDefinition, PlanStepUpdate
 from codepilot.core.policy import CorePolicy, PolicyContext
-from codepilot.core.reducer import ReductionContext, apply_core_command, apply_decision
+from codepilot.core.reducer import (
+    ReductionContext,
+    apply_core_command,
+    apply_decision,
+    reduce_observation,
+)
 from codepilot.core.state import (
     CoreState,
     FailureCount,
@@ -28,7 +33,7 @@ from codepilot.core.state import (
     LoopGuardFacts,
 )
 from codepilot.core.tool_step import project_core_command_results, project_core_commands
-from codepilot.protocols import AssistantMessage, TextContent
+from codepilot.protocols import AssistantMessage, TextContent, ToolCall
 from codepilot.tools.results import ToolResult
 
 
@@ -135,6 +140,53 @@ def test_unapproved_proposal_can_be_revised_after_user_feedback() -> None:
     assert revised.state.task.plan.plan_id == "plan:submit-1"
     assert revised.state.task.plan.revision == 2
     assert revised.state.task.plan.definition.summary == "补充兼容性验证"
+
+
+def test_plan_feedback_requires_a_submitted_revision_before_waiting_again() -> None:
+    proposed = _submit("plan")
+    feedback = reduce_observation(
+        proposed,
+        UserInputObservation(
+            "feedback-required",
+            text="重新设计第一阶段",
+            current_goal=proposed.task.current_goal,
+        ),
+        _context("plan"),
+    ).state
+
+    plain = ModelObservation(
+        "model-plain-plan",
+        message=AssistantMessage(content=[TextContent(text="这是修改后的文本方案")]),
+        purpose="replan",
+    )
+    plain_state = reduce_observation(feedback, plain, _context("plan")).state
+    plain_decision = CorePolicy.decide(plain_state, plain, PolicyContext("plan"))
+
+    tool_response = ModelObservation(
+        "model-plan-tool",
+        message=AssistantMessage(
+            content=[
+                ToolCall(
+                    id="submit-revision",
+                    name="propose_plan",
+                    arguments={},
+                )
+            ]
+        ),
+        purpose="replan",
+    )
+    tool_state = reduce_observation(
+        feedback, tool_response, _context("plan")
+    ).state
+    tool_decision = CorePolicy.decide(
+        tool_state, tool_response, PolicyContext("plan")
+    )
+
+    assert any(item.kind == "plan_incomplete" for item in feedback.task.blockers)
+    assert isinstance(plain_decision, CallModel)
+    assert plain_decision.purpose == "replan"
+    assert isinstance(tool_decision, ExecuteTools)
+    assert [call.name for call in tool_decision.calls] == ["propose_plan"]
 
 
 def test_progress_is_delta_based_revision_checked_and_evidence_backed() -> None:
@@ -427,3 +479,19 @@ def test_only_canonical_plan_tool_results_are_projected_as_core_commands() -> No
     assert visible[0].error is not None
     assert visible[0].error.code == "plan.revision_conflict"
     assert visible[0].data["core_command_result"]["status"] == "rejected"
+
+
+def test_plan_tool_descriptions_define_submission_and_progress_contracts() -> None:
+    from codepilot.core.tool_adapters.plan import create_plan_registrations
+
+    descriptions = {
+        item.spec.name: item.spec.description
+        for item in create_plan_registrations()
+    }
+
+    assert "plain text is not a submission" in descriptions["propose_plan"]
+    assert "full revised plan" in descriptions["propose_plan"]
+    assert "post-approval implementation or verification" in descriptions["propose_plan"]
+    assert "no canonical plan exists" in descriptions["create_build_plan"]
+    assert "submit only changed step IDs" in descriptions["update_plan_progress"]
+    assert "Core decides" in descriptions["close_plan"]

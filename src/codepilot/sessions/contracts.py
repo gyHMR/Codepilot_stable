@@ -35,7 +35,7 @@
 
 import json
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Literal, Mapping, Optional
 from uuid import uuid4
 
@@ -249,11 +249,15 @@ class MessageRecord:
 
     def __post_init__(self) -> None:
         _require_schema(self.schema_version, MESSAGE_RECORD_SCHEMA_VERSION, "message record")
-        object.__setattr__(self, "message_id", _require_text(self.message_id, "message_id"))
+        message_id = _require_text(self.message_id, "message_id")
+        object.__setattr__(self, "message_id", message_id)
         object.__setattr__(self, "session_id", _require_text(self.session_id, "session_id"))
         object.__setattr__(self, "run_id", _optional_text(self.run_id))
         object.__setattr__(self, "parent_id", _optional_text(self.parent_id))
         object.__setattr__(self, "created_at", _require_text(self.created_at, "created_at"))
+        metadata = dict(self.message.metadata)
+        metadata.setdefault("session_message_id", message_id)
+        object.__setattr__(self, "message", replace(self.message, metadata=metadata))
 
 
 @dataclass(frozen=True)

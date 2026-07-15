@@ -128,6 +128,7 @@ class WebService:
     def session_detail(self, session_id: str) -> dict[str, Any]:
         view = self.runtime.describe(session_id)
         status = view.status
+        view_state = getattr(view, "state", None) or {}
         return {
             "session_id": status.session_id,
             "workspace": status.workspace,
@@ -139,6 +140,7 @@ class WebService:
             "pending_approvals": [
                 _public_dict(item) for item in view.pending_approvals
             ],
+            "plan": view_state.get("current_plan"),
         }
 
     def messages(self, session_id: str) -> list[dict[str, Any]]:

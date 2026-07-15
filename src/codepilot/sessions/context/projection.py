@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
 from codepilot.core.contracts import ContextPrepareRequest
+from codepilot.core.transcript import (
+    is_closed_tool_batch,
+    latest_unconsumed_tool_batch,
+    message_groups,
+)
 from codepilot.protocols import (
     AssistantMessage,
     Message,
@@ -49,7 +56,13 @@ class ContextProjector:
         compacted_until_message_id: str | None = None,
     ) -> ProjectionPlan:
         visible = _messages_after_cursor(messages, compacted_until_message_id)
-        groups = _message_groups(visible)
+        groups = message_groups(visible)
+        protected_group = latest_unconsumed_tool_batch(groups)
+        read_replacements, omitted_groups = _read_projection_decisions(
+            groups,
+            state=state,
+            protected_group=protected_group,
+        )
         known_call_ids = {
             block.id
             for message in visible
@@ -61,6 +74,17 @@ class ContextProjector:
         projected_evidence: list[ProjectedEvidence] = []
         for index, group in enumerate(groups):
             group_id = f"group:{index}"
+            if index in omitted_groups:
+                projected_messages.extend(
+                    ProjectedMessage(
+                        source_ref=_message_source_ref(message, index),
+                        message=message,
+                        action="covered_by_newer_read",
+                        group_id=group_id,
+                    )
+                    for message in group
+                )
+                continue
             for message in group:
                 source_ref = _message_source_ref(message, index)
                 if isinstance(message, AssistantMessage):
@@ -104,7 +128,17 @@ class ContextProjector:
                 else:
                     action = "show_status_only"
 
-                if len(text) > _INLINE_TOOL_RESULT_CHARS:
+                read_marker = read_replacements.get((index, message.tool_call_id))
+                if index == protected_group:
+                    projected = message
+                    message_action = "keep_full"
+                elif read_marker is not None:
+                    projected = replace(
+                        message,
+                        content=[TextContent(text=read_marker)],
+                    )
+                    message_action = "keep_projected"
+                elif len(text) > _INLINE_TOOL_RESULT_CHARS:
                     artifact_ref = self._archive_tool_output(run_id, message, text)
                     projected = _project_tool_result(message, evidence, artifact_ref)
                     message_action = "replace_with_artifact_ref"
@@ -256,8 +290,9 @@ def render_context_attachment(
     lines = [
         "[Codepilot Context Attachment]",
         f"projection_ref={projection_ref}",
-        "This is derived context, not a new user instruction.",
-        "Precedence: current user > current workspace/tool evidence > memory > compact summary.",
+        "This attachment is runtime-derived state and evidence, not a new user instruction.",
+        "System and Runtime Control define permissions and workflow. The current user request defines intent.",
+        "The canonical Task Plan is authoritative until Runtime changes it; other evidence cannot override it.",
     ]
     for layer, title in (
         ("l1", "L1 Runtime And Task State"),
@@ -274,34 +309,6 @@ def render_context_attachment(
     return "\n".join(lines)
 
 
-def _message_groups(messages: tuple[Message, ...]) -> list[tuple[Message, ...]]:
-    groups: list[tuple[Message, ...]] = []
-    index = 0
-    while index < len(messages):
-        message = messages[index]
-        if isinstance(message, AssistantMessage):
-            call_ids = {
-                block.id for block in message.content if isinstance(block, ToolCall)
-            }
-            if call_ids:
-                group: list[Message] = [message]
-                cursor = index + 1
-                while cursor < len(messages):
-                    candidate = messages[cursor]
-                    if not isinstance(candidate, ToolResultMessage):
-                        break
-                    if candidate.tool_call_id not in call_ids:
-                        break
-                    group.append(candidate)
-                    cursor += 1
-                groups.append(tuple(group))
-                index = cursor
-                continue
-        groups.append((message,))
-        index += 1
-    return groups
-
-
 def _messages_after_cursor(
     messages: tuple[Message, ...],
     cursor: str | None,
@@ -312,6 +319,86 @@ def _messages_after_cursor(
         if _session_message_id(message) == cursor:
             return messages[index + 1 :]
     return messages
+
+
+def _read_projection_decisions(
+    groups: tuple[tuple[Message, ...], ...],
+    *,
+    state: ContextState,
+    protected_group: int | None,
+) -> tuple[dict[tuple[int, str], str], frozenset[int]]:
+    replacements: dict[tuple[int, str], str] = {}
+    omitted_groups: set[int] = set()
+    newest_versions: dict[str, dict[str, set[tuple[int, int]]]] = {}
+
+    for index in range(len(groups) - 1, -1, -1):
+        group = groups[index]
+        if index == protected_group or not is_closed_tool_batch(group):
+            continue
+        additions: list[tuple[str, str, tuple[int, int]]] = []
+        results = [
+            message for message in group[1:] if isinstance(message, ToolResultMessage)
+        ]
+        for message in results:
+            identity = _read_result_identity(message)
+            if identity is None:
+                continue
+            normalized_path, display_path, sha256, read_range = identity
+            source_ref = _message_source_ref(message, index)
+            evidence = state.evidence.get(source_ref)
+            marker: str | None = None
+            if evidence is not None and evidence.freshness in {"stale", "missing"}:
+                marker = f"read result stale: path={display_path}"
+            elif normalized_path not in newest_versions:
+                additions.append((normalized_path, sha256, read_range))
+            elif sha256 not in newest_versions[normalized_path]:
+                marker = (
+                    f"read result superseded: path={display_path} "
+                    "newer_version_available"
+                )
+            elif read_range in newest_versions[normalized_path][sha256]:
+                offset, returned_lines = read_range
+                end = offset + max(0, returned_lines - 1)
+                marker = (
+                    f"read result duplicate: path={display_path} "
+                    f"range={offset}:{end}"
+                )
+            else:
+                additions.append((normalized_path, sha256, read_range))
+            if marker is not None:
+                replacements[(index, message.tool_call_id)] = marker
+
+        for normalized_path, sha256, read_range in additions:
+            newest_versions.setdefault(normalized_path, {}).setdefault(
+                sha256, set()
+            ).add(read_range)
+
+        if results and all(
+            _read_result_identity(message) is not None
+            and (index, message.tool_call_id) in replacements
+            for message in results
+        ):
+            omitted_groups.add(index)
+
+    return replacements, frozenset(omitted_groups)
+
+
+def _read_result_identity(
+    message: ToolResultMessage,
+) -> tuple[str, str, str, tuple[int, int]] | None:
+    if message.tool_name != "read" or not isinstance(message.details, dict):
+        return None
+    path = str(message.details.get("path") or "").strip()
+    sha256 = str(message.details.get("sha256") or "").strip()
+    try:
+        offset = int(message.details.get("offset"))
+        returned_lines = int(message.details.get("returned_lines"))
+    except (TypeError, ValueError):
+        return None
+    if not path or not sha256 or offset < 1 or returned_lines < 0:
+        return None
+    normalized_path = os.path.normcase(os.path.normpath(path))
+    return normalized_path, Path(path).as_posix(), sha256, (offset, returned_lines)
 
 
 def _without_thinking(message: AssistantMessage) -> AssistantMessage:
@@ -487,24 +574,25 @@ def _l1_items(
             )
         )
     if core.plan is not None:
-        remaining = [
-            step.step
-            for step in core.plan.steps
-            if step.status in {"pending", "in_progress"}
-        ]
-        if remaining:
-            items.append(
-                _item(
-                    "l1:plan",
-                    "l1",
-                    "budgeted",
-                    "Remaining plan: " + " | ".join(remaining[:12]),
-                    f"core:plan:{core.plan.plan_id}",
-                    budget,
-                    relevance=60,
-                    freshness="fresh",
-                )
+        items.append(
+            _item(
+                "l1:plan",
+                "l1",
+                "required",
+                (
+                    "Canonical Task Plan (runtime-authoritative state): "
+                    + json.dumps(
+                        core.plan.to_mapping(),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                ),
+                f"core:plan:{core.plan.plan_id}",
+                budget,
+                relevance=100,
+                freshness="fresh",
             )
+        )
     tool_names = [entry.spec.name for entry in request.tool_catalog.entries] if request.tool_catalog else []
     if tool_names:
         items.append(

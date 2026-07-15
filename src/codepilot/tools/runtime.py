@@ -237,6 +237,28 @@ class ToolRuntime:
                 )
             admitted.append(prepared)
 
+        requested_read_chars, max_read_chars = _read_batch_output_budget(admitted)
+        if requested_read_chars > max_read_chars:
+            details = {
+                "requested_chars": requested_read_chars,
+                "max_chars": max_read_chars,
+            }
+            results = []
+            for item in admitted:
+                result = _failure(
+                    item.request,
+                    "tool.batch.output_budget_exceeded",
+                    "validation",
+                    (
+                        "Parallel read batch requested "
+                        f"{requested_read_chars} characters; maximum is {max_read_chars}"
+                    ),
+                    item.started_at_ms,
+                    details=details,
+                )
+                results.append(self._settle(item.attempt_id, "failed", result))
+            return ToolBatchPreparation(results=tuple(results))
+
         self._prepared_sequence += 1
         batch_id = f"{items[0].run_id}:batch:{self._prepared_sequence}"
         self._prepared_batches[batch_id] = tuple(admitted)
@@ -1277,6 +1299,20 @@ def _failure(
         timing=_timing(started),
         registration_id=request.registration_id,
     )
+
+
+def _read_batch_output_budget(items: list[_Prepared]) -> tuple[int, int]:
+    """Return normalized read output demand and the hard batch limit."""
+
+    from .builtins.files import READ_BATCH_MAX_CHARS, ReadInput
+
+    requested_chars = 0
+    for item in items:
+        resolved_input = getattr(item.resolution, "input", None)
+        value = getattr(resolved_input, "value", resolved_input)
+        if item.request.tool_name == "read" and isinstance(value, ReadInput):
+            requested_chars += value.max_chars
+    return requested_chars, READ_BATCH_MAX_CHARS
 
 
 def _approval_result(request, challenge, started) -> ToolResult:

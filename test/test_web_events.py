@@ -27,6 +27,46 @@ def test_runtime_frame_conversion() -> None:
     }
 
 
+def test_nested_runtime_message_update_is_projected_to_message_delta() -> None:
+    from codepilot.interfaces.web.events import runtime_frame_to_event
+    from codepilot.runtime.actions import ProgressFrame
+
+    event = runtime_frame_to_event(
+        ProgressFrame(
+            event={
+                "type": "message_update",
+                "assistant_message_event": {"type": "text_delta", "delta": "hi"},
+            }
+        ),
+        session_id="s1",
+        sequence=1,
+        event_id_factory=lambda: "evt-1",
+    )
+
+    assert event.type == "message_delta"
+    assert event.data == {"type": "text_delta", "delta": "hi"}
+
+
+def test_approval_projection_normalizes_web_fields() -> None:
+    from codepilot.interfaces.web.events import runtime_frame_to_event
+
+    event = runtime_frame_to_event(
+        SimpleNamespace(
+            kind="approval_required",
+            approval={
+                "approval_id": "a1",
+                "risk": "high",
+                "effects": frozenset({"process_spawn", "filesystem_read"}),
+            },
+        ),
+        session_id="s1",
+        sequence=1,
+    )
+
+    assert event.data["risk_level"] == "high"
+    assert sorted(event.data["effects"]) == ["filesystem_read", "process_spawn"]
+
+
 def test_runtime_frame_kinds_have_stable_web_types() -> None:
     from codepilot.interfaces.web.events import runtime_frame_to_event
 

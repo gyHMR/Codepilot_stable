@@ -123,10 +123,11 @@ def create_interaction_registration() -> ToolRegistration:
         spec=ToolSpec(
             REQUEST_USER_INPUT_TOOL,
             (
-                "Pause the current tool call only when a required user choice or missing value cannot "
-                "be inferred safely. Provide a concise prompt and, when applicable, two to eight "
-                "mutually exclusive options. This is user input collection, not tool security approval "
-                "and not Task Plan approval."
+                "Pause the run for structured user input only when a missing value or choice would "
+                "materially change the implementation and cannot be inferred from the request or "
+                "repository. Ask one concise question; when useful, provide two to eight mutually "
+                "exclusive options and allow free text. Do not use this for status updates, tool "
+                "security approval, Task Plan approval, or questions that further read-only investigation can answer."
             ),
             input_schema,
             output_schema,

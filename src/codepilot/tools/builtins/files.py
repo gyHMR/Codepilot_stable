@@ -51,6 +51,12 @@ _DRAFT = "https://json-schema.org/draft/2020-12/schema"
 _AUTO_APPROVE_MAX_FILES = 20
 _AUTO_APPROVE_MAX_BYTES = 500_000
 
+# read 的单次结果和并行批次预算。单次限制由输入 Schema 在 handler 执行前校验，
+# 批次限制由 ToolRuntime.prepare_batch 统一准入。
+READ_MAX_CHARS = 30_000
+READ_MAX_LINES = 1_000
+READ_BATCH_MAX_CHARS = 100_000
+
 
 # ── 输入类型（dataclass） ─────────────────────────────────────────────────────
 
@@ -205,11 +211,41 @@ def create_file_registrations(
         ToolRegistration 列表（只包含被启用的工具）
     """
     configs = (
-        ("ls", LsInput, _ls_schema(), False, "List one workspace directory with names and file sizes."),
-        ("read", ReadInput, _read_schema(), False, "Read a UTF-8 workspace file with line pagination and truncation metadata."),
-        ("write", WriteInput, _write_schema(), True, "Create or replace one UTF-8 workspace file and report whether content changed."),
-        ("edit", EditInput, _edit_schema(), True, "Replace exact text in one UTF-8 workspace file with occurrence and hash guards."),
-        ("apply_patch", ApplyPatchInput, _patch_schema(), True, "Validate and atomically apply one to twenty exact text replacements."),
+        (
+            "ls",
+            LsInput,
+            _ls_schema(),
+            False,
+            "List one known workspace directory with entry names and file sizes. This is not recursive; use find to discover paths by pattern. Respect truncated metadata instead of assuming the listing is complete.",
+        ),
+        (
+            "read",
+            ReadInput,
+            _read_schema(),
+            False,
+            "Read a line range from one UTF-8 workspace file. Use offset and limit for targeted or continued reads; each result has hard line and character bounds plus path, hash, line-count, returned-line, and truncation metadata. If truncated, continue from the first unreturned line. Do not re-read an unchanged identical range merely to keep it in context.",
+        ),
+        (
+            "write",
+            WriteInput,
+            _write_schema(),
+            True,
+            "Create a UTF-8 file or replace its complete content, reporting whether bytes actually changed. Use for new files or intentional full rewrites; prefer edit for one local replacement and apply_patch for several exact replacements. Set overwrite=false when an existing file must be protected.",
+        ),
+        (
+            "edit",
+            EditInput,
+            _edit_schema(),
+            True,
+            "Replace exact text in one UTF-8 file. Use the smallest clearly unique old_text and add expected_file_hash or expected_occurrences when editing from observed content; use occurrence_index or replace_all only when that multiplicity is intentional. Use apply_patch for coordinated replacements across files.",
+        ),
+        (
+            "apply_patch",
+            ApplyPatchInput,
+            _patch_schema(),
+            True,
+            "Atomically apply one to twenty exact text replacements across workspace files. Use for coordinated multi-hunk or multi-file edits after reading the relevant current content. All replacements are validated before commit, so one missing or ambiguous old_text prevents the batch from being partially applied.",
+        ),
     )
     registrations: list[ToolRegistration] = []
     for name, input_type, input_schema, mutating, description in configs:
@@ -451,7 +487,8 @@ class _FileHandler:
         if not target.is_file():
             raise ToolHandlerError("read.not_file", f"File not found: {input.path}")
         try:
-            text = target.read_text(encoding="utf-8")
+            raw_content = target.read_bytes()
+            text = raw_content.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ToolHandlerError("read.not_utf8", f"File is not valid UTF-8: {input.path}") from exc
         lines = text.splitlines(keepends=True)
@@ -471,6 +508,7 @@ class _FileHandler:
             text=rendered,
             details={
                 "path": relative,
+                "sha256": hashlib.sha256(raw_content).hexdigest(),
                 "offset": input.offset,
                 "line_count": len(lines),
                 "returned_lines": len(rendered.splitlines()),
@@ -911,7 +949,28 @@ def _ls_schema() -> dict[str, Any]:
 
 
 def _read_schema() -> dict[str, Any]:
-    return {"$schema": _DRAFT, "type": "object", "properties": {"path": {"type": "string"}, "max_chars": {"type": "integer", "minimum": 1, "default": 20_000}, "offset": {"type": "integer", "minimum": 1, "default": 1}, "limit": {"type": "integer", "minimum": 1, "default": 200}}, "required": ["path"], "additionalProperties": False}
+    return {
+        "$schema": _DRAFT,
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "max_chars": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": READ_MAX_CHARS,
+                "default": 20_000,
+            },
+            "offset": {"type": "integer", "minimum": 1, "default": 1},
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": READ_MAX_LINES,
+                "default": 200,
+            },
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    }
 
 
 def _write_schema() -> dict[str, Any]:

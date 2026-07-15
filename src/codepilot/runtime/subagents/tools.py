@@ -218,8 +218,7 @@ def _list_registration(
     return _registration(
         name=LIST_EXPLORATION_AGENTS_TOOL,
         description=(
-            "Plan mode only. Inspect reports already produced by dispatch_exploration. This tool does "
-            "not create or run subagents; use it to filter or compare existing exploration evidence."
+            "Plan mode only. Inspect reports already produced by dispatch_exploration without creating or running subagents. Use to filter, compare, or recover existing evidence by query or focus path; do not call it as a prerequisite when no report is expected."
         ),
         input_schema=input_schema,
         output_schema=output_schema,
@@ -341,9 +340,7 @@ def _dispatch_registration(
     return _registration(
         name=DISPATCH_EXPLORATION_TOOL,
         description=(
-            "Plan mode only. Dispatch the minimum necessary number of read-only exploration subagents "
-            "for independent repository questions. Use distinct scopes, prefer reuse=auto, and integrate "
-            "the returned evidence before proposing the final Task Plan."
+            "Plan mode only. Dispatch read-only exploration subagents for open-ended, cross-module, or genuinely independent repository questions that would require several searches in the main context. Give each task a distinct purpose and scope, avoid duplicate investigation, and prefer reuse=auto. Do not use for one known file or a focused lookup. Reports are evidence, not the final design; the main agent must integrate and verify them before propose_plan."
         ),
         input_schema=input_schema,
         output_schema=output_schema,
