@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from codepilot.core.contracts import CoreReason
 from codepilot.core.errors import CoreContractError, CoreInvariantError
 from codepilot.protocols import ErrorInfo
 
@@ -15,6 +16,20 @@ def runtime_error_info(error: Any) -> ErrorInfo | None:
         return None
     if isinstance(error, ErrorInfo):
         return error
+    if isinstance(error, CoreReason):
+        details = dict(error.details)
+        source = _core_reason_error_source(error.source)
+        if source != error.source:
+            details.setdefault("reason_source", error.source)
+        if error.evidence_refs:
+            details.setdefault("evidence_refs", list(error.evidence_refs))
+        return ErrorInfo(
+            code=error.code,
+            message=error.message or error.code,
+            retryable=error.recoverable,
+            source=source,
+            details=details,
+        )
     if isinstance(error, dict):
         code = _text(error.get("code")) or "runtime.dispatch_failed"
         message = _text(error.get("message")) or code
@@ -73,6 +88,8 @@ def runtime_error_payload(error: Any) -> dict[str, Any]:
     return {
         "code": info.code,
         "message": info.message,
+        "source": info.source,
+        "retryable": info.retryable,
         "details": dict(info.details),
     }
 
@@ -80,6 +97,16 @@ def runtime_error_payload(error: Any) -> dict[str, Any]:
 def _text(value: object) -> str | None:
     text = value.strip() if isinstance(value, str) else ""
     return text or None
+
+
+def _core_reason_error_source(source: str) -> str:
+    aliases = {
+        "model": "llm",
+        "tools": "tool",
+        "verification": "core",
+    }
+    allowed = {"llm", "tool", "core", "runtime", "session", "interface"}
+    return aliases.get(source, source if source in allowed else "core")
 
 
 __all__ = ["runtime_error_info", "runtime_error_payload"]

@@ -1,0 +1,32 @@
+.panel { height: 100vh; overflow-y: auto; padding: 8px 18px 32px; background: var(--color-surface-subtle); }
+.section { padding: 18px 0; border-bottom: 1px solid var(--color-border); }
+.section:last-child { border-bottom: 0; }
+.section h2 { margin: 0 0 12px; color: var(--color-text-secondary); font-size: 12px; font-weight: 650; }
+.projectName, .taskTitle { display: block; margin-bottom: 5px; font-size: 14px; }
+.path { display: block; overflow-wrap: anywhere; color: var(--color-text-muted); font-size: 11px; }
+.muted { color: var(--color-text-muted); font-size: 12px; }
+.detailRow { display: flex; align-items: center; gap: 7px; margin-top: 10px; color: var(--color-text-secondary); font-size: 12px; }
+.success { color: var(--color-success); }
+.changeList { list-style: none; margin: 3px 0 0; padding: 0; }
+.changeList li { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: center; gap: 6px; padding: 4px 0; color: var(--color-text-secondary); }
+.changeList code { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.taskSection { padding-top: 20px; }
+.progressLabel { display: grid; grid-template-columns: 34px 1fr; align-items: center; gap: 8px; margin: 11px 0 13px; color: var(--color-text-muted); font-size: 11px; }
+.progressLabel > div { height: 3px; overflow: hidden; background: var(--color-border); }
+.progressLabel i { display: block; height: 100%; background: var(--color-success); }
+.steps { list-style: none; margin: 0; padding: 0; }
+.steps > li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 7px; color: var(--color-text-secondary); }
+.steps > li > svg { margin-top: 8px; }
+.steps p { margin: 0 0 4px; color: var(--color-text-secondary); font-size: 12px; }
+.steps small { color: var(--color-text-muted); }
+.steps .completed { color: var(--color-success); }
+.steps .completed span { color: var(--color-text-muted); text-decoration: line-through; }
+.steps .in_progress { color: var(--color-accent); }
+.steps .in_progress span { color: var(--color-text); font-weight: 600; }
+.approvalHint { margin: 10px 0 0; padding: 8px; color: var(--color-warning); background: var(--color-warning-soft); font-size: 12px; }
+.runState { display: flex; align-items: center; gap: 7px; }
+.runState time { margin-left: auto; color: var(--color-text-muted); font: 11px var(--font-mono); }
+.environment { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 9px; margin: 0; font-size: 12px; }
+.environment dt { color: var(--color-text-muted); }
+.environment dd { min-width: 0; display: flex; align-items: center; gap: 6px; margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 1050px) { .panel { height: 100%; padding-top: 48px; } }

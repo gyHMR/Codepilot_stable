@@ -5,6 +5,7 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { queryClient } from "./state/queryClient";
 import "./styles/tokens.css";
-import "./styles/app.css";
+import "./styles/global.css";
+import "./styles/markdown.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(<React.StrictMode><QueryClientProvider client={queryClient}><BrowserRouter><App /></BrowserRouter></QueryClientProvider></React.StrictMode>);

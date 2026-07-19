@@ -1,0 +1,26 @@
+.shell { min-height: 100vh; display: grid; grid-template-columns: var(--sidebar-width) minmax(560px, 1fr) var(--project-panel-width); background: var(--color-surface); }
+.sidebar, .project { min-width: 0; background: var(--color-surface-subtle); }
+.sidebar { border-right: 1px solid var(--color-border); }
+.project { border-left: 1px solid var(--color-border); }
+.conversation { min-width: 0; min-height: 100vh; position: relative; background: var(--color-surface); }
+.mobileControls { display: none; position: absolute; z-index: 12; top: 10px; left: 10px; right: 10px; pointer-events: none; justify-content: space-between; }
+.mobileControls > span { pointer-events: auto; }
+.overlay { position: fixed; inset: 0; z-index: 50; background: rgb(20 26 30 / 24%); }
+.drawer { position: fixed; z-index: 60; top: 0; bottom: 0; width: min(88vw, 320px); background: var(--color-surface-subtle); box-shadow: var(--shadow-menu); overflow: hidden; }
+.drawer.left { left: 0; }
+.drawer.right { right: 0; }
+.drawerClose { position: absolute; z-index: 2; top: 8px; right: 8px; }
+.srOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.leftTrigger, .rightTrigger { display: none; }
+@media (max-width: 1050px) {
+  .shell { grid-template-columns: var(--sidebar-width) minmax(0, 1fr); }
+  .project { display: none; }
+  .mobileControls { display: flex; justify-content: flex-end; }
+  .rightTrigger { display: inline-block; }
+}
+@media (max-width: 720px) {
+  .shell { display: block; }
+  .sidebar { display: none; }
+  .mobileControls { justify-content: space-between; }
+  .leftTrigger { display: inline-block; }
+}

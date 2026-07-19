@@ -116,7 +116,7 @@ def test_finalization_model_sidecar_is_captured_and_removed_from_visible_answer(
     ]
 
 
-def test_retrying_model_discards_failed_attempt_deltas_and_reports_attempts() -> None:
+def test_retrying_model_retries_only_before_visible_output_and_streams_live() -> None:
     class _BaseModel:
         def __init__(self) -> None:
             self.attempt = 0
@@ -125,7 +125,6 @@ def test_retrying_model_discards_failed_attempt_deltas_and_reports_attempts() ->
             self.attempt += 1
             yield LLMStarted()
             if self.attempt == 1:
-                yield LLMTextDelta("discarded partial answer")
                 yield LLMFailed({"code": "llm.timeout", "retryable": True})
                 return
             yield LLMTextDelta("visible final answer")
@@ -154,6 +153,35 @@ def test_retrying_model_discards_failed_attempt_deltas_and_reports_attempts() ->
     ] == ["visible final answer"]
     completed = next(event for event in events if isinstance(event, LLMCompleted))
     assert completed.attempts == 2
+
+
+def test_retrying_model_does_not_buffer_visible_deltas() -> None:
+    released = asyncio.Event()
+
+    class _BaseModel:
+        async def stream(self, _request):
+            yield LLMTextDelta("visible now")
+            await released.wait()
+            yield LLMCompleted(
+                AssistantMessage(content=[TextContent(text="visible now")])
+            )
+
+    async def run_case() -> None:
+        port = RetryingModelPort(_BaseModel(), max_retries=1)
+        request = LLMRequest(
+            model=ModelDescriptor(provider="unit", model_id="unit"),
+            messages=(UserMessage(content="finish"),),
+            correlation=LLMCorrelation(run_id="run_live", session_id="session_live", purpose="reasoning"),
+        )
+        stream = port.stream(request)
+        first = await anext(stream)
+        assert isinstance(first, LLMTextDelta)
+        assert first.text == "visible now"
+        released.set()
+        remaining = [event async for event in stream]
+        assert any(isinstance(event, LLMCompleted) for event in remaining)
+
+    asyncio.run(run_case())
 
 
 def test_terminal_commit_happens_before_automatic_memory_submission(tmp_path) -> None:

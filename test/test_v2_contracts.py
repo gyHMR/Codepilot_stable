@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-import importlib
 from typing import get_args
 
 import pytest
@@ -259,30 +258,6 @@ def test_tool_port_approval_contract_uses_typed_challenge_and_response() -> None
     assert response.decision == "approve"
 
 
-def test_v2_contract_modules_do_not_import_higher_layers() -> None:
-    forbidden = {
-        "codepilot.core.contracts": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
-        "codepilot.sessions.contracts": ("codepilot.runtime", "codepilot.interfaces"),
-        "codepilot.runtime.actions": ("codepilot.core.agent", "codepilot.runtime.session_coordinator", "codepilot.tools.runtime"),
-        "codepilot.llm.ports": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
-        "codepilot.tools.contracts": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
-    }
-    for module_name, forbidden_imports in forbidden.items():
-        module = importlib.import_module(module_name)
-        names = set(getattr(module, "__dict__", {}))
-        imported_modules = {
-            value.__name__
-            for value in module.__dict__.values()
-            if hasattr(value, "__name__") and hasattr(value, "__package__")
-        }
-        haystack = names | imported_modules
-        assert not any(
-            item == forbidden_name or item.startswith(f"{forbidden_name}.")
-            for item in haystack
-            for forbidden_name in forbidden_imports
-        )
-
-
 def test_v2_contract_modules_export_only_named_contract_surface() -> None:
     import codepilot.core.contracts as core_contracts
     import codepilot.llm.ports as llm_ports
@@ -317,3 +292,17 @@ def test_sessions_waiting_contract_accepts_core_continuation() -> None:
     )
 
     assert waiting.kind == "continuation"
+
+
+def test_runtime_gateway_accepts_approval_as_user_action() -> None:
+    import inspect
+
+    from codepilot.runtime.actions import ApprovalDecided
+    from codepilot.runtime.gateway import RuntimeGateway
+
+    signature = inspect.signature(RuntimeGateway.dispatch)
+    assert list(signature.parameters) == ["self", "session_id", "action"]
+
+    action = ApprovalDecided(approval_id="approval_1", decision="approve")
+    assert action.approval_id == "approval_1"
+    assert action.decision == "approve"

@@ -74,6 +74,32 @@ def test_session_and_action_routes(tmp_path) -> None:
         assert accepted.status_code == 202
 
 
+def test_session_title_timeline_and_workspace_routes(tmp_path) -> None:
+    from fastapi.testclient import TestClient
+    from codepilot.interfaces.web.app import create_app
+
+    app = create_app(workspace=tmp_path, runtime=ApiGateway())
+
+    with TestClient(app) as client:
+        created = client.post("/api/sessions", json={"title": "整理 Web 工作台"})
+        session_id = created.json()["session_id"]
+        assert created.json()["title"] == "整理 Web 工作台"
+
+        renamed = client.patch(
+            f"/api/sessions/{session_id}", json={"title": "新的会话标题"}
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["title"] == "新的会话标题"
+        assert client.get(f"/api/sessions/{session_id}/timeline").json() == []
+
+        workspace = client.get("/api/workspace/summary")
+        assert workspace.status_code == 200
+        assert workspace.json()["name"] == tmp_path.name
+        assert workspace.json()["path"] == str(tmp_path.resolve())
+        assert isinstance(workspace.json()["git"]["available"], bool)
+        assert isinstance(workspace.json()["git"]["changes"], list)
+
+
 def test_blank_message_is_validation_error(tmp_path) -> None:
     from fastapi.testclient import TestClient
     from codepilot.interfaces.web.app import create_app

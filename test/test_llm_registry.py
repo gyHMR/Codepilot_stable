@@ -81,19 +81,6 @@ def test_deepseek_api_key_uses_deepseek_env(monkeypatch) -> None:
     assert get_env_api_key("openai") == "openai-key"
 
 
-def test_old_openai_standard_alias_is_removed() -> None:
-    from codepilot.llm.catalog import get_model, get_models
-    from codepilot.llm.registry import get_api_provider, reset_api_providers
-
-    reset_api_providers()
-
-    assert get_api_provider("openai-compatible") is not None
-    assert get_api_provider("openai-standard") is None
-    assert get_models("openai-standard") == []
-    with pytest.raises(KeyError):
-        get_model("openai-standard", "gpt-4o-mini")
-
-
 def test_runtime_assembly_uses_isolated_builtin_provider_registry(tmp_path) -> None:
     from codepilot.llm.registry import clear_api_providers, get_api_provider
     from codepilot.runtime import SessionOpenIntent

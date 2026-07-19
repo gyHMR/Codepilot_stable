@@ -45,6 +45,29 @@ class PlanModelPort:
         )
 
 
+class InteractionModelPort:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream(self, _request):
+        from codepilot.llm.ports import LLMCompleted
+        from codepilot.protocols import AssistantMessage, TextContent, ToolCall
+
+        self.calls += 1
+        if self.calls == 1:
+            yield LLMCompleted(message=AssistantMessage(content=[ToolCall(
+                id="interaction-call",
+                name="request_user_input",
+                arguments={
+                    "prompt": "选择界面",
+                    "options": ["CLI", "Web"],
+                    "allow_free_text": True,
+                },
+            )]))
+            return
+        yield LLMCompleted(message=AssistantMessage(content=[TextContent(text="interaction resumed")]))
+
+
 def unit_model():
     from codepilot.protocols import Model
 
@@ -81,9 +104,39 @@ def test_real_runtime_prompt_reaches_web_events_and_persistence(tmp_path) -> Non
         replay = service.events_for(session_id).replay_after(None)
         assert replay.events == ()
         all_events = tuple(service.events_for(session_id)._events)  # noqa: SLF001
-        assert any(event.type == "run_finished" for event in all_events)
+        assert any(event.type == "run.completed" for event in all_events)
         messages = service.messages(session_id)
         assert any("web echo" in str(message) for message in messages)
+        await service.shutdown()
+
+    asyncio.run(run_case())
+
+
+def test_web_projection_recovers_terminal_state_and_accepts_next_input(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.interfaces.web.service import WebService
+        from codepilot.runtime.gateway import RuntimeGateway
+
+        service = WebService(
+            runtime=RuntimeGateway(model_port=EchoModelPort()),
+            workspace=tmp_path,
+            session_open_options={"model": unit_model(), "memory_enabled": False},
+        )
+
+        session_id = (await service.create_session())["session_id"]
+
+        await service.submit_prompt(session_id, "first input")
+        await service.wait_for_idle(session_id)
+        first_projection = service.projection(session_id)
+        assert first_projection["execution"] == {"run_id": None, "status": "idle"}
+        assert any("web echo" in str(item) for item in service.timeline(session_id))
+
+        await service.submit_prompt(session_id, "second input")
+        await service.wait_for_idle(session_id)
+        second_projection = service.projection(session_id)
+        assert second_projection["execution"] == {"run_id": None, "status": "idle"}
+        user_items = [item for item in service.timeline(session_id) if item["type"] == "user_message"]
+        assert len(user_items) == 2
         await service.shutdown()
 
     asyncio.run(run_case())
@@ -114,6 +167,36 @@ def test_web_session_detail_exposes_the_canonical_plan(tmp_path) -> None:
         assert detail["plan"]["revision"] == 1
         assert detail["plan"]["definition"]["summary"] == "完善登录模块"
         assert detail["plan"]["steps"][0]["step"] == "实现登录服务"
+        assert service.projection(session_id)["execution"]["status"] == "waiting_plan"
+        await service.shutdown()
+
+    asyncio.run(run_case())
+
+
+def test_web_interaction_wait_is_projected_and_resumed_explicitly(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.interfaces.web.service import WebService
+        from codepilot.runtime.gateway import RuntimeGateway
+
+        service = WebService(
+            runtime=RuntimeGateway(model_port=InteractionModelPort()),
+            workspace=tmp_path,
+            session_open_options={"model": unit_model(), "memory_enabled": False},
+        )
+        session_id = (await service.create_session())["session_id"]
+        await service.submit_prompt(session_id, "需要启动脚本")
+        await service.wait_for_idle(session_id)
+
+        projection = service.projection(session_id)
+        interaction = projection["pending_interaction"]
+        assert projection["execution"]["status"] == "waiting_user"
+        assert interaction["payload"]["prompt"] == "选择界面"
+        assert interaction["payload"]["options"] == ["CLI", "Web"]
+
+        await service.respond_interaction(session_id, interaction["request_id"], "Web")
+        await service.wait_for_idle(session_id)
+        assert service.projection(session_id)["execution"]["status"] == "idle"
+        assert any("interaction resumed" in str(item) for item in service.timeline(session_id))
         await service.shutdown()
 
     asyncio.run(run_case())

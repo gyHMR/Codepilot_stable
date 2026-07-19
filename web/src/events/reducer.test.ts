@@ -3,7 +3,7 @@ import { initialEventState, reduceWebEvent } from "./reducer";
 
 describe("event reducer", () => {
   it("appends deltas and ignores duplicates", () => {
-    const event = { event_id: "e1", session_id: "s1", run_id: "r1", type: "message_delta", sequence: 1, timestamp: "now", data: { delta: "hi" } };
+    const event = { event_id: "e1", session_id: "s1", run_id: "r1", type: "assistant.delta", sequence: 1, timestamp: "now", data: { delta: "hi" } };
     const once = reduceWebEvent(initialEventState, event);
     const twice = reduceWebEvent(once, event);
     expect(twice.streamingText).toBe("hi");
@@ -18,8 +18,8 @@ describe("event reducer", () => {
 
   it("requests a fresh sync for every terminal event and clears approvals", () => {
     const waiting = { ...initialEventState, pendingApprovals: [{ approval_id: "a1" }], runState: "paused" as const };
-    const first = reduceWebEvent(waiting, { event_id: "e1", session_id: "s1", run_id: "r1", type: "run_finished", sequence: 1, timestamp: "now", data: {} });
-    const second = reduceWebEvent(first, { event_id: "e2", session_id: "s1", run_id: "r2", type: "run_finished", sequence: 2, timestamp: "now", data: {} });
+    const first = reduceWebEvent(waiting, { event_id: "e1", session_id: "s1", run_id: "r1", type: "run.completed", sequence: 1, timestamp: "now", data: {} });
+    const second = reduceWebEvent(first, { event_id: "e2", session_id: "s1", run_id: "r2", type: "run.completed", sequence: 2, timestamp: "now", data: {} });
     expect(first.pendingApprovals).toEqual([]);
     expect(second.syncRevision).toBe(2);
   });

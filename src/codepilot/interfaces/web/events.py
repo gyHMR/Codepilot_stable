@@ -48,22 +48,44 @@ def runtime_frame_to_event(
         payload = _json_dict(getattr(frame, "approval", {}))
         if "risk_level" not in payload and "risk" in payload:
             payload["risk_level"] = payload["risk"]
-        event_type = kind
+        event_type = "approval.requested"
     elif kind in {"run_paused", "run_finished", "command_finished"}:
         payload = _json_dict(getattr(frame, "record", {}))
         if kind == "run_paused":
             payload["checkpoint"] = _json_value(getattr(frame, "checkpoint", {}))
-        event_type = kind
+            waiting = payload["checkpoint"].get("waiting", {}) if isinstance(payload["checkpoint"], dict) else {}
+            wait_kind = str(waiting.get("kind", "")) if isinstance(waiting, dict) else ""
+            wait_payload = waiting.get("payload", {}) if isinstance(waiting, dict) else {}
+            payload.update({
+                "status": {
+                    "tool_approval": "waiting_approval",
+                    "user_input": "waiting_user",
+                    "plan_confirmation": "waiting_plan",
+                    "continuation": "waiting_continuation",
+                }.get(wait_kind, "paused"),
+                "kind": wait_kind,
+                "request_id": str(waiting.get("request_id", "")) if isinstance(waiting, dict) else "",
+                "payload": wait_payload if isinstance(wait_payload, dict) else {},
+            })
+            event_type = {
+                "user_input": "interaction.requested",
+                "plan_confirmation": "plan.confirmation_requested",
+                "continuation": "continuation.requested",
+            }.get(wait_kind, "run.status_changed")
+        else:
+            payload["status"] = "completed"
+            event_type = "run.completed"
     elif kind == "cancelled":
         payload = {
             "cancelled": bool(getattr(frame, "cancelled", False)),
             "reason": str(getattr(frame, "reason", "user")),
         }
-        event_type = kind
+        payload["status"] = "cancelled"
+        event_type = "run.completed"
     elif kind == "failed":
         error = getattr(frame, "error", "Runtime failed")
         payload = _json_dict(error) if isinstance(error, dict) else {"message": str(error)}
-        event_type = kind
+        event_type = "error"
     else:
         payload = _json_dict(frame)
         event_type = kind
@@ -86,17 +108,33 @@ class EventHub:
         self._events: deque[WebEvent] = deque(maxlen=capacity)
         self._subscribers: set[asyncio.Queue[WebEvent]] = set()
         self._subscriber_capacity = subscriber_capacity
+        self._overflowed: set[asyncio.Queue[WebEvent]] = set()
 
     async def publish(self, event: WebEvent) -> None:
         self._events.append(event)
-        stale: list[asyncio.Queue[WebEvent]] = []
         for queue in tuple(self._subscribers):
             try:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
-                stale.append(queue)
-        for queue in stale:
-            self.unsubscribe(queue)
+                # Never leave an SSE client waiting forever after dropping deltas.
+                # Replace the backlog with an explicit resync barrier; the route
+                # closes the stream after delivering it and the browser reconnects.
+                while not queue.empty():
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                sync = WebEvent(
+                    event_id=uuid4().hex,
+                    session_id=event.session_id,
+                    run_id=event.run_id,
+                    type="sync_required",
+                    sequence=event.sequence,
+                    timestamp=event.timestamp,
+                    data={"reason": "subscriber_queue_overflow"},
+                )
+                queue.put_nowait(sync)
+                self._overflowed.add(queue)
 
     def subscribe(self) -> asyncio.Queue[WebEvent]:
         queue: asyncio.Queue[WebEvent] = asyncio.Queue(self._subscriber_capacity)
@@ -114,6 +152,10 @@ class EventHub:
 
     def unsubscribe(self, queue: asyncio.Queue[WebEvent]) -> None:
         self._subscribers.discard(queue)
+        self._overflowed.discard(queue)
+
+    def should_close(self, queue: asyncio.Queue[WebEvent]) -> bool:
+        return queue in self._overflowed
 
     def replay_after(self, event_id: str | None) -> ReplayResult:
         events = tuple(self._events)
@@ -150,17 +192,43 @@ def _project_progress(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             projected = _json_dict(assistant_event)
             assistant_type = str(projected.get("type", ""))
             if assistant_type == "text_delta":
-                return "message_delta", {
-                    "type": "text_delta",
+                return "assistant.delta", {
                     "delta": str(projected.get("delta", "")),
                 }
+            if assistant_type in {"thinking_delta", "reasoning_delta"}:
+                return "activity.updated", {
+                    "activity_id": "model-thinking",
+                    "type": "thinking",
+                    "name": "思考",
+                    "status": "running",
+                    "append_summary": str(projected.get("delta", "")),
+                }
             if assistant_type.startswith("tool_call"):
-                return "tool_activity", projected
+                raw_call = projected.get("toolCall")
+                call = _json_dict(raw_call) if raw_call is not None else {}
+                call_id = str(call.get("id") or "").strip()
+                index = call.get("index", projected.get("contentIndex"))
+                activity_id = call_id or (
+                    f"tool-call-index-{index}" if index is not None else "tool-call-current"
+                )
+                activity = {
+                    "activity_id": activity_id,
+                    "type": "tool_call",
+                    "status": "running",
+                }
+                if call.get("name"):
+                    activity["name"] = str(call["name"])
+                if call.get("arguments"):
+                    activity["arguments"] = call["arguments"]
+                if call.get("raw_arguments"):
+                    activity["raw_arguments"] = str(call["raw_arguments"])
+                return "activity.updated", activity
     if progress_type == "text_delta":
-        return "message_delta", payload
+        return "assistant.delta", {"delta": str(payload.get("delta", ""))}
     if progress_type.startswith("tool_"):
-        return "tool_activity", payload
-    return "progress", payload
+        return "activity.updated", payload
+    payload.setdefault("status", progress_type or "running")
+    return "run.status_changed", payload
 
 
 def _json_value(value: Any) -> Any:

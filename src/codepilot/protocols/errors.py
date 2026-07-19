@@ -16,7 +16,7 @@ from typing import Any, Literal, cast
 
 
 # 错误来源：标识错误发生在系统的哪个层面
-ErrorSource = Literal["llm", "tool", "runtime", "session", "interface"]
+ErrorSource = Literal["llm", "tool", "core", "runtime", "session", "interface"]
 
 # LLM 错误类型：细分 LLM 调用过程中可能遇到的错误类别
 LLMErrorKind = Literal[
@@ -29,7 +29,9 @@ LLMErrorKind = Literal[
     "unsupported_capability",  # 模型不支持的能力
     "unknown",                 # 未知错误
 ]
-_ERROR_SOURCES = frozenset({"llm", "tool", "runtime", "session", "interface"})
+_ERROR_SOURCES = frozenset(
+    {"llm", "tool", "core", "runtime", "session", "interface"}
+)
 _LLM_ERROR_KINDS = frozenset(
     {
         "auth",

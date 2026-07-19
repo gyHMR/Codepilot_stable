@@ -775,6 +775,7 @@ SessionContinuationKind = Literal[
     "tool_denied",
     "mode_changed",
     "automatic_continuation",
+    "user_input_response",
 ]
 _CONTINUATION_KINDS = {
     "plan_approved",
@@ -785,6 +786,7 @@ _CONTINUATION_KINDS = {
     "tool_denied",
     "mode_changed",
     "automatic_continuation",
+    "user_input_response",
 }
 
 
@@ -919,6 +921,8 @@ class SessionContinuationIntent:
         object.__setattr__(self, "target_mode", _optional_text(self.target_mode))
         if kind == "plan_feedback" and not self.text:
             raise ValueError("plan feedback text is required")
+        if kind == "user_input_response" and not self.text:
+            raise ValueError("user input response text is required")
         if kind in {"tool_approved", "tool_denied"} and not self.approval_id:
             raise ValueError("tool continuation approval_id is required")
 

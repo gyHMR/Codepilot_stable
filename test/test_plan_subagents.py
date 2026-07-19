@@ -160,6 +160,7 @@ def test_plan_approved_continuation_executes_existing_plan_without_replanning() 
     assert "保留现有 step_id" in instruction
     assert "update_plan_progress" in instruction
     assert "close_plan" in instruction
+    assert "不是完成任务的必要条件" in instruction
 
 
 def test_subagent_registry_keeps_process_local_reports_and_marks_stale(tmp_path) -> None:

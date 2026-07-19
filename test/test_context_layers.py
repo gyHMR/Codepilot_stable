@@ -79,7 +79,10 @@ def test_service_materializes_five_layers_without_putting_dynamic_state_in_l0(
 
     prepared = asyncio.run(service.prepare(_request()))
 
-    assert prepared.system_prompt == "L0 immutable rules."
+    assert prepared.system_prompt.startswith("L0 immutable rules.")
+    assert "# Codepilot Runtime Control" in prepared.system_prompt
+    assert "Core directive for this model call:" in prepared.system_prompt
+    assert "core.reasoning" in prepared.system_prompt
     assert prepared.messages[0].metadata["context_attachment"] is True
     attachment = str(prepared.messages[0].content)
     assert "L1 Runtime And Task State" in attachment
@@ -88,7 +91,9 @@ def test_service_materializes_five_layers_without_putting_dynamic_state_in_l0(
     assert "L3 Recalled Memory" in attachment
     assert "project.verification.command" in attachment
     assert prepared.messages[-1].metadata["session_message_id"] == "msg_current"
-    assert service.latest_report["layers"]["l0"] == ["L0 immutable rules."]
+    assert service.latest_report["layers"]["l0"] == [prepared.system_prompt]
+    assert "Core directive:" not in attachment
+    assert "l1:directive" not in service.latest_report["selected_items"]
 
 
 def test_memory_recall_failure_degrades_to_empty_l3(tmp_path: Path) -> None:
@@ -182,8 +187,11 @@ def test_runtime_control_is_compiled_into_system_prompt_not_user_attachment(
     assert "Continuation event: plan_feedback" in prepared.system_prompt
     assert "Required scope: plan_revision_only" in prepared.system_prompt
     assert "本轮必须调用 propose_plan" in prepared.system_prompt
+    assert "Core directive for this model call:" in prepared.system_prompt
+    assert "core.reasoning" in prepared.system_prompt
     assert "当前 mode=plan" not in attachment
     assert "本轮必须调用 propose_plan" not in attachment
+    assert "core.reasoning" not in attachment
 
 
 def test_canonical_plan_is_required_runtime_state_with_full_step_details(

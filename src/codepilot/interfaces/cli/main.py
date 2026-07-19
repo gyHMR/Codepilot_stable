@@ -176,6 +176,8 @@ def build_parser() -> argparse.ArgumentParser:
     web_parser.add_argument("--port", type=int, default=8000)
     web_parser.add_argument("--workspace", default=".")
     web_parser.add_argument("--reload", action="store_true", default=False)
+    web_parser.add_argument("--dev", action="store_true", default=False)
+    web_parser.add_argument("--frontend-port", type=int, default=5173)
     return parser
 
 
@@ -229,6 +231,8 @@ async def _run_from_args(args: argparse.Namespace) -> int:
                 port=args.port,
                 workspace=Path(args.workspace),
                 reload=args.reload,
+                dev=args.dev,
+                frontend_port=args.frontend_port,
             )
         )
         if inspect.isawaitable(server_result):

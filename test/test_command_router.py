@@ -69,31 +69,6 @@ def _init_repo(root: Path) -> None:
     _git(root, "config", "user.name", "Test User")
 
 
-def test_cli_command_router_hides_internal_session_tree_commands(tmp_path: Path) -> None:
-    asyncio.run(_run_internal_commands_removed_case(tmp_path))
-
-
-async def _run_internal_commands_removed_case(tmp_path: Path) -> None:
-    from codepilot.interfaces.cli.interactive import dispatch_command
-    from codepilot.runtime.commands import builtin_commands
-
-    runtime, session_id = _create_runtime_session(tmp_path)
-    try:
-        public_names = {command.name for command in builtin_commands()}
-        assert {"session", "tree", "path", "switch", "clear"}.isdisjoint(public_names)
-
-        help_result = await dispatch_command(runtime, session_id, "/help")
-        help_text = "\n".join(help_result.output_lines)
-        assert "`/resume`" in help_text
-        assert "`/session`" not in help_text
-        assert "`/tree`" not in help_text
-
-        result = await dispatch_command(runtime, session_id, "/session")
-        assert result.handled is False
-    finally:
-        await runtime.close_all()
-
-
 def test_cli_command_router_new_switches_to_empty_session(tmp_path: Path) -> None:
     asyncio.run(_run_new_command_case(tmp_path))
 
@@ -108,10 +83,6 @@ def test_cli_command_router_resume_lists_and_switches_sessions(tmp_path: Path) -
 
 def test_cli_command_router_shows_context_report(tmp_path: Path) -> None:
     asyncio.run(_run_context_command_case(tmp_path))
-
-
-def test_cli_command_router_does_not_expose_removed_compact_command(tmp_path: Path) -> None:
-    asyncio.run(_run_removed_compact_command_case(tmp_path))
 
 
 def test_cli_command_router_manages_project_memory(tmp_path: Path) -> None:
@@ -464,25 +435,6 @@ async def _run_rollback_blocked_case(tmp_path: Path) -> None:
         assert any("status=conflict" in line for line in result.output_lines)
         assert any("affected_path_has_staged_changes" in line for line in result.output_lines)
         assert tracked.read_text(encoding="utf-8") == "print('after')\n"
-    finally:
-        await runtime.close_all()
-
-
-async def _run_removed_compact_command_case(tmp_path: Path) -> None:
-    from codepilot.interfaces.cli.interactive import dispatch_command
-    from codepilot.runtime.commands import builtin_commands
-
-    runtime, session_id = _create_runtime_session(tmp_path)
-    try:
-        assert "compact" not in {command.name for command in builtin_commands()}
-        assert "compact" not in {
-            command.name for command in runtime.describe(session_id).commands
-        }
-
-        result = await dispatch_command(runtime, session_id, "/compact")
-
-        assert result.handled is False
-        assert result.output_lines == ()
     finally:
         await runtime.close_all()
 

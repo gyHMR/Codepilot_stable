@@ -14,7 +14,7 @@ export class SessionEventClient {
     this.source = new EventSource(`/api/sessions/${this.sessionId}/events${query}`);
     this.source.onopen = () => { this.attempts = 0; this.onConnection(true); };
     this.source.onmessage = (message) => this.consume(message);
-    for (const type of ["connected", "progress", "message_delta", "tool_activity", "approval_required", "run_paused", "run_finished", "command_finished", "cancelled", "failed", "sync_required"]) {
+    for (const type of ["session.snapshot", "assistant.started", "assistant.delta", "assistant.completed", "activity.updated", "approval.requested", "approval.resolved", "interaction.requested", "interaction.resolved", "plan.confirmation_requested", "continuation.requested", "run.status_changed", "run.completed", "plan.updated", "workspace.changed", "error", "sync_required"]) {
       this.source.addEventListener(type, (message) => this.consume(message as MessageEvent));
     }
     this.source.onerror = () => {
@@ -29,7 +29,7 @@ export class SessionEventClient {
   private consume(message: MessageEvent) {
     const event = JSON.parse(message.data) as Record<string, unknown>;
     const normalized = { ...event, event_id: message.lastEventId || event.event_id } as WebEvent;
-    this.lastEventId = normalized.event_id;
+    if (normalized.type !== "session.snapshot" && normalized.type !== "sync_required") this.lastEventId = normalized.event_id;
     this.onEvent(normalized);
   }
 }

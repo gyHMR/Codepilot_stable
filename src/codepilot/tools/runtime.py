@@ -347,6 +347,7 @@ class ToolRuntime:
                 f"Tool call was not started because '{barrier_tool_call_id}' paused the batch",
                 item.started_at_ms,
                 status="interrupted",
+                retryable=True,
                 details={"barrier_tool_call_id": barrier_tool_call_id},
             )
             results.append(self._settle(item.attempt_id, "interrupted", result))
@@ -370,6 +371,7 @@ class ToolRuntime:
             f"Tool call was not started because '{barrier_tool_call_id}' paused the batch",
             started,
             status="interrupted",
+            retryable=True,
             details={"barrier_tool_call_id": barrier_tool_call_id},
         )
         try:

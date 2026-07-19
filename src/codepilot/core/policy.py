@@ -176,19 +176,11 @@ class CorePolicy:
             )
             return _call_model("replan", "replan.required", evidence)
 
-        assessment = assess_core_state(state)
-        if assessment.status == "needs_verification":
-            return _call_model(
-                "verification",
-                "verification.required",
-                state.facts.workspace.evidence_refs,
-            )
-
         if plan is not None and plan.status == "active":
             all_steps_completed = all(
                 step.status == "completed" for step in plan.steps
             )
-            if plan.close_request is not None and all_steps_completed:
+            if all_steps_completed:
                 if state.task.blockers:
                     return _call_model(
                         "recovery",
@@ -199,13 +191,52 @@ class CorePolicy:
                             for ref in item.evidence_refs
                         ),
                     )
-                if _is_final_response_candidate(observation):
+                if _is_final_candidate(observation):
                     return Terminate("completed", "plan.completed")
                 return _call_model("final_response", "final_response.required")
-            if plan.close_request is not None or all_steps_completed:
-                return _call_model("plan_closeout", "plan.closeout_required")
             if _is_final_candidate(observation):
-                return _call_model("reasoning", "plan.progress_required")
+                pending_steps = tuple(
+                    step.step_id
+                    for step in plan.steps
+                    if step.status != "completed"
+                )
+                if state.facts.loop_guards.repeated_no_progress >= 2:
+                    return Terminate(
+                        "failed",
+                        "plan.reconciliation_exhausted",
+                        (
+                            "The model produced a final response twice while "
+                            "the active Task Plan still had incomplete steps."
+                        ),
+                        pending_steps,
+                    )
+                return _call_model(
+                    "reasoning",
+                    "plan.reconciliation_required",
+                    constraints=(
+                        f"Active Plan expected_revision={plan.revision}.",
+                        "Incomplete step_ids: " + ", ".join(pending_steps),
+                        (
+                            "Reconcile the canonical Plan with the work actually "
+                            "completed. If an incomplete step is complete, call "
+                            "update_plan_progress with the current expected_revision "
+                            "and only the changed step_ids."
+                        ),
+                        (
+                            "If any step is not complete, continue the required "
+                            "implementation or verification work. Do not emit another "
+                            "final response while incomplete steps remain."
+                        ),
+                    ),
+                )
+
+        assessment = assess_core_state(state)
+        if assessment.status == "needs_verification":
+            return _call_model(
+                "verification",
+                "verification.required",
+                state.facts.workspace.evidence_refs,
+            )
 
         if _is_final_candidate(observation):
             if context.mode == "read" and state.facts.workspace.changed:
@@ -355,14 +386,6 @@ def _is_final_candidate(observation: CoreObservation) -> bool:
     )
 
 
-def _is_final_response_candidate(observation: CoreObservation) -> bool:
-    return (
-        isinstance(observation, ModelObservation)
-        and observation.purpose == "final_response"
-        and _is_final_candidate(observation)
-    )
-
-
 def _has_tool_status(observation: CoreObservation, status: str) -> bool:
     return isinstance(observation, ToolBatchObservation) and any(
         result.status == status for result in observation.results
@@ -398,11 +421,14 @@ def _call_model(
     purpose: ModelPurpose,
     reason_code: str,
     evidence_refs: tuple[str, ...] = (),
+    *,
+    constraints: tuple[str, ...] = (),
 ) -> CallModel:
     return CallModel(
         purpose=purpose,
         directive=CoreDirective(
-            code=f"core.{purpose}",
+            code=reason_code,
+            constraints=constraints,
             evidence_refs=evidence_refs,
         ),
         reason=CoreReason(

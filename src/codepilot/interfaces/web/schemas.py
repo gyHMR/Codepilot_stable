@@ -21,7 +21,13 @@ class ApiError(BaseModel):
 
 class SessionCreate(BaseModel):
     """创建 Session 的请求载荷。"""
-    title: str | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class SessionUpdate(BaseModel):
+    """更新 Web Session 展示属性。"""
+
+    title: str = Field(min_length=1, max_length=120)
 
 
 class MessageCreate(BaseModel):
@@ -41,6 +47,12 @@ class ApprovalCreate(BaseModel):
     reason: str = ""
 
 
+class InteractionCreate(BaseModel):
+    """Answer one persisted user-input interaction."""
+
+    answer: str = Field(min_length=1)
+
+
 class AcceptedAction(BaseModel):
     """异步动作已被 Runtime 接受的响应。"""
     session_id: str
@@ -53,7 +65,9 @@ __all__ = [
     "ApiError",
     "ApiErrorDetail",
     "ApprovalCreate",
+    "InteractionCreate",
     "CommandCreate",
     "MessageCreate",
     "SessionCreate",
+    "SessionUpdate",
 ]

@@ -370,10 +370,16 @@ def _plan_description(operation: str) -> str:
             "Build mode only. Create one lightweight active Task Plan when the implementation is genuinely multi-step and no canonical plan exists. Items must be concrete implementation or verification work with independently checkable outcomes. Do not call this for a simple task or while an active plan already exists."
         ),
         UPDATE_PLAN_PROGRESS_TOOL: (
-            "Build mode only. Update the existing active plan using its current expected_revision. For normal progress, submit only changed step IDs with status, completion note, and evidence; never resend the whole plan. Use revision only when user direction, repeated failure, or new repository evidence invalidates the approved structure, and provide the complete revised definition and items."
+            "Build mode only. Update the existing active plan using its current expected_revision. For normal progress, submit only changed step IDs with status, completion note, and evidence; never resend the whole plan. Evidence refs must already be observable: use a successful tool_call_id, or workspace:///relative/path for a file listed in a ToolResult's affected_paths. Use revision only when user direction, repeated failure, or new repository evidence invalidates the approved structure, and provide the complete revised definition and items."
         ),
         CLOSE_PLAN_TOOL: (
-            "Build mode only. Request closeout of the current active plan using its expected_revision, an accurate summary, and concrete evidence references. Call only after checking every completion criterion and the latest verification state. This submits evidence to Core; Core decides whether the plan completes or remains active."
+            "Build mode compatibility tool. Optionally request closeout of the current "
+            "active plan using its expected_revision, an accurate summary, and concrete "
+            "evidence references. Call only after every step is completed and the latest "
+            "verification state is checked. This request is not required for completion; "
+            "Core decides from canonical step state whether the plan completes or remains "
+            "active. Evidence refs follow the same tool_call_id or "
+            "workspace:///relative/path contract as update_plan_progress."
         ),
     }[operation]
 

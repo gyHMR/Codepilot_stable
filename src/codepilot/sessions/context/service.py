@@ -73,7 +73,10 @@ class ContextService:
             raise ContextBudgetExceededError(
                 f"context_protocol_invalid: {exc}"
             ) from exc
-        system_prompt = _compiled_system_prompt(request.seed)
+        system_prompt = _compiled_system_prompt(
+            request.seed,
+            directive=request.directive,
+        )
         tools = _tools_from_request(request)
         correction_factors = self.calibrator.factors_for(
             request.model.provider,
@@ -497,7 +500,11 @@ def _tools_from_request(request: ContextPrepareRequest) -> tuple[Tool, ...]:
     )
 
 
-def _compiled_system_prompt(seed: Mapping[str, object]) -> str:
+def _compiled_system_prompt(
+    seed: Mapping[str, object],
+    *,
+    directive: str = "",
+) -> str:
     base = str(seed.get("system_prompt") or "").strip()
     mode_policy = str(seed.get("mode_policy") or "").strip()
     synthetic = seed.get("synthetic_control")
@@ -516,6 +523,14 @@ def _compiled_system_prompt(seed: Mapping[str, object]) -> str:
                     instruction,
                 ]
             )
+    core_directive = str(directive).strip()
+    if core_directive:
+        control_lines.extend(
+            [
+                "Core directive for this model call:",
+                core_directive,
+            ]
+        )
     if not control_lines:
         return base
     runtime_control = "\n".join(

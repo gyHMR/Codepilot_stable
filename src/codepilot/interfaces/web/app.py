@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from codepilot.runtime import RuntimeGateway
 
-from .routes import actions, events, health, sessions
+from .routes import actions, events, health, sessions, workspace as workspace_routes
 from .service import WebConflict, WebNotFound, WebService, WebServiceError
 
 
@@ -41,6 +41,7 @@ def create_app(
     app.include_router(sessions.router)
     app.include_router(actions.router)
     app.include_router(events.router)
+    app.include_router(workspace_routes.router)
 
     static_root = frontend_dir or (Path(__file__).parent / "static")
     if (static_root / "assets").is_dir():

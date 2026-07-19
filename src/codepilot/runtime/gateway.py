@@ -29,9 +29,11 @@ from .actions import (
     CommandDescriptor,
     CommandFinishedFrame,
     CommandSubmitted,
+    ContinuationRequested,
     FailedFrame,
     ProgressFrame,
     PromptSubmitted,
+    InteractionResponded,
     RunCancelled,
     RunFinishedFrame,
     RunPausedFrame,
@@ -184,6 +186,41 @@ class RuntimeGateway:
             return
         if isinstance(action, ApprovalDecided):
             async for frame in self._resume_after_approval(session, action):
+                yield frame
+            return
+        if isinstance(action, InteractionResponded):
+            checkpoint = session.controller.runtime_checkpoint() or {}
+            if str(checkpoint.get("waiting_kind") or "") != "user_input":
+                yield FailedFrame(error={"code": "runtime.interaction_not_pending", "request_id": action.request_id})
+                return
+            if str(checkpoint.get("request_id") or "") != action.request_id:
+                yield FailedFrame(error={"code": "runtime.interaction_mismatch", "request_id": action.request_id})
+                return
+            async for frame in self._run_continuation(
+                session,
+                SessionContinuationIntent(
+                    kind="user_input_response",
+                    run_id=_optional_text(checkpoint.get("run_id")),
+                    text=action.answer,
+                ),
+            ):
+                yield frame
+            return
+        if isinstance(action, ContinuationRequested):
+            checkpoint = session.controller.runtime_checkpoint() or {}
+            if str(checkpoint.get("waiting_kind") or "") != "continuation":
+                yield FailedFrame(error={"code": "runtime.continuation_not_pending", "request_id": action.request_id})
+                return
+            if str(checkpoint.get("request_id") or "") != action.request_id:
+                yield FailedFrame(error={"code": "runtime.continuation_mismatch", "request_id": action.request_id})
+                return
+            async for frame in self._run_continuation(
+                session,
+                SessionContinuationIntent(
+                    kind="automatic_continuation",
+                    run_id=_optional_text(checkpoint.get("run_id")),
+                ),
+            ):
                 yield frame
             return
         yield FailedFrame(error={"code": "runtime.unknown_action", "action": type(action).__name__})
@@ -574,7 +611,9 @@ class RuntimeGateway:
             )
             return
         if outcome.status == "failed":
-            yield FailedFrame(error=runtime_error_payload(outcome.error))
+            yield FailedFrame(
+                error=runtime_error_payload(outcome.error or outcome.reason)
+            )
             return
         if outcome.status == "cancelled":
             yield CancelledFrame(
@@ -608,6 +647,8 @@ class RuntimeGateway:
                 tool_name=challenge.tool_name,
                 reason=challenge.reason,
                 risk_level=challenge.risk,
+                effects=tuple(sorted(challenge.effects)),
+                safe_preview=dict(challenge.safe_preview),
             )
             for challenge in challenges
             if challenge.session_id == session.session_id

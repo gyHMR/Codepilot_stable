@@ -153,6 +153,11 @@ def project_core_command_results(
     for result in results:
         command_result = by_id.get(result.tool_call_id)
         if command_result is None:
+            if result.status == "success" and result.tool_name in PLAN_TOOL_NAMES:
+                raise CoreInvariantError(
+                    "Successful Plan ToolResult has no matching Core CommandResult: "
+                    f"{result.tool_name} ({result.tool_call_id})"
+                )
             projected.append(result)
             continue
         message = (

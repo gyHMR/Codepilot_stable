@@ -78,23 +78,32 @@ class RetryingModelPort:
             return
         retries = max(0, self.max_retries) if self.enabled else 0
         for attempt in range(retries + 1):
-            retry = False
-            buffered = []
+            committed = False
+            started = False
             async for event in self.base.stream(request):
+                if isinstance(event, LLMStarted):
+                    if not started:
+                        yield event
+                        started = True
+                    continue
                 if (
                     isinstance(event, LLMFailed)
                     and attempt < retries
                     and _retryable_error(event.error)
+                    and not committed
                 ):
-                    retry = True
                     break
-                buffered.append(event)
-            if not retry:
-                attempts = attempt + 1
-                for event in buffered:
-                    if isinstance(event, (LLMCompleted, LLMFailed)):
-                        event = replace(event, attempts=attempts)
-                    yield event
+                # Once any user-visible content is emitted, retrying would duplicate
+                # text/reasoning/tool-call deltas. Commit this attempt and stream it
+                # immediately instead of buffering the entire model response.
+                if not isinstance(event, (LLMCompleted, LLMFailed)):
+                    committed = True
+                if isinstance(event, (LLMCompleted, LLMFailed)):
+                    event = replace(event, attempts=attempt + 1)
+                yield event
+                if isinstance(event, (LLMCompleted, LLMFailed)):
+                    return
+            else:
                 return
             if self.base_delay_ms > 0:
                 await asyncio.sleep(self.base_delay_ms / 1000)

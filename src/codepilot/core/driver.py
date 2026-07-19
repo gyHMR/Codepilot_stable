@@ -120,6 +120,7 @@ async def run_core(input: CoreRunInput, ports: CorePorts) -> CoreOutcome:
         core=input.state,
         observation=_initial_observation(input),
         messages=_MessageJournal(input.messages),
+        sequence=_last_observation_sequence(input.state),
     )
 
     cancellation = _cancellation_observation(input, ports, driver)
@@ -323,9 +324,7 @@ async def run_core(input: CoreRunInput, ports: CorePorts) -> CoreOutcome:
 
 
 def _initial_observation(input: CoreRunInput) -> CoreObservation:
-    entry_sequence = (
-        len(input.state.facts.observation_ledger.applied_observation_ids) + 1
-    )
+    entry_sequence = _last_observation_sequence(input.state) + 1
     if isinstance(input.entry, ToolResultEntry):
         return UserInputObservation(
             observation_id=f"core:entry:tool_results:{entry_sequence}",
@@ -344,6 +343,19 @@ def _initial_observation(input: CoreRunInput) -> CoreObservation:
         text=_last_user_text(input.messages) or input.state.task.original_request,
         current_goal=input.state.task.current_goal,
     )
+
+
+def _last_observation_sequence(state: CoreState) -> int:
+    """Restore the monotonic Driver sequence when the same Run is resumed."""
+
+    latest = 0
+    for observation_id in state.facts.observation_ledger.applied_observation_ids:
+        if not observation_id.startswith("core:"):
+            continue
+        suffix = observation_id.rsplit(":", 1)[-1]
+        if suffix.isdigit():
+            latest = max(latest, int(suffix))
+    return latest
 
 
 def _reduce(

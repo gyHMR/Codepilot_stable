@@ -1,5 +1,29 @@
-:root { --ink:#d8e6df; --muted:#71827b; --void:#050908; --panel:#09110f; --line:#1b2a25; --acid:#b6f34a; --cyan:#50e3c2; --danger:#ff6b57; --font-display:"Bahnschrift SemiCondensed","Arial Narrow",sans-serif; --font-mono:"Cascadia Code","JetBrains Mono",monospace; }
-* { box-sizing:border-box; }
-body { margin:0; color:var(--ink); background:var(--void); font-family:var(--font-mono); }
-button,textarea,input { font:inherit; }
-button { color:inherit; }
+:root {
+  color-scheme: light;
+  --color-canvas: #f4f5f6;
+  --color-surface: #ffffff;
+  --color-surface-subtle: #f7f8f9;
+  --color-surface-hover: #eef1f4;
+  --color-text: #202428;
+  --color-text-secondary: #606870;
+  --color-text-muted: #8a929a;
+  --color-border: #e1e5e8;
+  --color-border-strong: #cbd1d6;
+  --color-accent: #2563eb;
+  --color-accent-soft: #eff6ff;
+  --color-success: #16803a;
+  --color-success-soft: #edf8f0;
+  --color-warning: #a15c00;
+  --color-warning-soft: #fff8e8;
+  --color-danger: #c73535;
+  --color-danger-soft: #fff1f1;
+  --font-ui: "IBM Plex Sans", "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", "SFMono-Regular", monospace;
+  --sidebar-width: 248px;
+  --project-panel-width: 304px;
+  --topbar-height: 52px;
+  --radius-sm: 4px;
+  --radius-md: 7px;
+  --shadow-menu: 0 10px 32px rgb(25 32 38 / 12%);
+  --transition-fast: 150ms ease;
+}

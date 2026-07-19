@@ -165,7 +165,6 @@ def apply_decision(
         decision.status == "completed"
         and plan is not None
         and plan.status == "active"
-        and plan.close_request is not None
         and all(step.status == "completed" for step in plan.steps)
     ):
         plan = replace(plan, status="completed", revision=plan.revision + 1)
@@ -198,6 +197,13 @@ def apply_decision(
 
 
 def _reduce_model(state: CoreState, observation: ModelObservation) -> CoreReduction:
+    repeated_no_progress = state.facts.loop_guards.repeated_no_progress
+    if _is_unfinished_plan_final_candidate(state, observation):
+        repeated_no_progress += 1
+    loop_guards = replace(
+        state.facts.loop_guards,
+        repeated_no_progress=repeated_no_progress,
+    )
     counters = replace(
         state.facts.counters,
         model_turns=state.facts.counters.model_turns + 1,
@@ -205,7 +211,14 @@ def _reduce_model(state: CoreState, observation: ModelObservation) -> CoreReduct
             int(state.facts.counters.model_attempts or 0) + observation.attempts
         ),
     )
-    next_state = replace(state, facts=replace(state.facts, counters=counters))
+    next_state = replace(
+        state,
+        facts=replace(
+            state.facts,
+            counters=counters,
+            loop_guards=loop_guards,
+        ),
+    )
     events: list[CoreDomainEvent] = [CoreDomainEvent("model_observed")]
     failure = observation.error
     if observation.status == "completed" and _model_message_is_empty(observation):
@@ -274,7 +287,8 @@ def _reduce_tools(
     next_state = replace(
         next_state, facts=replace(next_state.facts, verification=verification)
     )
-    if verification != state.facts.verification:
+    verification_changed = verification != state.facts.verification
+    if verification_changed:
         events.append(
             CoreDomainEvent(
                 "verification_recorded",
@@ -327,6 +341,12 @@ def _reduce_tools(
     loop_guards = _reduce_loop_guards(
         next_state.facts.loop_guards, observation.calls, results
     )
+    if (
+        workspace_changed
+        or verification_changed
+        or any(result.status == "applied" for result in command_results)
+    ):
+        loop_guards = replace(loop_guards, repeated_no_progress=0)
     next_state = replace(
         next_state, facts=replace(next_state.facts, loop_guards=loop_guards)
     )
@@ -362,8 +382,10 @@ def _reduce_user_input(
         status="active" if state.task.status == "blocked" else state.task.status,
         blockers=blockers,
     )
+    next_state = replace(state, task=task)
+    next_state = _reset_no_progress(next_state)
     return CoreReduction(
-        state=replace(state, task=task),
+        state=next_state,
         events=(CoreDomainEvent("user_input_received"),),
     )
 
@@ -506,11 +528,12 @@ def _update_plan_progress(
     next_by_id = dict(by_id)
     for update in command.updates:
         previous = by_id[update.step_id]
+        evidence_refs = _normalize_evidence_refs(update.evidence_refs)
         if previous.status == "completed" and update.status != "completed":
             return _reject_command(state, command, "plan.completed_step_regression")
         if update.status == "completed" and not update.completion_note:
             return _reject_command(state, command, "plan.completion_note_required")
-        if set(update.evidence_refs) - known_evidence:
+        if set(evidence_refs) - known_evidence:
             return _reject_command(state, command, "plan.unknown_evidence")
         try:
             next_by_id[update.step_id] = PlanStep(
@@ -523,7 +546,7 @@ def _update_plan_progress(
                     update.completion_note if update.status == "completed" else ""
                 ),
                 evidence_refs=(
-                    update.evidence_refs if update.status == "completed" else ()
+                    evidence_refs if update.status == "completed" else ()
                 ),
             )
         except ValueError:
@@ -615,13 +638,16 @@ def _request_plan_close(
     problem = _active_plan_problem(state, command.expected_revision, context)
     if problem is not None:
         return _reject_command(state, command, problem)
-    if set(command.evidence_refs) - _known_evidence(state):
-        return _reject_command(state, command, "plan.unknown_evidence")
     plan = state.task.plan
     assert plan is not None
+    if any(step.status != "completed" for step in plan.steps):
+        return _reject_command(state, command, "plan.steps_incomplete")
+    evidence_refs = _normalize_evidence_refs(command.evidence_refs)
+    if set(evidence_refs) - _known_evidence(state):
+        return _reject_command(state, command, "plan.unknown_evidence")
     request = PlanCloseRequest(
         summary=command.summary,
-        evidence_refs=command.evidence_refs,
+        evidence_refs=evidence_refs,
         requested_at_revision=plan.revision,
     )
     next_plan = replace(
@@ -810,10 +836,33 @@ def _known_evidence(state: CoreState) -> set[str]:
     refs = set(state.facts.observation_ledger.applied_observation_ids)
     refs.update(state.facts.loop_guards.seen_tool_call_ids)
     refs.update(state.facts.workspace.evidence_refs)
+    refs.update(
+        _workspace_evidence_ref(path)
+        for path in state.facts.workspace.affected_paths
+    )
     refs.update(state.facts.verification.evidence_refs)
     if state.facts.failures.latest is not None:
         refs.update(state.facts.failures.latest.evidence_refs)
-    return refs
+    return {_normalize_evidence_ref(ref) for ref in refs}
+
+
+def _normalize_evidence_refs(refs: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(_normalize_evidence_ref(ref) for ref in refs))
+
+
+def _normalize_evidence_ref(ref: str) -> str:
+    value = ref.strip()
+    if not value.lower().startswith("workspace:"):
+        return value
+    path = value[len("workspace:") :].replace("\\", "/").lstrip("/")
+    parts = tuple(part for part in path.split("/") if part not in {"", "."})
+    if any(part == ".." for part in parts):
+        return value
+    return "workspace:///" + "/".join(parts)
+
+
+def _workspace_evidence_ref(path: str) -> str:
+    return _normalize_evidence_ref(f"workspace:///{path}")
 
 
 def _applied_plan_command(
@@ -822,6 +871,7 @@ def _applied_plan_command(
     event_type: str,
     payload: dict[str, object],
 ) -> CoreReduction:
+    state = _reset_no_progress(state)
     return CoreReduction(
         state=state,
         events=(CoreDomainEvent(event_type, payload),),
@@ -1035,6 +1085,11 @@ def _remove_blocker(state: CoreState, kind: str) -> CoreState:
     return replace(state, task=replace(state.task, blockers=blockers))
 
 
+def _reset_no_progress(state: CoreState) -> CoreState:
+    loop_guards = replace(state.facts.loop_guards, repeated_no_progress=0)
+    return replace(state, facts=replace(state.facts, loop_guards=loop_guards))
+
+
 def _reduce_loop_guards(
     current: LoopGuardFacts,
     calls: tuple[ToolCall, ...],
@@ -1070,6 +1125,29 @@ def _model_message_is_empty(observation: ModelObservation) -> bool:
         or (isinstance(block, TextContent) and bool(block.text.strip()))
         for block in observation.message.content
     )
+
+
+def _is_unfinished_plan_final_candidate(
+    state: CoreState,
+    observation: ModelObservation,
+) -> bool:
+    plan = state.task.plan
+    if (
+        plan is None
+        or plan.status != "active"
+        or all(step.status == "completed" for step in plan.steps)
+        or observation.status != "completed"
+        or observation.message is None
+    ):
+        return False
+    has_text = any(
+        isinstance(block, TextContent) and bool(block.text.strip())
+        for block in observation.message.content
+    )
+    has_tools = any(
+        isinstance(block, ToolCall) for block in observation.message.content
+    )
+    return has_text and not has_tools
 
 
 def _failure_event(failure: FailureRecord) -> CoreDomainEvent:

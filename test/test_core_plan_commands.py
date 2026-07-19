@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from codepilot.core.commands import (
     AbandonPlan,
     ApprovePlan,
@@ -13,6 +15,7 @@ from codepilot.core.commands import (
     UpdatePlanProgress,
 )
 from codepilot.core.contracts import CallModel, ExecuteTools, Terminate, Wait
+from codepilot.core.errors import CoreInvariantError
 from codepilot.core.observations import (
     ModelObservation,
     ToolBatchObservation,
@@ -31,6 +34,7 @@ from codepilot.core.state import (
     FailureCount,
     FailureFacts,
     LoopGuardFacts,
+    WorkspaceFacts,
 )
 from codepilot.core.tool_step import project_core_command_results, project_core_commands
 from codepilot.protocols import AssistantMessage, TextContent, ToolCall
@@ -197,7 +201,10 @@ def test_progress_is_delta_based_revision_checked_and_evidence_backed() -> None:
         state,
         facts=replace(
             state.facts,
-            loop_guards=LoopGuardFacts(seen_tool_call_ids=("tool-edit",)),
+            loop_guards=LoopGuardFacts(
+                repeated_no_progress=1,
+                seen_tool_call_ids=("tool-edit",),
+            ),
         ),
     )
 
@@ -226,6 +233,7 @@ def test_progress_is_delta_based_revision_checked_and_evidence_backed() -> None:
         "completed",
         "in_progress",
     ]
+    assert updated.state.facts.loop_guards.repeated_no_progress == 0
 
     stale = apply_core_command(
         updated.state,
@@ -255,6 +263,47 @@ def test_progress_is_delta_based_revision_checked_and_evidence_backed() -> None:
         _context(),
     )
     assert unknown_evidence.command_results[0].reason == "plan.unknown_evidence"
+
+
+def test_plan_progress_accepts_verified_workspace_path_evidence() -> None:
+    state = _submit()
+    assert state.task.plan is not None
+    state = replace(
+        state,
+        facts=replace(
+            state.facts,
+            workspace=WorkspaceFacts(
+                revision=1,
+                changed=True,
+                affected_paths=("start.bat",),
+                evidence_refs=("call-write",),
+            ),
+        ),
+    )
+    first = state.task.plan.steps[0]
+
+    updated = apply_core_command(
+        state,
+        UpdatePlanProgress(
+            "progress-workspace-ref",
+            expected_revision=1,
+            updates=(
+                PlanStepUpdate(
+                    first.step_id,
+                    "completed",
+                    completion_note="启动脚本已创建。",
+                    evidence_refs=("workspace:/start.bat",),
+                ),
+            ),
+        ),
+        _context(),
+    )
+
+    assert updated.command_results[0].status == "applied"
+    assert updated.state.task.plan is not None
+    assert updated.state.task.plan.steps[0].evidence_refs == (
+        "workspace:///start.bat",
+    )
 
 
 def test_plan_mode_revision_waits_for_approval_and_preserves_completed_steps() -> None:
@@ -344,7 +393,7 @@ def test_build_plan_auto_revision_requires_five_qualified_failures() -> None:
     assert revised.state.task.plan.definition.summary == "改用兼容实现"
 
 
-def test_close_is_a_request_and_completion_policy_owns_terminal_transition() -> None:
+def test_completed_steps_and_final_text_complete_task_and_plan_atomically() -> None:
     state = _submit()
     assert state.task.plan is not None
     first, second = state.task.plan.steps
@@ -370,13 +419,69 @@ def test_close_is_a_request_and_completion_policy_owns_terminal_transition() -> 
         _context(),
     ).state
 
-    before_close = CorePolicy.decide(
+    before_final = CorePolicy.decide(
         progressed,
-        ToolBatchObservation("tools-before-close"),
+        ToolBatchObservation("tools-before-final"),
         PolicyContext("build"),
     )
-    assert isinstance(before_close, CallModel)
-    assert before_close.purpose == "plan_closeout"
+    assert isinstance(before_final, CallModel)
+    assert before_final.purpose == "final_response"
+
+    terminal = CorePolicy.decide(
+        progressed,
+        ModelObservation(
+            "model-final",
+            message=AssistantMessage(content=[TextContent(text="计划已完成。")]),
+            purpose="final_response",
+        ),
+        PolicyContext("build"),
+    )
+    assert isinstance(terminal, Terminate)
+    assert terminal.status == "completed"
+
+    completed = apply_decision(progressed, terminal, _context()).state
+    assert completed.task.status == "satisfied"
+    assert completed.task.plan is not None
+    assert completed.task.plan.status == "completed"
+
+
+def test_close_plan_is_optional_and_rejects_incomplete_steps() -> None:
+    state = _submit()
+    assert state.task.plan is not None
+    rejected = apply_core_command(
+        state,
+        RequestPlanClose(
+            "close-incomplete",
+            expected_revision=1,
+            summary="尝试提前关闭。",
+            evidence_refs=("missing",),
+        ),
+        _context(),
+    )
+    assert rejected.command_results[0].reason == "plan.steps_incomplete"
+
+    first, second = state.task.plan.steps
+    state = replace(
+        state,
+        facts=replace(
+            state.facts,
+            loop_guards=LoopGuardFacts(
+                seen_tool_call_ids=("tool-edit", "tool-test")
+            ),
+        ),
+    )
+    progressed = apply_core_command(
+        state,
+        UpdatePlanProgress(
+            "progress-close",
+            expected_revision=1,
+            updates=(
+                PlanStepUpdate(first.step_id, "completed", "实现完成", ("tool-edit",)),
+                PlanStepUpdate(second.step_id, "completed", "验证通过", ("tool-test",)),
+            ),
+        ),
+        _context(),
+    ).state
 
     requested = apply_core_command(
         progressed,
@@ -392,31 +497,6 @@ def test_close_is_a_request_and_completion_policy_owns_terminal_transition() -> 
     assert requested.task.plan.status == "active"
     assert requested.task.plan.close_request is not None
 
-    decision = CorePolicy.decide(
-        requested,
-        ToolBatchObservation("tools-after-close"),
-        PolicyContext("build"),
-    )
-    assert isinstance(decision, CallModel)
-    assert decision.purpose == "final_response"
-
-    terminal = CorePolicy.decide(
-        requested,
-        ModelObservation(
-            "model-final",
-            message=AssistantMessage(content=[TextContent(text="计划已完成。")]),
-            purpose="final_response",
-        ),
-        PolicyContext("build"),
-    )
-    assert isinstance(terminal, Terminate)
-    assert terminal.status == "completed"
-
-    completed = apply_decision(requested, terminal, _context()).state
-    assert completed.task.status == "satisfied"
-    assert completed.task.plan is not None
-    assert completed.task.plan.status == "completed"
-
 
 def test_abandon_plan_is_an_external_command_not_a_plan_state_method() -> None:
     state = _submit()
@@ -431,16 +511,54 @@ def test_abandon_plan_is_an_external_command_not_a_plan_state_method() -> None:
     assert not hasattr(abandoned.state.task.plan, "abandon")
 
 
-def test_active_plan_cannot_be_finished_by_plain_model_text() -> None:
+def test_active_plan_final_text_requests_reconciliation_with_pending_state() -> None:
     state = _submit()
+    observation = ModelObservation(
+        "model-1",
+        message=AssistantMessage(content=[TextContent(text="已经全部完成。")]),
+    )
+    reduced = reduce_observation(state, observation, _context()).state
     decision = CorePolicy.decide(
-        state,
-        ModelObservation("model-1"),
+        reduced,
+        observation,
         PolicyContext("build"),
     )
 
     assert isinstance(decision, CallModel)
     assert decision.purpose == "reasoning"
+    assert decision.reason.code == "plan.reconciliation_required"
+    assert decision.directive.code == "plan.reconciliation_required"
+    directive = "\n".join(decision.directive.constraints)
+    assert "expected_revision=1" in directive
+    assert "plan:submit-1:step:1" in directive
+    assert "plan:submit-1:step:2" in directive
+    assert "update_plan_progress" in directive
+    assert "Do not emit another final response" in directive
+    assert reduced.facts.loop_guards.repeated_no_progress == 1
+
+
+def test_second_unreconciled_final_text_fails_without_another_model_call() -> None:
+    state = _submit()
+    first = ModelObservation(
+        "model-final-1",
+        message=AssistantMessage(content=[TextContent(text="全部完成。")]),
+    )
+    state = reduce_observation(state, first, _context()).state
+    second = ModelObservation(
+        "model-final-2",
+        message=AssistantMessage(content=[TextContent(text="随时回来找我。")]),
+    )
+    state = reduce_observation(state, second, _context()).state
+
+    decision = CorePolicy.decide(state, second, PolicyContext("build"))
+
+    assert isinstance(decision, Terminate)
+    assert decision.status == "failed"
+    assert decision.reason_code == "plan.reconciliation_exhausted"
+    assert decision.evidence_refs == (
+        "plan:submit-1:step:1",
+        "plan:submit-1:step:2",
+    )
 
 
 def test_only_canonical_plan_tool_results_are_projected_as_core_commands() -> None:
@@ -480,6 +598,9 @@ def test_only_canonical_plan_tool_results_are_projected_as_core_commands() -> No
     assert visible[0].error.code == "plan.revision_conflict"
     assert visible[0].data["core_command_result"]["status"] == "rejected"
 
+    with pytest.raises(CoreInvariantError, match="no matching Core CommandResult"):
+        project_core_command_results((plan_result,), ())
+
 
 def test_plan_tool_descriptions_define_submission_and_progress_contracts() -> None:
     from codepilot.core.tool_adapters.plan import create_plan_registrations
@@ -494,4 +615,5 @@ def test_plan_tool_descriptions_define_submission_and_progress_contracts() -> No
     assert "post-approval implementation or verification" in descriptions["propose_plan"]
     assert "no canonical plan exists" in descriptions["create_build_plan"]
     assert "submit only changed step IDs" in descriptions["update_plan_progress"]
+    assert "workspace:///relative/path" in descriptions["update_plan_progress"]
     assert "Core decides" in descriptions["close_plan"]

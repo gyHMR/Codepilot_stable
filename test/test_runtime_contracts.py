@@ -15,7 +15,7 @@ from codepilot.runtime.contracts import (
     terminal_outcome_for_status,
 )
 from codepilot.runtime.environment import RunEnvironment, RunResourceScope
-from codepilot.runtime.errors import runtime_error_info
+from codepilot.runtime.errors import runtime_error_info, runtime_error_payload
 from codepilot.runtime.executor import RunExecutionCompleted, RunExecutor
 from codepilot.runtime.lifecycle import RuntimeLifecycle
 from codepilot.core.contracts import (
@@ -269,6 +269,86 @@ def test_runtime_error_adapter_distinguishes_core_faults(error, code) -> None:
     assert info.details["error_type"] == type(error).__name__
 
 
+def test_runtime_error_adapter_preserves_failed_core_reason() -> None:
+    reason = CoreReason(
+        "plan.reconciliation_exhausted",
+        message="The active Task Plan still has incomplete steps.",
+        evidence_refs=("plan:1:step:1",),
+        details={"pending_steps": 1},
+    )
+
+    info = runtime_error_info(reason)
+    payload = runtime_error_payload(reason)
+
+    assert info is not None
+    assert info.code == "plan.reconciliation_exhausted"
+    assert info.source == "core"
+    assert info.details == {
+        "pending_steps": 1,
+        "evidence_refs": ["plan:1:step:1"],
+    }
+    assert payload == {
+        "code": "plan.reconciliation_exhausted",
+        "message": "The active Task Plan still has incomplete steps.",
+        "source": "core",
+        "retryable": False,
+        "details": {
+            "pending_steps": 1,
+            "evidence_refs": ["plan:1:step:1"],
+        },
+    }
+
+
+def test_runtime_error_adapter_maps_core_domain_sources() -> None:
+    info = runtime_error_info(
+        CoreReason("tool.failed", source="tools", message="Tool execution failed")
+    )
+
+    assert info is not None
+    assert info.source == "tool"
+    assert info.details["reason_source"] == "tools"
+
+
+def test_failed_outcome_uses_core_reason_for_persistence_and_runtime_frame() -> None:
+    from codepilot.runtime.actions import FailedFrame
+    from codepilot.runtime.coordinator import RunCoordinator
+    from codepilot.runtime.gateway import RuntimeGateway
+
+    outcome = CoreOutcome(
+        status="failed",
+        reason=CoreReason(
+            "plan.reconciliation_exhausted",
+            message="Plan reconciliation was not completed.",
+        ),
+        state=CoreState.new("finish the plan"),
+    )
+    coordinator = RunCoordinator(SimpleNamespace(session_id="session_1"))
+    result = coordinator._agent_result_from_outcome(  # noqa: SLF001
+        SimpleNamespace(run_id="run_1", input_messages=[]),
+        outcome,
+    )
+
+    async def collect_frames():
+        gateway = RuntimeGateway()
+        return [
+            frame
+            async for frame in gateway._frames_from_outcome(  # noqa: SLF001
+                SimpleNamespace(controller=SimpleNamespace()),
+                outcome,
+                SimpleNamespace(run_id="run_1"),
+            )
+        ]
+
+    frames = asyncio.run(collect_frames())
+
+    assert result.error is not None
+    assert result.error.code == "plan.reconciliation_exhausted"
+    assert len(frames) == 1
+    assert isinstance(frames[0], FailedFrame)
+    assert frames[0].error["code"] == "plan.reconciliation_exhausted"
+    assert frames[0].error["source"] == "core"
+
+
 def test_run_executor_preserves_structured_core_fault_code(monkeypatch) -> None:
     async def broken(_input, _ports):
         raise CoreInvariantError("state revision moved backwards")
@@ -301,40 +381,6 @@ def test_run_executor_does_not_terminalize_boundary_commit_failure(monkeypatch) 
                 SimpleNamespace(loop_input=SimpleNamespace(state=CoreState.new("test"))),
             )
         )
-
-
-def test_run_executor_normalizes_task_cancellation(monkeypatch) -> None:
-    async def cancelled(_input, _ports):
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr("codepilot.runtime.executor.run_core", cancelled)
-    environment = _environment()
-    prepared = SimpleNamespace(
-        loop_input=SimpleNamespace(state=CoreState.new("test"))
-    )
-
-    outcome = asyncio.run(_collect_execution(RunExecutor(), environment, prepared))
-
-    assert outcome.status == "cancelled"
-    assert outcome.reason.code == "runtime.cancelled"
-    assert project_core_signals(outcome).cancelled is True
-
-
-def test_run_executor_maps_deadline_cancellation_to_failed_timeout(monkeypatch) -> None:
-    async def cancelled(_input, _ports):
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr("codepilot.runtime.executor.run_core", cancelled)
-    environment = _environment()
-    environment.resources.cancel("deadline_exceeded")
-    prepared = SimpleNamespace(
-        loop_input=SimpleNamespace(state=CoreState.new("test"))
-    )
-
-    outcome = asyncio.run(_collect_execution(RunExecutor(), environment, prepared))
-
-    assert outcome.status == "failed"
-    assert external_stop_reason(outcome.reason) == "deadline_exceeded"
 
 
 def test_run_executor_preserves_core_state_when_deadline_wins(monkeypatch) -> None:

@@ -207,19 +207,6 @@ def _l1_items(
                 freshness="fresh",
             )
         )
-    if request.directive:
-        items.append(
-            _item(
-                "l1:directive",
-                "l1",
-                "required",
-                f"Core directive: {request.directive}",
-                "core:directive",
-                budget,
-                relevance=70,
-                freshness="fresh",
-            )
-        )
     if request.purpose == "finalization":
         items.append(
             _item(

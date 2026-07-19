@@ -245,6 +245,72 @@ def test_execute_batch_serializes_same_group_and_stops_at_approval_barrier() -> 
     assert after_barrier_called is False
 
 
+def test_core_waits_when_approval_interrupts_an_earlier_batch_call() -> None:
+    from codepilot.core.contracts import Wait
+    from codepilot.core.observations import ToolBatchObservation
+    from codepilot.core.policy import CorePolicy, PolicyContext
+    from codepilot.core.reducer import ReductionContext, reduce_observation
+    from codepilot.core.state import CoreState
+    from codepilot.protocols import ToolCall
+
+    earlier_called = False
+
+    async def earlier_handler(input, context):
+        nonlocal earlier_called
+        _ = input, context
+        earlier_called = True
+        return SampleOutput("unexpected")
+
+    async def approval_handler(input, context):
+        _ = input, context
+        return SampleOutput("approved")
+
+    runtime, ids = _multi_runtime(
+        (
+            _registration("earlier", earlier_handler),
+            _registration("approval", approval_handler, approval="always"),
+        )
+    )
+    requests = (
+        _request("earlier", ids["earlier"], "first"),
+        _request("approval", ids["approval"], "second"),
+    )
+    results = tuple(asyncio.run(runtime.execute_batch(requests)))
+    observation = ToolBatchObservation(
+        "tools-approval-barrier",
+        calls=tuple(
+            ToolCall(
+                id=request.tool_call_id,
+                name=request.tool_name,
+                arguments=dict(request.arguments),
+            )
+            for request in requests
+        ),
+        results=results,
+    )
+
+    reduced = reduce_observation(
+        CoreState.new("inspect workspace"),
+        observation,
+        ReductionContext(run_id="run-approval", mode="build", now_ms=0),
+    ).state
+    decision = CorePolicy.decide(
+        reduced,
+        observation,
+        PolicyContext("build"),
+    )
+
+    assert [result.status for result in results] == [
+        "interrupted",
+        "approval_required",
+    ]
+    assert results[0].error is not None
+    assert results[0].error.retryable is True
+    assert earlier_called is False
+    assert isinstance(decision, Wait)
+    assert decision.wait.kind == "tool_approval"
+
+
 def test_core_delegates_tool_turn_batch_to_tool_port() -> None:
     from codepilot.core.contracts import (
         CorePorts,

@@ -170,7 +170,11 @@ class RunCoordinator:
             counters=project_core_counters(outcome),
             messages=[*prepared.input_messages, *outcome.new_messages],
             final_message=outcome.final_message,
-            error=runtime_error_info(outcome.error) if outcome.status == "failed" else None,
+            error=(
+                runtime_error_info(outcome.error or outcome.reason)
+                if outcome.status == "failed"
+                else None
+            ),
             affected_paths=list(state.facts.workspace.affected_paths),
             workspace_changed=state.facts.workspace.changed,
             verification=project_core_verification(outcome),

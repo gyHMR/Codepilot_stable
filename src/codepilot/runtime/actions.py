@@ -95,6 +95,8 @@ class ApprovalView:
     tool_name: str
     reason: str = ""
     risk_level: str = "unknown"
+    effects: tuple[str, ...] = ()
+    safe_preview: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -212,6 +214,26 @@ class ApprovalDecided:
 
 
 @dataclass(frozen=True)
+class InteractionResponded:
+    """用户回答一个挂起的 request_user_input 交互。"""
+    request_id: str
+    answer: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "request_id", _require_text(self.request_id, "request_id"))
+        object.__setattr__(self, "answer", _require_text(self.answer, "answer"))
+
+
+@dataclass(frozen=True)
+class ContinuationRequested:
+    """继续一个因本轮预算边界而暂停的 Run。"""
+    request_id: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "request_id", _require_text(self.request_id, "request_id"))
+
+
+@dataclass(frozen=True)
 class RunCancelled:
     """请求取消活动 Run 的动作。"""
     reason: str = "user"
@@ -220,7 +242,7 @@ class RunCancelled:
         object.__setattr__(self, "reason", _optional_text(self.reason) or "user")
 
 
-UserAction = PromptSubmitted | CommandSubmitted | ApprovalDecided | RunCancelled
+UserAction = PromptSubmitted | CommandSubmitted | ApprovalDecided | InteractionResponded | ContinuationRequested | RunCancelled
 
 
 @dataclass(frozen=True)
@@ -397,7 +419,9 @@ __all__ = [
     "CommandFinishedFrame",
     "CommandSource",
     "CommandSubmitted",
+    "ContinuationRequested",
     "FailedFrame",
+    "InteractionResponded",
     "ProgressFrame",
     "PromptSubmitted",
     "RunCancelled",

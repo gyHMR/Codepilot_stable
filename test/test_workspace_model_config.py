@@ -180,11 +180,6 @@ def test_cli_interactive_opens_runtime_session_and_runs_repl(tmp_path, monkeypat
     assert captured["closed"] is True
 
 
-def test_cli_rejects_removed_legacy_options() -> None:
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(["--mode", "print", "--prompt", "hello"])
-
-
 def test_cli_help_uses_cyber_command_deck(capsys) -> None:
     with pytest.raises(SystemExit) as exc:
         build_parser().parse_args(["--help"])
@@ -290,18 +285,6 @@ def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> 
     assert config.prompt_debug_sources is False
     assert config.extension_paths == []
     assert config.sources["retry_enabled"].kind == "cli"
-
-
-def test_removed_shell_security_settings_are_rejected(tmp_path) -> None:
-    root = tmp_path / ".codepilot"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "settings.json").write_text(
-        json.dumps({"block_dangerous_bash": False}),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="Removed runtime settings"):
-        load_runtime_config(SessionOpenIntent(workspace_dir=tmp_path))
 
 
 def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:

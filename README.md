@@ -148,6 +148,18 @@ codepilot web --workspace /path/to/project --port 8000
 
 默认地址为 `http://127.0.0.1:8000`。当前版本没有登录认证，不建议将服务直接暴露到局域网或公网。
 
+开发 Web 前端时，先安装前端依赖，再由一个命令同时启动 FastAPI 自动重载和 Vite HMR：
+
+```bash
+cd web
+npm ci
+cd ..
+codepilot web --dev
+codepilot web --dev --port 9000 --frontend-port 5174
+```
+
+浏览器访问终端输出的前端地址，默认是 `http://127.0.0.1:5173`。工作区仍是执行命令时的目录，也可通过 `--workspace` 指定。
+
 ### 启动 DingTalk 入口
 
 ```bash
@@ -345,10 +357,11 @@ Web 前端开发：
 ```bash
 cd web
 npm ci
-npm run dev
 npm test -- --run
 npm run typecheck
 npm run build
+cd ..
+codepilot web --dev
 ```
 
 ## 当前状态与路线图

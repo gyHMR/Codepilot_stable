@@ -31,18 +31,25 @@ async def session_events(
 
     async def stream() -> AsyncIterator[str]:
         replay, queue = hub.subscribe_after(last_event_id)
-        if replay.expired:
+        if last_event_id is None or replay.expired:
             yield format_sse(
                 WebEvent(
                     event_id=uuid4().hex,
                     session_id=session_id,
-                    type="sync_required",
+                    type="session.snapshot",
                     sequence=max(1, hub.latest_sequence + 1),
                     timestamp=datetime.now(timezone.utc).isoformat(),
-                    data={"reason": "event_history_expired"},
+                    data={
+                        **service.projection(session_id),
+                        "reason": (
+                            "initial_subscription"
+                            if last_event_id is None
+                            else "event_history_expired"
+                        ),
+                    },
                 )
             )
-        else:
+        if not replay.expired:
             for event in replay.events:
                 yield format_sse(event)
 
@@ -56,6 +63,8 @@ async def session_events(
                     yield ": keepalive\n\n"
                     continue
                 yield format_sse(event)
+                if event.type == "sync_required" and hub.should_close(queue):
+                    return
         finally:
             hub.unsubscribe(queue)
 

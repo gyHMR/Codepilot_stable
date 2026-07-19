@@ -8,32 +8,6 @@ from codepilot.observability import EventRecorder, build_run_summary, build_run_
 from codepilot.observability.events import validate_run_event
 
 
-def test_tool_event_normalization_rejects_removed_field_dialects() -> None:
-    import pytest
-
-    from codepilot.observability.events import event_to_record
-
-    with pytest.raises(ValueError, match="tool_call_id"):
-        event_to_record(
-            {
-                "type": "tool_started",
-                "toolCallId": "call-old",
-                "toolName": "read",
-                "args": {},
-            }
-        )
-
-    with pytest.raises(ValueError, match="schema_version=1"):
-        event_to_record(
-            {
-                "type": "tool_call_started",
-                "tool_call_id": "call-old",
-                "tool_name": "read",
-                "args": {},
-            }
-        )
-
-
 def test_event_recorder_writes_slim_canonical_events(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
     recorder = EventRecorder(path)

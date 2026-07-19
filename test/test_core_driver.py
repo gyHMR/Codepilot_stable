@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
+from codepilot.core.commands import (
+    SubmitPlan,
+    UpdatePlanProgress,
+    core_command_to_dict,
+)
 from codepilot.core.contracts import (
     CoreBoundary,
     CoreLimits,
@@ -15,7 +21,13 @@ from codepilot.core.contracts import (
 )
 from codepilot.core.driver import run_core
 from codepilot.core.errors import CoreInvariantError
-from codepilot.core.state import CoreState
+from codepilot.core.plan import (
+    PlanDefinition,
+    PlanStepDefinition,
+    PlanStepUpdate,
+)
+from codepilot.core.reducer import ReductionContext, apply_core_command
+from codepilot.core.state import CoreState, ObservationLedger
 from codepilot.llm.ports import LLMCompleted, ModelDescriptor
 from codepilot.protocols import (
     AssistantMessage,
@@ -183,6 +195,25 @@ def _approval_result() -> ToolResult:
     )
 
 
+def _active_plan_state() -> CoreState:
+    reduction = apply_core_command(
+        CoreState.new("implement login"),
+        SubmitPlan(
+            "submit-driver",
+            PlanDefinition(
+                summary="Implement login",
+                completion_criteria=("Login tests pass",),
+            ),
+            (
+                PlanStepDefinition("Implement login", "Edit service", "Run unit tests"),
+                PlanStepDefinition("Verify login", "Run regression", "Check results"),
+            ),
+        ),
+        ReductionContext(run_id="run_driver", mode="build", now_ms=0),
+    )
+    return reduction.state
+
+
 def test_driver_commits_exact_model_completion_sequence() -> None:
     boundary = FakeBoundary()
 
@@ -198,6 +229,117 @@ def test_driver_commits_exact_model_completion_sequence() -> None:
     assert boundary.boundaries[1].new_messages == (outcome.final_message,)
     assert boundary.boundaries[2].new_messages == ()
     assert outcome.state.facts.counters.model_turns == 1
+
+
+def test_driver_stops_after_two_final_responses_with_incomplete_plan() -> None:
+    boundary = FakeBoundary()
+    context = FakeContext()
+    model = FakeModel(
+        [
+            _final("All work is complete."),
+            _final("Come back any time."),
+            _final("This response must never be requested."),
+        ]
+    )
+
+    outcome = asyncio.run(
+        run_core(
+            _input(state=_active_plan_state()),
+            _ports(model, boundary, context=context),
+        )
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.reason.code == "plan.reconciliation_exhausted"
+    assert len(model.requests) == 2
+    assert len(context.requests) == 2
+    assert context.requests[1].directive.startswith("plan.reconciliation_required")
+    assert "update_plan_progress" in context.requests[1].directive
+
+
+def test_resumed_driver_uses_fresh_observation_ids_for_plan_commands() -> None:
+    state = _active_plan_state()
+    assert state.task.plan is not None
+    state = replace(
+        state,
+        facts=replace(
+            state.facts,
+            observation_ledger=ObservationLedger(
+                applied_observation_ids=(
+                    "submit-driver",
+                    "core:model:1",
+                    "core:tools:2",
+                )
+            ),
+        ),
+    )
+    command = UpdatePlanProgress(
+        "call-resumed-progress",
+        expected_revision=1,
+        updates=tuple(
+            PlanStepUpdate(
+                step.step_id,
+                "completed",
+                completion_note=f"Completed {step.step}",
+            )
+            for step in state.task.plan.steps
+        ),
+    )
+    request = AssistantMessage(
+        content=[
+            ToolCall(
+                id=command.command_id,
+                name="update_plan_progress",
+                arguments={
+                    "expected_revision": command.expected_revision,
+                    "updates": [
+                        {
+                            "step_id": update.step_id,
+                            "status": update.status,
+                            "completion_note": update.completion_note,
+                            "evidence_refs": list(update.evidence_refs),
+                        }
+                        for update in command.updates
+                    ],
+                },
+            )
+        ]
+    )
+    result = ToolResult(
+        tool_call_id=command.command_id,
+        tool_name="update_plan_progress",
+        status="success",
+        data={"core_command": core_command_to_dict(command)},
+        registration_id="core-plan",
+    )
+    boundary = FakeBoundary()
+
+    outcome = asyncio.run(
+        run_core(
+            _input(state=state),
+            _ports(
+                FakeModel([request, _final("Plan complete.")]),
+                boundary,
+                tools=FakeTools(results=(result,)),
+            ),
+        )
+    )
+
+    assert outcome.status == "completed"
+    assert outcome.state.task.plan is not None
+    assert outcome.state.task.plan.status == "completed"
+    applied_ids = outcome.state.facts.observation_ledger.applied_observation_ids
+    assert "core:model:3" in applied_ids
+    assert "core:tools:4" in applied_ids
+    visible_results = [
+        message
+        for item in boundary.boundaries
+        for message in item.new_messages
+        if isinstance(message, ToolResultMessage)
+        and message.tool_call_id == command.command_id
+    ]
+    assert len(visible_results) == 1
+    assert "Core applied the Plan command" in str(visible_results[0].content)
 
 
 def test_driver_commits_before_tools_before_any_execution() -> None:

@@ -82,6 +82,7 @@ from codepilot.sessions.service import (
     new_session_id,
 )
 from codepilot.tools.security import ApprovalResponse
+from codepilot.tools.state import InteractionResponse
 from codepilot.tools.codecs import json_value
 from .session_state_adapter import RuntimeSessionStateAdapter
 from .contracts import project_core_domain_event
@@ -406,6 +407,13 @@ class RuntimeSessionCoordinator:
                 model=model,
                 tools=tools,
             )
+        if intent.kind == "user_input_response":
+            return await self._prepare_interaction_resume(
+                intent,
+                run_id=run_id,
+                model=model,
+                tools=tools,
+            )
 
         recovery = self.state_service.inspect_recovery(
             RecoveryRequest(session_id=self.session_id, run_id=run_id)
@@ -488,7 +496,12 @@ class RuntimeSessionCoordinator:
             state=resumed_run.core_state,
             model=model,
             mode=mode,
-            limits=self.core_limits(mode),
+            limits=_continuation_limits(
+                self.core_limits(mode),
+                resumed_run.core_state,
+                enabled=intent.kind == "automatic_continuation",
+                request_id=waiting.request_id if waiting is not None else "",
+            ),
             context_seed=self._loop_context(
                 mode,
                 synthetic_control=synthetic_control,
@@ -505,6 +518,91 @@ class RuntimeSessionCoordinator:
             context_refs={"context": "session_context", "continuation": intent.kind},
             memory_refs={"enabled": self.memory_enabled},
             plan_refs={"plan_state": plan},
+            rollback_baseline=self._rollback_baseline_ref(run_id),
+        )
+
+    async def _prepare_interaction_resume(
+        self,
+        intent: SessionContinuationIntent,
+        *,
+        run_id: str,
+        model: ModelDescriptor,
+        tools: Any | None,
+    ) -> PreparedAgentRun:
+        recovery = self.state_service.inspect_recovery(
+            RecoveryRequest(
+                session_id=self.session_id,
+                run_id=run_id,
+                expected_waiting_kind="user_input",
+            )
+        )
+        if recovery.bundle is None or recovery.bundle.run.checkpoint is None:
+            raise ValueError(f"Run is not recoverable: {run_id}")
+        if tools is None:
+            raise ValueError("User input recovery requires a Tool port")
+        self._restore_tool_checkpoint(tools, recovery.bundle.run)
+        waiting = recovery.bundle.run.checkpoint.waiting
+        if waiting is None:
+            raise ValueError("User input checkpoint has no waiting state")
+        payload = dict(waiting.payload)
+        response = InteractionResponse(
+            interaction_id=str(payload.get("interaction_id") or ""),
+            request_fingerprint=str(payload.get("request_fingerprint") or ""),
+            session_id=self.session_id,
+            tool_call_id=str(payload.get("tool_call_id") or waiting.request_id),
+            tool_name=str(payload.get("tool_name") or "request_user_input"),
+            registration_id=str(payload.get("registration_id") or ""),
+            answers={"answer": intent.text},
+        )
+        prepared_resume = tools.prepare_resume(response)
+        resumed_run = self.state_service.resume_run(
+            ResumeRunRequest(
+                session_id=self.session_id,
+                run_id=run_id,
+                checkpoint_id=recovery.bundle.run.checkpoint.checkpoint_id,
+                request_id=waiting.request_id,
+                components=(
+                    ComponentCheckpoint(
+                        owner="tools",
+                        schema_version=1,
+                        state=json_value(prepared_resume.checkpoint_state),
+                    ),
+                ),
+            ),
+            expected_run_revision=recovery.bundle.run.revision,
+        )
+        self.session_state = recovery.bundle.session
+        self._restore_context_checkpoint(recovery.bundle.run)
+        self._restore_rollback_checkpoint(recovery.bundle.run)
+        state_port = RuntimeSessionStateAdapter(
+            self.state_service,
+            self.session_state,
+            resumed_run,
+            context_state=self.context_service.checkpoint_state,
+            workspace_state=self._capture_workspace_checkpoint,
+        )
+        messages = [record.message for record in recovery.bundle.messages]
+        self.conversation.set_messages(messages)
+        result = tools.execute_prepared_resume(prepared_resume.resume_id)
+        if inspect.isawaitable(result):
+            result = await result
+        return PreparedAgentRun(
+            run_id=run_id,
+            session_id=self.session_id,
+            loop_input=CoreRunInput(
+                session_id=self.session_id,
+                run_id=run_id,
+                entry=ToolResultEntry((result,)),
+                messages=tuple(messages),
+                state=resumed_run.core_state,
+                model=model,
+                mode=self.current_mode,
+                limits=self.core_limits(),
+                context_seed=self._loop_context(),
+            ),
+            context_port=self.context_service,
+            state_port=state_port,
+            plan_refs={"plan_state": self.active_plan_state()},
             rollback_baseline=self._rollback_baseline_ref(run_id),
         )
 
@@ -1423,12 +1521,44 @@ def new_run_id() -> str:
     return f"run_{uuid4().hex[:12]}"
 
 
+def _continuation_limits(
+    limits: CoreLimits,
+    raw_state: object,
+    *,
+    enabled: bool,
+    request_id: str,
+) -> CoreLimits:
+    if not enabled:
+        return limits
+    state = load_core_state(raw_state)
+    counters = state.facts.counters
+    per_turn = limits.max_tool_calls_per_turn
+    if request_id.endswith("run.max_tool_calls_per_turn"):
+        per_turn = None
+    return replace(
+        limits,
+        max_model_turns=limits.max_model_turns + counters.model_turns,
+        max_tool_iterations=limits.max_tool_iterations + counters.tool_iterations,
+        max_tool_calls=(
+            None
+            if limits.max_tool_calls is None
+            else limits.max_tool_calls + counters.tool_calls
+        ),
+        max_tool_calls_per_turn=per_turn,
+        repeated_tool_call_limit=(
+            limits.repeated_tool_call_limit
+            + state.facts.loop_guards.repeated_tool_calls
+        ),
+    )
+
+
 def _continuation_control(kind: str) -> dict[str, object] | None:
     instruction = {
         "plan_approved": (
             "canonical Task Plan 已获批准并处于 active 状态。从第一个未完成步骤继续执行，"
             "不要复述、重新设计或创建第二份计划。保留现有 step_id；仅用 "
-            "update_plan_progress 更新进度，最终用 close_plan 提交关闭证据。"
+            "update_plan_progress 更新进度。最终答复前确保所有步骤均已标记 completed；"
+            "close_plan 仅为兼容接口，不是完成任务的必要条件。"
         ),
         "plan_rejected": (
             "用户拒绝了 proposed plan，但尚未给出修改方向。只询问一个会实质影响方案的具体问题；"
@@ -1485,10 +1615,11 @@ def _mode_policy(mode: str) -> str:
         "当前 mode=build。可以在权限范围内读取、修改、运行项目命令并验证。修改前读取相关实现，优先使用专用文件工具，"
         "command 用于 argv 形式的项目命令，只有需要 Shell 语法时才用 bash。"
         "存在 active canonical Task Plan 时，直接执行第一个未完成步骤，不得创建第二份计划；进度变化用 "
-        "update_plan_progress 提交并保留现有 step_id。没有计划且任务确实复杂时才用 create_build_plan，简单任务直接完成。"
+        "update_plan_progress 提交并保留现有 step_id。没有计划且任务确实复杂时才用 "
+        "create_build_plan，简单任务直接完成。"
         "若新证据使原计划基础失效，按工具协议提交 revision，不能在文本中悄悄改变范围。"
-        "完成实现后运行与风险相称的验证；存在计划时，最终答复前用 close_plan 提交完成情况和证据，"
-        "是否完成由 Core 判定。"
+        "完成实现后运行与风险相称的验证；存在计划时，最终答复前确保所有步骤都已通过 "
+        "update_plan_progress 标记 completed。Task 与 Plan 是否完成由 Core 根据结构化状态判定。"
     )
 
 

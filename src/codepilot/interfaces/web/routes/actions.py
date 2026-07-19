@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request, status
 
-from ..schemas import AcceptedAction, ApprovalCreate, CommandCreate, MessageCreate
+from ..schemas import AcceptedAction, ApprovalCreate, CommandCreate, InteractionCreate, MessageCreate
 
 
 router = APIRouter(prefix="/api/sessions")
@@ -50,6 +50,33 @@ async def decide_approval(
     return await request.app.state.web_service.decide_approval(
         session_id, approval_id, payload.decision, payload.reason
     )
+
+
+@router.post(
+    "/{session_id}/interactions/{request_id}",
+    response_model=AcceptedAction,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def respond_interaction(
+    request: Request,
+    session_id: str,
+    request_id: str,
+    payload: InteractionCreate,
+) -> AcceptedAction:
+    return await request.app.state.web_service.respond_interaction(
+        session_id, request_id, payload.answer
+    )
+
+
+@router.post(
+    "/{session_id}/continuations/{request_id}",
+    response_model=AcceptedAction,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def continue_run(
+    request: Request, session_id: str, request_id: str
+) -> AcceptedAction:
+    return await request.app.state.web_service.continue_run(session_id, request_id)
 
 
 @router.post(
