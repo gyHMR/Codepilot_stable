@@ -52,6 +52,7 @@ class RuntimeModel:
     get_api_key: Any | None
     source: ConfigValueSource
     credential_source: str
+    proxy_url: str | None = None
     credential_location: str | None = None
 
     @property
@@ -475,6 +476,7 @@ def resolve_runtime_model(
                 model=local_model.to_model(),
                 get_api_key=intent.get_api_key or local_model.build_api_key_resolver(),
                 source=ConfigValueSource("project", ".codepilot/model.local.json"),
+                proxy_url=local_model.proxy_url,
             )
         return _with_credentials(
             intent,
@@ -491,6 +493,7 @@ def resolve_runtime_model(
             model=config.local_model.to_model(),
             get_api_key=intent.get_api_key or config.local_model.build_api_key_resolver(),
             source=ConfigValueSource("project", ".codepilot/model.local.json"),
+            proxy_url=config.local_model.proxy_url,
         )
 
     settings = config.settings
@@ -516,6 +519,7 @@ def _with_credentials(
     model: Model,
     get_api_key: Any | None,
     source: ConfigValueSource,
+    proxy_url: str | None = None,
 ) -> RuntimeModel:
     credential_source, credential_location = _credential_source(
         intent,
@@ -529,6 +533,7 @@ def _with_credentials(
         get_api_key=get_api_key,
         source=source,
         credential_source=credential_source,
+        proxy_url=proxy_url,
         credential_location=credential_location,
     )
 

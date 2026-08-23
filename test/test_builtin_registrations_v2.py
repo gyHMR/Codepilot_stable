@@ -352,6 +352,39 @@ def test_controlled_command_executes_without_shell_parsing(tmp_path: Path) -> No
     assert "process_spawn" in {effect.kind for effect in result.effects}
 
 
+def test_command_and_bash_do_not_depend_on_asyncio_subprocess_support(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def unsupported(*_args, **_kwargs):
+        raise NotImplementedError("asyncio subprocess transport is unavailable")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unsupported)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", unsupported)
+    runtime, registration_ids = _runtime(
+        tmp_path,
+        enabled_names=["command", "bash"],
+    )
+    executable = str(Path(sys.executable))
+
+    command_result = _execute(
+        runtime,
+        registration_ids,
+        "command",
+        {"argv": [executable, "--version"]},
+    )
+    bash_result = _execute(
+        runtime,
+        registration_ids,
+        "bash",
+        {"command": f'"{executable}" -c "print(\'threaded-shell\')"'},
+    )
+
+    assert command_result.status == "success"
+    assert bash_result.status == "success"
+    assert "threaded-shell" in bash_result.data["text"]
+
+
 def test_verification_command_projects_passed_and_failed_evidence(tmp_path: Path) -> None:
     runtime, registration_ids = _runtime(tmp_path, enabled_names=["command"])
     executable = str(Path(sys.executable))

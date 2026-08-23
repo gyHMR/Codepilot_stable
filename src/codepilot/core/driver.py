@@ -40,6 +40,7 @@ from .reducer import ReductionContext, apply_decision, reduce_observation
 from .reducer import CoreReduction
 from .state import CoreState
 from .tool_step import (
+    deferred_tool_results,
     execute_core_tool_batch,
     interrupted_tool_results,
     prepare_core_tool_batch,
@@ -221,12 +222,25 @@ async def run_core(input: CoreRunInput, ports: CorePorts) -> CoreOutcome:
             continue
 
         if isinstance(decision, ExecuteTools):
+            executable_calls, deferred_calls = _bounded_tool_calls(
+                decision.calls,
+                input.limits.max_tool_calls_per_turn,
+            )
+            bounded_decision = (
+                ExecuteTools(executable_calls, decision.reason)
+                if executable_calls
+                else None
+            )
             try:
-                prepared = prepare_core_tool_batch(
-                    input,
-                    ports,
-                    decision,
-                    driver.catalog_snapshot,
+                prepared = (
+                    prepare_core_tool_batch(
+                        input,
+                        ports,
+                        bounded_decision,
+                        driver.catalog_snapshot,
+                    )
+                    if bounded_decision is not None
+                    else None
                 )
             except asyncio.CancelledError as exc:
                 return await _terminate_interrupted_execution(
@@ -253,7 +267,10 @@ async def run_core(input: CoreRunInput, ports: CorePorts) -> CoreOutcome:
                         "source": "core",
                     },
                 )
-            if prepared.preparation.results:
+            if prepared is None:
+                executed = False
+                results = ()
+            elif prepared.preparation.results:
                 executed = False
                 results = _complete_results(
                     prepared.calls,
@@ -290,9 +307,16 @@ async def run_core(input: CoreRunInput, ports: CorePorts) -> CoreOutcome:
                         },
                     )
                 results = _complete_results(prepared.calls, executed_results)
+            results = (
+                *results,
+                *deferred_tool_results(
+                    deferred_calls,
+                    limit=input.limits.max_tool_calls_per_turn or 0,
+                ),
+            )
             observation = ToolBatchObservation(
                 observation_id=driver.observation_id("tools"),
-                calls=prepared.calls,
+                calls=decision.calls,
                 results=results,
                 commands=project_core_commands(results),
             )
@@ -321,6 +345,15 @@ async def run_core(input: CoreRunInput, ports: CorePorts) -> CoreOutcome:
             return _outcome(driver, decision.status, decision.reason)
 
         raise TypeError(f"Unknown Core decision: {type(decision).__name__}")
+
+
+def _bounded_tool_calls(
+    calls: tuple[ToolCall, ...],
+    limit: int | None,
+) -> tuple[tuple[ToolCall, ...], tuple[ToolCall, ...]]:
+    if limit is None or len(calls) <= limit:
+        return calls, ()
+    return calls[:limit], calls[limit:]
 
 
 def _initial_observation(input: CoreRunInput) -> CoreObservation:

@@ -229,6 +229,35 @@ def interrupted_tool_results(
     )
 
 
+def deferred_tool_results(
+    calls: tuple[ToolCall, ...] | list[ToolCall],
+    *,
+    limit: int,
+) -> tuple[ToolResult, ...]:
+    """Close calls beyond the per-turn execution limit without recording failures."""
+
+    message = (
+        f"Core deferred this Tool call because the per-turn execution limit is {limit}. "
+        "Re-issue the call in a later model turn if it is still needed."
+    )
+    return tuple(
+        ToolResult(
+            tool_call_id=call.id,
+            tool_name=call.name,
+            status="interrupted",
+            content=(TextContent(message),),
+            error=ToolError(
+                code="core.tool_deferred",
+                kind="interrupted",
+                message=message,
+                retryable=True,
+            ),
+            registration_id="core_deferred",
+        )
+        for call in calls
+    )
+
+
 def unavailable_tool_results(
     calls: tuple[ToolCall, ...] | list[ToolCall],
 ) -> tuple[ToolResult, ...]:
@@ -320,6 +349,7 @@ def _tool_event_type(result: ToolResult) -> str:
 
 
 __all__ = [
+    "deferred_tool_results",
     "execute_core_tool_batch",
     "interrupted_tool_results",
     "PreparedCoreToolBatch",

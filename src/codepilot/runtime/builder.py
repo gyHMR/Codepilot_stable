@@ -205,6 +205,7 @@ def build_runtime_session(intent: SessionOpenIntent) -> RuntimeSession:
         stream_fn=effective_options.stream_fn,
         convert_messages=effective_options.convert_to_llm,
         get_api_key=effective_options.get_api_key,
+        proxy_url=model.proxy_url,
         registry=provider_registry,
     )
     tool_state_store = CheckpointToolStateStore(

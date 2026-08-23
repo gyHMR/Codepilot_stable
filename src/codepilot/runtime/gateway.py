@@ -149,6 +149,20 @@ class RuntimeGateway:
                         async for frame in self._follow_up_from_command(session, record):
                             yield frame
                         return
+                if waiting_kind is None:
+                    request_id = f"recovery:{checkpoint_run_id}"
+                    yield FailedFrame(
+                        error={
+                            "code": "runtime.recovery_required",
+                            "message": (
+                                "Recover the interrupted run before sending a new prompt."
+                            ),
+                            "retryable": True,
+                            "run_id": checkpoint_run_id,
+                            "request_id": request_id,
+                        }
+                    )
+                    return
                 phase = _optional_text(checkpoint.get("phase"))
                 continuation_kind = (
                     "plan_clarification"
@@ -208,6 +222,24 @@ class RuntimeGateway:
             return
         if isinstance(action, ContinuationRequested):
             checkpoint = session.controller.runtime_checkpoint() or {}
+            checkpoint_run_id = _optional_text(checkpoint.get("run_id"))
+            recovery_request_id = (
+                f"recovery:{checkpoint_run_id}" if checkpoint_run_id is not None else None
+            )
+            if (
+                checkpoint_run_id is not None
+                and checkpoint.get("waiting_kind") is None
+                and action.request_id == recovery_request_id
+            ):
+                async for frame in self._run_continuation(
+                    session,
+                    SessionContinuationIntent(
+                        kind="automatic_continuation",
+                        run_id=checkpoint_run_id,
+                    ),
+                ):
+                    yield frame
+                return
             if str(checkpoint.get("waiting_kind") or "") != "continuation":
                 yield FailedFrame(error={"code": "runtime.continuation_not_pending", "request_id": action.request_id})
                 return

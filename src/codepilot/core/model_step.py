@@ -58,7 +58,10 @@ async def call_model_once(
             session_id=input.session_id,
             run_id=input.run_id,
             purpose=_context_purpose(purpose),
-            directive=_directive_text(directive),
+            directive=_directive_text(
+                directive,
+                max_tool_calls_per_turn=input.limits.max_tool_calls_per_turn,
+            ),
             messages=messages,
             core_view=CoreContextView.from_state(state, input.mode),
             model=input.model,
@@ -184,9 +187,19 @@ def _context_purpose(purpose: ModelPurpose) -> ContextPurpose:
     return "reasoning"
 
 
-def _directive_text(directive: CoreDirective) -> str:
+def _directive_text(
+    directive: CoreDirective,
+    *,
+    max_tool_calls_per_turn: int | None,
+) -> str:
     lines = [directive.code]
     lines.extend(directive.constraints)
+    if max_tool_calls_per_turn is not None:
+        lines.append(
+            "Issue at most "
+            f"{max_tool_calls_per_turn} ToolCalls in one model turn; split larger work "
+            "across turns."
+        )
     if directive.evidence_refs:
         lines.append("evidence: " + ", ".join(directive.evidence_refs))
     return "\n".join(lines)

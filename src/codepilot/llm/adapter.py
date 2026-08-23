@@ -62,6 +62,7 @@ class ProviderModelPort(ModelPort):
         complete_fn: ProviderCompleteFn | None = None,
         convert_messages: ProviderMessageConverter | None = None,
         get_api_key: ProviderApiKeyResolver | None = None,
+        proxy_url: str | None = None,
         registry: ApiProviderRegistry | None = None,
     ) -> None:
         self._model = model
@@ -69,6 +70,7 @@ class ProviderModelPort(ModelPort):
         self._complete_fn = complete_fn
         self._convert_messages = convert_messages
         self._get_api_key = get_api_key
+        self._proxy_url = proxy_url
         self._registry = registry
 
     async def stream(self, request: LLMRequest) -> AsyncIterator[LLMEvent]:
@@ -120,6 +122,7 @@ class ProviderModelPort(ModelPort):
                 max_tokens=request.options.max_tokens,
                 timeout_seconds=request.options.timeout_seconds,
                 api_key=api_key,
+                proxy_url=self._proxy_url,
                 session_id=request.correlation.session_id or None,
             )
             if not capabilities.streaming:

@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from codepilot.runtime import RuntimeGateway, SessionOpenIntent
+from codepilot.runtime.errors import runtime_error_payload
 from codepilot.runtime.actions import (
     ApprovalDecided,
     CommandSubmitted,
@@ -154,6 +155,8 @@ class WebService:
         state = self._state_for(session_id)
         current_run_id = getattr(state, "current_run_id", None) if state is not None else None
         wait = self._wait_state(session_id, state=state)
+        if wait is None and not detail.get("is_running"):
+            wait = self._recovery_wait_state(session_id, state=state)
         pending = detail.get("pending_approvals", [])
         if wait is not None:
             execution_status = {
@@ -193,6 +196,8 @@ class WebService:
         ]
         wait = self._wait_state(session_id, state=state)
         is_running = status.is_running or session_id in self._tasks
+        if wait is None and not is_running:
+            wait = self._recovery_wait_state(session_id, state=state)
         return {
             "session_id": status.session_id,
             "title": self._session_title(session_id, metadata),
@@ -310,7 +315,7 @@ class WebService:
 
     async def continue_run(self, session_id: str, request_id: str) -> AcceptedAction:
         await self.ensure_open(session_id)
-        wait = self._wait_state(session_id)
+        wait = self._wait_state(session_id) or self._recovery_wait_state(session_id)
         if wait is None or wait.get("kind") != "continuation":
             raise WebNotFound("web.continuation_not_found", "Continuation is not pending")
         if str(wait.get("request_id")) != request_id:
@@ -365,6 +370,27 @@ class WebService:
             "kind": str(getattr(waiting, "kind", "")),
             "request_id": str(getattr(waiting, "request_id", "")),
             "payload": payload if isinstance(payload, dict) else {},
+        }
+
+    def _recovery_wait_state(
+        self,
+        session_id: str,
+        *,
+        state: Any | None = None,
+    ) -> dict[str, Any] | None:
+        state = state or self._state_for(session_id)
+        run_id = getattr(state, "current_run_id", None) if state is not None else None
+        if not run_id:
+            return None
+        run = self._session_states.get_run(str(run_id))
+        checkpoint = getattr(run, "checkpoint", None) if run is not None else None
+        if checkpoint is None or getattr(checkpoint, "waiting", None) is not None:
+            return None
+        return {
+            "run_id": str(run_id),
+            "kind": "continuation",
+            "request_id": f"recovery:{run_id}",
+            "payload": {"reason": "runtime.recovery_required"},
         }
 
     def _session_metadata(self, session_id: str, *, state: Any | None) -> dict[str, str]:
@@ -434,6 +460,7 @@ class WebService:
     async def _consume_action(
         self, session_id: str, action: Any, *, cancellation: bool = False
     ) -> None:
+        registry = self._cancellations if cancellation else self._tasks
         try:
             await self.ensure_open(session_id)
             async for frame in self.runtime.dispatch(session_id, action):
@@ -476,9 +503,49 @@ class WebService:
                         frame, session_id=session_id, sequence=sequence
                     )
                 )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            current = asyncio.current_task()
+            if registry.get(session_id) is current:
+                registry.pop(session_id, None)
+            self._approval_resolutions.pop(session_id, None)
+            self._interaction_resolutions.pop(session_id, None)
+            try:
+                sequence = self._sequences.get(session_id, 0) + 1
+                self._sequences[session_id] = sequence
+                await self.events_for(session_id).publish(
+                    WebEvent(
+                        event_id=uuid4().hex,
+                        session_id=session_id,
+                        run_id=None,
+                        type="error",
+                        sequence=sequence,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        data=runtime_error_payload(exc),
+                    )
+                )
+                sequence += 1
+                self._sequences[session_id] = sequence
+                await self.events_for(session_id).publish(
+                    WebEvent(
+                        event_id=uuid4().hex,
+                        session_id=session_id,
+                        run_id=None,
+                        type="session.snapshot",
+                        sequence=sequence,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        data={
+                            **self.projection(session_id),
+                            "reason": "dispatch_failed",
+                        },
+                    )
+                )
+            except Exception:
+                # The background task must never leak a second exception to waiters.
+                pass
         finally:
             current = asyncio.current_task()
-            registry = self._cancellations if cancellation else self._tasks
             if registry.get(session_id) is current:
                 registry.pop(session_id, None)
 

@@ -103,7 +103,12 @@ def stream_anthropic(
             if tools:
                 payload["tools"] = tools
 
-            async with httpx.AsyncClient(timeout=resolved_options.timeout_seconds) as client:
+            client_options: dict[str, Any] = {
+                "timeout": resolved_options.timeout_seconds,
+            }
+            if resolved_options.proxy_url:
+                client_options["proxy"] = resolved_options.proxy_url
+            async with httpx.AsyncClient(**client_options) as client:
                 async with client.stream(
                     "POST",
                     f"{model.base_url.rstrip('/')}/v1/messages",
@@ -253,8 +258,8 @@ def stream_anthropic(
                     stream.end(out)
         except Exception as exc:
             out.stop_reason = "error"
-            out.error_message = str(exc)
             out.error_info = classify_llm_error(exc, model)
+            out.error_message = out.error_info.message
             stream.push(llm_event("error", reason="error", error=out, errorInfo=out.error_info))
             stream.end(out)
 

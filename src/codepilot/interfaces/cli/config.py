@@ -35,6 +35,7 @@ _MODEL_CONFIG_TEMPLATE = {
     "base_url": "https://api.deepseek.com/v1",
     "api_key": "",
     "api_key_env": "DEEPSEEK_API_KEY",
+    "proxy_url": "",
     "context_window": 64000,
     "max_tokens": 8192,
     "reasoning": False,

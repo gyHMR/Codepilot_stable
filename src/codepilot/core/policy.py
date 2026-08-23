@@ -329,12 +329,7 @@ def _budget_wait(
         _tool_calls(observation) if isinstance(observation, ModelObservation) else ()
     )
     final_candidate = _is_final_candidate(observation) and not state.task.blockers
-    if (
-        context.limits.max_tool_calls_per_turn is not None
-        and len(calls) > context.limits.max_tool_calls_per_turn
-    ):
-        reason = "run.max_tool_calls_per_turn"
-    elif counters.model_turns > context.limits.max_model_turns or (
+    if counters.model_turns > context.limits.max_model_turns or (
         counters.model_turns >= context.limits.max_model_turns
         and isinstance(observation, (ModelObservation, ToolBatchObservation))
         and not calls

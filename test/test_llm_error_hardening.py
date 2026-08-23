@@ -59,3 +59,26 @@ def test_adapter_normalizes_unexpected_errors_with_run_correlation() -> None:
         assert events[-1].error.details["session_id"] == "session-1"
 
     asyncio.run(run_case())
+
+
+def test_empty_timeout_error_keeps_retryable_timeout_classification() -> None:
+    import httpx
+
+    from codepilot.llm.stream import classify_llm_error
+    from codepilot.protocols import Model
+
+    request = httpx.Request("POST", "https://api.example.test/chat")
+    error = httpx.ConnectTimeout("", request=request)
+    model = Model(
+        id="unit", name="Unit", api="openai-compatible", provider="openai",
+        base_url="https://api.example.test", reasoning=False, input=["text"],
+        context_window=4000, max_tokens=500,
+    )
+
+    info = classify_llm_error(error, model)
+
+    assert info.code == "llm.timeout"
+    assert info.kind == "timeout"
+    assert info.retryable is True
+    assert info.message
+    assert info.details["exception_type"] == "ConnectTimeout"

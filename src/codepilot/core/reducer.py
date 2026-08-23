@@ -249,19 +249,26 @@ def _reduce_tools(
         batch_call_ids.add(result.tool_call_id)
         unique_results.append(result)
     results = tuple(unique_results)
+    material_results = tuple(
+        result
+        for result in results
+        if result.error is None or result.error.code != "core.tool_deferred"
+    )
     new_call_count = sum(
-        result.tool_call_id not in counted_call_ids for result in results
+        result.tool_call_id not in counted_call_ids for result in material_results
     )
     counters = replace(
         state.facts.counters,
-        tool_iterations=state.facts.counters.tool_iterations + 1,
+        tool_iterations=(
+            state.facts.counters.tool_iterations + (1 if material_results else 0)
+        ),
         tool_calls=state.facts.counters.tool_calls + new_call_count,
     )
     next_state = replace(state, facts=replace(state.facts, counters=counters))
     events: list[CoreDomainEvent] = []
 
     workspace, workspace_changed = _reduce_workspace(
-        next_state.facts.workspace, results
+        next_state.facts.workspace, material_results
     )
     next_state = replace(
         next_state, facts=replace(next_state.facts, workspace=workspace)
@@ -280,7 +287,7 @@ def _reduce_tools(
 
     verification = _reduce_verification(
         next_state.facts.verification,
-        results,
+        material_results,
         workspace=workspace,
         workspace_changed=workspace_changed,
     )
@@ -301,9 +308,11 @@ def _reduce_tools(
         )
     next_state = _sync_verification_blocker(next_state)
 
-    clean_success = bool(results) and all(result.status == "success" for result in results)
+    clean_success = bool(material_results) and all(
+        result.status == "success" for result in material_results
+    )
 
-    for result in results:
+    for result in material_results:
         failure = _failure_from_tool_result(result)
         if failure is not None:
             next_state = _record_failure(next_state, failure)
@@ -338,8 +347,11 @@ def _reduce_tools(
             facts=replace(next_state.facts, failures=FailureFacts()),
         )
 
+    material_call_ids = {result.tool_call_id for result in material_results}
     loop_guards = _reduce_loop_guards(
-        next_state.facts.loop_guards, observation.calls, results
+        next_state.facts.loop_guards,
+        tuple(call for call in observation.calls if call.id in material_call_ids),
+        material_results,
     )
     if (
         workspace_changed
@@ -533,8 +545,9 @@ def _update_plan_progress(
             return _reject_command(state, command, "plan.completed_step_regression")
         if update.status == "completed" and not update.completion_note:
             return _reject_command(state, command, "plan.completion_note_required")
-        if set(evidence_refs) - known_evidence:
-            return _reject_command(state, command, "plan.unknown_evidence")
+        evidence_refs = tuple(
+            ref for ref in evidence_refs if ref in known_evidence
+        )
         try:
             next_by_id[update.step_id] = PlanStep(
                 step_id=previous.step_id,
@@ -643,8 +656,8 @@ def _request_plan_close(
     if any(step.status != "completed" for step in plan.steps):
         return _reject_command(state, command, "plan.steps_incomplete")
     evidence_refs = _normalize_evidence_refs(command.evidence_refs)
-    if set(evidence_refs) - _known_evidence(state):
-        return _reject_command(state, command, "plan.unknown_evidence")
+    known_evidence = _known_evidence(state)
+    evidence_refs = tuple(ref for ref in evidence_refs if ref in known_evidence)
     request = PlanCloseRequest(
         summary=command.summary,
         evidence_refs=evidence_refs,

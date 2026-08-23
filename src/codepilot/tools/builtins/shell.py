@@ -22,6 +22,7 @@
 """
 
 import asyncio
+import subprocess
 from dataclasses import dataclass
 from typing import Any
 
@@ -211,12 +212,10 @@ def create_command_registration(
         timeout, error = execution_policy.validate_timeout(input.timeout_seconds)
         if error or timeout is None:
             raise ToolHandlerError("command.invalid_timeout", "Invalid command timeout")
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
+        proc = await _spawn_process(
+            argv,
             cwd=str(cwd),
             env=build_shell_environment(execution_policy.allowed_env),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
         )
         return await _collect_process_result(
             proc,
@@ -369,12 +368,11 @@ def create_shell_registration(
         timeout, error = execution_policy.validate_timeout(input.timeout_seconds)
         if error or timeout is None:
             raise ToolHandlerError("shell.invalid_timeout", "Invalid shell timeout")
-        proc = await asyncio.create_subprocess_shell(
+        proc = await _spawn_process(
             input.command,
             cwd=str(sandbox.root),
             env=build_shell_environment(execution_policy.allowed_env),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            shell=True,
         )
 
         async def cleanup() -> None:
@@ -519,6 +517,53 @@ def create_shell_registration(
 
 
 # ── 共享辅助函数 ──────────────────────────────────────────────────────────────
+
+
+class _ThreadedProcess:
+    """Expose the small asyncio-process surface used by the tool handlers."""
+
+    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+        self._process = process
+
+    @property
+    def returncode(self) -> int | None:
+        return self._process.poll()
+
+    def terminate(self) -> None:
+        self._process.terminate()
+
+    def kill(self) -> None:
+        self._process.kill()
+
+    async def wait(self) -> int:
+        return await asyncio.to_thread(self._process.wait)
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        stdout, stderr = await asyncio.to_thread(self._process.communicate)
+        return stdout or b"", stderr or b""
+
+
+async def _spawn_process(
+    command: list[str] | str,
+    *,
+    cwd: str,
+    env: dict[str, str],
+    shell: bool = False,
+) -> _ThreadedProcess:
+    """Start a process without depending on the event loop's subprocess transport."""
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = await asyncio.to_thread(
+        subprocess.Popen,
+        command,
+        cwd=cwd,
+        env=env,
+        shell=shell,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=creationflags,
+    )
+    return _ThreadedProcess(process)
 
 
 async def _collect_process_result(

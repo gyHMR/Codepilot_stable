@@ -99,6 +99,7 @@ class WorkspaceModelConfig:
     base_url: str
     api_key: str | None = None
     api_key_env: str | None = None
+    proxy_url: str | None = None
     context_window: int = 128_000
     max_tokens: int = 8192
     reasoning: bool = False
@@ -292,6 +293,7 @@ class WorkspaceResourceLoader:
                 base_url=str(raw.get("base_url", "")),
                 api_key=_string(raw.get("api_key")),
                 api_key_env=_string(raw.get("api_key_env")),
+                proxy_url=_string(raw.get("proxy_url")),
                 context_window=int(raw.get("context_window", 128_000)),
                 max_tokens=int(raw.get("max_tokens", 8192)),
                 reasoning=bool(raw.get("reasoning", False)),
@@ -616,6 +618,8 @@ def check_workspace_model_config(workspace: str | Path) -> WorkspaceConfigCheck:
         ("base_url", model.base_url),
         ("credential", credential_source),
     ]
+    if model.proxy_url:
+        rows.append(("proxy", "configured"))
     if credential_source == "missing":
         rows.append(("status", "MISSING_CREDENTIAL"))
         rows.append(("next", f"Set {model.api_key_env} or add api_key to {loader.model_file}"))
@@ -641,6 +645,8 @@ def describe_workspace_config(workspace: str | Path) -> WorkspaceConfigView:
                 ("api", model.api),
             ]
         )
+        if model.proxy_url:
+            model_rows.append(("proxy", "configured"))
         if model.api_key_env and os.getenv(model.api_key_env):
             model_rows.append(("credential", f"env:{model.api_key_env}"))
         elif model.api_key:

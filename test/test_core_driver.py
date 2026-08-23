@@ -595,34 +595,62 @@ def test_driver_accepts_final_tool_result_entry_without_reexecuting_tool() -> No
     ]
 
 
-def test_driver_settles_calls_that_exceed_the_per_turn_limit() -> None:
+def test_driver_executes_bounded_tool_batch_and_defers_the_tail() -> None:
     boundary = FakeBoundary()
     assistant = AssistantMessage(
         content=[
-            ToolCall(id="call_1", name="read", arguments={}),
-            ToolCall(id="call_2", name="read", arguments={}),
+            ToolCall(id=f"call_{index}", name="read", arguments={})
+            for index in range(1, 21)
         ]
     )
-    tools = FakeTools()
+    tools = FakeTools(
+        results=tuple(
+            ToolResult(
+                tool_call_id=f"call_{index}",
+                tool_name="read",
+                status="success",
+                registration_id="read@1",
+            )
+            for index in range(1, 17)
+        )
+    )
+    model = FakeModel([assistant, _final()])
 
     outcome = asyncio.run(
         run_core(
-            _input(limits=CoreLimits(max_tool_calls_per_turn=1)),
-            _ports(FakeModel([assistant]), boundary, tools=tools),
+            _input(limits=CoreLimits(max_tool_calls_per_turn=16)),
+            _ports(model, boundary, tools=tools),
         )
     )
 
-    assert outcome.status == "waiting"
-    assert outcome.reason.code == "run.max_tool_calls_per_turn"
-    assert tools.executed is False
+    assert outcome.status == "completed"
+    assert tools.executed is True
+    assert len(tools.requests) == 16
+    assert outcome.state.facts.counters.tool_calls == 16
+    assert outcome.state.facts.failures.latest is None
+    assert outcome.state.facts.failures.count_for("core.tool_deferred") == 0
     assert [item.kind for item in boundary.boundaries] == [
         "before_model",
         "after_model",
+        "before_tools",
         "after_tools",
-        "waiting",
+        "before_model",
+        "after_model",
+        "before_terminal",
     ]
-    settled = boundary.boundaries[2].new_messages
-    assert [message.tool_call_id for message in settled] == ["call_1", "call_2"]
+    settled = boundary.boundaries[3].new_messages
+    assert [message.tool_call_id for message in settled] == [
+        f"call_{index}" for index in range(1, 21)
+    ]
+    assert [message.error_code for message in settled[-4:]] == [
+        "core.tool_deferred"
+    ] * 4
+    second_request_results = [
+        message
+        for message in model.requests[1].messages
+        if isinstance(message, ToolResultMessage)
+    ]
+    assert len(second_request_results) == 20
 
 
 def test_driver_rejects_results_for_unknown_tool_calls() -> None:

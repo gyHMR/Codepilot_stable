@@ -338,6 +338,7 @@ def test_provider_model_port_passes_explicit_timeout_to_provider() -> None:
 
         async def fake_stream(_model, _context, options):
             captured["timeout"] = options.timeout_seconds
+            captured["proxy_url"] = options.proxy_url
             stream = AssistantMessageEventStream()
             stream.end(AssistantMessage(content=[TextContent(text="ok")]))
             return stream
@@ -346,7 +347,7 @@ def test_provider_model_port_passes_explicit_timeout_to_provider() -> None:
             id="unit", name="Unit", api="unit-test", provider="unit",
             base_url="", reasoning=False, input=["text"], context_window=4000,
             max_tokens=500,
-        ), stream_fn=fake_stream)
+        ), stream_fn=fake_stream, proxy_url="http://127.0.0.1:7897")
         _ = [event async for event in port.stream(LLMRequest(
             model=ModelDescriptor(provider="unit", model_id="unit"),
             messages=(UserMessage(content="hello"),),
@@ -354,6 +355,7 @@ def test_provider_model_port_passes_explicit_timeout_to_provider() -> None:
         ))]
 
         assert captured["timeout"] == 12.5
+        assert captured["proxy_url"] == "http://127.0.0.1:7897"
 
     asyncio.run(run_case())
 

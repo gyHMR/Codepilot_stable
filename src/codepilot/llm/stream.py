@@ -75,6 +75,7 @@ class StreamOptions:
         temperature: 温度参数
         max_tokens: 最大输出 token 数
         api_key: API 密钥（可选，不提供则从环境变量读取）
+        proxy_url: 当前模型请求使用的显式 HTTP 代理
         headers: 自定义 HTTP 头
         timeout_seconds: 超时时间（秒）
         session_id: 会话 ID（用于追踪）
@@ -82,6 +83,7 @@ class StreamOptions:
     temperature: float | None = None
     max_tokens: int | None = None
     api_key: str | None = None
+    proxy_url: str | None = None
     headers: dict[str, str] | None = None
     timeout_seconds: float = 120.0
     session_id: str | None = None
@@ -385,9 +387,16 @@ def classify_llm_error(exc: Exception, model: Model) -> LLMErrorInfo:
     elif isinstance(exc, RuntimeError) and "api_key" in str(exc).lower():
         kind = "auth"
 
+    message = redact_llm_error_text(exc).strip()
+    if not message:
+        message = {
+            "timeout": "LLM request timed out",
+            "network": "LLM network request failed",
+        }.get(kind, f"LLM request failed ({type(exc).__name__})")
+
     return LLMErrorInfo(
         code=f"llm.{kind}",
-        message=redact_llm_error_text(exc),
+        message=message,
         retryable=retryable,
         kind=kind,
         provider=model.provider,

@@ -13,6 +13,7 @@ from codepilot.runtime.actions import (
     ApprovalDecided,
     ApprovalRequiredFrame,
     CancelledFrame,
+    ContinuationRequested,
     FailedFrame,
     PromptSubmitted,
     RunCancelled,
@@ -502,7 +503,9 @@ def test_opening_session_restores_active_plan_and_context_checkpoint(tmp_path: P
     assert (tmp_path / snapshot_ref).is_file()
 
 
-def test_reopened_progress_checkpoint_continues_same_run(tmp_path: Path) -> None:
+def test_reopened_progress_checkpoint_requires_explicit_recovery_without_consuming_prompt(
+    tmp_path: Path,
+) -> None:
     async def run_case() -> None:
         from codepilot.core.state import CoreState
         from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
@@ -559,17 +562,34 @@ def test_reopened_progress_checkpoint_continues_same_run(tmp_path: Path) -> None
                 memory_enabled=False,
             )
         )
+        rejected = [
+            frame
+            async for frame in gateway.dispatch(
+                opened.session_id,
+                PromptSubmitted(text="brand new request"),
+            )
+        ]
+
+        assert len(rejected) == 1
+        assert isinstance(rejected[0], FailedFrame)
+        assert rejected[0].error["code"] == "runtime.recovery_required"
+        assert rejected[0].error["run_id"] == "run_crash_resume"
+        assert rejected[0].error["request_id"] == "recovery:run_crash_resume"
+        coordinator = _coordinator(gateway, opened.session_id)
+        messages = coordinator.state_service.load_messages(opened.session_id)
+        assert [record.message.role for record in messages] == ["user"]
+        assert "brand new request" not in str(messages[0].message)
+
         frames = [
             frame
             async for frame in gateway.dispatch(
                 opened.session_id,
-                PromptSubmitted(text="same request"),
+                ContinuationRequested(request_id="recovery:run_crash_resume"),
             )
         ]
 
         assert any(isinstance(frame, RunFinishedFrame) for frame in frames), frames
         finished = next(frame for frame in frames if isinstance(frame, RunFinishedFrame))
-        coordinator = _coordinator(gateway, opened.session_id)
         run = coordinator.state_service.get_run(finished.record.run_id)
         messages = coordinator.state_service.load_messages(opened.session_id)
         assert finished.record.run_id == "run_crash_resume"
@@ -647,11 +667,25 @@ def test_reopened_after_model_checkpoint_finishes_without_repeating_model_call(
                 memory_enabled=False,
             )
         )
-        frames = [
+        rejected = [
             frame
             async for frame in gateway.dispatch(
                 opened.session_id,
                 PromptSubmitted(text="same request"),
+            )
+        ]
+
+        assert len(rejected) == 1
+        assert isinstance(rejected[0], FailedFrame)
+        assert rejected[0].error["code"] == "runtime.recovery_required"
+
+        frames = [
+            frame
+            async for frame in gateway.dispatch(
+                opened.session_id,
+                ContinuationRequested(
+                    request_id="recovery:run_after_model_resume"
+                ),
             )
         ]
 

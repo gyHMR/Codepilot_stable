@@ -112,7 +112,26 @@ export function reduceWebEvent(state: SessionEventState, event: WebEvent): Sessi
     return { ...base, runState, pendingContinuation: runState === "running" ? null : base.pendingContinuation, runStartedAt: base.runStartedAt ?? event.timestamp, lastResult: null, lastError: null };
   }
   if (event.type === "run.completed") return { ...base, snapshotReceived: true, runState: "idle", streamingText: "", activities: [], pendingApprovals: [], pendingInteraction: null, pendingContinuation: null, runStartedAt: null, lastResult: event.data, needsSync: true, syncRevision: base.syncRevision + 1 };
-  if (event.type === "error") return { ...base, runState: "failed", streamingText: "", pendingApprovals: [], lastError: event.data, needsSync: true, syncRevision: base.syncRevision + 1 };
+  if (event.type === "error") {
+    if (String(event.data.code ?? "") === "runtime.recovery_required") {
+      return {
+        ...base,
+        runState: "paused",
+        streamingText: "",
+        pendingApprovals: [],
+        pendingContinuation: {
+          run_id: String(event.data.run_id ?? ""),
+          kind: "continuation",
+          request_id: String(event.data.request_id ?? ""),
+          payload: { reason: "runtime.recovery_required" },
+        },
+        lastError: event.data,
+        needsSync: true,
+        syncRevision: base.syncRevision + 1,
+      };
+    }
+    return { ...base, runState: "failed", streamingText: "", pendingApprovals: [], lastError: event.data, needsSync: true, syncRevision: base.syncRevision + 1 };
+  }
   if (event.type === "plan.updated" || event.type === "workspace.changed") return { ...base, needsSync: true, syncRevision: base.syncRevision + 1 };
   if (event.type === "sync_required") return { ...base, needsSync: true, syncRevision: base.syncRevision + 1 };
   return base;

@@ -262,7 +262,10 @@ def test_progress_is_delta_based_revision_checked_and_evidence_backed() -> None:
         ),
         _context(),
     )
-    assert unknown_evidence.command_results[0].reason == "plan.unknown_evidence"
+    assert unknown_evidence.command_results[0].status == "applied"
+    assert unknown_evidence.state.task.plan is not None
+    assert unknown_evidence.state.task.plan.steps[1].status == "completed"
+    assert unknown_evidence.state.task.plan.steps[1].evidence_refs == ()
 
 
 def test_plan_progress_accepts_verified_workspace_path_evidence() -> None:

@@ -29,4 +29,29 @@ describe("event reducer", () => {
     const reset = reduceWebEvent(active, { event_id: "reset", session_id: "s2", run_id: null, type: "session_reset", sequence: 0, timestamp: "now", data: {} });
     expect(reset).toEqual(initialEventState);
   });
+
+  it("projects a recovery-required error into the continuation dock", () => {
+    const next = reduceWebEvent(initialEventState, {
+      event_id: "recovery-error",
+      session_id: "s1",
+      run_id: null,
+      type: "error",
+      sequence: 1,
+      timestamp: "now",
+      data: {
+        code: "runtime.recovery_required",
+        run_id: "run-crashed",
+        request_id: "recovery:run-crashed",
+        message: "Recover the interrupted run before sending a new prompt.",
+      },
+    });
+
+    expect(next.runState).toBe("paused");
+    expect(next.pendingContinuation).toEqual({
+      run_id: "run-crashed",
+      kind: "continuation",
+      request_id: "recovery:run-crashed",
+      payload: { reason: "runtime.recovery_required" },
+    });
+  });
 });
