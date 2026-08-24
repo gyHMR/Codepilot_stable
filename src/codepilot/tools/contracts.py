@@ -1,716 +1,625 @@
+"""工具拥有者、Registry、Runtime 和 Core 共享的规范定义。
+
+本文件是整个工具子系统的"契约层"，定义了所有核心类型和协议接口。
+理解 tools 包的关键就是理解这里的类型体系。
+"""
+
 from __future__ import annotations
 
-"""
-可执行工具契约 —— 由工具层 (tools layer) 拥有和维护。
-
-本模块定义了 Codepilot 系统中所有与工具相关的核心数据模型、类型别名、
-协议接口和辅助函数。这些契约贯穿工具的注册、调度、执行、审批和安全策略
-等完整生命周期，是工具子系统与运行时 (runtime)、会话 (sessions) 等其他
-子系统之间通信的基础。
-
-模块主要内容：
-- 类型别名：ToolScope（工具作用域）、ToolObservationStatus（工具观察状态）、
-  ToolInvocationSource（工具调用来源）
-- 执行协议：ToolExecuteFn（工具执行函数签名）
-- 核心数据类：ToolMetadata（运行时元数据）、ToolDefinition（工具定义）、
-  ToolCallRequest（工具调用请求）、ToolInvocation（工具调用输入）、
-  ToolObservation（工具执行观察输出）、ToolInterruption（审批中断）、
-  ToolResumeDecision（审批恢复决策）、ToolPolicyContext（策略评估上下文）、
-  ToolCatalogItem / ToolCatalogView（工具目录对外视图）、
-  PreparedToolCall / PreparedToolCallResult（工具准备结果）、
-  ToolRiskView（风险展示）
-- 协议接口：ToolPort（工具端口 —— 工具子系统对外暴露的主接口）
-- 辅助函数：tool_call_from_invocation（从调用输入构造 ToolCall）、
-  error_result（构造错误结果）、_clean_text / _require_text / _optional_text / _clean_scopes（内部校验与清洗）
-"""
-
-from collections.abc import Iterator, Mapping
+import re
+from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Awaitable, Callable, Literal, Protocol, TypeAlias, cast
-
-from codepilot.protocols import (
-    AssistantMessage,
-    ContentBlock,
-    RunVerification,
-    TextContent,
-    Tool,
-    ToolCall,
-    ToolHookContextSnapshot,
+from typing import (
+    Awaitable,
+    Callable,
+    Generic,
+    Literal,
+    Protocol,
+    TYPE_CHECKING,
+    TypeAlias,
+    TypeVar,
+    cast,
 )
-from codepilot.protocols.tools import ToolResult, ToolResultStatus, ToolRiskLevel
 
-# ============================================================================
-# 类型别名 (Type Aliases)
-# ============================================================================
+from .security import (
+    ApprovalChallenge,
+    ApprovalResponse,
+    ToolAccessResolution,
+    ToolMode,
+    ToolPolicy,
+)
 
-# ToolScope: 工具的作用域/可见范围。
-# - "read":      只读操作（如读取文件、浏览目录）
-# - "plan":      规划模式下的工具
-# - "build":     构建模式下的工具（默认模式，允许修改文件）
-# - "memory":    记忆相关操作
-# - "extension": 扩展工具（在任何模式下都可见）
-ToolScope: TypeAlias = Literal["read", "plan", "build", "memory", "extension"]
+if TYPE_CHECKING:
+    from .registry import ToolCatalogSnapshot
+    from .results import ToolResult
+    from .state import InteractionResponse
 
-# ToolObservationStatus: 工具执行后的观察状态。
-# - "success":           执行成功
-# - "error":             执行出错
-# - "denied":            被安全策略拒绝
-# - "approval_required": 需要人工审批
-# - "cancelled":         被取消
-ToolObservationStatus: TypeAlias = Literal[
-    "success",
-    "error",
-    "denied",
-    "approval_required",
-    "cancelled",
+
+# ── 类型别名 ──────────────────────────────────────────────────────────────────
+#
+# ToolCategory: 工具的功能分类
+#   - filesystem:  文件系统操作（read/write/edit/ls）
+#   - search:      搜索（grep/glob）
+#   - command:     受控命令（受限制的 git/python 等）
+#   - delegation:  代理/子代理
+#   - plan:        计划相关
+#   - interaction: 用户交互（弹框询问）
+#   - external:    外部工具（MCP 等）
+#
+# ToolSource: 工具的来源（决定其信任级别和替换规则）
+#   - builtin:   内置工具（不可被外部覆盖）
+#   - caller:    调用方注册
+#   - skill:     技能注册
+#   - extension: Python 扩展插件注册
+#   - mcp:       MCP 服务器代理
+
+ToolCategory: TypeAlias = Literal[
+    "filesystem",
+    "search",
+    "command",
+    "delegation",
+    "plan",
+    "interaction",
+    "external",
 ]
+ToolSource: TypeAlias = Literal["builtin", "caller", "skill", "extension", "mcp"]
 
-# ToolInvocationSource: 工具调用的来源。
-# - "agent":           由 AI 智能体发起
-# - "approval_resume": 由审批恢复流程发起（用户批准后重新执行）
-ToolInvocationSource: TypeAlias = Literal["agent", "approval_resume"]
-
-# ToolResumeDecisionValue: 审批恢复时的决策值。
-# - "approve": 批准执行
-# - "deny":    拒绝执行
-ToolResumeDecisionValue: TypeAlias = Literal["approve", "deny"]
-
-# 合法状态值集合（用于运行时校验）
-_OBSERVATION_STATUSES = frozenset(
-    {"success", "error", "denied", "approval_required", "cancelled"}
+# 工具名正则：字母开头，后续字母/数字/下划线/连字符，最长 64 字符
+_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+_TOOL_CATEGORIES = frozenset(
+    {"filesystem", "search", "command", "delegation", "plan", "interaction", "external"}
 )
-_RESUME_DECISIONS = frozenset({"approve", "deny"})
-_RISK_LEVELS = frozenset({"low", "medium", "high"})
-_SCOPES = frozenset({"read", "plan", "build", "memory", "extension"})
+_TOOL_SOURCES = frozenset({"builtin", "caller", "skill", "extension", "mcp"})
+_TOOL_MODES = frozenset({"plan", "execute", "unrestricted"})
 
-# ToolUpdateCallback: 工具执行过程中的更新回调类型。
-# 接收一个 ToolResult 参数，用于在执行过程中向调用方推送中间状态。
-ToolUpdateCallback: TypeAlias = Callable[[ToolResult], None]
-
-
-# ============================================================================
-# 执行函数协议 (Execution Function Protocol)
-# ============================================================================
-
-class ToolExecuteFn(Protocol):
-    """
-    工具执行函数的协议签名。
-
-    任何实现了此签名的可调用对象都可以作为工具的 execute 函数。
-    该函数接收一个具体的 ToolCallRequest，可选的信号对象 (signal)
-    和可选的更新回调 (on_update)，返回 ToolResult 或 Awaitable[ToolResult]
-    （支持同步和异步两种返回方式）。
-    """
-    def __call__(
-        self,
-        request: "ToolCallRequest",
-        signal: Any | None = None,
-        on_update: ToolUpdateCallback | None = None,
-    ) -> Awaitable[ToolResult] | ToolResult:
-        ...
-
-
-# ============================================================================
-# 核心数据类 (Core Dataclasses)
-# ============================================================================
 
 @dataclass(frozen=True)
-class ToolMetadata:
-    """
-    工具运行时元数据 —— 用于工具对外暴露、调度决策和安全策略评估。
+class ToolSpec:
+    """工具规格 —— 对 LLM 可见的工具定义。
 
-    每个工具在注册时都附带一份元数据，描述其类别、风险等级、并发特性、
-    是否需要审批等静态属性。这些信息在工具生命周期中保持不变。
+    这是工具定义中会暴露给模型的部分，包含名称、描述和输入/输出 JSON Schema。
+    LLM 通过这个 spec 了解有哪些工具可用以及如何调用。
+
+    参数:
+        name: 工具名称（必须匹配 [A-Za-z][A-Za-z0-9_-]{0,63}）
+        description: 工具描述（LLM 理解此工具用途的文本）
+        input_schema: 输入参数的 JSON Schema（Draft 2020-12）
+        output_schema: 输出结果的 JSON Schema（可选）
+        schema_version: schema 版本号（默认为 1，必须为正整数）
     """
 
-    # 工具唯一名称
     name: str
-    # 工具类别标签（如 "files", "shell", "network" 等）
-    category: str
-    # 是否为只读操作（只读工具通常无需审批，安全风险低）
-    read_only: bool
-    # 是否并发安全（可同时运行多个实例而不会互相干扰）
-    concurrency_safe: bool
-    # 是否排他执行（执行时需要独占锁，其他工具必须等待）
-    exclusive: bool
-    # 是否需要人工审批
-    requires_approval: bool
-    # 风险等级: "low"（低）、"medium"（中）、"high"（高）
-    risk_level: ToolRiskLevel
-    # 可见作用域列表：控制工具在哪些模式下可见
-    scopes: tuple[str, ...]
-    # 是否需要网络访问权限
-    network_access: bool = False
-    # 是否需要凭据
-    credential_required: bool = False
-    # 额外元数据（用于扩展，存放任意键值对）
-    extra: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        """
-        创建后的校验逻辑：
-        1. 校验 name、category 为非空文本
-        2. 校验所有布尔字段的类型
-        3. 校验 risk_level 在合法值集合中
-        4. 校验 scopes 列表合法且去重
-        5. 校验 extra 是 dict 类型
-        """
-        object.__setattr__(self, "name", _require_text(self.name, "metadata.name"))
-        object.__setattr__(
-            self,
-            "category",
-            _require_text(self.category, "metadata.category"),
-        )
-        for field_name in (
-            "read_only",
-            "concurrency_safe",
-            "exclusive",
-            "requires_approval",
-            "network_access",
-            "credential_required",
-        ):
-            if not isinstance(getattr(self, field_name), bool):
-                raise TypeError(f"ToolMetadata {field_name} must be bool")
-        risk_level = _clean_text(self.risk_level)
-        if risk_level not in _RISK_LEVELS:
-            raise ValueError(f"Unknown tool risk level: {self.risk_level}")
-        object.__setattr__(self, "risk_level", cast(ToolRiskLevel, risk_level))
-        object.__setattr__(self, "scopes", tuple(_clean_scopes(self.scopes)))
-        if not isinstance(self.extra, dict):
-            raise TypeError("ToolMetadata extra must be a dict")
-        object.__setattr__(self, "extra", deepcopy(self.extra))
-
-    def visible_in(self, current_mode: str) -> bool:
-        """
-        判断工具在指定的当前模式下是否可见。
-
-        工具在以下任一条件下可见：
-        1. current_mode 在工具的 scopes 列表中
-        2. 工具的 scopes 中包含 "extension"（扩展工具在所有模式下均可见）
-
-        返回 True 表示可见，False 表示不可见。
-        """
-        mode = _clean_text(current_mode)
-        return mode in self.scopes or "extension" in self.scopes
-
-
-@dataclass
-class ToolDefinition:
-    """
-    工具定义 —— 一个可调用的工具，包含模型可见的 schema 和运行时元数据。
-
-    ToolDefinition 是工具注册表中的核心条目。它将工具的"描述面"
-    （name、description、parameters——供 LLM 理解和调用）与"执行面"
-    （execute 函数、metadata 元数据）绑定在一起。
-
-    注意：这是可变数据类 (frozen=False)，因为 execute 属性在注册后
-    可能被动态替换或包装。
-    """
-
-    # 工具唯一名称（与 metadata.name 必须一致）
-    name: str
-    # 工具显示标签（面向用户的可读名称）
-    label: str
-    # 工具功能描述（面向 LLM，告诉模型何时以及如何使用该工具）
     description: str
-    # JSON Schema 格式的参数定义（定义工具接受的输入参数结构）
-    parameters: dict[str, Any]
-    # 工具运行时元数据
-    metadata: ToolMetadata
-    # 工具执行函数（符合 ToolExecuteFn 协议的可调用对象）
-    execute: ToolExecuteFn
+    input_schema: Mapping[str, object]
+    output_schema: Mapping[str, object] | None = None
+    schema_version: int = 1
 
     def __post_init__(self) -> None:
-        """
-        创建后的校验逻辑：
-        1. 校验 name、label、description 为非空文本
-        2. 校验 parameters 为 dict
-        3. 校验 metadata 为 ToolMetadata 实例
-        4. 校验 metadata.name == self.name（名称一致性）
-        5. 校验 execute 可调用
-        6. 深拷贝 parameters 以防止外部修改
-        """
-        self.name = _require_text(self.name, "tool.name")
-        self.label = _require_text(self.label, "tool.label")
-        self.description = _require_text(self.description, "tool.description")
-        if not isinstance(self.parameters, dict):
-            raise TypeError("ToolDefinition parameters must be a dict")
-        if not isinstance(self.metadata, ToolMetadata):
-            raise TypeError("ToolDefinition metadata must be ToolMetadata")
-        if self.metadata.name != self.name:
-            raise ValueError(
-                f"Tool metadata name must match tool name: {self.metadata.name} != {self.name}"
+        # 验证名称格式
+        name = _require_text(self.name, "tool name")
+        if _TOOL_NAME_PATTERN.fullmatch(name) is None:
+            raise ValueError(f"Invalid tool name: {self.name}")
+        # 验证版本号
+        if isinstance(self.schema_version, bool) or not isinstance(
+            self.schema_version, int
+        ):
+            raise TypeError("schema_version must be int")
+        if self.schema_version <= 0:
+            raise ValueError("schema_version must be positive")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(
+            self, "description", _require_text(self.description, "description")
+        )
+        # 冻结 input_schema 防止运行时篡改
+        object.__setattr__(
+            self,
+            "input_schema",
+            _freeze_json_mapping(self.input_schema, "input_schema"),
+        )
+        if self.output_schema is not None:
+            object.__setattr__(
+                self,
+                "output_schema",
+                _freeze_json_mapping(self.output_schema, "output_schema"),
             )
-        if not callable(self.execute):
-            raise TypeError("ToolDefinition execute must be callable")
-        self.parameters = deepcopy(self.parameters)
-
-    def to_spec(self) -> Tool:
-        """
-        将工具定义转换为纯协议对象 Tool（供 LLM API 使用）。
-
-        Tool 对象包含 name、description、parameters 三个字段，
-        是对外发送给 LLM 的工具描述，不包含执行逻辑和元数据。
-        """
-        return Tool(
-            name=self.name,
-            description=self.description,
-            parameters=self.parameters,
-        )
 
 
 @dataclass(frozen=True)
-class ToolCatalogItem:
+class ToolExecutionRequest:
+    """工具执行请求 —— 从 model step 创建的具体执行请求。
+
+    包含模型发出的工具调用的完整上下文：
+    - run_id / session_id: 标识所属的运行和会话
+    - tool_call_id: LLM 为该工具调用分配的 ID
+    - tool_name: 调用的工具名称
+    - arguments: LLM 传入的参数
+    - mode: 当前运行模式（plan / execute / unrestricted）
+    - registration_id: 模型看到的注册快照 ID（用于检测过期）
+    - deadline_at_ms: 可选的执行截止时间戳
+    - raw_arguments / argument_parse_error: 参数解析失败时的原始内容
+
+    返回值:
+        此对象被传递给 ToolRuntime，由它负责查找注册、验证权限并执行。
     """
-    工具目录条目 —— 工具目录中的一个条目。
 
-    将工具的 spec（供 LLM 消费）和 metadata（供运行时代理消费）
-    打包在一起，作为目录查询的基本单元。
-
-    注意：ToolCatalogItem 不暴露 execute 函数，外部使用者只能看到
-    工具的描述信息，不能直接执行。
-    """
-    spec: Tool
-    metadata: ToolMetadata
-
-
-@dataclass(frozen=True)
-class ToolCatalogView:
-    """
-    工具目录视图 —— 工具目录的不可变快照。
-
-    封装了当前可用的全部工具条目列表，提供便捷的迭代和查询方法。
-    此视图是只读的（frozen=True），确保在传递过程中不会被意外修改。
-
-    主要用途：
-    1. 向 LLM 提供当前可用工具列表（通过 tools 属性）
-    2. 供运行时筛选特定模式下的工具
-    """
-    items: tuple[ToolCatalogItem, ...] = field(default_factory=tuple)
-
-    @property
-    def tools(self) -> tuple[Tool, ...]:
-        """提取所有条目的 Tool spec，返回纯协议对象元组。"""
-        return tuple(item.spec for item in self.items)
-
-    def __iter__(self) -> Iterator[Tool]:
-        """迭代目录视图时默认迭代 Tool spec 列表。"""
-        return iter(self.tools)
-
-    def __len__(self) -> int:
-        """返回目录中工具的数量。"""
-        return len(self.items)
-
-
-@dataclass(frozen=True)
-class ToolPolicyContext:
-    """
-    工具策略评估上下文 —— 在执行策略检查时提供运行环境信息。
-
-    策略模块在执行工具前需要根据上下文信息（如会话 ID、会话元数据）
-    来决定是否允许执行、是否需要审批等。
-
-    字段说明：
-    - session_id: 当前会话的唯一标识（可选）
-    - metadata: 与策略评估相关的额外键值对（如用户角色、权限级别等），
-      内部存储为 MappingProxyType 以确保不可变
-    """
-    session_id: str | None = None
-    metadata: Mapping[str, object] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        """清洗 session_id（None 或空字符串统一为 None），将 metadata 转为不可变映射。"""
-        object.__setattr__(self, "session_id", _optional_text(self.session_id))
-        object.__setattr__(
-            self,
-            "metadata",
-            MappingProxyType(deepcopy(dict(self.metadata))),
-        )
-
-
-@dataclass(frozen=True)
-class ToolCallRequest:
-    """
-    工具调用请求 —— 描述一次完整的工具调用所需的所有信息。
-
-    当 AI 智能体决定调用某个工具时，会生成一个 ToolCallRequest，包含：
-    - 运行标识（run_id、tool_call_id）：用于追踪和关联
-    - 工具名称和参数（name、arguments）：告诉系统调用哪个工具以及传什么参数
-    - 元数据和安全上下文（metadata、policy_context、current_mode、source）：
-      用于策略评估和权限检查
-    - 消息上下文（assistant_message、context）：提供调用的原始消息上下文
-
-    这是整个工具执行链路的入口数据结构。
-    """
-    # 当前运行 ID（一次 run 可能包含多个 tool call）
     run_id: str
-    # 工具调用 ID（全局唯一的调用标识）
-    tool_call_id: str
-    # 要调用的工具名称
-    name: str
-    # 工具调用参数（JSON 可序列化的键值对）
-    arguments: dict[str, Any] = field(default_factory=dict)
-    # 工具元数据（可选，通常由准备阶段填充）
-    metadata: ToolMetadata | None = None
-    # 当前运行模式（决定哪些工具可用）
-    current_mode: str = "build"
-    # 调用来源
-    source: ToolInvocationSource = "agent"
-    # 策略评估上下文
-    policy_context: ToolPolicyContext = field(default_factory=ToolPolicyContext)
-    # 触发此工具调用的 AI 助手消息（可选）
-    assistant_message: AssistantMessage | None = None
-    # 工具钩子上下文快照（可选，用于工具执行前后的拦截处理）
-    context: ToolHookContextSnapshot | None = None
-
-    def __post_init__(self) -> None:
-        """清洗并校验所有字段：确保 run_id、tool_call_id、name 非空，arguments 为 dict，
-        current_mode 非空，source 值合法。"""
-        object.__setattr__(self, "run_id", _require_text(self.run_id, "run_id"))
-        object.__setattr__(
-            self,
-            "tool_call_id",
-            _require_text(self.tool_call_id, "tool_call_id"),
-        )
-        object.__setattr__(self, "name", _require_text(self.name, "tool.name"))
-        if not isinstance(self.arguments, dict):
-            raise TypeError("ToolCallRequest arguments must be a dict")
-        object.__setattr__(self, "arguments", deepcopy(self.arguments))
-        object.__setattr__(self, "current_mode", _require_text(self.current_mode, "current_mode"))
-        source = _clean_text(self.source)
-        if source not in {"agent", "approval_resume"}:
-            raise ValueError(f"Unknown tool invocation source: {self.source}")
-        object.__setattr__(self, "source", cast(ToolInvocationSource, source))
-
-
-@dataclass(frozen=True)
-class PreparedToolCall:
-    """
-    已准备的工具调用 —— 将 ToolCallRequest 与对应的 ToolDefinition 绑定。
-
-    准备阶段 (preparation phase) 的输出：根据请求中的工具名称查找到
-    对应的工具定义后，将两者打包为 PreparedToolCall，供后续执行使用。
-    """
-    # 匹配到的工具定义
-    definition: ToolDefinition
-    # 原始调用请求
-    request: ToolCallRequest
-
-    @property
-    def metadata(self) -> ToolMetadata:
-        """快捷属性：直接从 definition 获取工具元数据。"""
-        return self.definition.metadata
-
-
-@dataclass(frozen=True)
-class PreparedToolCallResult:
-    """
-    工具准备结果 —— 准备阶段的返回结构。
-
-    如果准备成功：call 字段包含有效的 PreparedToolCall，error_code 为 None。
-    如果准备失败（如工具未找到、模式不匹配等）：error_code 包含错误代码，
-    message 包含错误描述，recovery_hint 包含恢复建议。
-    """
-    # 已准备好的工具调用（成功时非 None）
-    call: PreparedToolCall | None = None
-    # 错误代码（成功时为 None）
-    error_code: str | None = None
-    # 错误或成功消息
-    message: str = ""
-    # 恢复提示（告诉调用方如何修复问题）
-    recovery_hint: str = ""
-
-    @property
-    def valid(self) -> bool:
-        """
-        判断准备结果是否有效。
-
-        当 call 不为 None 且 error_code 为 None 时返回 True，
-        表示准备成功，可以继续进行工具执行。
-        """
-        return self.call is not None and self.error_code is None
-
-
-@dataclass(frozen=True)
-class ToolRiskView:
-    """
-    工具风险视图 —— 以人类可读的方式展示工具的风险等级。
-
-    用于在审批中断时将风险信息呈现给用户，帮助用户做出批准/拒绝的决策。
-
-    字段说明：
-    - level: 风险等级字符串（如 "low", "medium", "high", "unknown"）
-    - summary: 风险摘要描述（说明为什么这个工具有该风险等级）
-    """
-    level: str
-    summary: str = ""
-
-
-@dataclass(frozen=True)
-class ToolInterruption:
-    """
-    工具中断 —— 当工具需要人工审批时产生的中断信号。
-
-    当工具的 requires_approval 为 True 或策略评估认为需要审批时，
-    系统会生成一个 ToolInterruption 并暂停执行流程，等待用户做出
-    批准或拒绝的决策。用户决策通过 ToolResumeDecision 返回。
-
-    字段说明：
-    - approval_id: 审批请求的唯一 ID（用于后续恢复时关联）
-    - run_id: 当前运行 ID
-    - tool_call_id: 被中断的工具调用 ID
-    - tool_name: 被中断的工具名称
-    - arguments: 工具调用的参数（供用户审查）
-    - reason: 中断原因（说明为什么需要审批）
-    - risk: 风险视图（展示风险信息给用户）
-    """
-    approval_id: str
-    run_id: str
+    session_id: str
     tool_call_id: str
     tool_name: str
-    arguments: dict[str, object] = field(default_factory=dict)
-    reason: str = ""
-    risk: ToolRiskView = field(default_factory=lambda: ToolRiskView(level="unknown"))
-
-
-@dataclass(frozen=True)
-class ToolInvocation:
-    """
-    工具调用输入 —— 传递给 ToolPort.execute() 的标准化输入结构。
-
-    与 ToolCallRequest 类似但更精简：去掉了 metadata 字段（因为此时
-    工具定义已匹配完成），保留执行所需的核心信息。
-
-    同时去除了 source 字段中的调用来源区分，统一作为执行入口参数。
-    """
-    run_id: str
-    tool_call_id: str
-    name: str
-    arguments: dict[str, object] = field(default_factory=dict)
-    current_mode: str = "build"
-    source: ToolInvocationSource = "agent"
-    policy_context: ToolPolicyContext = field(default_factory=ToolPolicyContext)
-    assistant_message: AssistantMessage | None = None
-    context: ToolHookContextSnapshot | None = None
-
-
-@dataclass(frozen=True)
-class ToolObservation:
-    """
-    工具执行观察 —— 工具执行完成后产生的输出/结果。
-
-    ToolObservation 是工具执行链路的终点数据结构。它记录了：
-    - 执行状态（成功、错误、被拒绝、需要审批、已取消）
-    - 输出内容（content：多模态内容块元组）
-    - 副作用信息（affected_paths：受影响的文件路径，workspace_changed：工作区是否改变）
-    - 验证结果（verification：运行后验证项）
-    - 中断信息（interruption：如果需要审批，包含中断详情）
-    - 额外元数据（metadata：工具自定义的附加信息）
-
-    注意：content 使用 tuple 是因为 dataclass 的 frozen=True 需要不可变类型。
-    """
-    # 工具调用 ID
-    tool_call_id: str
-    # 工具名称
-    name: str
-    # 执行状态
-    status: ToolObservationStatus
-    # 输出内容（多模态内容块的不可变元组）
-    content: tuple[ContentBlock, ...] = field(default_factory=tuple)
-    # 受影响的文件路径列表
-    affected_paths: tuple[str, ...] = field(default_factory=tuple)
-    # 工作区是否发生了变化
-    workspace_changed: bool = False
-    # 运行后验证结果列表
-    verification: tuple[RunVerification, ...] = field(default_factory=tuple)
-    # 中断信息（如果需要审批）
-    interruption: ToolInterruption | None = None
-    # 额外元数据
-    metadata: dict[str, object] = field(default_factory=dict)
+    arguments: Mapping[str, object]
+    mode: ToolMode
+    registration_id: str
+    deadline_at_ms: int | None = None
+    raw_arguments: str | None = None
+    argument_parse_error: str | None = None
 
     def __post_init__(self) -> None:
-        """清洗 status 字段，确保其值在合法的观察状态集合中。"""
-        status = _clean_text(self.status)
-        if status not in _OBSERVATION_STATUSES:
-            raise ValueError(f"Unknown tool observation status: {self.status}")
-        object.__setattr__(self, "status", cast(ToolObservationStatus, status))
+        # 所有 ID 字段不能为空
+        for name in (
+            "run_id",
+            "session_id",
+            "tool_call_id",
+            "tool_name",
+            "registration_id",
+        ):
+            object.__setattr__(self, name, _require_text(getattr(self, name), name))
+        mode = _clean_text(self.mode)
+        if mode not in _TOOL_MODES:
+            raise ValueError(f"Unknown tool mode: {self.mode}")
+        if self.deadline_at_ms is not None and (
+            isinstance(self.deadline_at_ms, bool)
+            or not isinstance(self.deadline_at_ms, int)
+        ):
+            raise TypeError("deadline_at_ms must be int or None")
+        object.__setattr__(self, "mode", cast(ToolMode, mode))
+        object.__setattr__(
+            self, "arguments", _freeze_json_mapping(self.arguments, "arguments")
+        )
+        object.__setattr__(self, "raw_arguments", _optional_text(self.raw_arguments))
+        object.__setattr__(
+            self,
+            "argument_parse_error",
+            _optional_text(self.argument_parse_error),
+        )
 
 
 @dataclass(frozen=True)
-class ToolResumeDecision:
-    """
-    工具恢复决策 —— 用户在审批中断后做出的决策。
+class ToolBatchPreparation:
+    """工具批次的准备结果。
 
-    当工具执行被中断等待审批时，用户通过此数据结构
-    传达批准 (approve) 或拒绝 (deny) 的决定，系统根据此决定
-    恢复或终止工具执行。
-
-    字段说明：
-    - approval_id: 对应的审批请求 ID（与 ToolInterruption.approval_id 对应）
-    - decision: "approve"（批准执行）或 "deny"（拒绝执行）
-    - reason: 决策理由（可选，用于记录审计日志）
+    准备阶段只做注册、参数、权限和审批检查，不执行处理器；通过时返回一次性
+    ``batch_id``，遇到屏障时直接返回与输入顺序对应的终态结果。
     """
-    approval_id: str
-    decision: ToolResumeDecisionValue
-    reason: str = ""
+
+    batch_id: str | None = None
+    results: tuple["ToolResult", ...] = ()
 
     def __post_init__(self) -> None:
-        """清洗并校验：确保 approval_id 非空，decision 在合法决策值集合中，
-        reason 为清洗后的文本。"""
-        decision = _clean_text(self.decision)
-        if decision not in _RESUME_DECISIONS:
-            raise ValueError(f"Unknown tool resume decision: {self.decision}")
-        object.__setattr__(self, "approval_id", _require_text(self.approval_id, "approval_id"))
-        object.__setattr__(self, "decision", cast(ToolResumeDecisionValue, decision))
-        object.__setattr__(self, "reason", _clean_text(self.reason))
+        from .results import ToolResult
+
+        batch_id = _optional_text(self.batch_id)
+        results = tuple(self.results)
+        if any(not isinstance(result, ToolResult) for result in results):
+            raise TypeError(
+                "ToolBatchPreparation results must contain ToolResult values"
+            )
+        if (batch_id is None) == (not results):
+            raise ValueError(
+                "ToolBatchPreparation requires exactly one of batch_id or results"
+            )
+        object.__setattr__(self, "batch_id", batch_id)
+        object.__setattr__(self, "results", results)
 
 
-# ============================================================================
-# 协议接口 (Protocol Interface)
-# ============================================================================
+@dataclass(frozen=True)
+class ToolResumePreparation:
+    """恢复挂起工具前生成的一次性恢复句柄及其 checkpoint 投影。"""
 
-class ToolPort(Protocol):
+    resume_id: str
+    checkpoint_state: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "resume_id",
+            _require_text(self.resume_id, "resume_id"),
+        )
+        if not isinstance(self.checkpoint_state, Mapping):
+            raise TypeError("checkpoint_state must be a mapping")
+        object.__setattr__(
+            self,
+            "checkpoint_state",
+            _freeze_json_mapping(self.checkpoint_state, "checkpoint_state"),
+        )
+
+
+class CancellationToken(Protocol):
+    """取消令牌 —— 工具处理器检查取消状态的协议接口。
+
+    工具处理器在长时间操作中应定期检查 cancelled 属性
+    或调用 raise_if_cancelled() 以响应取消信号。
     """
-    工具端口 —— 工具子系统对外暴露的主协议接口。
 
-    ToolPort 定义了工具子系统的三个核心能力：
-    1. catalog():  查询当前可用的工具目录
-    2. execute():  执行一个工具调用
-    3. resume():   在审批中断后恢复执行（批准或拒绝）
-
-    任何实现了此协议的对象都可以作为工具子系统与外部（如运行时）
-    进行交互。这种端口/适配器架构使得工具子系统可以独立替换和测试。
-    """
-
-    def catalog(self, current_mode: str = "build") -> ToolCatalogView:
-        """
-        获取当前模式下的工具目录视图。
-
-        参数 current_mode 指定当前运行模式（如 "read"、"plan"、"build"），
-        返回的 ToolCatalogView 仅包含在该模式下可见的工具。
-        """
+    @property
+    def cancelled(self) -> bool:
+        """返回工具是否已收到取消信号。"""
         ...
 
-    async def execute(self, invocation: ToolInvocation) -> ToolObservation:
-        """
-        执行一个工具调用。
-
-        接收 ToolInvocation 作为输入，执行后返回 ToolObservation 作为结果。
-        这是一个异步方法，因为工具执行可能涉及 I/O 操作（如文件读写、网络请求等）。
-        """
-        ...
-
-    async def resume(self, decision: ToolResumeDecision) -> ToolObservation:
-        """
-        在审批中断后恢复工具执行。
-
-        接收用户的 ToolResumeDecision（批准或拒绝），
-        恢复之前被中断的工具执行流程，返回最终的 ToolObservation。
-        如果用户拒绝，返回状态为 "denied" 的观察结果。
-        """
+    def raise_if_cancelled(self) -> None:
+        """若已取消则抛出取消异常，否则继续执行。"""
         ...
 
 
-# ============================================================================
-# 辅助函数 (Helper Functions)
-# ============================================================================
+class ProgressReporter(Protocol):
+    """进度报告器 —— 工具处理器发送进度事件的协议接口。
 
-def tool_call_from_invocation(invocation: ToolInvocation) -> ToolCall:
+    工具处理器可以在执行过程中调用 report() 发送中间状态事件，
+    这些事件会被转发到上层（REPL 显示进度、RPC 发送事件帧等）。
     """
-    从 ToolInvocation 构造标准的 ToolCall 对象。
 
-    ToolCall 是协议层定义的简单数据结构（包含 id、name、arguments），
-    供 LLM API 和历史记录使用。此函数桥接了工具层的 ToolInvocation
-    和协议层的 ToolCall 之间的数据转换。
+    async def report(
+        self,
+        kind: str,
+        *,
+        message: str = "",
+        data: Mapping[str, object] | None = None,
+    ) -> None:
+        """发送一条运行中进度事件，不改变工具结果状态。"""
+        ...
+
+
+class EffectReporter(Protocol):
+    """效果报告器 —— 工具处理器报告副作用的协议接口。
+
+    工具处理器通过此接口记录每次操作的文件系统/网络等副作用，
+    这些记录会被用于权限验证（实际效果不超过授权范围）和审计日志。
+    """
+
+    def report(self, effect: object) -> None:
+        """记录一个已观察或声明的工具副作用。"""
+        ...
+
+
+CleanupCallback: TypeAlias = Callable[[], Awaitable[None] | None]
+
+
+class CleanupStack(Protocol):
+    """清理栈 —— 注册和运行工具清理回调的协议接口。
+
+    工具处理器可以通过 push() 注册清理回调（如关闭临时文件句柄），
+    工具执行完成后这些回调会被逆序执行。
+    """
+
+    def push(self, callback: CleanupCallback) -> None:
+        """登记一个在工具结束时逆序执行的清理回调。"""
+        ...
+
+
+@dataclass(frozen=True)
+class ToolExecutionContext:
+    """工具执行上下文 —— 运行时提供给工具处理器的完整上下文。
+
+    当工具处理器被调用时，此对象包含了执行所需的所有基础设施：
+    - request: 原始的 ToolExecutionRequest（含调用 ID、参数等）
+    - cancellation: 取消令牌（检查是否被取消）
+    - deadline_at_ms: 执行截止时间戳
+    - progress: 进度报告器（发送中间状态事件）
+    - effects: 效果报告器（记录副作用操作）
+    - cleanup: 清理栈（注册清理回调）
+
+    工具处理器不直接创建此对象，由 ToolRuntime 在执行时构造并传入。
+    """
+
+    request: ToolExecutionRequest
+    cancellation: CancellationToken
+    deadline_at_ms: int | None
+    progress: ProgressReporter
+    effects: EffectReporter
+    cleanup: CleanupStack
+
+
+TInput = TypeVar("TInput")
+TOutput = TypeVar("TOutput")
+
+
+class ToolHandlerError(Exception):
+    """工具处理器错误 —— 工具处理器抛出的预期领域异常。
+
+    与普通的 Exception 不同，ToolHandlerError 被视为"预期的"失败，
+    不会触发崩溃恢复逻辑。它包含结构化的错误码和可选的详细信息，
+    帮助上层理解失败原因并决定是否重试。
 
     参数:
-        invocation: 工具调用输入
-
-    返回:
-        ToolCall: 协议层的工具调用对象
+        code: 错误码（如 "write.exists"、"read.not_file"）
+        message: 人类可读的错误描述
+        retryable: 此错误是否可重试（如超时可重试，权限拒绝不可重试）
+        details: 额外错误数据的映射
     """
-    return ToolCall(
-        id=invocation.tool_call_id,
-        name=invocation.name,
-        arguments=dict(invocation.arguments),
-    )
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        self.code = _require_text(code, "tool handler error code")
+        self.message = _require_text(message, "tool handler error message")
+        self.retryable = bool(retryable)
+        if details is not None and not isinstance(details, Mapping):
+            raise TypeError("tool handler error details must be a mapping")
+        self.details = deepcopy(dict(details or {}))
+        super().__init__(self.message)
 
 
-def error_result(message: str, *, status: ToolResultStatus = "error", error_code: str) -> ToolResult:
+class ToolCodec(Protocol, Generic[TInput]):
+    """编解码器协议 —— 工具值的序列化和反序列化接口。
+
+    每个工具注册时都需要提供 input_codec 和 output_codec，
+    负责在"原始 JSON 对象"和"类型化的 Python 对象"之间转换。
+    具体的实现有 DataclassCodec（基于 dataclass 类型转换）和
+    JsonObjectCodec（纯 JSON Schema 验证）。
+
+    类型参数 TInput: 解码后的 Python 类型（如 WriteInput dataclass）。
     """
-    构造一个错误工具结果 (ToolResult)。
 
-    当工具执行失败时，使用此函数快速创建统一的错误响应。
-    自动设置 is_error=True，并将错误消息包装为 TextContent。
+    @property
+    def json_schema(self) -> Mapping[str, object] | None:
+        """返回输入值的 JSON Schema；未提供校验时返回 ``None``。"""
+        ...
 
-    参数:
-        message:   错误描述消息
-        status:    结果状态（默认为 "error"，也可用于 "denied" 等其他非成功状态）
-        error_code: 机器可读的错误代码（如 "TOOL_NOT_FOUND"、"PERMISSION_DENIED"）
+    # 返回 JSON Schema，None 表示不校验（仅 UnverifiedJsonCodec 使用）
 
-    返回:
-        ToolResult: 包含错误信息的工具结果对象
+    def decode(self, value: object) -> TInput:
+        """将模型传入的 JSON 值校验并解码为处理器输入类型。"""
+        ...
+
+    # 将 JSON 对象解码为类型化的 Python 值
+    # 参数 value: 来自 LLM 的原始 JSON 参数
+    # 返回: 解码后的类型化对象
+
+    def encode(self, value: TInput) -> object:
+        """将处理器输出编码为可序列化的 JSON 值。"""
+        ...
+
+    # 将类型化的 Python 值编码回 JSON 对象
+    # 参数 value: 工具处理器的返回值
+    # 返回: 编码后的 JSON 对象
+
+
+class ToolHandler(Protocol, Generic[TInput, TOutput]):
+    """工具处理器协议 —— 实际执行工具逻辑的接口。
+
+    工具的所有业务逻辑都在 handler 中实现。
+    handler 是一个异步可调用对象，接收解码后的输入和上下文，
+    返回类型化的输出，然后由 output_codec 编码为 JSON。
+
+    类型参数:
+        TInput: 解码后的输入类型
+        TOutput: 原始的返回类型（在编码前）
     """
-    return ToolResult(
-        content=[TextContent(text=message)],
-        status=status,
-        is_error=status != "success",
-        error_code=error_code,
-    )
+
+    async def __call__(
+        self, input: TInput, context: ToolExecutionContext
+    ) -> TOutput: ...
 
 
-# ============================================================================
-# 内部工具函数 (Internal Helper Functions)
-# ============================================================================
+class ToolAccessResolver(Protocol, Generic[TInput]):
+    """访问解析器协议 —— 将工具输入解析为访问权限请求的接口。
 
-def _clean_scopes(values: tuple[str, ...]) -> list[str]:
+    在工具执行前被调用，负责：
+    1. 对输入参数进行路径安全解析（如将相对路径转为工作区绝对路径）
+    2. 构造 ToolAccessRequest（包含受影响资源、预期效果、风险级别）
+    3. 返回 ToolAccessResolution 供审批流程使用
+
+    不同类型的工具有不同的访问解析逻辑：
+    - 文件工具：解析路径、检查是否在工作区内、分类读写
+    - Shell 工具：解析命令、评估命令分类（只读/变更/高风险）
     """
-    清洗并校验作用域列表。
 
-    对输入的每个值进行文本清洗，校验其是否在合法作用域集合中，
-    去除重复值（保持第一次出现的顺序），确保结果非空。
+    def resolve(
+        self,
+        input: TInput,
+        request: ToolExecutionRequest,
+    ) -> ToolAccessResolution[TInput]:
+        """根据已解码输入生成资源、效果和风险组成的访问请求。"""
+        ...
 
-    参数:
-        values: 原始作用域元组
 
-    返回:
-        list[str]: 去重后的合法作用域列表
+class ToolOutputRenderer(Protocol):
+    """输出渲染器协议 —— 将工具输出数据转为 LLM 可消费的内容块。
 
-    异常:
-        ValueError: 如果某个值不在合法集合中，或结果为空
+    render() 接收编码后的输出字典，返回内容元素元组（TextContent、
+    ImageContent、ArtifactContent），这些内容将作为 ToolResult 的
+    content 字段返回给 LLM。
     """
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        text = _clean_text(value)
-        if text not in _SCOPES:
-            raise ValueError(f"Unknown tool scope: {value}")
-        if text not in seen:
-            cleaned.append(text)
-            seen.add(text)
-    if not cleaned:
-        raise ValueError("ToolMetadata scopes cannot be empty")
-    return cleaned
+
+    def render(self, data: Mapping[str, object]) -> tuple[object, ...]:
+        """把编码后的结果转换为模型可消费的内容块。"""
+        ...
+
+
+@dataclass(frozen=True)
+class ToolRegistration:
+    """工具注册 —— 工具拥有者提供的完整定义，在 Registry 物化之前使用。
+
+    这是工具创建者需要填充的"登记表"，包含工具的所有方面：
+    - 身份信息（名称、版本、分类、来源、拥有者）
+    - 模型可见定义（spec）
+    - 安全策略（policy）
+    - 输入输出编解码（codecs）
+    - 业务逻辑（handler）
+    - 权限解析（access_resolver）
+    - 结果渲染（renderer）
+
+    __post_init__ 会对所有字段做严格校验，确保注册信息的完整性。
+    """
+
+    #: 工具版本号（字符串，如 "1.0.0"）
+    version: str
+    #: 实现版本号（用于检测 handler 实现是否变化）
+    implementation_version: str
+    #: 工具规格（对 LLM 可见的名称、描述、Schema）
+    spec: ToolSpec
+    #: 工具功能分类
+    category: ToolCategory
+    #: 工具来源
+    source: ToolSource
+    #: 工具的拥有者标识（用于权限管理和卸载）
+    owner: str
+    #: 安全策略（并发、超时、权限模式、审批规则等）
+    policy: ToolPolicy
+    #: 输入编解码器（JSON → 类型化对象）
+    input_codec: ToolCodec[object]
+    #: 输出编解码器（类型化对象 → JSON）
+    output_codec: ToolCodec[object]
+    #: 工具处理器（实际业务逻辑）
+    handler: ToolHandler[object, object]
+    #: 输出渲染器（输出字典 → LLM 内容块）
+    renderer: ToolOutputRenderer
+    #: 访问解析器（输入参数 → 权限审批请求）
+    access_resolver: ToolAccessResolver[object]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "version", _require_text(self.version, "tool version"))
+        object.__setattr__(
+            self,
+            "implementation_version",
+            _require_text(self.implementation_version, "implementation_version"),
+        )
+        object.__setattr__(self, "owner", _require_text(self.owner, "tool owner"))
+        if not isinstance(self.spec, ToolSpec):
+            raise TypeError("spec must be ToolSpec")
+        category = _clean_text(self.category)
+        if category not in _TOOL_CATEGORIES:
+            raise ValueError(f"Unknown tool category: {self.category}")
+        source = _clean_text(self.source)
+        if source not in _TOOL_SOURCES:
+            raise ValueError(f"Unknown tool source: {self.source}")
+        if not isinstance(self.policy, ToolPolicy):
+            raise TypeError("policy must be ToolPolicy")
+        if not callable(self.handler):
+            raise TypeError("handler must be callable")
+        if not callable(getattr(self.input_codec, "decode", None)):
+            raise TypeError("input_codec must implement decode")
+        if not callable(getattr(self.output_codec, "encode", None)):
+            raise TypeError("output_codec must implement encode")
+        if not callable(getattr(self.renderer, "render", None)):
+            raise TypeError("renderer must implement render")
+        if not callable(getattr(self.access_resolver, "resolve", None)):
+            raise TypeError("access_resolver must implement resolve")
+        object.__setattr__(self, "category", cast(ToolCategory, category))
+        object.__setattr__(self, "source", cast(ToolSource, source))
+
+
+class ToolExecutionPort(Protocol):
+    """唯一暴露给 Core 的工具执行能力。
+
+    Core 只能先准备批次，再用一次性句柄执行；注册物化、权限、审批和状态持久化均
+    由 Tools/Runtime 内部负责，Core 不得直接调用处理器。
+    """
+
+    def catalog_snapshot(
+        self, *, mode: ToolMode | None = None
+    ) -> ToolCatalogSnapshot:
+        """返回指定运行模式下稳定的模型可见工具目录快照。"""
+        ...
+
+    def prepare_batch(
+        self,
+        requests: tuple[ToolExecutionRequest, ...] | list[ToolExecutionRequest],
+    ) -> ToolBatchPreparation:
+        """执行无副作用准备并返回批次句柄或阻断结果。"""
+        ...
+
+    async def execute_prepared(self, batch_id: str) -> tuple[ToolResult, ...]:
+        """消费一次性批次句柄并执行已通过准备阶段的工具。"""
+        ...
+
+
+class ToolControlPort(Protocol):
+    """仅供 Runtime/Interface 使用的审批、交互、取消与恢复控制端口。"""
+
+    def pending_challenges(self) -> tuple[ApprovalChallenge, ...]:
+        """返回当前待用户处理的审批挑战。"""
+        ...
+
+    def approval_challenge(self, approval_id: str):
+        """按审批 ID 获取挑战详情；不存在时返回 ``None``。"""
+        ...
+
+    async def cancel(self, attempt_id: str) -> bool:
+        """请求取消指定工具尝试，并返回是否成功发出取消。"""
+        ...
+
+    def prepare_resume(
+        self,
+        response: ApprovalResponse | InteractionResponse,
+    ) -> ToolResumePreparation:
+        """暂存用户响应并生成可恢复的 opaque 句柄。"""
+        ...
+
+    def pending_prepared_resume(self) -> ToolResumePreparation | None:
+        """读取当前待执行的恢复句柄。"""
+        ...
+
+    async def execute_prepared_resume(self, resume_id: str) -> ToolResult:
+        """消费恢复句柄并继续执行挂起工具。"""
+        ...
+
+
+class ToolCheckpointPort(Protocol):
+    """仅供 Runtime 保存和恢复 Tools 私有状态的 opaque checkpoint 端口。"""
+
+    def checkpoint_state(
+        self,
+        *,
+        intent: Mapping[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        """导出当前 Tools 私有状态；无活动状态时返回 ``None``。"""
+        ...
+
+    def restore_checkpoint_state(self, state: Mapping[str, object]) -> None:
+        """校验并恢复此前导出的 Tools 私有状态。"""
+        ...
+
+
+# ── 内部辅助函数 ──────────────────────────────────────────────────────────────
+
+
+def _freeze_json_mapping(
+    value: Mapping[str, object], field_name: str
+) -> Mapping[str, object]:
+    """递归冻结一个 JSON 兼容的映射为不可变视图（MappingProxyType）。
+
+    使用 MappingProxyType 包装确保数据在运行时不可变，
+    防止代码意外修改本应只读的数据结构。"""
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be a mapping")
+    return cast(Mapping[str, object], _freeze_json_value(dict(value)))
+
+
+def _freeze_json_value(value: object) -> object:
+    """递归冻结 JSON 值，将 dict → MappingProxyType，list/tuple → tuple。"""
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_json_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json_value(item) for item in value)
+    return deepcopy(value)
+
+
+def _clean_text(value: object) -> str:
+    """清理文本：None → ""，其他转 str 并去除首尾空格。"""
+    return str(value).strip() if value is not None else ""
 
 
 def _require_text(value: object, field_name: str) -> str:
-    """
-    要求文本值非空 —— 清洗后如果为空白字符串则抛出异常。
-
-    用于校验必填的字符串字段（如 name、id 等），确保它们有实际内容。
-
-    参数:
-        value:      待校验的值
-        field_name: 字段名（用于异常消息）
-
-    返回:
-        str: 清洗后的非空字符串
-
-    异常:
-        ValueError: 如果 value 为空或清洗后为空
-    """
+    """要求值必须有文本内容，否则抛出 ValueError。"""
     text = _clean_text(value)
     if not text:
         raise ValueError(f"{field_name} cannot be empty")
@@ -718,63 +627,29 @@ def _require_text(value: object, field_name: str) -> str:
 
 
 def _optional_text(value: object) -> str | None:
-    """
-    可选文本值清洗 —— 清洗后如果为空白字符串则返回 None。
+    """将值转为可选的清理后文本。"""
+    return _clean_text(value) or None
 
-    用于校验可选的字符串字段（如 session_id），空值统一为 None。
-
-    参数:
-        value: 待清洗的值
-
-    返回:
-        str | None: 清洗后的非空字符串，或 None
-    """
-    text = _clean_text(value)
-    return text or None
-
-
-def _clean_text(value: object) -> str:
-    """
-    基础文本清洗 —— 将任意值转为去除首尾空白的字符串。
-
-    如果 value 为 None，返回空字符串。
-    如果 value 为其他类型，调用 str() 转换后去除首尾空白。
-
-    参数:
-        value: 任意值
-
-    返回:
-        str: 清洗后的字符串
-    """
-    return str(value).strip() if value is not None else ""
-
-
-# ============================================================================
-# 模块导出列表
-# ============================================================================
 
 __all__ = [
-    "PreparedToolCall",
-    "PreparedToolCallResult",
-    "ToolCallRequest",
-    "ToolCatalogItem",
-    "ToolCatalogView",
-    "ToolDefinition",
-    "ToolExecuteFn",
-    "ToolInterruption",
-    "ToolInvocation",
-    "ToolInvocationSource",
-    "ToolMetadata",
-    "ToolObservation",
-    "ToolObservationStatus",
-    "ToolPolicyContext",
-    "ToolPort",
-    "ToolResumeDecision",
-    "ToolResumeDecisionValue",
-    "ToolResult",
-    "ToolRiskView",
-    "ToolScope",
-    "ToolUpdateCallback",
-    "error_result",
-    "tool_call_from_invocation",
+    "CancellationToken",
+    "CleanupStack",
+    "EffectReporter",
+    "ProgressReporter",
+    "ToolAccessResolver",
+    "ToolBatchPreparation",
+    "ToolCheckpointPort",
+    "ToolControlPort",
+    "ToolCategory",
+    "ToolCodec",
+    "ToolExecutionContext",
+    "ToolExecutionPort",
+    "ToolExecutionRequest",
+    "ToolHandler",
+    "ToolHandlerError",
+    "ToolOutputRenderer",
+    "ToolRegistration",
+    "ToolResumePreparation",
+    "ToolSource",
+    "ToolSpec",
 ]

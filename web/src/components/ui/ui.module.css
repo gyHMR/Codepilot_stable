@@ -1,0 +1,13 @@
+.iconButton { width: 32px; height: 32px; display: inline-grid; place-items: center; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--color-text-secondary); cursor: pointer; transition: background var(--transition-fast), color var(--transition-fast); }
+.iconButton:hover { color: var(--color-text); background: var(--color-surface-hover); }
+.iconButton:disabled { opacity: .45; cursor: default; }
+.danger:hover { color: var(--color-danger); background: var(--color-danger-soft); }
+.tooltip { z-index: 80; padding: 5px 8px; border-radius: var(--radius-sm); background: #252a2f; color: #fff; font-size: 12px; box-shadow: var(--shadow-menu); }
+.menu { z-index: 70; min-width: 168px; padding: 5px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); box-shadow: var(--shadow-menu); }
+.menuItem { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 5px 8px; border-radius: var(--radius-sm); outline: 0; cursor: pointer; font-size: 13px; }
+.menuItem[data-highlighted] { background: var(--color-surface-hover); }
+.dangerText { color: var(--color-danger); }
+.collapsibleTrigger { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 0; border: 0; background: transparent; cursor: pointer; text-align: left; }
+.collapsibleTrigger svg { transition: transform var(--transition-fast); }
+.collapsible[data-state="open"] .collapsibleTrigger svg { transform: rotate(180deg); }
+.collapsibleContent { overflow: hidden; }

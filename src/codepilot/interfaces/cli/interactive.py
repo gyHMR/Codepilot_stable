@@ -1,3 +1,5 @@
+"""实现交互式终端循环、审批询问和命令分发。"""
+
 from __future__ import annotations
 
 """人类 CLI 交互主流程：读取输入、派发 runtime action、渲染 frame。
@@ -14,6 +16,7 @@ from __future__ import annotations
 CLI 层不直接调用模型、工具或 session 内部对象；所有跨层动作都经过 runtime action。
 """
 
+import asyncio
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal
 
@@ -218,7 +221,7 @@ async def run_prompt(
         renderer: 终端渲染器。
         verbose: 发生异常时是否打印 traceback。
 
-    Ctrl+C 会被转换成 ``RunCancelled``，让 runtime 有机会清理当前 run。
+    Runtime 会在 dispatch consumer 被取消时提交 cancelled 终态；CLI 只负责显示并传播取消。
     """
 
     try:
@@ -228,6 +231,9 @@ async def run_prompt(
             runtime.dispatch(session_id, PromptSubmitted(text=text)),
             renderer,
         )
+    except asyncio.CancelledError:
+        renderer.render_status("Cancelled", kind="cancelled")
+        raise
     except KeyboardInterrupt:
         renderer.render_status("Cancelled", kind="cancelled")
         async for _frame in runtime.dispatch(

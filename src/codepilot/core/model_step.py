@@ -1,8 +1,10 @@
+"""封装一次模型调用的请求构造、事件归并和失败分类。"""
+
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Callable
 
 from codepilot.llm.ports import (
     LLMCompleted,
@@ -13,314 +15,231 @@ from codepilot.llm.ports import (
     LLMTextDelta,
     LLMToolCallDelta,
 )
-from codepilot.protocols import (
-    AssistantMessage,
-    Message,
-    TextContent,
-    ThinkingContent,
-    Tool,
-    ToolResultMessage,
-    Usage,
-    UserMessage,
-)
-from codepilot.tools.contracts import ToolCatalogView
+from codepilot.protocols import AssistantMessage, Message, Usage, tool_mode_for_run_mode
+from codepilot.tools.registry import ToolCatalogSnapshot
 
-from .context_preflight import TOOL_RESULT_MAX_CHARS, prepare_messages_for_model
-from .contracts import AgentLoopInput, AgentLoopPorts, AgentMessage
+from .contracts import (
+    ContextPrepareRequest,
+    ContextPurpose,
+    CoreContextView,
+    CoreDirective,
+    CorePorts,
+    CoreRunInput,
+    ModelPurpose,
+    PreparedModelContext,
+)
+from .observations import ModelObservation
+from .state import CoreState, FailureRecord
 
 
 @dataclass(frozen=True)
-class ModelTurnResult:
-    message: AssistantMessage
+class ModelActionResult:
+    """一次模型调用归并后的消息、用量和错误结果。"""
+    observation: ModelObservation
     usage: Usage | None = None
-    error: Any = None
+    catalog_snapshot: ToolCatalogSnapshot | None = None
 
 
-async def run_model_turn(
-    input: AgentLoopInput,
-    ports: AgentLoopPorts,
-    messages: list[Any],
+async def call_model_once(
+    input: CoreRunInput,
+    ports: CorePorts,
+    messages: tuple[Message, ...],
+    state: CoreState,
+    purpose: ModelPurpose,
+    directive: CoreDirective,
     *,
-    emit: Callable[[dict[str, Any]], None] | None = None,
-) -> ModelTurnResult:
-    """Ask the model for the next assistant message."""
+    observation_id: str,
+) -> ModelActionResult:
+    """Prepare context and perform exactly one model action."""
 
-    if ports.model is None:
-        return ModelTurnResult(
-            message=AssistantMessage(content=[TextContent(text=input.user_prompt or "")])
+    snapshot = _core_tool_catalog(input, ports)
+    prepared = ports.context.prepare(
+        ContextPrepareRequest(
+            session_id=input.session_id,
+            run_id=input.run_id,
+            purpose=_context_purpose(purpose),
+            directive=_directive_text(
+                directive,
+                max_tool_calls_per_turn=input.limits.max_tool_calls_per_turn,
+            ),
+            messages=messages,
+            core_view=CoreContextView.from_state(state, input.mode),
+            model=input.model,
+            tool_catalog=snapshot,
+            seed=input.context_seed,
         )
+    )
+    if inspect.isawaitable(prepared):
+        prepared = await prepared
+    if not isinstance(prepared, PreparedModelContext):
+        raise TypeError("ContextPreparationPort.prepare must return PreparedModelContext")
 
+    request = LLMRequest(
+        model=input.model,
+        messages=prepared.messages,
+        system_prompt=prepared.system_prompt,
+        tools=prepared.tools,
+        correlation=LLMCorrelation(
+            run_id=input.run_id,
+            session_id=input.session_id,
+            purpose=_context_purpose(purpose),
+        ),
+    )
     assistant: AssistantMessage | None = None
     usage = None
-    request = await build_model_request(input, ports, messages)
+    attempts = 1
     async for event in ports.model.stream(request):
         if isinstance(event, LLMFailed):
-            return ModelTurnResult(
-                message=AssistantMessage(content=[TextContent(text="")]),
-                error=event.error,
+            return ModelActionResult(
+                observation=ModelObservation(
+                    observation_id=observation_id,
+                    status="failed",
+                    error=_model_failure(event.error, observation_id),
+                    purpose=purpose,
+                    attempts=event.attempts,
+                ),
+                catalog_snapshot=snapshot,
             )
         if isinstance(event, LLMTextDelta):
-            _emit_llm_delta(
-                emit,
-                event_type="text_delta",
-                payload={"delta": event.text},
+            await _emit_core_live_event(
+                ports,
+                {
+                    "type": "message_update",
+                    "assistant_message_event": {
+                        "type": "text_delta",
+                        "delta": event.text,
+                    },
+                },
             )
             continue
         if isinstance(event, LLMReasoningDelta):
-            _emit_llm_delta(
-                emit,
-                event_type="reasoning_delta",
-                payload={"delta": event.text},
+            await _emit_core_live_event(
+                ports,
+                {
+                    "type": "message_update",
+                    "assistant_message_event": {
+                        "type": "reasoning_delta",
+                        "delta": event.text,
+                    },
+                },
             )
             continue
         if isinstance(event, LLMToolCallDelta):
-            _emit_llm_delta(
-                emit,
-                event_type="tool_call_delta",
-                payload={"toolCall": event.tool_call},
+            await _emit_core_live_event(
+                ports,
+                {
+                    "type": "message_update",
+                    "assistant_message_event": {
+                        "type": "tool_call_delta",
+                        "toolCall": event.tool_call,
+                    },
+                },
             )
             continue
         if isinstance(event, LLMCompleted):
             assistant = event.message
             usage = event.usage
+            attempts = event.attempts
 
-    return ModelTurnResult(
-        message=assistant or AssistantMessage(content=[TextContent(text="")]),
-        usage=usage,
-    )
-
-
-def _emit_llm_delta(
-    emit: Callable[[dict[str, Any]], None] | None,
-    *,
-    event_type: str,
-    payload: dict[str, Any],
-) -> None:
-    if emit is None:
-        return
-    emit(
-        {
-            "type": "message_update",
-            "assistantMessageEvent": {
-                "type": event_type,
-                **payload,
-            },
-        }
-    )
-
-
-async def build_model_request(
-    input: AgentLoopInput,
-    ports: AgentLoopPorts,
-    messages: list[Any],
-) -> LLMRequest:
-    tools = tool_catalog_for_request(input, ports)
-    request_data: dict[str, Any] = {
-        "run_id": input.run_id,
-        "session_id": input.correlation.session_id or "",
-        "mode": input.mode,
-        "model": input.model,
-        "messages": list(messages),
-        "system_prompt": str(input.context.get("system_prompt", "")),
-        "tools": list(tools),
-        "context": dict(input.context),
-    }
-    if ports.context is not None:
-        prepared = ports.context.prepare(request_data)
-        if inspect.isawaitable(prepared):
-            prepared = await prepared
-        if isinstance(prepared, dict):
-            request_data.update(prepared)
-    request_data["system_prompt"] = _append_synthetic_control(
-        str(request_data.get("system_prompt", "")),
-        request_data.get("context"),
-    )
-    preflight = prepare_messages_for_model(
-        list(request_data.get("messages", messages)),
-        tool_result_max_chars=TOOL_RESULT_MAX_CHARS,
-    )
-    request_data["messages"] = preflight.messages
-    report = request_data.get("context_report")
-    if isinstance(report, dict):
-        runner_preflight = preflight.report.to_dict()
-        report["runner_preflight"] = runner_preflight
-        recorder = getattr(ports.context, "record_preflight", None)
-        if callable(recorder):
-            value = recorder(runner_preflight, run_id=input.run_id)
-            if inspect.isawaitable(value):
-                await value
-    return LLMRequest(
-        model=request_data.get("model", input.model),
-        messages=tuple(request_data.get("messages", messages)),
-        system_prompt=str(request_data.get("system_prompt", "")),
-        tools=tuple(request_data.get("tools", tools)),
-        correlation=LLMCorrelation(
-            run_id=input.run_id,
-            session_id=input.correlation.session_id or "",
+    if assistant is None:
+        return ModelActionResult(
+            observation=ModelObservation(
+                observation_id=observation_id,
+                status="failed",
+                error=FailureRecord(
+                    code="llm.stream_incomplete",
+                    source="model",
+                    message="Model stream ended without a completion event",
+                    recoverable=False,
+                    evidence_refs=(observation_id,),
+                ),
+                purpose=purpose,
+                attempts=attempts,
+            ),
+            catalog_snapshot=snapshot,
+        )
+    return ModelActionResult(
+        observation=ModelObservation(
+            observation_id=observation_id,
+            message=assistant,
+            purpose=purpose,
+            attempts=attempts,
         ),
+        usage=usage,
+        catalog_snapshot=snapshot,
     )
 
 
-def _append_synthetic_control(
-    system_prompt: str,
-    context: object,
+def _core_tool_catalog(
+    input: CoreRunInput,
+    ports: CorePorts,
+) -> ToolCatalogSnapshot | None:
+    if ports.tools is None or bool(input.context_seed.get("suppress_tools", False)):
+        return None
+    return ports.tools.catalog_snapshot(mode=tool_mode_for_run_mode(input.mode))
+
+
+def _context_purpose(purpose: ModelPurpose) -> ContextPurpose:
+    if purpose == "verification":
+        return "verification"
+    if purpose == "final_response":
+        return "finalization"
+    return "reasoning"
+
+
+def _directive_text(
+    directive: CoreDirective,
+    *,
+    max_tool_calls_per_turn: int | None,
 ) -> str:
-    if not isinstance(context, dict):
-        return system_prompt
-    control = context.get("synthetic_control")
-    if not isinstance(control, dict):
-        return system_prompt
-    instruction = _control_text(control, "instruction")
-    if not instruction:
-        return system_prompt
-    section = "\n".join(
-        [
-            "## Synthetic Control",
-            f"Source: {_control_text(control, 'source') or 'runner'}",
-            f"Kind: {_control_text(control, 'kind') or 'runner_control'}",
-            f"Scope: {_control_text(control, 'scope') or 'summary_only'}",
-            "Lifetime: this model call only",
-            "This is not a user request. Do not expand task scope from it.",
-            f"Instruction: {instruction}",
-        ]
-    )
-    if section in system_prompt:
-        return system_prompt
-    if system_prompt.strip():
-        return f"{system_prompt.rstrip()}\n\n{section}"
-    return section
-
-
-def _control_text(control: dict[str, object], key: str) -> str:
-    value = control.get(key)
-    return value.strip() if isinstance(value, str) else ""
-
-
-def tool_catalog_for_request(input: AgentLoopInput, ports: AgentLoopPorts) -> list[Tool]:
-    if bool(input.context.get("suppress_tools", False)):
-        return []
-    if ports.tools is not None:
-        catalog = ports.tools.catalog(input.mode)
-        if catalog:
-            return [_as_tool(item) for item in _catalog_items(catalog)]
-    return [_as_tool(item) for item in input.tools]
-
-
-def _catalog_items(catalog: Any) -> list[Any]:
-    if isinstance(catalog, ToolCatalogView):
-        return list(catalog.tools)
-    if isinstance(catalog, dict):
-        value = catalog.get("tools")
-        if isinstance(value, (list, tuple)):
-            return list(value)
-        return [catalog]
-    if isinstance(catalog, (list, tuple)):
-        return list(catalog)
-    return [catalog]
-
-
-def _as_tool(item: Any) -> Tool:
-    if isinstance(item, Tool):
-        return item
-    if isinstance(item, str):
-        return Tool(name=item, description=item, parameters={})
-    if hasattr(item, "to_spec"):
-        spec = item.to_spec()
-        if isinstance(spec, Tool):
-            return spec
-    if isinstance(item, dict):
-        name = str(item.get("name") or item.get("id") or "")
-        description = str(item.get("description") or name)
-        return Tool(
-            name=name,
-            description=description,
-            parameters=dict(item.get("parameters") or item.get("input_schema") or {}),
+    lines = [directive.code]
+    lines.extend(directive.constraints)
+    if max_tool_calls_per_turn is not None:
+        lines.append(
+            "Issue at most "
+            f"{max_tool_calls_per_turn} ToolCalls in one model turn; split larger work "
+            "across turns."
         )
-    name = str(getattr(item, "name"))
-    return Tool(
-        name=name,
-        description=str(getattr(item, "description", "") or name),
-        parameters=dict(getattr(item, "parameters", {}) or {}),
+    if directive.evidence_refs:
+        lines.append("evidence: " + ", ".join(directive.evidence_refs))
+    return "\n".join(lines)
+
+
+def _model_failure(error: object, observation_id: str) -> FailureRecord:
+    if isinstance(error, Mapping):
+        code = _optional_text(error.get("code")) or "model.call_failed"
+        message = _optional_text(error.get("message")) or code
+        recoverable = bool(error.get("retryable", False))
+    else:
+        code = _optional_text(getattr(error, "code", None)) or "model.call_failed"
+        message = _optional_text(getattr(error, "message", None)) or str(error)
+        recoverable = bool(getattr(error, "retryable", False))
+    return FailureRecord(
+        code=code,
+        source="model",
+        message=message or code,
+        recoverable=recoverable,
+        evidence_refs=(observation_id,),
     )
 
 
-def convert_to_llm(
-    messages: list[AgentMessage],
-    *,
-    strip_thinking: bool = False,
-    thinking_to_text: bool = False,
-    tool_result_max_chars: int = TOOL_RESULT_MAX_CHARS,
-) -> list[Message]:
-    """Normalize core messages before handing them to an LLM provider."""
-
-    result: list[Message] = []
-    for msg in messages:
-        converted = _convert_single(
-            msg,
-            strip_thinking=strip_thinking,
-            thinking_to_text=thinking_to_text,
-        )
-        if converted is not None:
-            result.append(converted)
-    return prepare_messages_for_model(
-        result,
-        tool_result_max_chars=tool_result_max_chars,
-    ).messages
+def _optional_text(value: object) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
 
 
-def _convert_single(
-    msg: AgentMessage,
-    *,
-    strip_thinking: bool,
-    thinking_to_text: bool,
-) -> Message | None:
-    if isinstance(msg, UserMessage):
-        return msg
-    if isinstance(msg, AssistantMessage):
-        return _process_assistant(
-            msg,
-            strip_thinking=strip_thinking,
-            thinking_to_text=thinking_to_text,
-        )
-    if isinstance(msg, ToolResultMessage):
-        return msg
-    return None
+async def _emit_core_live_event(
+    ports: CorePorts,
+    event: Mapping[str, object],
+) -> None:
+    if ports.live_events is None:
+        return
+    try:
+        result = ports.live_events(event)
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        return
 
 
-def _process_assistant(
-    msg: AssistantMessage,
-    *,
-    strip_thinking: bool,
-    thinking_to_text: bool,
-) -> AssistantMessage:
-    if not strip_thinking and not thinking_to_text:
-        return msg
-
-    new_content = []
-    for block in msg.content:
-        if isinstance(block, ThinkingContent):
-            if strip_thinking:
-                continue
-            if thinking_to_text and block.thinking:
-                new_content.append(
-                    TextContent(text=f"[thinking]\n{block.thinking}\n[/thinking]")
-                )
-                continue
-        new_content.append(block)
-    if not new_content:
-        new_content = [TextContent(text="(no content)")]
-
-    return AssistantMessage(
-        role=msg.role,
-        content=new_content,
-        api=msg.api,
-        provider=msg.provider,
-        model=msg.model,
-        usage=msg.usage,
-        stop_reason=msg.stop_reason,
-        response_id=msg.response_id,
-        error_message=msg.error_message,
-        error_info=msg.error_info,
-        timestamp=msg.timestamp,
-        metadata=dict(msg.metadata),
-    )
+__all__ = ["ModelActionResult", "call_model_once"]

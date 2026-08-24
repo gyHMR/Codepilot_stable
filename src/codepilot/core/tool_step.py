@@ -1,301 +1,362 @@
+"""把模型工具调用转换为 Tools 端口请求并归并执行结果。"""
+
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable
-from dataclasses import asdict
+from collections.abc import Mapping
+from dataclasses import dataclass
+import inspect
 from typing import Any
 
-from codepilot.protocols import (
-    AgentEvent,
-    AssistantMessage,
-    Message,
-    Tool,
-    ToolCall,
-    ToolHookContextSnapshot,
-    ToolResultMessage,
-)
+from codepilot.protocols import PLAN_TOOL_NAMES, ToolCall, ToolResultMessage, tool_mode_for_run_mode
 from codepilot.tools.contracts import (
-    ToolCatalogView,
-    ToolInvocation,
-    ToolMetadata,
-    ToolObservation,
-    ToolPort,
+    ToolBatchPreparation,
+    ToolExecutionRequest,
+)
+from codepilot.tools.registry import ToolCatalogSnapshot
+from codepilot.tools.results import (
+    TextContent,
+    ToolError,
+    ToolResult,
+    to_tool_result_message,
+    workspace_effect_summary,
 )
 
-from .contracts import WorkspaceEffects
+from .contracts import CorePorts, CoreRunInput, ExecuteTools
+from .commands import CoreCommand, core_command_from_mapping
+from .commands import CommandResult
+from .errors import CoreInvariantError
 
 
-async def execute_tool_turn(
-    *,
-    run_id: str,
-    session_id: str | None = None,
-    assistant_message: AssistantMessage | None = None,
-    messages: list[Message] | None = None,
-    system_prompt: str = "",
-    available_tools: list[Tool] | None = None,
-    current_mode: str = "build",
-    run_signals: dict[str, Any] | None = None,
-    metadata: dict[str, Any] | None = None,
-    tools: ToolPort,
-    tool_calls: list[ToolCall],
-    emit: Callable[[dict[str, Any]], None] | None = None,
-) -> list[ToolObservation]:
-    """Execute the tool calls requested by one assistant message."""
+@dataclass(frozen=True)
+class PreparedCoreToolBatch:
+    """模型工具调用转换后的 Core 批次及其注册快照。"""
+    calls: tuple[ToolCall, ...]
+    preparation: ToolBatchPreparation
 
-    observations: list[ToolObservation] = []
-    context = ToolHookContextSnapshot(
-        run_id=run_id,
-        session_id=session_id,
-        system_prompt=system_prompt,
-        messages=tuple(messages or ()),
-        tools=tuple(available_tools or ()),
-        run_signals=dict(run_signals or {}),
-        metadata=dict(metadata or {}),
+
+def prepare_core_tool_batch(
+    input: CoreRunInput,
+    ports: CorePorts,
+    decision: ExecuteTools,
+    catalog_snapshot: ToolCatalogSnapshot | None,
+) -> PreparedCoreToolBatch:
+    """把助手消息中的 ToolCall 转换为严格 Tools 请求批次。"""
+    if ports.tools is None:
+        return PreparedCoreToolBatch(
+            calls=decision.calls,
+            preparation=ToolBatchPreparation(
+                results=unavailable_tool_results(decision.calls)
+            ),
+        )
+    entries = {
+        item.spec.name: item
+        for item in (catalog_snapshot.entries if catalog_snapshot is not None else ())
+    }
+    requests = tuple(
+        ToolExecutionRequest(
+            run_id=input.run_id,
+            session_id=input.session_id,
+            tool_call_id=call.id,
+            tool_name=call.name,
+            arguments=dict(call.arguments),
+            raw_arguments=call.raw_arguments,
+            argument_parse_error=(
+                str(call.metadata.get("argument_parse_error"))
+                if call.metadata.get("argument_parse_error")
+                else None
+            ),
+            mode=tool_mode_for_run_mode(input.mode),
+            registration_id=(
+                entries[call.name].registration_id
+                if call.name in entries
+                else "registration_missing"
+            ),
+        )
+        for call in decision.calls
     )
-    metadata_by_name = _catalog_metadata(tools, current_mode)
-    index = 0
-    while index < len(tool_calls):
-        batch = _next_concurrent_batch(tool_calls, index, metadata_by_name)
-        if len(batch) > 1:
-            invocations = [
-                _invocation_for(
-                    tool_call,
-                    run_id=run_id,
-                    current_mode=current_mode,
-                    assistant_message=assistant_message,
-                    context=context,
-                )
-                for tool_call in batch
-            ]
-            for tool_call in batch:
-                _emit_tool_start(emit, tool_call)
-            batch_observations = list(
-                await asyncio.gather(*(tools.execute(invocation) for invocation in invocations))
-            )
-            observations.extend(batch_observations)
-            for observation in batch_observations:
-                if emit is not None:
-                    emit(_tool_end_event(observation))
-            if approval_observations(batch_observations):
-                break
-            index += len(batch)
-            continue
+    return PreparedCoreToolBatch(
+        calls=decision.calls,
+        preparation=ports.tools.prepare_batch(requests),
+    )
 
-        tool_call = tool_calls[index]
-        _emit_tool_start(emit, tool_call)
-        observation = await tools.execute(
-            _invocation_for(
-                tool_call,
-                run_id=run_id,
-                current_mode=current_mode,
-                assistant_message=assistant_message,
-                context=context,
+
+async def execute_core_tool_batch(
+    ports: CorePorts,
+    prepared: PreparedCoreToolBatch,
+) -> tuple[ToolResult, ...]:
+    """通过唯一工具端口执行准备完成的批次。"""
+    if ports.tools is None or prepared.preparation.batch_id is None:
+        raise RuntimeError("Prepared Tool batch is not executable")
+    for call in prepared.calls:
+        await _emit_core_live_event(
+            ports,
+            {
+                "type": "tool_started",
+                "tool_call_id": call.id,
+                "tool_name": call.name,
+                "args": dict(call.arguments),
+            },
+        )
+    results = await ports.tools.execute_prepared(prepared.preparation.batch_id)
+    for result in results:
+        await _emit_core_live_event(ports, tool_end_event(result))
+    return tuple(results)
+
+
+def project_final_tool_messages(
+    results: tuple[ToolResult, ...] | list[ToolResult],
+) -> tuple[ToolResultMessage, ...]:
+    """把终态 ToolResult 投影为追加回对话记录的消息。"""
+    return tuple(
+        to_tool_result_message(result)
+        for result in results
+        if result.status not in {"approval_required", "user_input_required"}
+    )
+
+
+def project_core_commands(
+    results: tuple[ToolResult, ...] | list[ToolResult],
+) -> tuple[CoreCommand, ...]:
+    """Accept command payloads only from Core-owned Plan tool names."""
+
+    commands: list[CoreCommand] = []
+    for result in results:
+        if result.status != "success" or result.tool_name not in PLAN_TOOL_NAMES:
+            continue
+        raw = result.data.get("core_command")
+        if not isinstance(raw, Mapping):
+            raise CoreInvariantError(
+                f"Plan tool returned no Core command: {result.tool_name}"
+            )
+        try:
+            command = core_command_from_mapping(raw)
+        except (TypeError, ValueError) as exc:
+            raise CoreInvariantError(
+                f"Plan tool returned an invalid Core command: {result.tool_name}"
+            ) from exc
+        if command.command_id != result.tool_call_id:
+            raise CoreInvariantError(
+                f"Plan command id does not match ToolCall: {result.tool_call_id}"
+            )
+        commands.append(command)
+    return tuple(commands)
+
+
+def project_core_command_results(
+    results: tuple[ToolResult, ...] | list[ToolResult],
+    command_results: tuple[CommandResult, ...] | list[CommandResult],
+) -> tuple[ToolResult, ...]:
+    """Expose Reducer acceptance or rejection in the model-facing ToolResult."""
+
+    by_id = {item.command_id: item for item in command_results}
+    projected: list[ToolResult] = []
+    for result in results:
+        command_result = by_id.get(result.tool_call_id)
+        if command_result is None:
+            if result.status == "success" and result.tool_name in PLAN_TOOL_NAMES:
+                raise CoreInvariantError(
+                    "Successful Plan ToolResult has no matching Core CommandResult: "
+                    f"{result.tool_name} ({result.tool_call_id})"
+                )
+            projected.append(result)
+            continue
+        message = (
+            "Core applied the Plan command."
+            if command_result.status == "applied"
+            else f"Core rejected the Plan command: {command_result.reason}."
+        )
+        data = {
+            **dict(result.data),
+            "core_command_result": {
+                "status": command_result.status,
+                "reason": command_result.reason,
+            },
+        }
+        projected.append(
+            ToolResult(
+                tool_call_id=result.tool_call_id,
+                tool_name=result.tool_name,
+                status=(
+                    result.status
+                    if command_result.status == "applied"
+                    else "error"
+                ),
+                content=(*result.content, TextContent(message)),
+                data=data,
+                effects=result.effects,
+                error=(
+                    result.error
+                    if command_result.status == "applied"
+                    else ToolError(
+                        code=command_result.reason,
+                        kind="validation",
+                        message=message,
+                        retryable=True,
+                    )
+                ),
+                approval=result.approval,
+                interaction=result.interaction,
+                registration_id=result.registration_id,
+                output_validation=result.output_validation,
+                content_trust=result.content_trust,
             )
         )
-        observations.append(observation)
-        if emit is not None:
-            emit(_tool_end_event(observation))
-        if observation.status == "approval_required" and observation.interruption is not None:
-            break
-        index += 1
-    return observations
+    return tuple(projected)
 
 
-def approval_observations(
-    observations: list[ToolObservation],
-) -> list[ToolObservation]:
-    return [
-        observation
-        for observation in observations
-        if observation.status == "approval_required" and observation.interruption is not None
-    ]
-
-
-def to_tool_result_message(
-    observation: ToolObservation,
+def interrupted_tool_results(
+    calls: tuple[ToolCall, ...] | list[ToolCall],
     *,
-    approval_id: str | None = None,
-    approved: bool = True,
-) -> ToolResultMessage:
-    metadata = dict(observation.metadata)
-    resolved_approval_id = approval_id or metadata.get("approval_id")
-    status = observation.status if observation.status else "success"
-    return ToolResultMessage(
-        tool_call_id=observation.tool_call_id,
-        tool_name=observation.name,
-        content=list(observation.content),
-        status=status,  # type: ignore[arg-type]
-        is_error=status != "success",
-        approved=approved,
-        approval_id=str(resolved_approval_id) if resolved_approval_id else None,
-        error_code=_optional_text(metadata.get("error_code")),
-        affected_paths=list(observation.affected_paths),
-        workspace_changed=observation.workspace_changed,
-        verification=_verification_payload(observation),
-        details=metadata.get("details"),
-        metadata=metadata,
+    code: str,
+    message: str,
+) -> tuple[ToolResult, ...]:
+    """为因前序屏障未执行的调用构造 interrupted 结果。"""
+    return tuple(
+        ToolResult(
+            tool_call_id=call.id,
+            tool_name=call.name,
+            status="interrupted",
+            content=(TextContent(message),),
+            error=ToolError(
+                code=code,
+                kind="interrupted",
+                message=message,
+                retryable=True,
+            ),
+            registration_id="core_settlement",
+        )
+        for call in calls
     )
 
 
-def workspace_effects(observations: list[ToolObservation]) -> WorkspaceEffects:
-    paths: list[str] = []
-    changed = False
-    for observation in observations:
-        paths.extend(observation.affected_paths)
-        changed = changed or observation.workspace_changed
-    return WorkspaceEffects(affected_paths=tuple(dict.fromkeys(paths)), changed=changed)
+def deferred_tool_results(
+    calls: tuple[ToolCall, ...] | list[ToolCall],
+    *,
+    limit: int,
+) -> tuple[ToolResult, ...]:
+    """Close calls beyond the per-turn execution limit without recording failures."""
+
+    message = (
+        f"Core deferred this Tool call because the per-turn execution limit is {limit}. "
+        "Re-issue the call in a later model turn if it is still needed."
+    )
+    return tuple(
+        ToolResult(
+            tool_call_id=call.id,
+            tool_name=call.name,
+            status="interrupted",
+            content=(TextContent(message),),
+            error=ToolError(
+                code="core.tool_deferred",
+                kind="interrupted",
+                message=message,
+                retryable=True,
+            ),
+            registration_id="core_deferred",
+        )
+        for call in calls
+    )
 
 
-def merge_workspace_effects(
-    first: WorkspaceEffects,
-    second: WorkspaceEffects,
-) -> WorkspaceEffects:
-    paths = tuple(dict.fromkeys([*first.affected_paths, *second.affected_paths]))
-    return WorkspaceEffects(affected_paths=paths, changed=first.changed or second.changed)
+def unavailable_tool_results(
+    calls: tuple[ToolCall, ...] | list[ToolCall],
+) -> tuple[ToolResult, ...]:
+    """为缺少工具端口的调用构造稳定失败结果。"""
+    return tuple(
+        ToolResult(
+            tool_call_id=call.id,
+            tool_name=call.name,
+            status="error",
+            content=(TextContent("No ToolExecutionPort is available for this run."),),
+            error=ToolError(
+                code="tool_not_found",
+                kind="unavailable",
+                message=f"Tool is unavailable: {call.name}",
+                retryable=False,
+            ),
+            registration_id="registration_missing",
+        )
+        for call in calls
+    )
 
 
-def verification(observations: list[ToolObservation]) -> list[Any]:
-    items: list[Any] = []
-    for observation in observations:
-        items.extend(observation.verification)
-    return items
+async def _emit_core_live_event(ports: CorePorts, event: dict[str, Any]) -> None:
+    if ports.live_events is None:
+        return
+    try:
+        value = ports.live_events(event)
+        if inspect.isawaitable(value):
+            await value
+    except Exception:
+        return
 
 
-def _verification_payload(observation: ToolObservation) -> dict[str, Any] | None:
-    if not observation.verification:
-        return None
-    items = [asdict(item) for item in observation.verification]
-    if len(items) == 1:
-        return items[0]
-    status = "unknown"
-    if any(item.get("status") == "failed" for item in items):
-        status = "failed"
-    elif any(item.get("status") == "passed" for item in items):
-        status = "passed"
-    return {"status": status, "items": items}
-
-
-def _tool_end_event(observation: ToolObservation) -> AgentEvent:
-    metadata = dict(observation.metadata)
-    interruption = observation.interruption
-    approval_id = metadata.get("approval_id")
-    if approval_id is None and interruption is not None:
-        approval_id = interruption.approval_id
-    approved = metadata.get("approved")
-    if approved is None:
-        approved = observation.status == "success"
-    details = metadata.get("details")
-    error_reason = metadata.get("error_code")
-    if error_reason is None and isinstance(details, dict):
-        error_reason = details.get("reason") or details.get("status")
+def tool_end_event(result: ToolResult) -> dict[str, Any]:
+    """根据工具终态构造统一 Core 领域事件载荷。"""
+    approval = result.approval
+    error = result.error
+    uris, workspace_changed = workspace_effect_summary(result.effects)
+    affected_paths = [
+        uri.removeprefix("workspace:///") or "."
+        for uri in uris
+    ]
     return {
-        "type": _tool_event_type(observation),
-        "toolCallId": observation.tool_call_id,
-        "toolName": observation.name,
-        "status": observation.status,
-        "isError": observation.status != "success",
-        "approved": approved,
-        "approvalId": str(approval_id) if approval_id else None,
-        "errorReason": str(error_reason) if error_reason else None,
-        "affectedPaths": list(observation.affected_paths),
-        "workspaceChanged": observation.workspace_changed,
-        "verification": list(observation.verification),
-        "reason": interruption.reason if interruption is not None else None,
-        "riskLevel": (
-            str(getattr(interruption.risk, "level", "unknown"))
-            if interruption is not None
-            else None
-        ),
+        "type": _tool_event_type(result),
+        "tool_call_id": result.tool_call_id,
+        "tool_name": result.tool_name,
+        "status": result.status,
+        "is_error": result.status
+        not in {"success", "approval_required", "user_input_required"},
+        "approved": result.status not in {"approval_required", "denied"},
+        "approval_id": approval.approval_id if approval is not None else None,
+        "error_reason": error.code if error is not None else None,
+        "affected_paths": affected_paths,
+        "workspace_changed": workspace_changed,
+        "reason": approval.reason if approval is not None else None,
+        "risk_level": approval.risk if approval is not None else None,
         "result": {
-            "content": list(observation.content),
-            "metadata": metadata,
+            "content": list(result.content),
+            "data": dict(result.data),
+            "effects": [
+                {
+                    "kind": effect.kind,
+                    "resource": effect.resource.uri,
+                    "operation": effect.operation,
+                    "status": effect.status,
+                    "certainty": effect.certainty,
+                }
+                for effect in result.effects
+            ],
+            "registration_id": result.registration_id,
+            "output_validation": result.output_validation,
+            "content_trust": result.content_trust,
         },
     }
 
 
-def _tool_event_type(observation: ToolObservation) -> str:
-    if observation.status == "success":
+def _tool_event_type(result: ToolResult) -> str:
+    if result.status == "success":
         return "tool_completed"
-    if observation.status in {"approval_required", "denied", "cancelled"}:
+    if result.status in {
+        "approval_required",
+        "user_input_required",
+        "denied",
+        "cancelled",
+        "interrupted",
+    }:
         return "tool_interrupted"
     return "tool_failed"
 
 
-def _invocation_for(
-    tool_call: ToolCall,
-    *,
-    run_id: str,
-    current_mode: str,
-    assistant_message: AssistantMessage | None,
-    context: ToolHookContextSnapshot,
-) -> ToolInvocation:
-    return ToolInvocation(
-        run_id=run_id,
-        tool_call_id=tool_call.id,
-        name=tool_call.name,
-        arguments=dict(tool_call.arguments),
-        current_mode=current_mode,
-        assistant_message=assistant_message,
-        context=context,
-    )
-
-
-def _emit_tool_start(
-    emit: Callable[[dict[str, Any]], None] | None,
-    tool_call: ToolCall,
-) -> None:
-    if emit is None:
-        return
-    emit(
-        {
-            "type": "tool_started",
-            "toolCallId": tool_call.id,
-            "toolName": tool_call.name,
-            "args": dict(tool_call.arguments),
-            "arguments": dict(tool_call.arguments),
-        }
-    )
-
-
-def _catalog_metadata(tools: ToolPort, current_mode: str) -> dict[str, ToolMetadata]:
-    try:
-        catalog = tools.catalog(current_mode)
-    except TypeError:
-        catalog = tools.catalog()
-    if not isinstance(catalog, ToolCatalogView):
-        return {}
-    return {item.metadata.name: item.metadata for item in catalog.items}
-
-
-def _next_concurrent_batch(
-    tool_calls: list[ToolCall],
-    start: int,
-    metadata_by_name: dict[str, ToolMetadata],
-) -> list[ToolCall]:
-    first = tool_calls[start]
-    if not _can_run_concurrently(first, metadata_by_name):
-        return [first]
-    batch = [first]
-    for tool_call in tool_calls[start + 1 :]:
-        if not _can_run_concurrently(tool_call, metadata_by_name):
-            break
-        batch.append(tool_call)
-    return batch
-
-
-def _can_run_concurrently(
-    tool_call: ToolCall,
-    metadata_by_name: dict[str, ToolMetadata],
-) -> bool:
-    metadata = metadata_by_name.get(tool_call.name)
-    return bool(
-        metadata is not None
-        and metadata.read_only
-        and metadata.concurrency_safe
-        and not metadata.exclusive
-    )
-
-
-def _optional_text(value: object) -> str | None:
-    text = str(value).strip() if value is not None else ""
-    return text or None
+__all__ = [
+    "deferred_tool_results",
+    "execute_core_tool_batch",
+    "interrupted_tool_results",
+    "PreparedCoreToolBatch",
+    "prepare_core_tool_batch",
+    "project_core_command_results",
+    "project_core_commands",
+    "project_final_tool_messages",
+    "tool_end_event",
+    "unavailable_tool_results",
+]

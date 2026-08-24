@@ -1,3 +1,5 @@
+"""记录 DingTalk 入站、出站和审批操作的脱敏审计事实。"""
+
 from __future__ import annotations
 
 # 新手导读：audit.py 只记录钉钉入口层的远程控制审计，不参与 Agent 决策。

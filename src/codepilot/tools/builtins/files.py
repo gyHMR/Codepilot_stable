@@ -1,1080 +1,972 @@
-from __future__ import annotations
+"""规范的工作区文件工具 —— ls / read / write / edit / apply_patch。
 
+本文件实现了所有文件系统操作的内置工具，包括目录列表、文件读取、
+文件写入、精确文本替换和批量补丁应用。
+
+每个工具通过 create_file_registrations() 注册，包含完整的六个组件：
+- Spec（模型可见的定义）
+- Codec（编解码器）
+- Handler（业务逻辑）
+- Resolver（访问权限解析）
+- Renderer（结果渲染）
+- Policy（安全策略）
+
+安全设计：
+- 所有路径操作经过 WorkspaceSandbox 进行沙箱隔离
+- 写操作需要 execute 模式 + 权限审批
+- 读操作在 plan 和 execute 模式下均可
+- 写操作串行执行（serial），读操作可并行（parallel）
+- 批量写操作（超过 20 文件或 500KB）触发额外的批量审批限制
+- 原子化写入（apply_patch）：先写临时文件，再 os.replace 替换，失败回滚
 """
-内置文件系统工具模块：ls、read、write、edit、apply_patch。
 
-本模块是 Codepilot 工具系统中的核心文件操作层，在 WorkspaceSandbox（工作区沙箱）
-的约束下提供安全、可追溯的文件 CRUD 操作。所有工具通过 create_file_tools() 工厂
-函数统一创建，返回 ToolDefinition 列表供工具注册表使用。
-
-核心设计原则：
-1. 路径安全：所有路径操作需经过沙箱解析，禁止逃逸到工作区外部。
-2. 可追溯性：每次修改都记录变更证据（change_evidence），包含前后哈希值。
-3. UTF-8 约束：仅处理有效的 UTF-8 文本文件，遇到二进制或非 UTF-8 文件返回友好错误。
-4. 唯一性约束：编辑工具默认要求 old_text 在文件中唯一匹配，防止意外修改多处。
-
-提供的工具：
-- ls：列出目录内容，显示文件名和文件大小。
-- read：分页读取文本文件，支持 offset/limit 分页和 max_chars 截断。
-- write：写入文本文件，支持覆盖控制和变更检测（内容未变则不标记为已修改）。
-- edit：基于 old_text -> new_text 的单文件替换编辑，支持匹配计数和文件哈希校验。
-- apply_patch：批量编辑工具，对多个文件执行唯一匹配替换，整体作为原子操作提交。
-"""
-
-from dataclasses import dataclass
+import asyncio
+import hashlib
+import os
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
-from codepilot.protocols import TextContent
-from codepilot.tools.contracts import ToolCallRequest, ToolDefinition, ToolResult
-from codepilot.tools.registry import get_builtin_tool_metadata
-from codepilot.tools.sandbox import WorkspaceSandbox, file_state_for_path
+from ..codecs import DataclassCodec
+from ..contracts import ToolExecutionContext, ToolHandlerError, ToolRegistration, ToolSpec
+from ..results import TextContent
+from ..sandbox import WorkspaceSandbox
+from ..security import (
+    ConcurrencyPolicy,
+    OutputLimits,
+    OutputTrustPolicy,
+    TimeoutPolicy,
+    ToolAccessRequest,
+    ToolAccessResolution,
+    ToolEffect,
+    ToolPolicy,
+    ToolResource,
+)
+
+_DRAFT = "https://json-schema.org/draft/2020-12/schema"
+
+# 批量操作自动审批阈值
+# 当文件数 > 20 或估计写入字节 > 500KB 时，提升风险等级并限制审批范围
+_AUTO_APPROVE_MAX_FILES = 20
+_AUTO_APPROVE_MAX_BYTES = 500_000
+
+# read 的单次结果和并行批次预算。单次限制由输入 Schema 在 handler 执行前校验，
+# 批次限制由 ToolRuntime.prepare_batch 统一准入。
+READ_MAX_CHARS = 30_000
+READ_MAX_LINES = 1_000
+READ_BATCH_MAX_CHARS = 100_000
+
+
+# ── 输入类型（dataclass） ─────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
-class _PatchEdit:
+class LsInput:
+    """ls 工具的输入参数。
+
+    参数:
+        path: 要列出的目录路径（默认当前目录 "."）
+        max_entries: 最多返回的条目数（默认 100）
     """
-    内部编辑操作的数据载体（不可变数据类）。
+    path: str = "."
+    max_entries: int = 100
 
-    表示一次文本替换操作的核心三元组：
-    - path:   目标文件在工作区中的相对路径。
-    - old_text: 要查找并替换的原始文本片段。
-    - new_text: 用于替换的新文本片段。
 
-    同时被 edit_tool（单次编辑）和 apply_patch_tool（批量编辑）复用。
+@dataclass(frozen=True)
+class ReadInput:
+    """read 工具的输入参数。
+
+    参数:
+        path: 要读取的文件路径
+        max_chars: 最多读取的字符数（默认 20,000）
+        offset: 开始读取的行号（从 1 开始，默认 1）
+        limit: 最多读取的行数（默认 200）
+    """
+    path: str
+    max_chars: int = 20_000
+    offset: int = 1
+    limit: int = 200
+
+
+@dataclass(frozen=True)
+class WriteInput:
+    """write 工具的输入参数。
+
+    参数:
+        path: 要写入的文件路径
+        content: 文件内容
+        overwrite: 是否覆盖已存在的文件（默认 True）
+    """
+    path: str
+    content: str
+    overwrite: bool = True
+
+
+@dataclass(frozen=True)
+class EditInput:
+    """edit 工具的输入参数。
+
+    参数:
+        path: 要编辑的文件路径
+        old_text: 要被替换的旧文本（必须精确匹配）
+        new_text: 替换后的新文本
+        replace_all: 是否替换所有匹配（默认 False）
+        occurrence_index: 替换第几次出现的匹配（可选，从 1 开始）
+        expected_occurrences: 预期的匹配次数（可选，用于验证）
+        expected_file_hash: 期望的文件 SHA256 哈希（可选，用于验证文件未变）
     """
     path: str
     old_text: str
     new_text: str
+    replace_all: bool = False
+    occurrence_index: int | None = None
+    expected_occurrences: int | None = None
+    expected_file_hash: str | None = None
 
 
-def create_file_tools(
+@dataclass(frozen=True)
+class ApplyPatchInput:
+    """apply_patch 工具的输入参数（批量编辑）。
+
+    参数:
+        edits: 编辑操作列表，每个元素包含 path/old_text/new_text
+    """
+    edits: list[dict[str, Any]]
+
+
+# ── 输出类型 ────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class FileOutput:
+    """文件操作的统一输出类型。
+
+    参数:
+        text: 给 LLM 看的文本描述
+        details: 结构化的详细数据
+        metadata: 元数据（如是否截断）
+        affected_paths: 受影响的文件路径列表（仅写操作）
+        workspace_changed: 工作区是否发生了变更
+        diff_summary: 变更摘要文本
+    """
+    text: str
+    details: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    affected_paths: list[str] = field(default_factory=list)
+    workspace_changed: bool = False
+    diff_summary: str | None = None
+
+
+# 输出 Schema（所有文件工具共享）
+_OUTPUT_SCHEMA = {
+    "$schema": _DRAFT,
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+        "details": {"type": "object"},
+        "metadata": {"type": "object"},
+        "affected_paths": {"type": "array", "items": {"type": "string"}},
+        "workspace_changed": {"type": "boolean"},
+        "diff_summary": {"type": ["string", "null"]},
+    },
+    "required": [
+        "text",
+        "details",
+        "metadata",
+        "affected_paths",
+        "workspace_changed",
+        "diff_summary",
+    ],
+    "additionalProperties": False,
+}
+
+
+# ── 注册创建函数 ──────────────────────────────────────────────────────────────
+
+
+def create_file_registrations(
     sandbox: WorkspaceSandbox,
     *,
     allow: Callable[[str], bool],
     edit_require_unique_match: bool = True,
-) -> list[ToolDefinition]:
+) -> list[ToolRegistration]:
+    """创建所有启用的文件操作工具注册。
+
+    注册 5 个文件工具：ls / read / write / edit / apply_patch
+    每个工具都绑定 input_codec、output_codec、handler、resolver、renderer、policy。
+
+    处理流程:
+    1. 遍历工具配置元组
+    2. 对每个工具：创建 codec、构建 ToolRegistration
+    3. 所有工具共享 _FileHandler 和 _Resolver（通过 name 区分）
+    4. 未启用的工具（allow() 返回 False 的）被跳过
+
+    参数:
+        sandbox: 工作区沙箱实例
+        allow: 工具启用过滤器（接收工具名称，返回是否启用）
+        edit_require_unique_match: edit 工具是否要求唯一匹配（默认 True）
+
+    返回:
+        ToolRegistration 列表（只包含被启用的工具）
     """
-    文件工具工厂函数 —— 创建所有内置文件系统工具。
-
-    这是本模块唯一的公开入口。调用方传入工作区沙箱实例和一个 allow 谓词函数，
-    由工厂函数根据 allow 判断结果有条件地向工具列表中添加工具。
-
-    参数：
-        sandbox: WorkspaceSandbox 实例，封装了工作区根目录和路径解析/边界检查逻辑。
-                 所有路径操作都以该沙箱为基准进行解析。
-        allow: 单参数谓词函数，接收工具名称字符串（如 "ls", "read", "write", "edit",
-               "apply_patch"），返回 bool 值表示是否允许该工具。通过此机制可实现
-               细粒度的工具权限控制。
-        edit_require_unique_match: 控制 edit_tool 的匹配唯一性策略。默认为 True，
-               即当 old_text 在文件中出现多次且未指定 occurrence_index 时，
-               edit_tool 会拒绝执行并返回错误，要求调用方提供更精确的 old_text。
-
-    返回值：
-        list[ToolDefinition] —— 根据 allow 谓词过滤后的工具定义列表。
-        每个 ToolDefinition 包含工具名称、标签、中文描述、参数 JSON Schema、
-        元数据和异步执行函数。
-
-    内部流程：
-        1. 定义 max_write_chars = 1_000_000 限制单次写入的最大字符数。
-        2. 依次定义五个闭包工具函数（ls_tool, read_tool, write_tool, edit_tool,
-           apply_patch_tool），每个闭包捕获 sandbox 和工厂参数。
-        3. 调用 allow("tool_name") 判断每个工具，允许则调用 _tool() 包装并追加。
-        4. _tool() 内部通过 get_builtin_tool_metadata() 获取工具的预注册元数据，
-           丢失则抛 ValueError。
-    """
-    tools: list[ToolDefinition] = []
-    # 单次写入操作的最大字符数上限（约 1MB 文本）
-    max_write_chars = 1_000_000
-
-    # ──────────────────────────────────────────────────────────────────
-    # ls_tool — 目录列表工具
-    # ──────────────────────────────────────────────────────────────────
-    async def ls_tool(request: ToolCallRequest, signal=None, on_update=None) -> ToolResult:
-        """
-        列出指定目录的内容，返回文件名和文件大小信息。
-
-        参数（来自 request.arguments）：
-            path: 要列出的目录路径，默认为 "."（当前目录）。
-            max_entries: 最大返回条目数，默认 100。超过该数量会被截断，
-                        并在 output_quality.truncated 中标记。
-
-        输出格式：
-            每行一条记录，格式为 "filename\t<size_or_dash>"：
-            - 目录：名称后带 "/" 后缀，大小列显示 "-"。
-            - 文件：直接显示名称，大小列显示字节数。
-
-        返回值：
-            ToolResult，其 content 中包含以换行分隔的目录列表文本。
-            metadata 中包含 output_quality.truncated 标记是否因 max_entries 截断。
-        """
-        _ = signal, on_update  # 显式忽略未使用的参数
-        params = request.arguments
-        path_text = str(params.get("path", "."))
-        max_entries = int(params.get("max_entries", 100))
-
-        # 通过沙箱解析路径，确保不逃逸工作区
-        target, error = _resolve_read_path(sandbox, path_text)
-        if error is not None:
-            return error
-
-        # 路径不存在
-        if not target.exists():
-            return _error_result(f"Path not found: {path_text}", "path_not_found")
-
-        # 路径不是目录
-        if not target.is_dir():
-            return _error_result(f"Not a directory: {path_text}", "not_a_directory")
-
-        # 列出目录条目，按名称排序后截取前 max_entries 条
-        items = sorted(target.iterdir(), key=lambda path: path.name)[:max_entries]
-
-        # 构建每一行的输出文本：名称[后缀]\t大小
-        lines = []
-        for item in items:
-            # 目录添加 "/" 后缀，大小显示 "-"
-            suffix = "/" if item.is_dir() else ""
-            # 目录不显示字节大小，显示 "-"
-            size = "-" if item.is_dir() else str(item.stat().st_size)
-            lines.append(f"{item.name}{suffix}\t{size}")
-
-        # 计算相对于工作区根目录的路径
-        rel = target.relative_to(sandbox.root).as_posix()
-
-        return ToolResult(
-            content=[TextContent(text="\n".join(lines) if lines else "(empty)")],
-            metadata={
-                "read_paths": [rel],
-                "output_quality": {"truncated": len(lines) >= max_entries},
-            },
-        )
-
-    # ──────────────────────────────────────────────────────────────────
-    # read_tool — 文件读取工具
-    # ──────────────────────────────────────────────────────────────────
-    async def read_tool(request: ToolCallRequest, signal=None, on_update=None) -> ToolResult:
-        """
-        分页读取文本文件内容，支持 offset/limit 行分页和 max_chars 字符截断。
-
-        参数（来自 request.arguments）：
-            path:      要读取的文件路径（必填）。
-            max_chars: 返回内容的最大字符数，默认 20000。当行内容累计超过该值时，
-                       后续行被截断，并在输出中标注截断原因。
-            offset:    起始行号（1-based），默认从第 1 行开始。
-            limit:     最大读取行数，默认 200 行。
-
-        分页与截断机制：
-            先按分页（offset + limit）选定候选行范围，再按 max_chars 进行字符级截断。
-            两者任一触发都会在输出中注明截断原因（"max_chars" 或 "line_limit"）。
-            当有更多内容可读时，输出末尾会给出下一次 read 调用的推荐参数。
-
-        输出格式：
-            lines <start>-<end> of <total>
-            <line_no>\t<line_content>
-            ...
-            ...<truncated: <reason>>...   （如有截断）
-            next: read(path="...", offset=N, limit=M)   （如有更多内容）
-
-        返回值：
-            ToolResult，其 content 中包含格式化的文件片段文本。
-            metadata 中包含丰富的状态信息：
-            - file_state: 当前文件状态（路径、大小、SHA256 哈希等）。
-            - actual_start_line / actual_end_line: 实际返回的起止行号。
-            - returned_lines / total_lines: 返回行数 / 总行数。
-            - has_more: 是否还有更多内容可读。
-            - next_offset: 下次读取的推荐 offset 值。
-            - truncated / truncated_reason: 截断标记及原因。
-            - output_quality: 输出质量元数据（编码状态、截断、可靠性评估等）。
-        """
-        _ = signal, on_update
-        params = request.arguments
-        path_text = str(params.get("path", ""))
-
-        # 路径为必填参数
-        if not path_text:
-            return _error_result("Missing path", "missing_path")
-
-        max_chars = int(params.get("max_chars", 20000))
-        offset = int(params.get("offset", 1))
-        # limit 可为 None（不传），此时默认 200 行
-        limit = params.get("limit")
-        limit = int(limit) if limit is not None else 200
-
-        # 路径安全解析
-        target, error = _resolve_read_path(sandbox, path_text)
-        if error is not None:
-            return error
-
-        # 路径存在性检查
-        if not target.exists():
-            return _error_result(f"Path not found: {path_text}", "path_not_found")
-
-        # 类型检查：必须是文件，不能是目录
-        if not target.is_file():
-            return _error_result(f"Not a file: {path_text}", "not_a_file")
-
-        # 读取原始文本内容
-        try:
-            raw = target.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            # 非 UTF-8 文本文件（可能是二进制文件）
-            return _error_result(
-                f"File is not valid UTF-8 text: {path_text}",
-                "invalid_utf8",
-                metadata={"output_quality": _output_quality(decode_status="invalid_utf8", may_be_binary=True)},
-            )
-
-        # 按行拆分
-        lines = raw.splitlines()
-
-        # 计算分页窗口：
-        # start_index: 将 1-based offset 转为 0-based 索引，并限制在有效范围内
-        start_index = min(max(offset, 1) - 1, len(lines))
-        # requested_end_index: 按 limit 截取行数，不超过文件总行数
-        requested_end_index = min(len(lines), start_index + max(limit, 1))
-
-        # 构建候选行列表，格式为 "行号\t行内容"
-        candidates = [
-            f"{line_no}\t{line}"
-            for line_no, line in enumerate(lines[start_index:requested_end_index], start=start_index + 1)
-        ]
-
-        # ── 按 max_chars 进行字符级截断 ──
-        selected: list[str] = []     # 最终选中的行列表
-        body_chars = 0                # 已累计的字符数（含换行分隔符开销）
-        char_truncated = False        # 是否因 max_chars 触发了截断
-
-        for rendered_line in candidates:
-            # extra: 当前行在输出中的字符开销（行内容 + 与前行的换行分隔符）
-            extra = len(rendered_line) + (1 if selected else 0)
-
-            # 已有内容时，累加后会超过 max_chars，截断
-            if selected and body_chars + extra > max_chars:
-                char_truncated = True
-                break
-
-            # 首行就超过 max_chars：不返回任何行，直接标记截断
-            if not selected and len(rendered_line) > max_chars:
-                char_truncated = True
-                break
-
-            selected.append(rendered_line)
-            body_chars += extra
-
-        # 实际返回的起止行号（1-based），没有选中行则为 None
-        actual_start_line = start_index + 1 if selected else None
-        actual_end_line = start_index + len(selected) if selected else None
-
-        # 是否还有未读取的行
-        has_more = (actual_end_line or start_index) < len(lines)
-
-        # 下一次读取的推荐 offset（一行之后开始）
-        next_offset = (actual_end_line + 1) if actual_end_line and has_more else None
-
-        # 因行数限制（limit）导致的截断标记
-        line_limit_truncated = requested_end_index < len(lines) and not char_truncated
-
-        # 统一的截断原因描述
-        truncated_reason = "max_chars" if char_truncated else ("line_limit" if line_limit_truncated else None)
-        truncated = bool(truncated_reason)
-
-        # 组装输出文本
-        header_end = actual_end_line or start_index  # 实际返回的最后行号（用于页眉）
-        rendered_parts = [f"lines {start_index + 1}-{header_end} of {len(lines)}"]  # 页眉
-
-        if selected:
-            rendered_parts.append("\n".join(selected))  # 文件内容体
-
-        if has_more:
-            if truncated_reason:
-                rendered_parts.append(f"...<truncated: {truncated_reason}>...")  # 截断提示
-            # 下一页的推荐调用方式
-            rendered_parts.append(
-                f'next: read(path="{path_text}", offset={next_offset}, limit={max(limit, 1)})'
-            )
-
-        rendered = "\n".join(rendered_parts)
-
-        # 文件路径和状态信息
-        relative_path = target.relative_to(sandbox.root).as_posix()
-        state = file_state_for_path(sandbox.root, relative_path)
-
-        return ToolResult(
-            content=[TextContent(text=rendered or "(empty)")],
-            details={"file_state": state},
-            metadata={
-                "file_state": state,
-                "read_paths": [relative_path],
-                "path": relative_path,
-                "start_line": actual_start_line,
-                "end_line": actual_end_line,
-                "actual_start_line": actual_start_line,
-                "actual_end_line": actual_end_line,
-                "returned_lines": len(selected),
-                "total_lines": len(lines),
-                "has_more": has_more,
-                "next_offset": next_offset,
-                "truncated": truncated,
-                "char_truncated": char_truncated,
-                "truncated_reason": truncated_reason,
-                "output_quality": _output_quality(
-                    truncated=truncated,
-                    original_chars=len(raw),
-                    returned_chars=len(rendered),
+    configs = (
+        (
+            "ls",
+            LsInput,
+            _ls_schema(),
+            False,
+            "List one known workspace directory with entry names and file sizes. This is not recursive; use find to discover paths by pattern. Respect truncated metadata instead of assuming the listing is complete.",
+        ),
+        (
+            "read",
+            ReadInput,
+            _read_schema(),
+            False,
+            "Read a line range from one UTF-8 workspace file. Use offset and limit for targeted or continued reads; each result has hard line and character bounds plus path, hash, line-count, returned-line, and truncation metadata. If truncated, continue from the first unreturned line. Do not re-read an unchanged identical range merely to keep it in context.",
+        ),
+        (
+            "write",
+            WriteInput,
+            _write_schema(),
+            True,
+            "Create a UTF-8 file or replace its complete content, reporting whether bytes actually changed. Use for new files or intentional full rewrites; prefer edit for one local replacement and apply_patch for several exact replacements. Set overwrite=false when an existing file must be protected.",
+        ),
+        (
+            "edit",
+            EditInput,
+            _edit_schema(),
+            True,
+            "Replace exact text in one UTF-8 file. Use the smallest clearly unique old_text and add expected_file_hash or expected_occurrences when editing from observed content; use occurrence_index or replace_all only when that multiplicity is intentional. Use apply_patch for coordinated replacements across files.",
+        ),
+        (
+            "apply_patch",
+            ApplyPatchInput,
+            _patch_schema(),
+            True,
+            "Atomically apply one to twenty exact text replacements across workspace files. Use for coordinated multi-hunk or multi-file edits after reading the relevant current content. All replacements are validated before commit, so one missing or ambiguous old_text prevents the batch from being partially applied.",
+        ),
+    )
+    registrations: list[ToolRegistration] = []
+    for name, input_type, input_schema, mutating, description in configs:
+        if not allow(name):
+            continue
+        input_codec = DataclassCodec(input_type, input_schema)
+        output_codec = DataclassCodec(FileOutput, _OUTPUT_SCHEMA)
+        registrations.append(
+            ToolRegistration(
+                version="1.0.0",
+                implementation_version="2",
+                spec=ToolSpec(name, description, input_schema, _OUTPUT_SCHEMA),
+                category="filesystem",
+                source="builtin",
+                owner="codepilot.builtin",
+                policy=_policy(mutating),
+                input_codec=input_codec,
+                output_codec=output_codec,
+                handler=_FileHandler(
+                    sandbox=sandbox,
+                    name=name,
+                    unique_edit=edit_require_unique_match,
                 ),
-            },
+                renderer=_Renderer(),
+                access_resolver=_Resolver(sandbox, name, mutating),
+            )
         )
+    return registrations
 
-    # ──────────────────────────────────────────────────────────────────
-    # write_tool — 文件写入工具
-    # ──────────────────────────────────────────────────────────────────
-    async def write_tool(request: ToolCallRequest, signal=None, on_update=None) -> ToolResult:
+
+# ── 访问解析器 ────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class _ResolvedFileInput:
+    value: object
+    targets: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class _Resolver:
+    """文件工具访问解析器 —— 将路径参数解析为权限请求。
+
+    对每个文件操作，解析目标路径：
+    - 通过 sandbox 解析路径（防止逃逸）
+    - 根据是否 mutating 选择读/写沙箱检查
+    - 构造 ToolAccessRequest（包含资源、效果、风险等级）
+    - 对批量写入操作，估算文件数和字节数，决定是否提升风险等级
+
+    批量操作甄别：
+    - 超过 _AUTO_APPROVE_MAX_FILES（20）或 _AUTO_APPROVE_MAX_BYTES（500KB）
+      的操作会被标记为 "bulk"，风险提升为 medium，审批范围限制为 once
+    - 防止 LLM 通过单次调用大量写入文件来绕过审批
+
+    参数:
+        sandbox: 工作区沙箱
+        name: 工具名称
+        mutating: 是否是变更操作
+    """
+    sandbox: WorkspaceSandbox
+    name: str
+    mutating: bool
+
+    def resolve(self, input, request):
+        """解析输入中的路径为访问权限请求。
+
+        对于 apply_patch，遍历所有 edits 中的 path。
+        对于其他工具，取 input.path。
+
+        参数:
+            input: 解码后的输入对象
+            request: 原始执行请求
+
+        返回:
+            ToolAccessResolution 包含访问权限信息
         """
-        将文本内容写入文件，支持覆盖控制和变更检测。
-
-        参数（来自 request.arguments）：
-            path:      目标文件路径（必填）。
-            content:   要写入的文本内容（必填）。
-            overwrite: 是否允许覆盖已存在的文件，默认 True。
-                       设为 False 时，若目标文件已存在则返回错误。
-
-        智能变更检测：
-            写入前先读取目标文件的当前内容（如果存在），与待写入内容进行比较。
-            若内容完全相同，则跳过实际写入操作，返回 "File unchanged" 结果，
-            且 workspace_changed=False，避免触发不必要的下游变更传播。
-
-        原子写入保证：
-            - 先创建父目录（exist_ok=True）。
-            - 使用 utf-8 编码写入，统一换行符为 "\n"。
-
-        尺寸限制：
-            单次写入内容不能超过 max_write_chars（1,000,000 字符）。
-
-        返回值：
-            ToolResult，其 content 中包含操作结果描述。
-            metadata 中包含 change_evidence（变更证据），记录操作类型
-            （create/update/unchanged）、前后文件哈希值等。
-        """
-        _ = signal, on_update
-        params = request.arguments
-        path_text = str(params.get("path", ""))
-        content = str(params.get("content", ""))
-        overwrite = bool(params.get("overwrite", True))
-
-        # 路径必填检查
-        if not path_text:
-            return _error_result("Missing path", "missing_path")
-
-        # 内容大小限制
-        if len(content) > max_write_chars:
-            return _error_result("Content is too large", "content_too_large")
-
-        # 写入路径解析（带可变性校验，确保目标在可写区域内）
-        target, error = _resolve_write_path(sandbox, path_text)
-        if error is not None:
-            return error
-
-        # 目标存在但非文件（如目录）
-        if target.exists() and not target.is_file():
-            return _error_result(f"Target is not a file: {path_text}", "target_not_file")
-
-        # overwrite=False 且文件已存在
-        if target.exists() and not overwrite:
-            return _error_result(f"File exists: {path_text}", "file_exists")
-
-        # 读取原始内容（用于变更检测）
-        try:
-            original = target.read_text(encoding="utf-8") if target.exists() else None
-        except UnicodeDecodeError:
-            return _error_result(f"Existing file is not valid UTF-8: {path_text}", "invalid_utf8")
-
-        relative_path = target.relative_to(sandbox.root).as_posix()
-        before_hash = _state_hash(sandbox.root, relative_path)
-
-        # ── 内容未变更检测 ──
-        # 如果新内容与原始内容完全相同，跳过写入，避免无意义的文件修改
-        if original == content:
-            state = file_state_for_path(sandbox.root, relative_path)
-            return ToolResult(
-                content=[TextContent(text=f"File unchanged: {relative_path}")],
-                affected_paths=[relative_path],
-                workspace_changed=False,  # 工作区未发生实际变化
-                diff_summary="No content change",
-                details={"changed": False, "file_state": state},
-                metadata={
-                    "file_state": state,
-                    "change_evidence": _change_evidence(
-                        "unchanged", relative_path, before_hash, _state_hash(sandbox.root, relative_path)
+        _ = request
+        paths = (
+            [str(item.get("path", "")) for item in input.edits]
+            if self.name == "apply_patch"
+            else [str(input.path)]
+        )
+        resources: list[ToolResource] = []
+        targets: list[Path] = []
+        for raw in paths:
+            target = self.sandbox.resolve_path(raw)
+            target = (
+                self.sandbox.ensure_mutable_path(target)
+                if self.mutating
+                else self.sandbox.ensure_readable_path(target)
+            )
+            targets.append(target)
+            resources.append(_resource(self.sandbox, target))
+        effects = (
+            frozenset({"filesystem_read", "filesystem_write"})
+            if self.mutating
+            else frozenset({"filesystem_read"})
+        )
+        # 估算批量写入大小，超过阈值则提升风险
+        file_count, estimated_bytes = _mutation_size(self.name, input)
+        bulk = self.mutating and (
+            file_count > _AUTO_APPROVE_MAX_FILES
+            or estimated_bytes > _AUTO_APPROVE_MAX_BYTES
+        )
+        return ToolAccessResolution(
+            input=_ResolvedFileInput(input, tuple(targets)),
+            access=ToolAccessRequest(
+                actions=(f"{self.name}.bulk" if bulk else self.name,),
+                resources=tuple(resources),
+                effects=effects,
+                risk="medium" if bulk else "low",
+                reason=f"{self.name} workspace path(s)",
+                safe_preview={
+                    "paths": paths,
+                    "file_count": file_count,
+                    "estimated_bytes": estimated_bytes,
+                    "operation_profile": (
+                        "bulk_write"
+                        if bulk
+                        else "workspace_write" if self.mutating else "workspace_read"
                     ),
                 },
-            )
-
-        # ── 执行写入 ──
-        # 确保父目录存在
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # 写入文件，统一换行符为 LF
-        target.write_text(content, encoding="utf-8", newline="\n")
-
-        state = file_state_for_path(sandbox.root, relative_path)
-
-        # 区分"创建"与"更新"操作
-        action = "created" if original is None else "updated"
-
-        return ToolResult(
-            content=[TextContent(text=f"Wrote file: {relative_path}")],
-            affected_paths=[relative_path],
-            workspace_changed=True,
-            diff_summary=f"{action} {relative_path}: {len(original or '')} -> {len(content)} characters",
-            details={"changed": True, "action": action, "file_state": state},
-            metadata={
-                "file_state": state,
-                "change_evidence": _change_evidence(
-                    "create" if original is None else "update",
-                    relative_path,
-                    before_hash,
-                    str(state.get("sha256", "<missing>")),
+                approval_scopes=(
+                    frozenset({"once"})
+                    if bulk
+                    else frozenset({"once", "session", "project"})
                 ),
+            ),
+        )
+
+
+# ── 处理器 ────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class _FileHandler:
+    """文件工具处理器 —— 实际的文件操作逻辑。
+
+    根据 name 分发到不同的处理方法：
+    - ls: 列出目录内容
+    - read: 读取文件内容（带行分页和截断）
+    - write: 创建或替换文件
+    - edit: 精确文本替换（支持哈希验证、匹配次数验证）
+    - apply_patch: 批量精确文本替换（原子化写入 + 失败回滚）
+
+    参数:
+        sandbox: 工作区沙箱
+        name: 工具名称
+        unique_edit: edit 是否要求唯一匹配
+    """
+
+    sandbox: WorkspaceSandbox
+    name: str
+    unique_edit: bool
+
+    async def __call__(self, resolved: _ResolvedFileInput, context: ToolExecutionContext) -> FileOutput:
+        """入口方法 —— 根据工具名称分发到具体处理逻辑。
+
+        在开始前检查取消信号（cancellation.raise_if_cancelled）。
+
+        参数:
+            input: 解码后的输入（LsInput / ReadInput / WriteInput 等）
+            context: 工具执行上下文
+
+        返回:
+            FileOutput 统一输出
+        """
+        context.cancellation.raise_if_cancelled()
+        input = resolved.value
+        if self.name == "ls":
+            return self._ls(input, resolved.targets[0], context)
+        if self.name == "read":
+            return self._read(input, resolved.targets[0], context)
+        if self.name == "write":
+            return self._write(input, resolved.targets[0], context)
+        if self.name == "edit":
+            return self._edit(input, resolved.targets[0], context)
+        return self._patch(input, resolved.targets, context)
+
+    def _ls(self, input: LsInput, target: Path, context: ToolExecutionContext) -> FileOutput:
+        """列出目录内容。
+
+        处理流程:
+        1. 解析路径并验证可读性
+        2. 检查路径是否是一个目录
+        3. 排序条目（目录在前，其余按字母序）
+        4. 截断到 max_entries 限制
+        5. 报告副作用
+
+        参数:
+            input: LsInput（path, max_entries）
+            context: 执行上下文
+
+        返回:
+            FileOutput 包含目录列表文本和元数据
+        """
+        target = self.sandbox.ensure_readable_path(target)
+        if not target.is_dir():
+            raise ToolHandlerError("ls.not_directory", f"Directory not found: {input.path}")
+        entries = sorted(target.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
+        shown = entries[: input.max_entries]
+        lines = [
+            f"{item.name}/" if item.is_dir() else f"{item.name}\t{item.stat().st_size} bytes"
+            for item in shown
+        ]
+        truncated = len(entries) > len(shown)
+        if truncated:
+            lines.append(f"... {len(entries) - len(shown)} more entries")
+        self._effect(context, target, "filesystem_read", "list directory")
+        relative = self.sandbox.relative_path(target) or "."
+        return FileOutput(
+            text="\n".join(lines),
+            details={"path": relative, "entry_count": len(entries)},
+            metadata={"truncated": truncated},
+        )
+
+    def _read(self, input: ReadInput, target: Path, context: ToolExecutionContext) -> FileOutput:
+        """读取文件内容。
+
+        处理流程:
+        1. 解析路径并验证可读性
+        2. 检查文件是否存在
+        3. 读取 UTF-8 编码的文件
+        4. 按 offset/limit 行号分页
+        5. 按 max_chars 截断（在最近的换行符处截断，避免截断行）
+        6. 报告副作用
+
+        输出元数据包含 output_quality 信息，LLM 可以据此判断
+        截断是否影响推理可靠性。
+
+        参数:
+            input: ReadInput（path, max_chars, offset, limit）
+            context: 执行上下文
+
+        返回:
+            FileOutput 包含文件内容和分页/截断元数据
+        """
+        target = self.sandbox.ensure_readable_path(target)
+        if not target.is_file():
+            raise ToolHandlerError("read.not_file", f"File not found: {input.path}")
+        try:
+            raw_content = target.read_bytes()
+            text = raw_content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ToolHandlerError("read.not_utf8", f"File is not valid UTF-8: {input.path}") from exc
+        lines = text.splitlines(keepends=True)
+        start = min(len(lines), input.offset - 1)
+        selected = lines[start : start + input.limit]
+        rendered = "".join(selected)
+        char_truncated = len(rendered) > input.max_chars
+        if char_truncated:
+            rendered = rendered[: input.max_chars]
+            if "\n" in rendered:
+                rendered = rendered[: rendered.rfind("\n") + 1]
+        line_truncated = start + len(selected) < len(lines)
+        truncated = char_truncated or line_truncated
+        self._effect(context, target, "filesystem_read", "read file")
+        relative = self.sandbox.relative_path(target)
+        return FileOutput(
+            text=rendered,
+            details={
+                "path": relative,
+                "sha256": hashlib.sha256(raw_content).hexdigest(),
+                "offset": input.offset,
+                "line_count": len(lines),
+                "returned_lines": len(rendered.splitlines()),
+            },
+            metadata={
+                "truncated": truncated,
+                "output_quality": {
+                    "truncated": truncated,
+                    "original_chars": len(text),
+                    "returned_chars": len(rendered),
+                    "reliable_for_reasoning": not truncated,
+                },
             },
         )
 
-    # ──────────────────────────────────────────────────────────────────
-    # edit_tool — 单文件文本替换编辑工具
-    # ──────────────────────────────────────────────────────────────────
-    async def edit_tool(request: ToolCallRequest, signal=None, on_update=None) -> ToolResult:
+    def _write(self, input: WriteInput, target: Path, context: ToolExecutionContext) -> FileOutput:
+        """创建或替换文件。
+
+        处理流程:
+        1. 解析路径并验证可修改性
+        2. 检查是否应阻止覆盖（overwrite=False 且文件已存在）
+        3. 读取原内容做变更检测（content unchanged = no-op）
+        4. 内容变更时：创建父目录 → 写入新内容（强制 \n 换行符）
+        5. 返回是否变更的信息
+
+        变更检测确保如果写入内容与原内容相同，不会实际写盘，
+        避免不必要的文件修改时间戳更新。
+
+        参数:
+            input: WriteInput（path, content, overwrite）
+            context: 执行上下文
+
+        返回:
+            FileOutput 包含写入结果（"Updated" 或 "Unchanged"）
         """
-        按 old_text -> new_text 替换文件内容，支持精确匹配控制。
+        target = self.sandbox.ensure_mutable_path(target)
+        if target.exists() and not input.overwrite:
+            raise ToolHandlerError("write.exists", f"File already exists: {input.path}")
+        previous = target.read_text(encoding="utf-8") if target.is_file() else None
+        changed = previous != input.content
+        if changed:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(input.content, encoding="utf-8", newline="\n")
+        return self._mutation_output(target, changed, context, "write file")
 
-        参数（来自 request.arguments）：
-            path:                 目标文件路径（必填）。
-            old_text:             要替换的原始文本（必填，不可为空）。
-            new_text:             替换后的新文本（必填，可为空字符串）。
-            replace_all:          是否替换所有匹配项，默认 False。
-            occurrence_index:     指定替换第几次出现（1-based），优先级高于 replace_all。
-            expected_occurrences: 期望的 old_text 出现次数，用于校验匹配数量。
-            expected_file_hash:   期望的文件 SHA256 哈希值，用于检测并发修改（stale file）。
+    def _edit(self, input: EditInput, target: Path, context: ToolExecutionContext) -> FileOutput:
+        """对文件执行精确的文本替换。
 
-        唯一性约束（受 edit_require_unique_match 控制）：
-            当 replace_all=False、未指定 occurrence_index 且 old_text 出现多次时，
-            若 edit_require_unique_match=True，则返回 multiple_matches 错误，
-            要求调用方提供更精确的 old_text 或使用 occurrence_index 明确指定。
+        支持四种替换模式:
+        1. occurrence_index: 替换第 N 次匹配（从 1 开始）
+        2. replace_all: 替换所有匹配
+        3. 唯一匹配（默认）: 如果 count!=1 则报错（由 unique_edit 控制）
+        4. replace_all=False 且无 occurrence_index: 仅替换第一次
 
-        实现：
-            委托给 _apply_single_edit() 核心编辑函数执行实际替换逻辑。
+        安全保护:
+        - expected_file_hash: 如果提供，先验证文件哈希是否匹配
+          （防止并发修改导致替换位置错误）
+        - expected_occurrences: 如果提供，先验证匹配次数
+          （防止误判，确认 LLM 对替换目标数量的理解正确）
+
+        参数:
+            input: EditInput（path, old_text, new_text, ...）
+            context: 执行上下文
+
+        返回:
+            FileOutput 包含编辑结果（含 replacements 计数）
         """
-        _ = signal, on_update
-        params = request.arguments
-
-        # 从参数构建编辑数据载体
-        edit = _PatchEdit(
-            path=str(params.get("path", "")),
-            old_text=str(params.get("old_text", "")),
-            new_text=str(params.get("new_text", "")),
-        )
-
-        # 解析可选的控制参数
-        replace_all = bool(params.get("replace_all", False))
-        occurrence_index = params.get("occurrence_index")
-        occurrence_index = int(occurrence_index) if occurrence_index is not None else None
-        expected_occurrences = params.get("expected_occurrences")
-        expected_occurrences = int(expected_occurrences) if expected_occurrences is not None else None
-        expected_hash = params.get("expected_file_hash")
-
-        # 委托核心编辑逻辑
-        return _apply_single_edit(
-            sandbox,
-            edit,
-            replace_all=replace_all,
-            occurrence_index=occurrence_index,
-            expected_occurrences=expected_occurrences,
-            expected_file_hash=str(expected_hash) if expected_hash is not None else None,
-            require_unique_match=edit_require_unique_match,
-            max_chars=max_write_chars,
-            label="Edited file",
-        )
-
-    # ──────────────────────────────────────────────────────────────────
-    # apply_patch_tool — 批量补丁应用工具
-    # ──────────────────────────────────────────────────────────────────
-    async def apply_patch_tool(request: ToolCallRequest, signal=None, on_update=None) -> ToolResult:
-        """
-        对多个文件执行批量结构化编辑（补丁）。
-
-        参数（来自 request.arguments）：
-            edits: 编辑操作的列表，每个元素是一个包含 path/old_text/new_text 的对象。
-                   列表长度限制为 1~20 个编辑。
-
-        与 edit_tool 的区别：
-            - edit_tool 针对单个文件提供灵活的匹配控制（replace_all、occurrence_index 等）。
-            - apply_patch_tool 面向批量场景，每个编辑要求 exactly one match（唯一匹配），
-              且所有编辑的校验在写入前完成（原子性：要么全部通过校验，要么全部拒绝）。
-
-        执行流程：
-            1. 校验 edits 参数（类型、数量上限）。
-            2. 逐条构建 _PatchEdit 对象并验证字段完整性。
-            3. 预检（pre-flight check）阶段：
-               a. 解析每个文件路径并验证文件存在且可读。
-               b. 读取原始内容并统计 old_text 的出现次数。
-               c. 必须 exactly one match，否则立即返回 patch_match_count 错误。
-               d. 预先计算替换后的内容，记录变更前哈希值。
-            4. 预检全部通过后，一次性写入所有文件。
-            5. 收集变更证据并返回统一结果。
-
-        返回值：
-            ToolResult，content 显示成功应用的编辑数量。
-            metadata.change_evidence 中包含每条编辑的变更证据列表。
-        """
-        _ = signal, on_update
-        params = request.arguments
-        raw_edits = params.get("edits")
-
-        # edits 必须是至少包含一个元素的列表
-        if not isinstance(raw_edits, list) or not raw_edits:
-            return _error_result("edits must contain at least one edit", "invalid_patch")
-
-        # 批量编辑上限：最多 20 个编辑
-        if len(raw_edits) > 20:
-            return _error_result("apply_patch supports at most 20 edits", "patch_too_large")
-
-        # 第一遍：构建 _PatchEdit 对象列表
-        edits: list[_PatchEdit] = []
-        for index, item in enumerate(raw_edits):
-            if not isinstance(item, dict):
-                return _error_result(f"edits[{index}] must be an object", "invalid_patch")
-            edit = _PatchEdit(
-                path=str(item.get("path", "")),
-                old_text=str(item.get("old_text", "")),
-                new_text=str(item.get("new_text", "")),
-            )
-            if not edit.path or edit.old_text == "":
-                return _error_result(f"edits[{index}] requires path and old_text", "invalid_patch")
-            edits.append(edit)
-
-        # 第二遍：预检阶段 — 读取文件、统计匹配数、预先计算替换结果
-        # prepared 列表元素：(edit, target_path, relative_path, updated_content, before_hash)
-        prepared: list[tuple[_PatchEdit, Any, str, str, str]] = []
-        for edit in edits:
-            target, error = _resolve_write_path(sandbox, edit.path)
-            if error is not None:
-                return error
-            if not target.exists() or not target.is_file():
-                return _error_result(f"Path not found or not file: {edit.path}", "path_not_file")
-            try:
-                original = target.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                return _error_result(f"File is not valid UTF-8: {edit.path}", "invalid_utf8")
-
-            # 计算匹配次数：apply_patch 要求恰好匹配一次
-            count = original.count(edit.old_text)
-            if count != 1:
-                return _error_result(
-                    f"Patch for {edit.path} expected exactly one match, found {count}",
-                    "patch_match_count",
-                    metadata={"matches": count},
-                )
-
-            # 预先计算替换后的文本（只替换第一个出现的匹配）
-            updated = original.replace(edit.old_text, edit.new_text, 1)
-            rel = target.relative_to(sandbox.root).as_posix()
-            before_hash = _state_hash(sandbox.root, rel)
-            prepared.append((edit, target, rel, updated, before_hash))
-
-        # 第三遍：预检全部通过，执行实际写入
-        affected: list[str] = []
-        evidences = []
-        for _edit, target, rel, updated, before_hash in prepared:
+        target = self.sandbox.ensure_mutable_path(target)
+        if not target.is_file():
+            raise ToolHandlerError("edit.not_file", f"File not found: {input.path}")
+        text = target.read_text(encoding="utf-8")
+        if input.expected_file_hash and _hash_text(text) != input.expected_file_hash:
+            raise ToolHandlerError("edit.hash_mismatch", "File content hash no longer matches")
+        count = text.count(input.old_text)
+        if input.expected_occurrences is not None and count != input.expected_occurrences:
+            raise ToolHandlerError("edit.occurrence_mismatch", f"Expected {input.expected_occurrences} matches, found {count}")
+        if count == 0:
+            raise ToolHandlerError("edit.no_match", "old_text was not found")
+        if input.occurrence_index is not None:
+            updated = _replace_occurrence(text, input.old_text, input.new_text, input.occurrence_index)
+            replacements = 1
+        elif input.replace_all:
+            updated = text.replace(input.old_text, input.new_text)
+            replacements = count
+        else:
+            if self.unique_edit and count != 1:
+                raise ToolHandlerError("edit.match_not_unique", f"old_text matched {count} times")
+            updated = text.replace(input.old_text, input.new_text, 1)
+            replacements = 1
+        changed = updated != text
+        if changed:
             target.write_text(updated, encoding="utf-8", newline="\n")
-            affected.append(rel)
-            evidences.append(
-                _change_evidence("update", rel, before_hash, _state_hash(sandbox.root, rel))
-            )
+        output = self._mutation_output(target, changed, context, "edit file")
+        return FileOutput(**{**output.__dict__, "details": {"replacements": replacements}})
 
-        return ToolResult(
-            content=[TextContent(text=f"Applied patch edits: {len(prepared)}")],
-            affected_paths=affected,
+    def _patch(self, input: ApplyPatchInput, targets: tuple[Path, ...], context: ToolExecutionContext) -> FileOutput:
+        """批量应用文本替换补丁（原子化写入 + 失败回滚）。
+
+        原子化保证：
+        1. 先验证所有编辑的匹配（在内存中模拟修改）
+        2. 对所有变更文件执行原子化写入（先写临时文件，再 os.replace）
+        3. 如果任何一个写入失败，回滚所有已替换的文件
+        4. 如果操作被取消（CancelledError），也执行回滚
+
+        支持 1-20 个编辑操作，每个操作包含 path/old_text/new_text。
+        每个编辑操作必须唯一匹配（count=1），防止歧义。
+
+        参数:
+            input: ApplyPatchInput（edits 列表）
+            context: 执行上下文
+
+        返回:
+            FileOutput 包含补丁应用结果
+        """
+        if not 1 <= len(input.edits) <= 20:
+            raise ToolHandlerError("apply_patch.invalid_count", "edits must contain between 1 and 20 items")
+        staged: dict[Path, str] = {}
+        originals: dict[Path, str] = {}
+        changed_paths: list[Path] = []
+        for index, (edit, resolved_target) in enumerate(zip(input.edits, targets, strict=True)):
+            path = str(edit.get("path", ""))
+            old_text = edit.get("old_text")
+            new_text = edit.get("new_text")
+            if not isinstance(old_text, str) or not isinstance(new_text, str):
+                raise ToolHandlerError("apply_patch.invalid_edit", f"edits[{index}] requires string old_text/new_text")
+            target = self.sandbox.ensure_mutable_path(resolved_target)
+            if not target.is_file():
+                raise ToolHandlerError("apply_patch.not_file", f"File not found: {path}")
+            current = staged.get(target)
+            if current is None:
+                current = target.read_text(encoding="utf-8")
+                originals[target] = current
+            count = current.count(old_text)
+            if count != 1:
+                raise ToolHandlerError("apply_patch.match_not_unique", f"edits[{index}] matched {count} times")
+            staged[target] = current.replace(old_text, new_text, 1)
+            if target not in changed_paths:
+                changed_paths.append(target)
+        # 原子化写入所有变更
+        _replace_files_atomically(
+            {target: staged[target] for target in changed_paths},
+            originals,
+            context,
+        )
+        for target in changed_paths:
+            self._effect(context, target, "filesystem_read", "validate patch")
+            self._effect(context, target, "filesystem_write", "apply patch")
+        relatives = [self.sandbox.relative_path(path) for path in changed_paths]
+        return FileOutput(
+            text=f"Applied {len(input.edits)} edit(s) across {len(changed_paths)} file(s).",
+            details={"edit_count": len(input.edits)},
+            affected_paths=relatives,
             workspace_changed=True,
-            diff_summary=f"applied {len(prepared)} patch edit(s)",
-            details={"edits": len(prepared)},
-            metadata={"change_evidence": evidences},
+            diff_summary=f"updated {len(changed_paths)} file(s)",
         )
 
-    # ── 根据 allow 谓词有条件地注册工具 ──
-    # 每个工具的中文描述用于向中文用户提供友好的工具说明
-    if allow("ls"):
-        tools.append(_tool("ls", "List Directory", "列出目录内容，返回文件名和大小。", _ls_schema(), ls_tool))
-    if allow("read"):
-        tools.append(_tool("read", "Read File", "读取文本文件内容。", _read_schema(), read_tool))
-    if allow("write"):
-        tools.append(_tool("write", "Write File", "写入文本文件。", _write_schema(), write_tool))
-    if allow("edit"):
-        tools.append(_tool("edit", "Edit File", "按 old_text -> new_text 替换文件内容。", _edit_schema(), edit_tool))
-    if allow("apply_patch"):
-        tools.append(_tool("apply_patch", "Apply Patch", "按结构化 edits 对一个或多个文件执行唯一匹配替换，适合多处小改。", _apply_patch_schema(), apply_patch_tool))
+    def _mutation_output(
+        self,
+        target: Path,
+        changed: bool,
+        context: ToolExecutionContext,
+        operation: str,
+    ) -> FileOutput:
+        """构建变更操作的通用输出。
 
-    return tools
+        无论 write/edit，变更后的输出结构一致：
+        - 报告读取副作用（变更前检查）
+        - 如果实际变更，报告写入副作用
+        - 返回 "Updated path" 或 "Unchanged path"
+
+        参数:
+            target: 目标文件路径
+            changed: 内容是否实际变更
+            context: 执行上下文
+            operation: 操作描述（"write file" / "edit file"）
+
+        返回:
+            FileOutput 对象
+        """
+        self._effect(context, target, "filesystem_read", f"{operation} precondition")
+        if changed:
+            self._effect(context, target, "filesystem_write", operation)
+        relative = self.sandbox.relative_path(target)
+        return FileOutput(
+            text=f"{'Updated' if changed else 'Unchanged'} {relative}",
+            affected_paths=[relative] if changed else [],
+            workspace_changed=changed,
+            diff_summary=f"updated {relative}" if changed else None,
+        )
+
+    def _effect(
+        self,
+        context: ToolExecutionContext,
+        target: Path,
+        kind: str,
+        operation: str,
+    ) -> None:
+        """报告一个文件操作副作用。
+
+        参数:
+            context: 执行上下文（包含 effects reporter）
+            target: 文件路径
+            kind: 副作用类型（filesystem_read / filesystem_write）
+            operation: 操作描述
+        """
+        context.effects.report(
+            ToolEffect(
+                kind=kind,
+                resource=_resource(self.sandbox, target),
+                operation=operation,
+                status="completed",
+                certainty="observed",
+            )
+        )
 
 
-def _apply_single_edit(
-    sandbox: WorkspaceSandbox,
-    edit: _PatchEdit,
-    *,
-    replace_all: bool,
-    occurrence_index: int | None,
-    expected_occurrences: int | None,
-    expected_file_hash: str | None,
-    require_unique_match: bool,
-    max_chars: int,
-    label: str,
-) -> ToolResult:
+# ── 渲染器 ────────────────────────────────────────────────────────────────────
+
+
+class _Renderer:
+    """渲染器 —— 将 FileOutput 转为 LLM 可消费的 TextContent。"""
+    def render(self, data):
+        """渲染文件工具输出为模型可消费的文本内容块。"""
+        return (TextContent(text=str(data["text"])),)
+
+
+# ── 策略 ──────────────────────────────────────────────────────────────────────
+
+
+def _policy(mutating: bool) -> ToolPolicy:
+    """构建文件工具的安全策略。
+
+    读/写策略的关键区别：
+    - allowed_modes: 写操作只允许在 execute 模式（plan 模式下不可写）
+    - declared_effects: 写操作包含 filesystem_write
+    - required_permissions: 写操作需要 workspace.write
+    - base_risk: 写操作为 medium，读操作为 low
+    - approval: 写操作为 on_risk（按风险审批），读操作为 never
+    - concurrency: 写操作串行执行（防止文件竞争），读操作可并行
+
+    参数:
+        mutating: 是否是变更操作
+
+    返回:
+        ToolPolicy 安全策略
     """
-    核心编辑逻辑 —— 执行单次文本替换操作。
-
-    这是 edit_tool 和 apply_patch_tool 共用的底层实现。edit_tool 通过丰富的
-    控制参数提供灵活的编辑能力，apply_patch_tool 则通过固定参数（replace_all=False,
-    require_unique_match 等）实现批量唯一匹配编辑。
-
-    执行流程（按顺序的防御性校验链）：
-
-    1. 参数校验
-       - edit.path 不能为空。
-       - edit.old_text 不能为空（空字符串无法匹配任何内容）。
-       - old_text + new_text 的总长度不能超过 max_chars 限制。
-
-    2. 路径与文件校验
-       - 通过 _resolve_write_path 解析并验证路径在工作区可写范围内。
-       - 目标文件必须存在且为普通文件。
-
-    3. UTF-8 编码校验
-       - 读取整个文件内容，非 UTF-8 则返回错误。
-
-    4. 文件哈希校验（Stale File Detection，过期文件检测）
-       - 若调用方提供了 expected_file_hash，则与当前文件的 SHA256 哈希比对。
-       - 不匹配说明文件在最后一次读取后已被修改，返回 stale_file 错误。
-       - 此机制防止基于过期文件内容进行的编辑覆盖他人的并发修改。
-
-    5. 匹配次数校验
-       - 使用 str.count() 统计 old_text 的出现次数。
-       - 若 expected_occurrences 被指定，校验实际匹配数是否等于期望值。
-       - 若匹配数为 0，返回 no_match 错误。
-       - 若匹配数 > 1、未指定 replace_all、未指定 occurrence_index、且
-         require_unique_match=True，则返回 multiple_matches 错误。
-
-    6. 执行替换（三种模式，按优先级排序）
-       - replace_all=True: 替换所有出现的 old_text。
-       - occurrence_index 指定: 仅替换第 N 次出现（通过 _replace_nth 实现）。
-       - 默认: 仅替换第一次出现。
-
-    7. 写入与结果组装
-       - 将替换后的内容写回文件。
-       - 若实际内容未变化（updated == original），workspace_changed=False。
-       - 返回包含变更证据的 ToolResult。
-
-    参数：
-        sandbox: 工作区沙箱实例。
-        edit: 编辑操作的三元组（path, old_text, new_text）。
-        replace_all: 是否替换所有匹配项。
-        occurrence_index: 指定替换第几次出现的匹配（1-based）。
-        expected_occurrences: 期望的匹配次数，用于校验。
-        expected_file_hash: 期望的文件哈希，用于过期检测。
-        require_unique_match: 是否要求唯一匹配。
-        max_chars: 编辑载荷大小上限。
-        label: 结果描述中的操作标签（如 "Edited file"）。
-
-    返回值：
-        ToolResult，包含替换次数、文件状态、变更证据等信息。
-    """
-    # ── 1. 参数校验 ──
-    if not edit.path:
-        return _error_result("Missing path", "missing_path")
-    if edit.old_text == "":
-        return _error_result("old_text cannot be empty", "empty_old_text")
-    if len(edit.old_text) + len(edit.new_text) > max_chars:
-        return _error_result("Edit payload is too large", "content_too_large")
-
-    # ── 2. 路径解析与文件存在性校验 ──
-    target, error = _resolve_write_path(sandbox, edit.path)
-    if error is not None:
-        return error
-    if not target.exists() or not target.is_file():
-        return _error_result(f"Path not found or not file: {edit.path}", "path_not_file")
-
-    # ── 3. 读取原始文件内容 ──
-    try:
-        original = target.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return _error_result(f"File is not valid UTF-8: {edit.path}", "invalid_utf8")
-
-    # ── 4. 文件哈希校验（过期文件检测）──
-    relative_path = target.relative_to(sandbox.root).as_posix()
-    state = file_state_for_path(sandbox.root, relative_path)
-    before_hash = str(state.get("sha256", "<missing>"))
-
-    if expected_file_hash is not None and before_hash != expected_file_hash:
-        # 文件自上次读取后已被修改，拒绝编辑以避免覆盖他人变更
-        return _error_result(
-            "File changed since it was read; read it again before editing",
-            "stale_file",
-            metadata={"file_state": state},
-        )
-
-    # ── 5. 匹配次数校验 ──
-    count = original.count(edit.old_text)
-
-    # 期望匹配次数的显式校验
-    if expected_occurrences is not None and count != expected_occurrences:
-        return _error_result(
-            f"Expected {expected_occurrences} matches, found {count}",
-            "unexpected_match_count",
-        )
-
-    # 无匹配
-    if count == 0:
-        return _error_result("No match found", "no_match")
-
-    # 多匹配且未指定唯一选择策略时的拒绝逻辑
-    if not replace_all and count > 1 and occurrence_index is None and require_unique_match:
-        return _error_result(
-            "Multiple matches found; refine old_text or use occurrence_index",
-            "multiple_matches",
-        )
-
-    # ── 6. 执行替换（三种模式）──
-    if replace_all:
-        # 模式 A: 替换所有匹配项
-        updated = original.replace(edit.old_text, edit.new_text)
-        replacements = count
-    elif occurrence_index is not None:
-        # 模式 B: 替换第 N 次出现
-        if occurrence_index < 1 or occurrence_index > count:
-            return _error_result("occurrence_index is out of range", "occurrence_out_of_range")
-        # _replace_nth 精确替换第 occurrence_index 次出现
-        updated = _replace_nth(original, edit.old_text, edit.new_text, occurrence_index)
-        replacements = 1
-    else:
-        # 模式 C: 默认替换第一次出现
-        updated = original.replace(edit.old_text, edit.new_text, 1)
-        replacements = 1
-
-    # ── 7. 写入文件 ──
-    target.write_text(updated, encoding="utf-8", newline="\n")
-
-    # 获取写入后的新状态
-    new_state = file_state_for_path(sandbox.root, relative_path)
-
-    return ToolResult(
-        content=[TextContent(text=f"{label}: {relative_path} (replacements={replacements})")],
-        affected_paths=[relative_path],
-        # 若替换后内容未实际变化，则工作区未修改
-        workspace_changed=updated != original,
-        diff_summary=f"edited {relative_path}: {replacements} replacement(s)",
-        details={"replacements": replacements, "file_state": new_state},
-        metadata={
-            "file_state": new_state,
-            "change_evidence": _change_evidence(
-                "update" if updated != original else "unchanged",
-                relative_path,
-                before_hash,
-                str(new_state.get("sha256", "<missing>")),
-            ),
-        },
+    return ToolPolicy(
+        allowed_modes=frozenset({"execute"} if mutating else {"plan", "execute"}),
+        declared_effects=(
+            frozenset({"filesystem_read", "filesystem_write"})
+            if mutating
+            else frozenset({"filesystem_read"})
+        ),
+        required_permissions=(
+            frozenset({"workspace.read", "workspace.write"})
+            if mutating
+            else frozenset({"workspace.read"})
+        ),
+        base_risk="medium" if mutating else "low",
+        approval="on_risk" if mutating else "never",
+        timeout=TimeoutPolicy(15_000, 60_000),
+        concurrency=(
+            ConcurrencyPolicy(mode="serial", group="workspace_mutation")
+            if mutating
+            else ConcurrencyPolicy(mode="parallel")
+        ),
+        output_limits=OutputLimits(),
+        output_trust=OutputTrustPolicy(),
     )
 
 
-def _tool(name: str, label: str, description: str, parameters: dict[str, Any], execute) -> ToolDefinition:
+# ── 辅助函数 ──────────────────────────────────────────────────────────────────
+
+
+def _resource(sandbox: WorkspaceSandbox, target: Path) -> ToolResource:
+    """构建工作区资源的 URI。
+
+    格式: "workspace:///相对路径"
+    相对路径通过 sandbox.relative_path() 计算（确保在工作区内）。
     """
-    工具包装工厂 —— 将执行函数和元数据组装为 ToolDefinition。
+    return ToolResource("workspace:///" + sandbox.relative_path(target))
 
-    参数：
-        name:        工具的唯一名称标识（如 "ls", "read", "write", "edit", "apply_patch"）。
-        label:       工具的英文人类可读标签。
-        description: 工具的中文描述，用于向用户说明工具功能。
-        parameters:  JSON Schema 格式的参数定义。
-        execute:     工具的异步执行函数。
 
-    实现：
-        从工具注册表中获取预定义的元数据（get_builtin_tool_metadata），
-        元数据包括工具的版本、分类、权限等信息。若元数据不存在则抛出异常，
-        这是防御性编程 —— 确保所有内置工具都有已注册的元数据。
+def _mutation_size(name: str, input: object) -> tuple[int, int]:
+    """估算写入操作的规模（文件数和字节数）。
 
-    返回值：
-        ToolDefinition 实例，可直接添加到工具定义列表中。
+    用于 Resolver 判断是否触发批量操作限制（bulk）。
+    - write: 1 个文件，content 字节数
+    - edit: 1 个文件，old_text + new_text 字节数
+    - apply_patch: 所有 edits 的 old_text + new_text 字节数总和
+
+    参数:
+        name: 工具名称
+        input: 解码后的输入对象
+
+    返回:
+        (file_count, estimated_bytes) 文件数和估计字节数
     """
-    metadata = get_builtin_tool_metadata(name)
-    if metadata is None:
-        raise ValueError(f"Missing builtin metadata for {name}")
-    return ToolDefinition(
-        name=name,
-        label=label,
-        description=description,
-        parameters=parameters,
-        metadata=metadata,
-        execute=execute,
-    )
+    if name == "write":
+        return 1, len(input.content.encode("utf-8"))
+    if name == "edit":
+        return 1, len(input.old_text.encode("utf-8")) + len(input.new_text.encode("utf-8"))
+    if name == "apply_patch":
+        return len(input.edits), sum(
+            len(str(item.get("old_text", "")).encode("utf-8"))
+            + len(str(item.get("new_text", "")).encode("utf-8"))
+            for item in input.edits
+        )
+    return 1, 0
 
 
-def _resolve_read_path(sandbox: WorkspaceSandbox, path_text: str) -> tuple[Any | None, ToolResult | None]:
+def _hash_text(text: str) -> str:
+    """计算文本的 SHA256 哈希。
+
+    用于 edit 工具的 expected_file_hash 验证。
     """
-    只读取路径解析 —— 通过沙箱解析路径并检查工作区边界。
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    与其他路径解析函数的区别：
-        _resolve_read_path 仅用于读取操作（ls_tool、read_tool），
-        不执行可变性检查（mutable check），因为读取操作不需要写入权限。
 
-    参数：
-        sandbox:   工作区沙箱实例。
-        path_text: 待解析的路径字符串（相对于工作区根目录或绝对路径）。
+def _replace_occurrence(text: str, old: str, new: str, index: int) -> str:
+    """替换文本中的第 N 次匹配。
 
-    返回值：
-        二元组 (resolved_path, error_result)：
-        - 成功时返回 (Path对象, None)。
-        - 路径逃逸工作区边界时返回 (None, ToolResult错误)。
+    参数:
+        text: 原始文本
+        old: 要替换的旧文本
+        new: 新文本
+        index: 第几次匹配（从 1 开始）
+
+    返回:
+        替换后的文本
+
+    抛出:
+        ToolHandlerError: index 无效或匹配不存在
     """
+    if index < 1:
+        raise ToolHandlerError("edit.invalid_occurrence", "occurrence_index must be positive")
+    start = -1
+    cursor = 0
+    for _ in range(index):
+        start = text.find(old, cursor)
+        if start < 0:
+            raise ToolHandlerError("edit.occurrence_missing", f"Occurrence {index} was not found")
+        cursor = start + len(old)
+    return text[:start] + new + text[start + len(old) :]
+
+
+def _replace_files_atomically(
+    staged: dict[Path, str],
+    originals: dict[Path, str],
+    context: ToolExecutionContext,
+) -> None:
+    """原子化替换多个文件。
+
+    策略：
+    1. 对所有目标文件，先写入临时文件（同目录，UUID 文件名）
+    2. 所有临时文件写入完毕后，用 os.replace 替换原文件
+    3. 如果任何一步失败（异常或取消），回滚已替换的文件
+
+    回滚：
+    - 对已被替换的文件，恢复原始内容
+    - 清理所有临时文件
+    - 如果是 CancelledError，重新抛出（上层处理）
+    - 如果是其他异常，抛出 ToolHandlerError
+
+    参数:
+        staged: 目标文件 → 新内容 的映射
+        originals: 目标文件 → 原始内容 的映射（用于回滚）
+        context: 执行上下文（用于检查取消）
+
+    抛出:
+        ToolHandlerError: 原子写入失败，可能包含回滚失败信息
+    """
+    temporary: dict[Path, Path] = {}
+    replaced: list[Path] = []
     try:
-        return sandbox.resolve_path(path_text), None
-    except ValueError:
-        # 路径逃逸工作区边界被沙箱拒绝
-        return None, _error_result(f"Path escapes workspace boundary: {path_text}", "path_escapes_workspace")
+        for target, content in staged.items():
+            context.cancellation.raise_if_cancelled()
+            temporary[target] = _write_replacement_file(target, content)
+        for target, temp in temporary.items():
+            context.cancellation.raise_if_cancelled()
+            os.replace(temp, target)
+            replaced.append(target)
+    except (Exception, asyncio.CancelledError) as exc:
+        rollback_errors: list[str] = []
+        for target in reversed(replaced):
+            try:
+                restore = _write_replacement_file(target, originals[target])
+                os.replace(restore, target)
+            except OSError as rollback_exc:
+                rollback_errors.append(f"{target.name}: {rollback_exc}")
+        for temp in temporary.values():
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        message = f"Atomic patch failed: {exc}"
+        if rollback_errors:
+            message += "; rollback failed for " + ", ".join(rollback_errors)
+        raise ToolHandlerError("apply_patch.atomic_write_failed", message) from exc
 
 
-def _resolve_write_path(sandbox: WorkspaceSandbox, path_text: str) -> tuple[Any | None, ToolResult | None]:
+def _write_replacement_file(target: Path, content: str) -> Path:
+    """写入替换临时文件（原子化写入的辅助函数）。
+
+    在同目录下创建临时文件（格式: .{target}.{uuid}.tmp），
+    写入内容后调用 fsync 确保数据落盘，然后复制原文件权限。
+
+    参数:
+        target: 目标文件路径
+        content: 要写入的内容
+
+    返回:
+        临时文件的路径
+
+    抛出:
+        OSError: 写入失败时，自动清理临时文件后重新抛出
     """
-    可写路径解析 —— 通过沙箱解析路径并校验可写性。
-
-    与 _resolve_read_path 的区别：
-        _resolve_write_path 额外调用 ensure_mutable_path()，确保目标路径
-        在工作区的可写区域内（而非只读区域，如系统文件或依赖包目录）。
-
-    参数：
-        sandbox:   工作区沙箱实例。
-        path_text: 待解析的路径字符串。
-
-    返回值：
-        二元组 (resolved_path, error_result)：
-        - 成功时返回 (Path对象, None)。
-        - 路径逃逸或不可写时返回 (None, ToolResult错误)。
-    """
+    temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
     try:
-        return sandbox.ensure_mutable_path(sandbox.resolve_path(path_text)), None
-    except ValueError as exc:
-        return None, _error_result(str(exc), "path_escapes_workspace")
+        with temp.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp, target.stat().st_mode)
+        return temp
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
 
 
-def _error_result(
-    message: str,
-    error_code: str,
-    *,
-    metadata: dict[str, Any] | None = None,
-) -> ToolResult:
-    """
-    构建标准化的错误 ToolResult。
-
-    统一的错误返回工厂，确保所有工具返回的错误具有一致的结构：
-    - status="error" 标记工具执行失败。
-    - is_error=True 供上层错误处理逻辑快速判断。
-    - error_code 作为可编程的错误分类标识。
-    - metadata 中自动附加恢复提示（recovery_hint），帮助 AI 或用户自行纠错。
-
-    参数：
-        message:    用户可读的错误描述文本。
-        error_code: 错误码（如 "path_not_found", "multiple_matches", "stale_file" 等）。
-        metadata:   额外的元数据字典，会与错误默认元数据合并。
-
-    返回值：
-        ToolResult 错误实例。
-    """
-    return ToolResult(
-        content=[TextContent(text=message)],
-        status="error",
-        is_error=True,
-        error_code=error_code,
-        metadata={**_metadata_for_error(error_code), **(metadata or {})},
-    )
-
-
-def _metadata_for_error(error_code: str) -> dict[str, Any]:
-    """
-    根据错误码生成恢复提示（Recovery Hint）元数据。
-
-    恢复提示是嵌入在错误 metadata 中的自然语言建议，引导 AI 或用户
-    在遇到特定错误时采取正确的修正操作。支持的常见错误码及其建议：
-
-    - path_not_found / path_not_file: 建议列表或搜索工作区确认路径。
-    - path_escapes_workspace: 建议使用工作区内的路径。
-    - stale_file: 建议重新读取文件后再编辑。
-    - multiple_matches: 建议读取更大范围的上下文以提供唯一的 old_text。
-    - no_match: 建议先读取当前文件内容。
-    - invalid_patch: 建议按正确的格式传递参数。
-
-    若错误码不在已知列表中，返回空字典（不附加恢复提示）。
-    """
-    hints = {
-        "path_not_found": "List or search the workspace to confirm the path.",
-        "path_not_file": "List or search the workspace to confirm the path.",
-        "path_escapes_workspace": "Use a path inside the current workspace.",
-        "stale_file": "Read the file again before editing.",
-        "multiple_matches": "Read a larger target region and provide unique old_text.",
-        "no_match": "Read the current file content before retrying.",
-        "invalid_patch": "Pass edits as [{path, old_text, new_text}].",
-    }
-    if error_code not in hints:
-        return {}
-    return {"recovery_hint": {"message": hints[error_code]}}
-
-
-def _output_quality(
-    *,
-    decode_status: str = "ok",
-    truncated: bool = False,
-    original_chars: int | None = None,
-    returned_chars: int | None = None,
-    may_be_binary: bool = False,
-) -> dict[str, Any]:
-    """
-    生成输出质量元数据 —— 记录读取操作返回内容的质量特征。
-
-    此函数为 read_tool 的 output_quality 字段提供标准化结构，
-    帮助下游消费者（AI 模型、日志系统、监控面板）评估返回内容的可靠性。
-
-    字段说明：
-        encoding:     编码格式，正常为 "utf-8"，解码失败时为 "unknown"。
-        decode_status: 解码状态，"ok" 或 "invalid_utf8"。
-        truncated:    是否因 max_chars 或 line_limit 发生了截断。
-        original_chars: 原始文件的字符总数。
-        returned_chars: 实际返回的字符数。
-        may_be_binary: 是否可能为二进制文件（基于解码失败推断）。
-        reliable_for_reasoning: 综合可靠性评估 —— 当编码正常、未截断、
-                                且非二进制时为 True，表示内容完整可用于推理。
-    """
-    return {
-        "encoding": "utf-8" if decode_status != "invalid_utf8" else "unknown",
-        "decode_status": decode_status,
-        "truncated": truncated,
-        "original_chars": original_chars,
-        "returned_chars": returned_chars,
-        "may_be_binary": may_be_binary,
-        "reliable_for_reasoning": decode_status == "ok" and not truncated and not may_be_binary,
-    }
-
-
-def _change_evidence(change_kind: str, path: str, before_hash: str, after_hash: str) -> dict[str, Any]:
-    """
-    生成变更证据（Change Evidence）—— 文件操作的可审计记录。
-
-    变更证据记录了文件修改操作的前后状态，供审计、回滚和变更追溯使用。
-
-    字段说明：
-        change_kind:  变更类型（"create" / "update" / "unchanged"）。
-        before_hashes: 变更前的文件哈希映射（{路径: 哈希值}）。
-        after_hashes:  变更后的文件哈希映射（{路径: 哈希值}）。
-        affected_paths: 受影响文件的相对路径列表。
-        effect_detection: 效应检测方式，固定为 "direct"（直接文件写入）。
-        effect_detection_confidence: 检测置信度，固定为 "high"。
-        safe_revert_available: 是否有安全的回滚路径，当前固定为 False。
-    """
-    return {
-        "change_kind": change_kind,
-        "before_hashes": {path: before_hash},
-        "after_hashes": {path: after_hash},
-        "affected_paths": [path],
-        "effect_detection": "direct",
-        "effect_detection_confidence": "high",
-        "safe_revert_available": False,
-    }
-
-
-def _state_hash(workspace: Any, path: str) -> str:
-    """
-    计算指定文件的当前 SHA256 哈希值（辅助函数）。
-
-    内部通过 file_state_for_path 获取文件的完整状态信息，然后提取
-    SHA256 字段。若文件不存在或哈希不可用，返回字符串 "<missing>"。
-
-    参数：
-        workspace: 工作区根目录路径。
-        path:      相对于工作区根目录的文件路径。
-
-    返回值：
-        文件的 SHA256 哈希值字符串，或 "<missing>"。
-    """
-    return str(file_state_for_path(workspace, path).get("sha256", "<missing>"))
-
-
-def _replace_nth(text: str, old: str, new: str, nth: int) -> str:
-    """
-    替换文本中第 N 次出现的子串（1-based）。
-
-    与 str.replace(old, new) 的区别：
-        Python 内置的 str.replace 接受 count 参数表示替换"前 N 次出现"，
-        但不支持精确指定"仅替换第 N 次出现"。本函数填补了这一空白。
-
-    实现方式：
-        通过循环使用 str.find() 逐次定位 old 的出现位置，定位到第 nth 次时
-        执行字符串拼接替换（text[:found] + new + text[found + len(old):]）。
-
-    参数：
-        text: 原始文本。
-        old:  要查找的子串。
-        new:  替换用的新子串。
-        nth:  要替换的序号（1-based，即第 1 次、第 2 次……）。
-
-    返回值：
-        替换后的文本。
-
-    异常：
-        ValueError: 若 old 在 text 中的出现次数不足 nth 次。
-    """
-    start = 0
-    for index in range(nth):
-        found = text.find(old, start)
-        if found < 0:
-            raise ValueError("nth occurrence not found")
-        # 当找到第 nth 次出现时，执行替换
-        if index == nth - 1:
-            return text[:found] + new + text[found + len(old) :]
-        # 非目标出现，跳过并继续向后搜索
-        start = found + len(old)
-    return text
-
-
-# ══════════════════════════════════════════════════════════════════════
-# JSON Schema 定义 —— 各工具的参数定义
-# ══════════════════════════════════════════════════════════════════════
+# ── JSON Schema 定义 ──────────────────────────────────────────────────────────
 
 
 def _ls_schema() -> dict[str, Any]:
-    """
-    ls 工具的参数 JSON Schema。
-
-    参数：
-        path (可选):       目标目录路径，字符串类型。
-        max_entries (可选): 最大条目数，整数类型。
-    """
-    return {
-        "type": "object",
-        "properties": {
-            "path": {"type": "string"},
-            "max_entries": {"type": "integer"},
-        },
-        "required": [],
-        "additionalProperties": False,
-    }
+    return {"$schema": _DRAFT, "type": "object", "properties": {"path": {"type": "string", "default": "."}, "max_entries": {"type": "integer", "minimum": 1, "maximum": 10_000, "default": 100}}, "additionalProperties": False}
 
 
 def _read_schema() -> dict[str, Any]:
-    """
-    read 工具的参数 JSON Schema。
-
-    参数：
-        path (必填):     目标文件路径。
-        max_chars (可选): 最大返回字符数，整数类型。
-        offset (可选):    起始行号（1-based），整数类型。
-        limit (可选):     最大返回行数，整数类型。
-    """
     return {
+        "$schema": _DRAFT,
         "type": "object",
         "properties": {
             "path": {"type": "string"},
-            "max_chars": {"type": "integer"},
-            "offset": {"type": "integer"},
-            "limit": {"type": "integer"},
+            "max_chars": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": READ_MAX_CHARS,
+                "default": 20_000,
+            },
+            "offset": {"type": "integer", "minimum": 1, "default": 1},
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": READ_MAX_LINES,
+                "default": 200,
+            },
         },
         "required": ["path"],
         "additionalProperties": False,
@@ -1082,88 +974,15 @@ def _read_schema() -> dict[str, Any]:
 
 
 def _write_schema() -> dict[str, Any]:
-    """
-    write 工具的参数 JSON Schema。
-
-    参数：
-        path (必填):      目标文件路径。
-        content (必填):   要写入的文本内容。
-        overwrite (可选): 是否允许覆盖已存在文件，布尔类型，默认 true。
-    """
-    return {
-        "type": "object",
-        "properties": {
-            "path": {"type": "string"},
-            "content": {"type": "string"},
-            "overwrite": {"type": "boolean"},
-        },
-        "required": ["path", "content"],
-        "additionalProperties": False,
-    }
+    return {"$schema": _DRAFT, "type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string", "maxLength": 1_000_000}, "overwrite": {"type": "boolean", "default": True}}, "required": ["path", "content"], "additionalProperties": False}
 
 
 def _edit_schema() -> dict[str, Any]:
-    """
-    edit 工具的参数 JSON Schema。
-
-    参数：
-        path (必填):                  目标文件路径。
-        old_text (必填):              要被替换的原始文本。
-        new_text (必填):              替换后的新文本。
-        replace_all (可选):           是否替换所有匹配项，布尔类型。
-        occurrence_index (可选):      指定替换第几次出现，整数类型（1-based）。
-        expected_occurrences (可选):  期望的匹配次数，整数类型。
-        expected_file_hash (可选):    期望的文件 SHA256 哈希值，字符串类型。
-    """
-    return {
-        "type": "object",
-        "properties": {
-            "path": {"type": "string"},
-            "old_text": {"type": "string"},
-            "new_text": {"type": "string"},
-            "replace_all": {"type": "boolean"},
-            "occurrence_index": {"type": "integer"},
-            "expected_occurrences": {"type": "integer"},
-            "expected_file_hash": {"type": "string"},
-        },
-        "required": ["path", "old_text", "new_text"],
-        "additionalProperties": False,
-    }
+    return {"$schema": _DRAFT, "type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string", "minLength": 1}, "new_text": {"type": "string"}, "replace_all": {"type": "boolean", "default": False}, "occurrence_index": {"type": ["integer", "null"], "minimum": 1}, "expected_occurrences": {"type": ["integer", "null"], "minimum": 0}, "expected_file_hash": {"type": ["string", "null"]}}, "required": ["path", "old_text", "new_text"], "additionalProperties": False}
 
 
-def _apply_patch_schema() -> dict[str, Any]:
-    """
-    apply_patch 工具的参数 JSON Schema。
-
-    参数：
-        edits (必填): 编辑列表，数组类型，长度 1~20。
-            每个元素为对象，包含：
-            - path (必填):     目标文件路径。
-            - old_text (必填): 要被替换的原始文本。
-            - new_text (必填): 替换后的新文本。
-    """
-    return {
-        "type": "object",
-        "properties": {
-            "edits": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 20,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "old_text": {"type": "string"},
-                        "new_text": {"type": "string"},
-                    },
-                    "required": ["path", "old_text", "new_text"],
-                    "additionalProperties": False,
-                },
-            }
-        },
-        "required": ["edits"],
-        "additionalProperties": False,
-    }
+def _patch_schema() -> dict[str, Any]:
+    return {"$schema": _DRAFT, "type": "object", "properties": {"edits": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string", "minLength": 1}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"], "additionalProperties": False}}}, "required": ["edits"], "additionalProperties": False}
 
 
-__all__ = ["create_file_tools"]
+__all__ = ["create_file_registrations"]

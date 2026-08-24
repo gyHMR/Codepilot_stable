@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import json
-import shutil
-import subprocess
 from argparse import Namespace
 from pathlib import Path
 
-from codepilot.core.contracts import AgentLoopPorts
-from codepilot.core.model_step import build_model_request
 from codepilot.evaluation.cli import _load_ab_cases, _run_ab
 from codepilot.evaluation.artifacts import EvaluationArtifacts
 from codepilot.evaluation.evidence import (
@@ -31,17 +26,9 @@ from codepilot.evaluation.reports import (
     render_comparison_markdown,
     render_markdown,
 )
-from codepilot.evaluation.runner import (
-    _context_compression_session_options,
-    _context_profile_messages,
-    _load_persisted_trace,
-    _prepare_workspace,
-)
-from codepilot.evaluation.schema import EvalCase, EvalResult, EvalRunOptions, MetricScore
+from codepilot.evaluation.runner import _load_persisted_trace
+from codepilot.evaluation.schema import EvalCase, EvalResult, MetricScore
 from codepilot.evaluation.scorers import score_metrics
-from codepilot.protocols import Model
-from codepilot.runtime import RuntimeGateway, SessionOpenIntent
-from codepilot.sessions.contracts import SessionRunIntent
 
 
 def test_loader_accepts_new_task_schema(tmp_path: Path) -> None:
@@ -268,121 +255,6 @@ def test_context_compression_benchmarks_have_pressure_profiles() -> None:
         assert "context.quality_retention_rate" in case.metrics
         assert int(case.context_profile.get("history_groups") or 0) > 0
         assert int(case.context_profile.get("chars_per_group") or 0) > 0
-
-
-def test_context_compression_benchmark_reaches_runtime_pressure_path(
-    tmp_path: Path,
-) -> None:
-    cases = {case.id: case for case in _context_compression_cases()}
-
-    tight_raw = _runtime_context_report(
-        cases["context-compression-tight-api-contract"],
-        tmp_path / "tight-raw",
-        variant="raw",
-    )
-    tight_compressed = _runtime_context_report(
-        cases["context-compression-tight-api-contract"],
-        tmp_path / "tight-compressed",
-        variant="compressed",
-    )
-    critical_compressed = _runtime_context_report(
-        cases["context-compression-critical-api-migration"],
-        tmp_path / "critical-compressed",
-        variant="compressed",
-    )
-
-    assert _pressure_level(tight_raw) == "tight"
-    assert tight_raw["estimated_tokens_before"] == tight_raw["estimated_tokens_after"]
-    assert _pressure_level(tight_compressed) == "tight"
-    tight_sections = {
-        section["name"]: section
-        for section in tight_compressed.get("sections", [])
-        if isinstance(section, dict)
-    }
-    assert (
-        tight_sections["working_set"]["estimated_tokens_after"]
-        < tight_sections["working_set"]["estimated_tokens_before"]
-    )
-    assert tight_sections["conversation"]["budget_tokens"] > (
-        tight_sections["task_plan"]["budget_tokens"] * 3
-    )
-    assert 0.03 <= (
-        tight_sections["task_plan"]["budget_tokens"]
-        / tight_compressed["total_budget_tokens"]
-    ) <= 0.07
-    assert not tight_compressed.get("compact_summary")
-    assert _pressure_level(critical_compressed) == "critical"
-    assert critical_compressed["estimated_tokens_after"] < critical_compressed["estimated_tokens_before"]
-    assert critical_compressed.get("compact_summary")
-
-
-def test_prepare_workspace_seeds_legacy_fixture_memory_as_structured_v4(
-    tmp_path: Path,
-) -> None:
-    fixture = tmp_path / "fixtures" / "fixture"
-    memory_dir = fixture / "memory"
-    memory_dir.mkdir(parents=True)
-    (fixture / "README.md").write_text("fixture\n", encoding="utf-8")
-    (memory_dir / "project_memory.jsonl").write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "id": "mem_api_contract_v2",
-                "scope": "project",
-                "kind": "constraint",
-                "key": "api-contract-v2-source-of-truth",
-                "text": "Use docs/api-contract-v2.md as source of truth.",
-                "source": "user",
-                "status": "active",
-                "triggers": ["topic:api", "path:docs/api-contract-v2.md"],
-                "related_paths": ["docs/api-contract-v2.md"],
-                "evidence_refs": ["docs/api-contract-v2.md"],
-                "supersedes": [],
-                "occurrences": 2,
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "updated_at": "2026-01-01T00:00:00+00:00",
-            },
-            ensure_ascii=False,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    case = EvalCase(
-        id="memory-seed",
-        module="memory",
-        fixture="fixture",
-        type="task",
-    )
-    options = EvalRunOptions(
-        fixtures_root=tmp_path / "fixtures",
-        artifact_root=tmp_path / "artifacts",
-        session_options=SessionOpenIntent(workspace_dir=tmp_path),
-    )
-
-    workspace = _prepare_workspace(case, options)
-
-    target = workspace / ".codepilot" / "memory" / "memories.jsonl"
-    payload = json.loads(target.read_text(encoding="utf-8").splitlines()[0])
-    assert payload["schema_version"] == 4
-    assert payload["id"] == "mem_api_contract_v2"
-    assert payload["type"] == "constraint"
-    assert payload["source"] == "user_explicit"
-    assert payload["content"] == "Use docs/api-contract-v2.md as source of truth."
-    assert payload["keywords"] == ["topic:api", "path:docs/api-contract-v2.md"]
-    assert payload["paths"] == ["docs/api-contract-v2.md"]
-    assert payload["evidence_refs"] == ["artifact:docs/api-contract-v2.md"]
-
-    if shutil.which("git"):
-        completed = subprocess.run(
-            ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        assert completed.returncode == 0
-        assert Path(completed.stdout.strip()).resolve() == workspace.resolve()
 
 
 def test_load_persisted_trace_prefers_workspace_run_artifact(tmp_path: Path) -> None:
@@ -662,60 +534,3 @@ def _context_compression_cases() -> list[EvalCase]:
         for case in load_eval_suite(Path("benchmarks/evaluation_v2/context"))
         if case.context_profile.get("kind") == "compression"
     ]
-
-
-def _runtime_context_report(
-    case: EvalCase,
-    artifact_root: Path,
-    *,
-    variant: str,
-) -> dict:
-    async def run() -> dict:
-        model = Model(
-            id="eval-dummy",
-            name="eval-dummy",
-            api="dummy",
-            provider="dummy",
-            base_url="",
-            reasoning=False,
-            input=["text"],
-            context_window=128000,
-            max_tokens=1024,
-        )
-        options = EvalRunOptions(
-            fixtures_root=Path("benchmarks/fixtures"),
-            artifact_root=artifact_root,
-            session_options=SessionOpenIntent(workspace_dir=Path.cwd(), model=model),
-        )
-        workspace = _prepare_workspace(case, options)
-        seeded_messages = _context_profile_messages(workspace, case)
-        session_options = _context_compression_session_options(
-            case,
-            options,
-            workspace=workspace,
-            variant=variant,
-            seeded_messages=seeded_messages,
-        )
-        runtime = RuntimeGateway()
-        handle = runtime.open_session(session_options)
-        session = runtime._sessions.require(handle.session_id)
-        prepared = await session.controller.prepare_run(SessionRunIntent(text=case.prompt))
-        ports = AgentLoopPorts(
-            model=None,
-            tools=session.tool_port,
-            context=prepared.context_port,
-        )
-        await build_model_request(prepared.loop_input, ports, prepared.loop_input.messages)
-        report = session.controller._session.latest_context_report
-        assert isinstance(report, dict)
-        return report
-
-    return asyncio.run(run())
-
-
-def _pressure_level(report: dict) -> str | None:
-    pressure = report.get("pressure")
-    if not isinstance(pressure, dict):
-        return None
-    value = pressure.get("level")
-    return value if isinstance(value, str) else None

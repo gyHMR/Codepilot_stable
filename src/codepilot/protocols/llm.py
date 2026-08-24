@@ -1,16 +1,16 @@
-from __future__ import annotations
-
-# 新手导读：llm.py 定义跨层共享的模型配置、能力、用量和费用协议。
-# 关注点：provider stream 事件和调用选项属于 llm 内部，不放在 protocols。
-
 """
-LLM 相关类型定义。
+定义跨层共享的 LLM 模型、能力、用量与费用契约。
 
 定义了与大语言模型交互所需的核心类型：
 - 模型配置：Model、ModelCapabilities
 - 用量与费用：Usage、Cost
 - 枚举类型：StopReason、ThinkingLevel
+
+Provider 的流事件、请求选项和网络调用属于 ``codepilot.llm`` 内部实现，不在本模块
+重复定义。
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal, cast

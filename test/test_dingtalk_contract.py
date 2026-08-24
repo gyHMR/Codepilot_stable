@@ -236,12 +236,12 @@ def test_dingtalk_approval_required_markdown_contains_commands() -> None:
     replies = render_event(
         {
             "type": "tool_interrupted",
-            "toolName": "write_file",
+                "tool_name": "write_file",
             "status": "approval_required",
-            "riskLevel": "high",
+                "risk_level": "high",
             "args": {"path": "src/app.py", "content": "secret"},
-            "approvalId": "approval_1",
-            "errorReason": "mutating tool requires approval",
+                "approval_id": "approval_1",
+                "error_reason": "mutating tool requires approval",
         }
     )
 

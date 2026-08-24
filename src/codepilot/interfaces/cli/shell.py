@@ -1,3 +1,5 @@
+"""管理 CLI 的终端输入、输出和信号处理。"""
+
 from __future__ import annotations
 
 # 新手导读：shell.py 封装 prompt_toolkit 交互输入、历史和命令补全。

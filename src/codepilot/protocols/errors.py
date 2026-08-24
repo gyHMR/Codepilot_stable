@@ -1,10 +1,5 @@
-from __future__ import annotations
-
-# 新手导读：errors.py 定义跨层可共享的错误信息结构。
-# 关注点：稳定错误结构能帮助 CLI/钉钉/RPC 用一致方式展示失败。
-
 """
-错误信息类型定义。
+定义跨层传递的结构化错误契约。
 
 定义了跨层传递的结构化错误载荷：
 - ErrorInfo: 通用错误信息基类
@@ -14,12 +9,14 @@ from __future__ import annotations
 做出不同的处理策略（重试、降级、报错等）。
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 
 # 错误来源：标识错误发生在系统的哪个层面
-ErrorSource = Literal["llm", "tool", "runtime", "session", "interface"]
+ErrorSource = Literal["llm", "tool", "core", "runtime", "session", "interface"]
 
 # LLM 错误类型：细分 LLM 调用过程中可能遇到的错误类别
 LLMErrorKind = Literal[
@@ -32,7 +29,9 @@ LLMErrorKind = Literal[
     "unsupported_capability",  # 模型不支持的能力
     "unknown",                 # 未知错误
 ]
-_ERROR_SOURCES = frozenset({"llm", "tool", "runtime", "session", "interface"})
+_ERROR_SOURCES = frozenset(
+    {"llm", "tool", "core", "runtime", "session", "interface"}
+)
 _LLM_ERROR_KINDS = frozenset(
     {
         "auth",

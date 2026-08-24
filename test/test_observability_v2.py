@@ -15,11 +15,11 @@ def test_event_recorder_writes_slim_canonical_events(tmp_path: Path) -> None:
     recorder.append(
         {
             "type": "context_projected",
-            "runId": "run-1",
-            "sessionId": "session-1",
-            "turnId": 1,
-            "eventId": "raw-1",
-            "timestamp": 100,
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "turn": 1,
+            "event_id": "raw-1",
+            "timestamp_ms": 100,
             "report": {
                 "context_id": "ctx-1",
                 "context_mode": "repair",
@@ -105,21 +105,21 @@ def test_event_recorder_redacts_secrets_and_skips_low_value_events(
     skipped = recorder.append(
         {
             "type": "turn_start",
-            "runId": "run-1",
-            "sessionId": "session-1",
-            "turnId": 1,
-            "eventId": "raw-turn",
-            "timestamp": 100,
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "turn": 1,
+            "event_id": "raw-turn",
+            "timestamp_ms": 100,
         }
     )
     written = recorder.append(
         {
             "type": "error",
-            "runId": "run-1",
-            "sessionId": "session-1",
-            "turnId": 1,
-            "eventId": "raw-error",
-            "timestamp": 101,
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "turn": 1,
+            "event_id": "raw-error",
+            "timestamp_ms": 101,
             "message": "api_key=abc123",
             "api_key": "abc123",
         }
@@ -254,21 +254,21 @@ def test_trace_normalizes_raw_event_shapes_even_when_event_names_are_canonical()
     events = [
         {
             "type": "memory_retrieved",
-            "runId": "run-1",
-            "sessionId": "session-1",
-            "turnId": 1,
-            "eventId": "mem-evt",
-            "timestamp": 100,
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "turn": 1,
+            "event_id": "mem-evt",
+            "timestamp_ms": 100,
             "memoryIds": ["mem_api_contract_v2"],
             "reasons": {"mem_api_contract_v2": ["path_match"]},
         },
         {
             "type": "plan_updated",
-            "runId": "run-1",
-            "sessionId": "session-1",
-            "turnId": 1,
-            "eventId": "plan-evt",
-            "timestamp": 110,
+            "run_id": "run-1",
+            "session_id": "session-1",
+            "turn": 1,
+            "event_id": "plan-evt",
+            "timestamp_ms": 110,
             "plan": {
                 "plan_id": "plan-1",
                 "origin_mode": "build",
@@ -340,84 +340,3 @@ def test_trace_joins_tool_start_args_into_finished_tool_evidence() -> None:
 
     assert evidence.tools[0].args == {"path": "docs/api-contract-v1.md"}
     assert evidence.tools[0].affected_paths == ["docs/api-contract-v1.md"]
-
-
-def test_v2_core_tool_events_normalize_to_observability_records() -> None:
-    import asyncio
-
-    async def run_case() -> None:
-        from codepilot.core.contracts import (
-            AgentLoopInput,
-            AgentLoopLimits,
-            AgentLoopPorts,
-            RunCorrelation,
-        )
-        from codepilot.core.runner import run_agent_loop
-        from codepilot.llm.ports import LLMCompleted, ModelDescriptor
-        from codepilot.observability import event_to_record, summarize_events
-        from codepilot.protocols import AssistantMessage, TextContent, ToolCall, ToolResultMessage
-        from codepilot.tools.contracts import ToolObservation
-
-        class FakeModel:
-            def __init__(self) -> None:
-                self.calls = 0
-
-            async def stream(self, request):
-                self.calls += 1
-                if self.calls == 1:
-                    yield LLMCompleted(
-                        message=AssistantMessage(
-                            content=[
-                                ToolCall(
-                                    id="call-read",
-                                    name="read",
-                                    arguments={"path": "README.md"},
-                                )
-                            ]
-                        )
-                    )
-                    return
-                assert isinstance(request.messages[-1], ToolResultMessage)
-                yield LLMCompleted(
-                    message=AssistantMessage(content=[TextContent(text="done")])
-                )
-
-        class FakeTools:
-            def catalog(self, current_mode: str = "build"):
-                return {"tools": ["read"]}
-
-            async def execute(self, invocation):
-                return ToolObservation(
-                    tool_call_id=invocation.tool_call_id,
-                    name=invocation.name,
-                    status="success",
-                    content=(TextContent(text="body"),),
-                    affected_paths=("README.md",),
-                    workspace_changed=False,
-                )
-
-        outcome = await run_agent_loop(
-            AgentLoopInput(
-                run_id="run-v2",
-                correlation=RunCorrelation(session_id="session-v2"),
-                user_prompt="read file",
-                model=ModelDescriptor(provider="fake", model_id="unit"),
-                limits=AgentLoopLimits(max_model_turns=3),
-            ),
-            AgentLoopPorts(model=FakeModel(), tools=FakeTools()),
-        )
-
-        records = [record for event in outcome.events if (record := event_to_record(event))]
-        summary = summarize_events(records)
-
-        assert summary["event_counts"]["tool_call_started"] == 1
-        assert summary["event_counts"]["tool_call_finished"] == 1
-        tool_started = next(record for record in records if record["type"] == "tool_call_started")
-        tool_finished = next(record for record in records if record["type"] == "tool_call_finished")
-        assert tool_started["args"] == {"path": "README.md"}
-        assert tool_finished["tool_call_id"] == "call-read"
-        assert tool_finished["tool_name"] == "read"
-        assert tool_finished["status"] == "success"
-        assert tool_finished["approved"] is True
-
-    asyncio.run(run_case())

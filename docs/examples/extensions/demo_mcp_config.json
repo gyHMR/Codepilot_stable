@@ -2,24 +2,15 @@
   "mcp_servers": [
     {
       "name": "demo",
-      "tools": [
-        {
-          "name": "mcp_demo_echo",
-          "tool": "echo",
-          "description": "Demo MCP proxy tool that forwards arguments to a fake MCP client.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "text": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "text"
-            ]
-          }
+      "transport": "streamable_http",
+      "url": "https://example.test/mcp/",
+      "allow_tools": ["echo"],
+      "tool_policies": {
+        "echo": {
+          "read_only": true,
+          "requires_approval": false
         }
-      ]
+      }
     }
   ]
 }

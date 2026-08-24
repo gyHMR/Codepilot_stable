@@ -1,14 +1,7 @@
-from __future__ import annotations
+"""Codepilot LLM 层。
 
-# 新手导读：llm 顶层不再转发协议 DTO 或 provider registry。
-# 关注点：core-facing 契约从 llm.ports 导入；provider 装配从 llm.adapter 导入。
-
-"""
-Codepilot LLM layer.
-
-This package owns provider integration, model catalog helpers, and the
-ModelPort adapter boundary. Import concrete capabilities from their explicit
-modules instead of treating this package root as a compatibility facade.
+本包拥有 provider 集成、模型目录助手和 ModelPort 适配器边界。
+从明确的模块导入具体功能，而非将包根作为兼容门面。
 """
 
 __all__: list[str] = []

@@ -1,15 +1,15 @@
+"""定义跨层共享的命令与生命周期钩子契约。
+
+本模块只描述扩展、Skill 与 Session 之间交换的只读视图、调用上下文和返回结果。
+它不解析命令、不执行处理器，也不持有 Session 状态；能力由扩展层提供，由运行时或
+Session 协调器负责路由。
+"""
+
 from __future__ import annotations
 
-# 新手导读：commands.py 定义外部能力暴露 slash command、生命周期 hook 和工具 hook 的协议。
-# 关注点：这里不执行命令，也不持有 session；extensions 生产这些能力，sessions 消费这些能力。
+from dataclasses import dataclass
+from typing import Awaitable, Callable, Literal, cast
 
-"""Command and hook capability contracts shared across layers."""
-
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Literal, cast
-
-from .conversation import AssistantMessage, ImageContent, Message, TextContent, ToolCall
-from .tools import Tool, ToolResult
 
 
 CommandSource = Literal["extension", "skill", "builtin", "prompt"]
@@ -18,7 +18,7 @@ _COMMAND_SOURCES = frozenset({"extension", "skill", "builtin", "prompt"})
 
 @dataclass(frozen=True)
 class SessionLifecycleView:
-    """Read-only session facts available to lifecycle hooks."""
+    """生命周期钩子可读取的 Session 事实快照，调用方不得通过它修改会话。"""
 
     session_id: str
     workspace_dir: str
@@ -28,7 +28,7 @@ class SessionLifecycleView:
 
 @dataclass(frozen=True)
 class SessionLifecycleContext:
-    """Session lifecycle hook context passed to before/after prompt hooks."""
+    """提示词处理前后传给生命周期钩子的上下文。"""
 
     text: str
     is_continue: bool
@@ -41,7 +41,7 @@ LifecycleHook = Callable[[SessionLifecycleContext], None | Awaitable[None]]
 
 @dataclass(frozen=True)
 class SessionCommandView:
-    """Read-only session facts available to extension and skill commands."""
+    """扩展命令和 Skill 命令可读取的 Session 事实快照。"""
 
     session_id: str
     workspace_dir: str
@@ -52,7 +52,11 @@ class SessionCommandView:
 
 @dataclass(frozen=True)
 class SessionCommandContext:
-    """Slash-command execution context shared by extensions, skills, and sessions."""
+    """斜杠命令的统一调用上下文。
+
+    ``name`` 不含前导斜杠；``args`` 在初始化时去除空白项；``session_view`` 只提供
+    当前会话的只读投影，命令实现不能把它当作 Session 权威状态。
+    """
 
     name: str
     args: list[str]
@@ -76,12 +80,34 @@ class SessionCommandContext:
             raise TypeError("SessionCommandContext.session_view must be SessionCommandView")
 
 
-CommandHandler = Callable[[SessionCommandContext], str | None | Awaitable[str | None]]
+@dataclass(frozen=True)
+class CommandOutcome:
+    """命令的结构化结果，可直接输出文本或转入一次普通模型 Run。
+
+    ``output`` 表示命令已经产生可展示结果，``prompt`` 表示应把文本交给正常 Run
+    主链路继续处理；两者至少存在一个。
+    """
+
+    output: str | None = None
+    prompt: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "output", _optional_command_text(self.output, field_name="command output"))
+        object.__setattr__(self, "prompt", _optional_command_text(self.prompt, field_name="command prompt"))
+        if self.output is None and self.prompt is None:
+            raise ValueError("CommandOutcome requires output or prompt")
+
+
+CommandHandlerResult = str | CommandOutcome | None
+CommandHandler = Callable[
+    [SessionCommandContext],
+    CommandHandlerResult | Awaitable[CommandHandlerResult],
+]
 
 
 @dataclass(frozen=True)
 class RegisteredCommand:
-    """Registered slash command exposed through command routing."""
+    """注册到统一命令路由中的斜杠命令声明。"""
 
     name: str
     handler: CommandHandler
@@ -103,58 +129,6 @@ class RegisteredCommand:
             _optional_command_text(self.description, field_name="command description"),
         )
         object.__setattr__(self, "source", _ensure_command_source(self.source))
-
-
-@dataclass(frozen=True)
-class ToolHookContextSnapshot:
-    """Read-only context visible to before/after tool hooks."""
-
-    run_id: str = ""
-    session_id: str | None = None
-    system_prompt: str = ""
-    messages: tuple[Message, ...] = ()
-    tools: tuple[Tool, ...] = ()
-    run_signals: dict[str, Any] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class BeforeToolCallResult:
-    """Result returned by a before-tool hook."""
-
-    block: bool = False
-    reason: str | None = None
-
-
-@dataclass
-class AfterToolCallResult:
-    """Patch returned by an after-tool hook."""
-
-    content: list[TextContent | ImageContent] | None = None
-    details: Any = None
-    is_error: bool | None = None
-
-
-@dataclass
-class BeforeToolCallContext:
-    """Context passed before a tool call is executed."""
-
-    assistant_message: AssistantMessage
-    tool_call: ToolCall
-    args: dict[str, Any]
-    context: ToolHookContextSnapshot
-
-
-@dataclass
-class AfterToolCallContext:
-    """Context passed after a tool call has produced a result."""
-
-    assistant_message: AssistantMessage
-    tool_call: ToolCall
-    args: dict[str, Any]
-    result: ToolResult
-    is_error: bool
-    context: ToolHookContextSnapshot
 
 
 def _require_command_text(value: object, *, field_name: str) -> str:
@@ -180,11 +154,9 @@ def _ensure_command_source(value: object) -> CommandSource:
 
 
 __all__ = [
-    "AfterToolCallContext",
-    "AfterToolCallResult",
-    "BeforeToolCallContext",
-    "BeforeToolCallResult",
     "CommandHandler",
+    "CommandHandlerResult",
+    "CommandOutcome",
     "CommandSource",
     "LifecycleHook",
     "RegisteredCommand",
@@ -192,5 +164,4 @@ __all__ = [
     "SessionCommandView",
     "SessionLifecycleContext",
     "SessionLifecycleView",
-    "ToolHookContextSnapshot",
 ]

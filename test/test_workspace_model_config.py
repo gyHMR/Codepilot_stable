@@ -17,7 +17,13 @@ from codepilot.runtime.model import resolve_runtime_model
 from codepilot.runtime import SessionOpenIntent
 
 
-def _write_model_config(workspace, *, api_key: str = "local-key") -> None:
+def _write_model_config(
+    workspace,
+    *,
+    api_key: str = "local-key",
+    model_id: str = "deepseek-chat",
+    proxy_url: str | None = None,
+) -> None:
     root = workspace / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
     (root / "model.local.json").write_text(
@@ -25,10 +31,11 @@ def _write_model_config(workspace, *, api_key: str = "local-key") -> None:
             {
                 "api": "openai-compatible",
                 "provider": "deepseek",
-                "model_id": "deepseek-chat",
+                "model_id": model_id,
                 "base_url": "https://api.deepseek.com/v1",
                 "api_key": api_key,
                 "api_key_env": "DEEPSEEK_API_KEY",
+                "proxy_url": proxy_url,
                 "context_window": 64000,
                 "max_tokens": 8192,
                 "reasoning": False,
@@ -40,7 +47,7 @@ def _write_model_config(workspace, *, api_key: str = "local-key") -> None:
 
 
 def test_workspace_model_config_loads_openai_compatible_deepseek(tmp_path) -> None:
-    _write_model_config(tmp_path)
+    _write_model_config(tmp_path, proxy_url="http://127.0.0.1:7897")
     model = WorkspaceResourceLoader(tmp_path).load().model
 
     assert model is not None
@@ -48,6 +55,7 @@ def test_workspace_model_config_loads_openai_compatible_deepseek(tmp_path) -> No
     assert model.provider == "deepseek"
     assert model.to_model().base_url == "https://api.deepseek.com/v1"
     assert model.resolve_api_key() == "local-key"
+    assert model.proxy_url == "http://127.0.0.1:7897"
 
 
 def test_environment_key_overrides_local_key(tmp_path, monkeypatch) -> None:
@@ -60,11 +68,39 @@ def test_environment_key_overrides_local_key(tmp_path, monkeypatch) -> None:
 
 
 def test_runtime_resolves_workspace_model_and_key(tmp_path) -> None:
-    _write_model_config(tmp_path)
+    _write_model_config(tmp_path, proxy_url="http://127.0.0.1:7897")
     intent = SessionOpenIntent(workspace_dir=tmp_path)
     resolved = resolve_runtime_model(intent, load_runtime_config(intent))
 
     assert resolved.model.provider == "deepseek"
+    assert resolved.get_api_key is not None
+    assert resolved.get_api_key("deepseek") == "local-key"
+    assert resolved.proxy_url == "http://127.0.0.1:7897"
+
+
+def test_runtime_restores_custom_workspace_model_from_local_config(tmp_path) -> None:
+    from codepilot.sessions.contracts import ModelRef
+    from codepilot.sessions.service import CreateSessionRequest, SessionStateService
+
+    _write_model_config(tmp_path, model_id="deepseek-v4-flash")
+    SessionStateService(tmp_path).create_session(
+        CreateSessionRequest(
+            workspace_root=str(tmp_path),
+            model=ModelRef(provider="deepseek", model="deepseek-v4-flash"),
+            current_mode="plan",
+            system_prompt_hash="test-system-prompt",
+            session_id="session_custom_model",
+        )
+    )
+
+    intent = SessionOpenIntent(
+        workspace_dir=tmp_path,
+        session_id="session_custom_model",
+    )
+    resolved = resolve_runtime_model(intent, load_runtime_config(intent))
+
+    assert resolved.model.id == "deepseek-v4-flash"
+    assert resolved.model.context_window == 64000
     assert resolved.get_api_key is not None
     assert resolved.get_api_key("deepseek") == "local-key"
 
@@ -97,6 +133,7 @@ def test_init_config_creates_editable_template(tmp_path) -> None:
     assert raw["api"] == "openai-compatible"
     assert raw["provider"] == "deepseek"
     assert raw["api_key"] == ""
+    assert raw["proxy_url"] == ""
 
 
 def test_cli_exposes_local_config_commands() -> None:
@@ -115,7 +152,7 @@ def test_cli_defaults_leave_runtime_config_unspecified() -> None:
     assert args.current_mode is None
 
 
-def test_cli_interactive_uses_runtime_deferred_approval_path(tmp_path, monkeypatch) -> None:
+def test_cli_interactive_opens_runtime_session_and_runs_repl(tmp_path, monkeypatch) -> None:
     from codepilot.interfaces.cli import main as cli_main
 
     captured = {}
@@ -144,13 +181,8 @@ def test_cli_interactive_uses_runtime_deferred_approval_path(tmp_path, monkeypat
     assert asyncio.run(cli_main._run_from_args(args)) == 0
     assert captured["run_mode"] == "repl"
     assert captured["session_id"] == "session_1"
-    assert captured["intent"].approval_provider is None
+    assert captured["intent"].workspace_dir == tmp_path
     assert captured["closed"] is True
-
-
-def test_cli_rejects_removed_legacy_options() -> None:
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(["--mode", "print", "--prompt", "hello"])
 
 
 def test_cli_help_uses_cyber_command_deck(capsys) -> None:
@@ -177,7 +209,11 @@ def test_cli_config_help_uses_cyber_config_deck(capsys) -> None:
 
 
 def test_config_check_and_show_use_sanitized_human_output(tmp_path, capsys) -> None:
-    _write_model_config(tmp_path, api_key="secret-value")
+    _write_model_config(
+        tmp_path,
+        api_key="secret-value",
+        proxy_url="http://proxy-user:proxy-secret@127.0.0.1:7897",
+    )
 
     _check_model_config(tmp_path)
     _show_config(tmp_path)
@@ -188,11 +224,13 @@ def test_config_check_and_show_use_sanitized_human_output(tmp_path, capsys) -> N
     assert "deepseek-chat" in output
     assert "local-file (do not commit)" in output
     assert "secret-value" not in output
+    assert "proxy-secret" not in output
 
 
 def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> None:
-    from codepilot.sessions.store import load_session_open_metadata
-    from codepilot.sessions.store import SessionStore
+    from codepilot.runtime.config import load_session_open_metadata
+    from codepilot.sessions.contracts import ModelRef
+    from codepilot.sessions.service import CreateSessionRequest, SessionStateService
 
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
@@ -206,8 +244,15 @@ def test_restored_session_identity_overrides_workspace_settings(tmp_path) -> Non
         ),
         encoding="utf-8",
     )
-    store = SessionStore(tmp_path, "session_restore")
-    store.ensure_initialized(model_id="deepseek-v4-pro", provider="deepseek", system_prompt="restored prompt")
+    SessionStateService(tmp_path).create_session(
+        CreateSessionRequest(
+            workspace_root=str(tmp_path),
+            model=ModelRef(provider="deepseek", model="deepseek-v4-pro"),
+            current_mode="build",
+            system_prompt_hash="test-system-prompt",
+            session_id="session_restore",
+        )
+    )
 
     intent = SessionOpenIntent(workspace_dir=tmp_path, session_id="session_restore")
     config = load_runtime_config(intent)
@@ -228,9 +273,7 @@ def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> 
             {
                 "retry_enabled": True,
                 "tool_permission_mode": "ask",
-                "block_dangerous_bash": True,
                 "prompt_debug_sources": True,
-                "bash_allow_patterns": ["pytest"],
                 "extension_paths": ["workspace-extension"],
             }
         ),
@@ -242,38 +285,31 @@ def test_explicit_false_and_empty_values_override_workspace_config(tmp_path) -> 
             workspace_dir=tmp_path,
             retry_enabled=False,
             tool_permission_mode="workspace-write",
-            block_dangerous_bash=False,
             prompt_debug_sources=False,
-            bash_allow_patterns=[],
             extension_paths=[],
         ),
     )
 
     assert config.retry_enabled is False
     assert config.tool_permission_mode == "workspace-write"
-    assert config.block_dangerous_bash is False
     assert config.prompt_debug_sources is False
-    assert config.bash_allow_patterns == []
     assert config.extension_paths == []
     assert config.sources["retry_enabled"].kind == "cli"
-    assert config.sources["bash_allow_patterns"].kind == "cli"
 
 
 def test_workspace_values_fall_back_to_defaults_with_sources(tmp_path) -> None:
     root = tmp_path / ".codepilot"
     root.mkdir(parents=True, exist_ok=True)
     (root / "settings.json").write_text(
-        json.dumps({"max_tool_calls_per_turn": 3, "tool_execution": "sequential"}),
+        json.dumps({"max_tool_calls_per_turn": 3}),
         encoding="utf-8",
     )
 
     config = load_runtime_config(SessionOpenIntent(workspace_dir=tmp_path))
 
     assert config.max_tool_calls_per_turn == 3
-    assert config.tool_execution == "sequential"
     assert config.max_retries == 2
     assert config.sources["max_tool_calls_per_turn"].kind == "project"
-    assert config.sources["tool_execution"].kind == "project"
     assert config.sources["max_retries"].kind == "default"
 
 

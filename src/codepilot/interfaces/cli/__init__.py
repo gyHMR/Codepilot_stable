@@ -1,3 +1,5 @@
+"""CLI 界面包：把用户输入和 Runtime 帧转换为终端交互。"""
+
 from __future__ import annotations
 
 """CLI interface adapter package.

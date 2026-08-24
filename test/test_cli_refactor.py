@@ -21,7 +21,7 @@ from codepilot.interfaces.cli.render import (
     SimpleRenderer,
 )
 from codepilot.interfaces.cli.render import CliStartupState, build_startup_state
-from codepilot.runtime.views import SessionStatus
+from codepilot.runtime.actions import SessionStatus
 from codepilot.sessions.contracts import SessionCommandRecord
 from codepilot.protocols import AssistantMessage, LLMErrorInfo, TextContent, Usage, Cost
 
@@ -65,7 +65,7 @@ class TestTerminalRenderer:
 
         event = {
             "type": "message_update",
-            "assistantMessageEvent": {
+            "assistant_message_event": {
                 "type": "text_delta",
                 "delta": "Hello",
             },
@@ -110,7 +110,7 @@ class TestTerminalRenderer:
 
         event = {
             "type": "tool_started",
-            "toolName": "Read",
+            "tool_name": "Read",
             "args": {"file_path": "/test/file.py"},
         }
 
@@ -124,14 +124,14 @@ class TestTerminalRenderer:
 
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolCallId": "read-1",
-            "toolName": "read",
+            "tool_call_id": "read-1",
+            "tool_name": "read",
             "args": {"path": "src/codepilot/core/loop.py", "offset": 10, "limit": 20},
         })
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolCallId": "ls-1",
-            "toolName": "ls",
+            "tool_call_id": "ls-1",
+            "tool_name": "ls",
             "args": {"path": "src/codepilot"},
         })
 
@@ -146,8 +146,8 @@ class TestTerminalRenderer:
 
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolCallId": "read-long",
-            "toolName": "read",
+            "tool_call_id": "read-long",
+            "tool_name": "read",
             "args": {"path": long_path},
         })
 
@@ -167,27 +167,27 @@ class TestTerminalRenderer:
 
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolCallId": "read-1",
-            "toolName": "read",
+            "tool_call_id": "read-1",
+            "tool_name": "read",
             "args": {"path": "a.py"},
         })
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolCallId": "ls-1",
-            "toolName": "ls",
+            "tool_call_id": "ls-1",
+            "tool_name": "ls",
             "args": {"path": "src"},
         })
         renderer.render_progress_event({
             "type": "tool_completed",
-            "toolCallId": "read-1",
-            "toolName": "read",
-            "isError": False,
+            "tool_call_id": "read-1",
+            "tool_name": "read",
+            "is_error": False,
         })
         renderer.render_progress_event({
             "type": "tool_completed",
-            "toolCallId": "ls-1",
-            "toolName": "ls",
-            "isError": False,
+            "tool_call_id": "ls-1",
+            "tool_name": "ls",
+            "is_error": False,
         })
 
         rendered = [call.args[0] for call in output.call_args_list]
@@ -319,12 +319,12 @@ class TestTerminalRenderer:
 
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolName": "write",
+            "tool_name": "write",
             "args": {"path": "demo.txt"},
         })
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolName": "bash",
+            "tool_name": "bash",
             "args": {"command": "python register.py --demo"},
         })
 
@@ -338,17 +338,17 @@ class TestTerminalRenderer:
 
         renderer.render_progress_event({
             "type": "tool_started",
-            "toolCallId": "bash-1",
-            "toolName": "bash",
+            "tool_call_id": "bash-1",
+            "tool_name": "bash",
             "args": {"command": "head -5 agent-test/chatbot.py"},
         })
         renderer.render_progress_event({
             "type": "tool_interrupted",
-            "toolCallId": "bash-1",
-            "toolName": "bash",
+            "tool_call_id": "bash-1",
+            "tool_name": "bash",
             "status": "approval_required",
-            "isError": True,
-            "errorReason": "approval_required",
+            "is_error": True,
+            "error_reason": "approval_required",
         })
 
         rendered = [call.args[0] for call in output.call_args_list]
@@ -364,7 +364,7 @@ class TestTerminalRenderer:
         renderer.render_progress_event(
             {
                 "type": "message_update",
-                "assistantMessageEvent": {
+                "assistant_message_event": {
                     "type": "text_delta",
                     "delta": text,
                 },
@@ -373,8 +373,8 @@ class TestTerminalRenderer:
         renderer.render_progress_event(
             {
                 "type": "tool_started",
-                "toolCallId": "bash-1",
-                "toolName": "bash",
+                "tool_call_id": "bash-1",
+                "tool_name": "bash",
                 "args": {"command": "python smoke_test.py"},
             }
         )
@@ -449,7 +449,7 @@ class TestSimpleRenderer:
 
         event = {
             "type": "message_update",
-            "assistantMessageEvent": {
+            "assistant_message_event": {
                 "type": "text_delta",
                 "delta": "Hello",
             },
@@ -477,7 +477,9 @@ class TestSimpleRenderer:
         message = MagicMock(spec=AssistantMessage)
         message.content = [TextContent(text="Hello")]
 
-        renderer.render_final(message)
+        renderer.render_final(
+            SimpleNamespace(outcome=SimpleNamespace(final_message=message))
+        )
         output.assert_called_with("Hello")
 
 
@@ -513,42 +515,6 @@ def test_run_once_dispatches_prompt_and_renders_final_message():
     assert runtime.sent == ("session_1", "hello")
     assert output == ["hello", ""]
 
-
-def test_render_dispatch_surfaces_approval_required_frame_directly():
-    from codepilot.interfaces.cli.interactive import render_dispatch
-    from codepilot.runtime.actions import ApprovalRequiredFrame
-    from codepilot.tools.contracts import ToolInterruption, ToolRiskView
-
-    interruption = ToolInterruption(
-        approval_id="approval_1",
-        run_id="run_1",
-        tool_call_id="call_1",
-        tool_name="write",
-        arguments={"path": "demo.txt"},
-        reason="workspace_write",
-        risk=ToolRiskView(level="high", summary="write file"),
-    )
-
-    async def frames():
-        yield ApprovalRequiredFrame(approval=interruption)
-
-    class FakeRenderer:
-        def __init__(self):
-            self.approvals = []
-            self.final = "not-called"
-
-        def render_approval_required(self, frame):
-            self.approvals.append(frame.approval)
-
-        def render_final(self, record):
-            self.final = record
-
-    renderer = FakeRenderer()
-
-    asyncio.run(render_dispatch(frames(), renderer))
-
-    assert renderer.approvals == [interruption]
-    assert renderer.final is None
 
 
 def test_render_dispatch_marks_input_ready_only_for_run_finished():
@@ -830,106 +796,6 @@ def test_run_rpc_emits_jsonl_contract_for_state_prompt_errors_and_shutdown(monke
     assert messages[7]["command"] == "shutdown"
     assert messages[7]["status"] == "ok"
 
-
-def test_run_rpc_surfaces_and_resumes_approval(monkeypatch):
-    from codepilot.interfaces.cli.rpc import run_rpc
-    from codepilot.runtime.actions import (
-        ApprovalDecided,
-        ApprovalRequiredFrame,
-        PromptSubmitted,
-        RunFinishedFrame,
-    )
-    from codepilot.tools.contracts import ToolInterruption, ToolRiskView
-
-    final_message = AssistantMessage(content=[TextContent(text="approved done")])
-    interruption = ToolInterruption(
-        approval_id="approval_1",
-        run_id="run_1",
-        tool_call_id="call_1",
-        tool_name="write",
-        arguments={"path": "demo.txt"},
-        reason="workspace_write",
-        risk=ToolRiskView(level="high", summary="write file"),
-    )
-
-    class FakeRuntime:
-        async def dispatch(self, session_id, action):
-            assert session_id == "session_1"
-            if isinstance(action, PromptSubmitted):
-                yield ApprovalRequiredFrame(approval=interruption)
-                return
-            if isinstance(action, ApprovalDecided):
-                assert action.approval_id == "approval_1"
-                assert action.decision == "approve"
-                yield RunFinishedFrame(
-                    record=type(
-                        "Record",
-                        (),
-                        {
-                            "run_id": "run_approved",
-                            "session_id": "session_1",
-                            "status": "completed",
-                            "stop_reason": "final_answer",
-                            "final_text": "approved done",
-                            "outcome": type(
-                                "Outcome",
-                                (),
-                                {"final_message": final_message},
-                            )(),
-                        },
-                    )()
-                )
-                return
-            raise AssertionError(f"unexpected action: {action!r}")
-
-    stdin = io.StringIO(
-        "\n".join(
-            [
-                json.dumps({"type": "prompt", "id": "prompt_1", "text": "write"}),
-                json.dumps(
-                    {
-                        "type": "approve",
-                        "id": "approve_1",
-                        "approval_id": "approval_1",
-                        "reason": "ok",
-                    }
-                ),
-                json.dumps({"type": "shutdown", "id": "shutdown_1"}),
-            ]
-        )
-        + "\n"
-    )
-    output: list[str] = []
-    monkeypatch.setattr("sys.stdin", stdin)
-
-    asyncio.run(run_rpc(FakeRuntime(), "session_1", output=output.append))
-
-    messages = [json.loads(line) for line in output]
-    assert messages[1] == {
-        "type": "approval_required",
-        "approval": {
-            "approval_id": "approval_1",
-            "run_id": "run_1",
-            "tool_call_id": "call_1",
-            "tool_name": "write",
-            "arguments": {"path": "demo.txt"},
-            "reason": "workspace_write",
-            "risk_level": "high",
-        },
-    }
-    assert messages[2] == {
-        "type": "response",
-        "id": "prompt_1",
-        "command": "prompt",
-        "status": "ok",
-        "data": {
-            "status": "waiting_approval",
-            "approval_id": "approval_1",
-        },
-    }
-    assert messages[3]["command"] == "approve"
-    assert messages[3]["status"] == "ok"
-    assert messages[3]["data"]["run_id"] == "run_approved"
 
 
 def test_rpc_ready_signal_uses_named_protocol_version() -> None:

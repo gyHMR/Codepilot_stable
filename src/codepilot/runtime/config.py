@@ -1,3 +1,5 @@
+"""加载并解释工作区、模型、工具和 Session 打开配置。"""
+
 from __future__ import annotations
 
 """Runtime configuration loading and interface-facing config views."""
@@ -9,7 +11,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TYPE_CHECKING, cast
 
-from codepilot.core.contracts import ToolExecutionMode
 from codepilot.core.plan import (
     PlanningBudgetProfile,
     RunMode,
@@ -17,17 +18,43 @@ from codepilot.core.plan import (
     ensure_run_mode,
 )
 from codepilot.protocols import Model, ModelCapabilities
-from codepilot.sessions.store import SessionOpenMetadata, load_session_open_metadata
+from codepilot.sessions.service import SessionStateService
+
+
+@dataclass(frozen=True)
+class SessionOpenMetadata:
+    """打开 Session 时记录的配置来源与解析结果。"""
+    provider: str | None = None
+    model_id: str | None = None
+    system_prompt: str | None = None
+
+
+def load_session_open_metadata(
+    workspace_dir: str | Path,
+    session_id: str | None,
+) -> SessionOpenMetadata | None:
+    if not session_id:
+        return None
+    state = SessionStateService(workspace_dir).get_session(session_id)
+    if state is None:
+        return None
+    return SessionOpenMetadata(provider=state.model.provider, model_id=state.model.model)
 
 if TYPE_CHECKING:
-    from .opening import SessionOpenIntent
+    from .actions import SessionOpenIntent
 
 
 RuntimePermissionMode = Literal["read-only", "workspace-write", "ask"]
 ConfigSourceKind = Literal["cli", "session", "project", "default"]
 SUPPORTED_MODEL_APIS = {"openai-compatible", "anthropic-messages"}
 _PERMISSION_MODES = {"read-only", "workspace-write", "ask"}
-_TOOL_EXECUTION_MODES = {"parallel", "sequential"}
+_REMOVED_TOOL_SECURITY_KEYS = {
+    "block_dangerous_bash",
+    "bash_allow_patterns",
+    "bash_block_patterns",
+    "tool_execution",
+    "tool_snippets",
+}
 
 
 class UnknownRuntimeConfigKeyError(KeyError):
@@ -36,12 +63,14 @@ class UnknownRuntimeConfigKeyError(KeyError):
 
 @dataclass(frozen=True)
 class ConfigValueSource:
+    """单个配置值的来源位置和优先级。"""
     kind: ConfigSourceKind
     location: str | None = None
 
 
 @dataclass(frozen=True)
 class ResolvedConfigValue:
+    """解析后的配置值及其来源。"""
     key: str
     value: Any
     source: ConfigValueSource
@@ -49,24 +78,28 @@ class ResolvedConfigValue:
 
 @dataclass(frozen=True)
 class WorkspaceConfigCheck:
+    """工作区配置的一项校验结果。"""
     rows: tuple[tuple[str, object], ...]
     border_style: str
 
 
 @dataclass(frozen=True)
 class WorkspaceConfigView:
+    """面向 Interface 的工作区配置解释视图。"""
     model_rows: tuple[tuple[str, object], ...]
     settings_rows: tuple[tuple[str, object], ...]
 
 
 @dataclass(frozen=True)
 class WorkspaceModelConfig:
+    """工作区指定的模型与 Provider 配置。"""
     api: str
     provider: str
     model_id: str
     base_url: str
     api_key: str | None = None
     api_key_env: str | None = None
+    proxy_url: str | None = None
     context_window: int = 128_000
     max_tokens: int = 8192
     reasoning: bool = False
@@ -115,11 +148,11 @@ class WorkspaceModelConfig:
 
 @dataclass
 class WorkspaceSettings:
+    """工作区级运行设置。"""
     provider: str | None = None
     model_id: str | None = None
     system_prompt: str | None = None
     thinking_level: str | None = None
-    tool_execution: ToolExecutionMode | None = None
     current_mode: RunMode | None = None
     planning_budget_profile: PlanningBudgetProfile | None = None
     max_tool_calls_per_turn: int | None = None
@@ -127,13 +160,9 @@ class WorkspaceSettings:
     max_retries: int | None = None
     retry_base_delay_ms: int | None = None
     tool_permission_mode: RuntimePermissionMode | None = None
-    block_dangerous_bash: bool | None = None
-    bash_allow_patterns: list[str] | None = None
-    bash_block_patterns: list[str] | None = None
     edit_require_unique_match: bool | None = None
     prompt_guidelines: list[str] | None = None
     append_system_prompt: str | None = None
-    tool_snippets: dict[str, str] | None = None
     extension_paths: list[str] | None = None
     skill_paths: list[str] | None = None
     prompt_debug_sources: bool | None = None
@@ -147,6 +176,7 @@ class WorkspaceSettings:
 
 @dataclass
 class WorkspaceResources:
+    """工作区发现的指令、Skill 和 MCP 资源。"""
     settings: WorkspaceSettings = field(default_factory=WorkspaceSettings)
     model: WorkspaceModelConfig | None = None
     prompt: str | None = None
@@ -155,13 +185,13 @@ class WorkspaceResources:
 
 @dataclass(frozen=True)
 class RuntimeConfig:
+    """完成优先级解析后的 Runtime 装配配置。"""
     workspace: Path
     settings: WorkspaceSettings
     local_model: WorkspaceModelConfig | None
     restored: SessionOpenMetadata | None
     system_prompt: str
     thinking_level: str
-    tool_execution: ToolExecutionMode
     current_mode: RunMode
     planning_budget_profile: PlanningBudgetProfile
     max_tool_calls_per_turn: int
@@ -169,13 +199,9 @@ class RuntimeConfig:
     max_retries: int
     retry_base_delay_ms: int
     tool_permission_mode: RuntimePermissionMode
-    block_dangerous_bash: bool
-    bash_allow_patterns: list[str] | None
-    bash_block_patterns: list[str] | None
     edit_require_unique_match: bool
     prompt_guidelines: list[str] | None
     append_system_prompt: str | None
-    tool_snippets: dict[str, str] | None
     extension_paths: list[str] | None
     skill_paths: list[str] | None
     prompt_debug_sources: bool
@@ -212,8 +238,13 @@ class WorkspaceResourceLoader:
         raw = self._load_json_object(self.settings_file)
         if raw is None:
             return WorkspaceSettings()
+        removed_keys = sorted(_REMOVED_TOOL_SECURITY_KEYS & raw.keys())
+        if removed_keys:
+            raise ValueError(
+                "Removed runtime settings are not supported: "
+                + ", ".join(removed_keys)
+            )
 
-        tool_execution = raw.get("tool_execution")
         current_mode = raw.get("current_mode")
         planning_budget_profile = raw.get("planning_budget_profile")
         permission_mode = raw.get("tool_permission_mode")
@@ -223,9 +254,6 @@ class WorkspaceResourceLoader:
             model_id=_string(raw.get("model_id")),
             system_prompt=_string(raw.get("system_prompt")),
             thinking_level=_string(raw.get("thinking_level")),
-            tool_execution=cast(ToolExecutionMode, tool_execution)
-            if tool_execution in _TOOL_EXECUTION_MODES
-            else None,
             current_mode=cast(RunMode, current_mode)
             if current_mode in {"read", "plan", "build"}
             else None,
@@ -239,13 +267,9 @@ class WorkspaceResourceLoader:
             tool_permission_mode=cast(RuntimePermissionMode, permission_mode)
             if permission_mode in _PERMISSION_MODES
             else None,
-            block_dangerous_bash=_bool(raw.get("block_dangerous_bash")),
-            bash_allow_patterns=_string_list(raw.get("bash_allow_patterns")),
-            bash_block_patterns=_string_list(raw.get("bash_block_patterns")),
             edit_require_unique_match=_bool(raw.get("edit_require_unique_match")),
             prompt_guidelines=_string_list(raw.get("prompt_guidelines")),
             append_system_prompt=_string(raw.get("append_system_prompt")),
-            tool_snippets=_string_map(raw.get("tool_snippets")),
             extension_paths=_string_list(raw.get("extension_paths")),
             skill_paths=_string_list(raw.get("skill_paths")),
             prompt_debug_sources=_bool(raw.get("prompt_debug_sources")),
@@ -269,6 +293,7 @@ class WorkspaceResourceLoader:
                 base_url=str(raw.get("base_url", "")),
                 api_key=_string(raw.get("api_key")),
                 api_key_env=_string(raw.get("api_key_env")),
+                proxy_url=_string(raw.get("proxy_url")),
                 context_window=int(raw.get("context_window", 128_000)),
                 max_tokens=int(raw.get("max_tokens", 8192)),
                 reasoning=bool(raw.get("reasoning", False)),
@@ -384,14 +409,6 @@ def load_runtime_config(intent: "SessionOpenIntent") -> RuntimeConfig:
                 default="off",
             )
         ),
-        tool_execution=_tool_execution_mode(
-            choose(
-                "tool_execution",
-                (_cli_source(), intent.tool_execution),
-                (_project_source("settings.json"), settings.tool_execution),
-                default="parallel",
-            )
-        ),
         current_mode=current_mode,
         planning_budget_profile=planning_budget_profile,
         max_tool_calls_per_turn=_positive_int(
@@ -430,26 +447,6 @@ def load_runtime_config(intent: "SessionOpenIntent") -> RuntimeConfig:
             default=1200,
         ),
         tool_permission_mode=permission_mode,
-        block_dangerous_bash=bool(
-            choose(
-                "block_dangerous_bash",
-                (_cli_source(), intent.block_dangerous_bash),
-                (_project_source("settings.json"), settings.block_dangerous_bash),
-                default=True,
-            )
-        ),
-        bash_allow_patterns=choose(
-            "bash_allow_patterns",
-            (_cli_source(), intent.bash_allow_patterns),
-            (_project_source("settings.json"), settings.bash_allow_patterns),
-            default=None,
-        ),
-        bash_block_patterns=choose(
-            "bash_block_patterns",
-            (_cli_source(), intent.bash_block_patterns),
-            (_project_source("settings.json"), settings.bash_block_patterns),
-            default=None,
-        ),
         edit_require_unique_match=bool(
             choose(
                 "edit_require_unique_match",
@@ -468,12 +465,6 @@ def load_runtime_config(intent: "SessionOpenIntent") -> RuntimeConfig:
             "append_system_prompt",
             (_cli_source(), intent.append_system_prompt),
             (_project_source("settings.json"), settings.append_system_prompt),
-            default=None,
-        ),
-        tool_snippets=choose(
-            "tool_snippets",
-            (_cli_source(), intent.tool_snippets),
-            (_project_source("settings.json"), settings.tool_snippets),
             default=None,
         ),
         extension_paths=choose(
@@ -583,7 +574,7 @@ def resolve_workspace_session_intent(
     if bool(provider) != bool(model_id):
         raise ValueError("--provider and --model must be provided together")
 
-    from .opening import SessionOpenIntent
+    from .actions import SessionOpenIntent
 
     workspace_path = Path(workspace)
     if provider and model_id:
@@ -627,6 +618,8 @@ def check_workspace_model_config(workspace: str | Path) -> WorkspaceConfigCheck:
         ("base_url", model.base_url),
         ("credential", credential_source),
     ]
+    if model.proxy_url:
+        rows.append(("proxy", "configured"))
     if credential_source == "missing":
         rows.append(("status", "MISSING_CREDENTIAL"))
         rows.append(("next", f"Set {model.api_key_env} or add api_key to {loader.model_file}"))
@@ -652,6 +645,8 @@ def describe_workspace_config(workspace: str | Path) -> WorkspaceConfigView:
                 ("api", model.api),
             ]
         )
+        if model.proxy_url:
+            model_rows.append(("proxy", "configured"))
         if model.api_key_env and os.getenv(model.api_key_env):
             model_rows.append(("credential", f"env:{model.api_key_env}"))
         elif model.api_key:
@@ -687,12 +682,6 @@ def _permission_mode(value: object) -> RuntimePermissionMode:
     if value not in _PERMISSION_MODES:
         raise ValueError(f"Unknown permission mode: {value}")
     return cast(RuntimePermissionMode, value)
-
-
-def _tool_execution_mode(value: object) -> ToolExecutionMode:
-    if value not in _TOOL_EXECUTION_MODES:
-        raise ValueError(f"Unknown tool execution mode: {value}")
-    return cast(ToolExecutionMode, value)
 
 
 def _string(value: object) -> str | None:

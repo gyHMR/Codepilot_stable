@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import pytest
 
-from codepilot.llm.stream import classify_llm_error
+from codepilot.llm.stream import StreamOptions, classify_llm_error
 from codepilot.llm.providers.openai import stream_openai_compatible
 from codepilot.protocols import Context, Model
 
@@ -55,6 +55,7 @@ def test_classify_llm_error_does_not_mask_unread_streaming_response() -> None:
 def test_openai_stream_reads_error_body_before_classification(monkeypatch) -> None:
     async def run_case() -> None:
         response = _unread_error_response()
+        client_options = {}
 
         class _StreamContext:
             async def __aenter__(self) -> httpx.Response:
@@ -64,8 +65,8 @@ def test_openai_stream_reads_error_body_before_classification(monkeypatch) -> No
                 await response.aclose()
 
         class _AsyncClient:
-            def __init__(self, **_kwargs) -> None:
-                pass
+            def __init__(self, **kwargs) -> None:
+                client_options.update(kwargs)
 
             async def __aenter__(self):
                 return self
@@ -81,7 +82,14 @@ def test_openai_stream_reads_error_body_before_classification(monkeypatch) -> No
             _AsyncClient,
         )
 
-        event_stream = stream_openai_compatible(_model(), Context(messages=[]))
+        event_stream = stream_openai_compatible(
+            _model(),
+            Context(messages=[]),
+            StreamOptions(
+                api_key="test-key",
+                proxy_url="http://127.0.0.1:7897",
+            ),
+        )
         message = await asyncio.wait_for(event_stream.result(), timeout=0.5)
 
         assert message.stop_reason == "error"
@@ -89,6 +97,7 @@ def test_openai_stream_reads_error_body_before_classification(monkeypatch) -> No
         assert message.error_info.details["response_text"] == (
             '{"error":{"message":"Invalid tool message sequence"}}'
         )
+        assert client_options["proxy"] == "http://127.0.0.1:7897"
 
     asyncio.run(run_case())
 

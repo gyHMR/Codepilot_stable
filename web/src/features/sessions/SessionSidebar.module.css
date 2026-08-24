@@ -1,0 +1,39 @@
+.sidebarContent { height: 100vh; display: flex; flex-direction: column; padding: 20px 12px 12px; background: var(--color-surface-subtle); }
+.brand { min-width: 0; padding: 0 8px 18px; }
+.brand strong { display: block; font-size: 17px; font-weight: 650; }
+.brand span { display: block; margin-top: 2px; overflow: hidden; color: var(--color-text-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.controls { display: grid; gap: 7px; padding-bottom: 14px; border-bottom: 1px solid var(--color-border); }
+.newButton, .searchButton { min-height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid transparent; border-radius: var(--radius-md); background: transparent; cursor: pointer; text-align: left; }
+.newButton { justify-content: center; background: var(--color-accent); color: #fff; font-weight: 600; }
+.newButton:hover { background: #1d55ce; }
+.newButton:disabled { opacity: .55; }
+.searchButton { color: var(--color-text-secondary); }
+.searchButton:hover { background: var(--color-surface-hover); color: var(--color-text); }
+.searchBox { height: 36px; display: flex; align-items: center; gap: 6px; padding-left: 9px; border: 1px solid var(--color-border-strong); border-radius: var(--radius-md); background: var(--color-surface); }
+.searchBox input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; }
+.sessionList { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 0 36px; }
+.group { margin-bottom: 16px; }
+.group h2 { margin: 0 8px 5px; color: var(--color-text-muted); font-size: 11px; font-weight: 600; }
+.sessionItem { position: relative; display: flex; align-items: center; border-left: 2px solid transparent; border-radius: 0 var(--radius-md) var(--radius-md) 0; }
+.sessionItem:hover { background: var(--color-surface-hover); }
+.active { border-left-color: var(--color-accent); background: var(--color-accent-soft); }
+.sessionSelect { min-width: 0; flex: 1; display: grid; gap: 3px; padding: 9px 30px 9px 9px; border: 0; background: transparent; cursor: pointer; text-align: left; }
+.sessionTitle { overflow: hidden; font-size: 13px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.sessionMeta { min-height: 17px; display: flex; align-items: center; gap: 7px; color: var(--color-text-muted); font-size: 11px; }
+.sessionMeta i { font-style: normal; }
+.sessionMeta .running { color: var(--color-accent); }
+.sessionMeta .approval { color: var(--color-warning); }
+.sessionMeta .failed { color: var(--color-danger); }
+.sessionMenu { position: absolute; right: 2px; opacity: 0; }
+.sessionItem:hover .sessionMenu, .sessionItem:focus-within .sessionMenu { opacity: 1; }
+.empty { padding: 24px 8px; color: var(--color-text-muted); font-size: 12px; }
+.dialogOverlay { position: fixed; inset: 0; z-index: 70; background: rgb(20 26 30 / 24%); }
+.dialog { position: fixed; z-index: 80; top: 50%; left: 50%; width: min(92vw, 420px); transform: translate(-50%, -50%); padding: 20px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); box-shadow: var(--shadow-menu); }
+.dialog h2 { margin: 0 0 8px; font-size: 16px; }
+.dialog p { color: var(--color-text-secondary); }
+.dialog input { width: 100%; height: 38px; margin-top: 10px; padding: 0 10px; border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); }
+.dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.dialog footer button { min-height: 34px; padding: 0 13px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); cursor: pointer; }
+.dialog .primaryButton { border-color: var(--color-accent); background: var(--color-accent); color: #fff; }
+.dialog .dangerButton { border-color: var(--color-danger); background: var(--color-danger); color: #fff; }
+@media (max-width: 720px) { .sidebarContent { height: 100%; padding-top: 52px; } }

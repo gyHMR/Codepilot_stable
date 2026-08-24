@@ -1,3 +1,5 @@
+"""提供 Durable/Live 事件的统计与摘要查询。"""
+
 from __future__ import annotations
 
 # 新手导读：events.py 把原始 Agent 事件归一化成更适合审计和统计的形态。
@@ -42,7 +44,6 @@ RUN_EVENT_TYPES = {
     "plan_completed",
     "plan_abandoned",
     "plan_state_warning",
-    "run_guard_checked",
     "file_changed",
     "error",
 }
@@ -97,7 +98,7 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
         return {
             **_base(raw, "run_finished"),
             "status": str(raw.get("status", "")),
-            "stop_reason": str(raw.get("stopReason") or raw.get("stop_reason") or ""),
+            "stop_reason": str(raw.get("stop_reason") or ""),
         }
     if event_type == "message_start" and _message_role(raw) == "assistant":
         return {**_base(raw, "model_call_started")}
@@ -111,19 +112,22 @@ def event_to_record(event: dict[str, Any]) -> dict[str, Any]:
         "memory_written",
     }:
         return _memory_written(raw, event_type)
-    if event_type in {"tool_call_started", "tool_started"}:
+    if event_type == "tool_started":
+        _require_internal_tool_event(raw, finished=False)
         return {
             **_base(raw, "tool_call_started"),
-            "tool_call_id": str(raw.get("toolCallId") or raw.get("tool_call_id") or ""),
-            "tool_name": str(raw.get("toolName") or raw.get("tool_name") or ""),
+            "tool_call_id": str(raw.get("tool_call_id") or ""),
+            "tool_name": str(raw.get("tool_name") or ""),
             "args": _slim_args(_dict(raw.get("args"))),
         }
-    if event_type in {"tool_call_finished", "tool_completed", "tool_failed", "tool_interrupted"}:
+    if event_type in {"tool_completed", "tool_failed", "tool_interrupted"}:
+        _require_internal_tool_event(raw, finished=True)
         return _tool_finished(raw)
+    if event_type in {"tool_call_started", "tool_call_finished"}:
+        _require_canonical_tool_record(raw)
+        return _canonical_existing(raw)
     if event_type in _PLAN_EVENTS:
         return _plan_event(raw, event_type)
-    if event_type == "run_guard_checked":
-        return _run_guard_checked(raw)
     if event_type == "file_diff":
         return {
             **_base(raw, "file_changed"),
@@ -165,6 +169,7 @@ def validate_run_event(event: dict[str, Any]) -> list[str]:
 
 
 def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """统计事件类型、错误和工具终态，返回紧凑摘要。"""
     counts: dict[str, int] = {}
     for event in events:
         event_type = str(event.get("type", "unknown"))
@@ -175,15 +180,10 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
 _COMMON_EVENT_FIELDS = {
     "schema_version",
     "event_id",
-    "eventId",
     "run_id",
-    "runId",
     "session_id",
-    "sessionId",
     "turn",
-    "turnId",
     "type",
-    "timestamp",
     "timestamp_ms",
 }
 
@@ -206,12 +206,12 @@ def _canonical_existing(raw: dict[str, Any]) -> dict[str, Any]:
 def _base(raw: dict[str, Any], event_type: str) -> dict[str, Any]:
     return {
         "schema_version": 1,
-        "event_id": str(raw.get("event_id") or raw.get("eventId") or ""),
-        "run_id": str(raw.get("run_id") or raw.get("runId") or ""),
-        "session_id": raw.get("session_id") or raw.get("sessionId"),
-        "turn": _int(raw.get("turn", raw.get("turnId"))),
+        "event_id": str(raw.get("event_id") or ""),
+        "run_id": str(raw.get("run_id") or ""),
+        "session_id": raw.get("session_id"),
+        "turn": _int(raw.get("turn")),
         "type": event_type,
-        "timestamp_ms": _int(raw.get("timestamp_ms", raw.get("timestamp"))),
+        "timestamp_ms": _int(raw.get("timestamp_ms")),
     }
 
 
@@ -309,46 +309,45 @@ def _tool_finished(raw: dict[str, Any]) -> dict[str, Any]:
     if isinstance(permission, dict):
         permission = permission.get("decision") or permission.get("action")
     verification = _dict(result.get("verification"))
-    affected = raw.get("affectedPaths")
-    if not isinstance(affected, list):
-        affected = raw.get("affected_paths")
-    if not isinstance(affected, list):
-        affected = result.get("affected_paths")
-    is_error = bool(
-        raw.get("isError", raw.get("is_error", result.get("is_error", False)))
-    )
-    status = str(raw.get("status") or result.get("status") or "")
+    affected = raw.get("affected_paths")
+    is_error = bool(raw.get("is_error", False))
+    status = str(raw.get("status") or "")
     if not status:
         status = "error" if is_error else "success"
     return {
         **_base(raw, "tool_call_finished"),
-        "tool_call_id": str(
-            raw.get("toolCallId")
-            or raw.get("tool_call_id")
-            or result.get("tool_call_id")
-            or ""
-        ),
-        "tool_name": str(
-            raw.get("toolName")
-            or raw.get("tool_name")
-            or result.get("tool_name")
-            or ""
-        ),
+        "tool_call_id": str(raw.get("tool_call_id") or ""),
+        "tool_name": str(raw.get("tool_name") or ""),
         "status": status,
         "is_error": is_error,
-        "error_reason": raw.get("errorReason")
-        or result.get("error_code")
-        or result.get("error_reason"),
-        "approved": bool(raw.get("approved", result.get("approved", True))),
+        "error_reason": raw.get("error_reason"),
+        "approved": bool(raw.get("approved", True)),
         "permission": permission,
-        "duration_ms": _optional_int(raw.get("durationMs", raw.get("duration_ms"))),
+        "duration_ms": _optional_int(raw.get("duration_ms")),
         "affected_paths": [str(path) for path in affected or [] if isinstance(path, str)],
-        "workspace_changed": _optional_bool(
-            raw.get("workspaceChanged", result.get("workspace_changed"))
-        ),
+        "workspace_changed": _optional_bool(raw.get("workspace_changed")),
         "verification_status": str(verification.get("status") or "none"),
-        "output_truncated": bool(raw.get("outputTruncated", raw.get("output_truncated", False))),
+        "output_truncated": bool(raw.get("output_truncated", False)),
     }
+
+
+def _require_internal_tool_event(raw: dict[str, Any], *, finished: bool) -> None:
+    for field_name in ("tool_call_id", "tool_name"):
+        if not isinstance(raw.get(field_name), str) or not raw[field_name]:
+            raise ValueError(f"Internal tool event requires {field_name}")
+    if finished:
+        if "status" not in raw or "is_error" not in raw:
+            raise ValueError("Finished internal tool event requires status and is_error")
+    elif not isinstance(raw.get("args"), dict):
+        raise ValueError("tool_started event requires args")
+
+
+def _require_canonical_tool_record(raw: dict[str, Any]) -> None:
+    if raw.get("schema_version") != 1:
+        raise ValueError("Canonical tool record requires schema_version=1")
+    for field_name in ("tool_call_id", "tool_name"):
+        if not isinstance(raw.get(field_name), str) or not raw[field_name]:
+            raise ValueError(f"Canonical tool record requires {field_name}")
 
 
 def _memory_retrieved(raw: dict[str, Any]) -> dict[str, Any]:
@@ -389,18 +388,6 @@ def _plan_event(raw: dict[str, Any], event_type: str) -> dict[str, Any]:
         "raw_user_request": str(plan.get("raw_user_request") or raw.get("raw_user_request") or ""),
         "interpreted_goal": str(plan.get("interpreted_goal") or raw.get("interpreted_goal") or ""),
         "items": _list_of_dicts(plan.get("items")),
-    }
-
-
-def _run_guard_checked(raw: dict[str, Any]) -> dict[str, Any]:
-    decision = _dict(raw.get("decision"))
-    signals = _dict(raw.get("signals"))
-    return {
-        **_base(raw, "run_guard_checked"),
-        "action": str(decision.get("action") or raw.get("action") or ""),
-        "reason": str(decision.get("reason") or raw.get("reason") or ""),
-        "verification_status": str(signals.get("verification_status") or ""),
-        "workspace_changed": bool(signals.get("workspace_changed", False)),
     }
 
 

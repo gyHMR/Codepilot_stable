@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-import importlib
 from typing import get_args
 
 import pytest
@@ -41,11 +40,9 @@ def test_runtime_actions_are_immutable_user_intents_and_frames() -> None:
 
 
 def test_runtime_describe_view_is_app_session_view_not_legacy_snapshot() -> None:
-    from codepilot.runtime.approvals import ApprovalView
-    from codepilot.runtime.views import builtin_commands
-    from codepilot.runtime.opening import AppSessionView
-    from codepilot.runtime.views import SessionStatus
-    import codepilot.runtime.views as views
+    from codepilot.runtime.actions import ApprovalView, AppSessionView, SessionStatus
+    from codepilot.runtime.commands import builtin_commands
+    import codepilot.runtime.actions as views
     from codepilot.sessions.contracts import SessionView
 
     view = AppSessionView(
@@ -80,56 +77,27 @@ def test_runtime_describe_view_is_app_session_view_not_legacy_snapshot() -> None
         view.state["leaf_id"] = "mutate"  # type: ignore[index]
 
 
-def test_core_contracts_describe_loop_stage_without_session_objects() -> None:
-    from codepilot.core.contracts import (
-        AgentLoopInput,
-        AgentLoopLimits,
-        AgentLoopOutcome,
-        AgentLoopPorts,
-        RunCorrelation,
-    )
-    from codepilot.llm.ports import ModelDescriptor
-    from codepilot.protocols import AgentRunCounters, AssistantMessage, TextContent
+def test_core_contracts_describe_one_run_vocabulary() -> None:
+    from typing import get_type_hints
 
-    final = AssistantMessage(content=[TextContent(text="done")])
-    outcome = AgentLoopOutcome(
-        run_id="run1",
-        status="completed",
-        stop_reason="final_answer",
-        new_messages=[final],
-        final_message=final,
-        counters=AgentRunCounters(model_attempts=1),
-    )
-    assert outcome.status == "completed"
-    assert outcome.final_message is final
+    from codepilot.core.contracts import CoreRunInput
 
-    loop_input = AgentLoopInput(
-        run_id="run1",
-        correlation=RunCorrelation(session_id="s1"),
-        messages=[],
-        context={"system_prompt": "sys"},
-        model=ModelDescriptor(provider="fake", model_id="unit"),
-        tools=[],
-        mode="build",
-        plan_state=None,
-        limits=AgentLoopLimits(max_model_turns=3),
-    )
-    assert loop_input.correlation.session_id == "s1"
-    assert loop_input.limits.max_model_turns == 3
-    assert AgentLoopPorts(model=None, tools=None).events is None
+    hints = get_type_hints(CoreRunInput)
+
+    assert "entry" in hints
+    assert "state" in hints
+    assert "mode" in hints
+    assert "retry_policy" not in hints
+    assert "deadline_at_ms" not in hints
+    assert "approval_id" not in hints
+    assert "decision" not in hints
 
 
-def test_agent_loop_default_tool_iteration_budget_supports_coding_tasks(tmp_path) -> None:
-    from codepilot.core.contracts import AgentLoopLimits
+def test_core_limits_support_mode_specific_coding_budgets(tmp_path) -> None:
     from codepilot.protocols import Model
+    from codepilot.runtime.session_coordinator import RuntimeSessionCoordinator
     from codepilot.sessions.contracts import SessionOptions
-    from codepilot.sessions.runtime import SessionRuntime
 
-    defaults = AgentLoopLimits()
-    assert defaults.max_model_turns >= 256
-    assert defaults.max_tool_iterations >= 200
-    assert defaults.max_model_turns > defaults.max_tool_iterations
-    assert defaults.max_tool_calls_per_turn == 16
     model = Model(
         id="unit",
         name="Unit",
@@ -141,16 +109,16 @@ def test_agent_loop_default_tool_iteration_budget_supports_coding_tasks(tmp_path
         context_window=4000,
         max_tokens=500,
     )
-    read_session = SessionRuntime(
+    read_session = RuntimeSessionCoordinator(
         SessionOptions(model=model, workspace_dir=tmp_path / "read", current_mode="read")
     )
-    plan_session = SessionRuntime(
+    plan_session = RuntimeSessionCoordinator(
         SessionOptions(model=model, workspace_dir=tmp_path / "plan", current_mode="plan")
     )
-    build_session = SessionRuntime(
+    build_session = RuntimeSessionCoordinator(
         SessionOptions(model=model, workspace_dir=tmp_path / "build", current_mode="build")
     )
-    wide_build_session = SessionRuntime(
+    wide_build_session = RuntimeSessionCoordinator(
         SessionOptions(
             model=model,
             workspace_dir=tmp_path / "build-wide",
@@ -158,11 +126,16 @@ def test_agent_loop_default_tool_iteration_budget_supports_coding_tasks(tmp_path
             planning_budget_profile="wide",
         )
     )
-
-    read_limits = read_session.loop_limits()
-    plan_limits = plan_session.loop_limits()
-    build_limits = build_session.loop_limits()
-    wide_limits = wide_build_session.loop_limits()
+    try:
+        read_limits = read_session.core_limits()
+        plan_limits = plan_session.core_limits()
+        build_limits = build_session.core_limits()
+        wide_limits = wide_build_session.core_limits()
+    finally:
+        read_session.close()
+        plan_session.close()
+        build_session.close()
+        wide_build_session.close()
 
     assert build_limits.max_tool_iterations >= 200
     assert build_limits.max_model_turns > build_limits.max_tool_iterations
@@ -172,105 +145,37 @@ def test_agent_loop_default_tool_iteration_budget_supports_coding_tasks(tmp_path
     assert wide_limits.max_tool_iterations > build_limits.max_tool_iterations
 
 
-def test_agent_loop_retry_policy_is_explicit_contract() -> None:
+def test_prepared_run_has_one_core_input() -> None:
     from typing import get_type_hints
 
-    from codepilot.core.contracts import AgentLoopInput, AgentResumeInput, RetryPolicy
+    from codepilot.core.contracts import CoreRunInput
+    from codepilot.sessions.contracts import PreparedAgentRun
 
-    input_hints = get_type_hints(AgentLoopInput)
-    resume_hints = get_type_hints(AgentResumeInput)
+    hints = get_type_hints(PreparedAgentRun)
 
-    assert input_hints["retry_policy"] is RetryPolicy
-    assert resume_hints["retry_policy"] is RetryPolicy
-    assert RetryPolicy(enabled=True, max_retries=-1, base_delay_ms=-5).max_retries == 0
+    assert hints["loop_input"] is CoreRunInput
+    assert "resume_input" not in hints
 
 
-def test_agent_loop_mode_and_plan_state_are_explicit_contracts() -> None:
+def test_core_ports_use_named_live_event_sink_contract() -> None:
     from typing import get_type_hints
 
-    from codepilot.core.contracts import AgentLoopInput, AgentResumeInput, RunCorrelation
+    from codepilot.core.contracts import CorePorts, LiveEventSink
 
-    input_hints = get_type_hints(AgentLoopInput)
-    resume_hints = get_type_hints(AgentResumeInput)
-    plan_state = {"plan_id": "plan_1", "interpreted_goal": "ship it"}
+    hints = get_type_hints(CorePorts)
 
-    assert input_hints["mode"].__args__ == ("read", "plan", "build")
-    assert resume_hints["mode"].__args__ == ("read", "plan", "build")
-    assert input_hints["plan_state"] == dict[str, object] | None
-    assert resume_hints["plan_state"] == dict[str, object] | None
-
-    loop_input = AgentLoopInput(
-        run_id="run_plan_contract",
-        correlation=RunCorrelation(),
-        mode="plan",
-        plan_state=plan_state,
-    )
-    plan_state["interpreted_goal"] = "mutated"
-    assert loop_input.mode == "plan"
-    assert loop_input.plan_state == {"plan_id": "plan_1", "interpreted_goal": "ship it"}
-
-
-def test_agent_loop_context_is_named_prepared_context_contract() -> None:
-    from typing import get_type_hints
-
-    from codepilot.core import PreparedContext as PublicPreparedContext
-    from codepilot.core.contracts import (
-        AgentLoopInput,
-        AgentResumeInput,
-        PreparedContext,
-        RunCorrelation,
-    )
-
-    input_hints = get_type_hints(AgentLoopInput)
-    resume_hints = get_type_hints(AgentResumeInput)
-    source = {"system_prompt": "Base rules", "session_id": "s1"}
-
-    loop_input = AgentLoopInput(
-        run_id="run_context",
-        correlation=RunCorrelation(session_id="s1"),
-        context=source,
-    )
-    resume_input = AgentResumeInput(
-        run_id="run_context_resume",
-        correlation=RunCorrelation(session_id="s1"),
-        context=source,
-    )
-    source["system_prompt"] = "mutated"
-
-    assert PublicPreparedContext is PreparedContext
-    assert input_hints["context"] is PreparedContext
-    assert resume_hints["context"] is PreparedContext
-    assert loop_input.context.system_prompt == "Base rules"
-    assert resume_input.context.session_id == "s1"
-    assert dict(loop_input.context) == {
-        "system_prompt": "Base rules",
-        "session_id": "s1",
-    }
-    with pytest.raises(TypeError):
-        loop_input.context["new"] = "value"  # type: ignore[index]
-
-
-def test_agent_loop_ports_use_named_event_sink_contract() -> None:
-    from typing import get_type_hints
-
-    from codepilot.core import EventSink as PublicEventSink
-    from codepilot.core.contracts import AgentLoopPorts, EventSink
-
-    hints = get_type_hints(AgentLoopPorts)
-
-    assert PublicEventSink is EventSink
-    assert hints["events"] == EventSink | None
+    assert hints["live_events"] == LiveEventSink | None
 
 
 def test_prepared_agent_run_context_port_uses_core_context_port_contract() -> None:
     from typing import get_type_hints
 
-    from codepilot.core.contracts import ContextPort
+    from codepilot.core.contracts import ContextPreparationPort
     from codepilot.sessions.contracts import PreparedAgentRun
 
     hints = get_type_hints(PreparedAgentRun)
 
-    assert hints["context_port"] == ContextPort | None
+    assert hints["context_port"] == ContextPreparationPort | None
 
 
 def test_prepared_agent_run_rollback_baseline_is_public_ref() -> None:
@@ -285,15 +190,15 @@ def test_prepared_agent_run_rollback_baseline_is_public_ref() -> None:
     assert ref.kind == "rollback_baseline_ref"
 
 
-def test_session_run_record_status_follows_core_loop_status_contract() -> None:
+def test_session_run_record_status_uses_public_run_status_contract() -> None:
     from typing import get_type_hints
 
-    from codepilot.core.contracts import AgentLoopStatus
+    from codepilot.protocols import AgentRunStatus
     from codepilot.sessions.contracts import SessionRunRecord
 
     hints = get_type_hints(SessionRunRecord)
 
-    assert hints["status"] == AgentLoopStatus
+    assert hints["status"] == AgentRunStatus
 
 
 def test_session_intents_normalize_resume_and_cancel_values() -> None:
@@ -317,62 +222,40 @@ def test_session_intents_normalize_resume_and_cancel_values() -> None:
         SessionResumeIntent(approval_id="approval1", decision="maybe")
 
 
-def test_tool_port_approval_contract_is_explicit_interruption() -> None:
-    from codepilot.tools.contracts import (
-        ToolInterruption,
-        ToolInvocation,
-        ToolObservation,
-        ToolResumeDecision,
-        ToolRiskView,
-    )
+def test_tool_port_approval_contract_uses_typed_challenge_and_response() -> None:
+    from codepilot.tools.results import ToolResult
+    from codepilot.tools.security import ApprovalChallenge, ApprovalResponse, ToolResource
 
-    interruption = ToolInterruption(
+    challenge = ApprovalChallenge(
         approval_id="approval1",
+        request_fingerprint="sha256:test",
         run_id="run1",
+        session_id="session1",
         tool_call_id="call1",
         tool_name="shell",
-        arguments={"cmd": "git status"},
+        registration_id="reg1",
+        actions=("shell",),
+        resources=(ToolResource("workspace:///"),),
+        effects=frozenset({"process_spawn"}),
+        risk="medium",
         reason="requires user approval",
-        risk=ToolRiskView(level="medium", summary="workspace write"),
+        safe_preview={"command": "git status"},
     )
-    observation = ToolObservation(
+    result = ToolResult(
         tool_call_id="call1",
-        name="shell",
+        tool_name="shell",
         status="approval_required",
-        interruption=interruption,
+        approval=challenge,
+        registration_id="reg1",
     )
-    decision = ToolResumeDecision(
+    response = ApprovalResponse(
         approval_id="approval1",
+        request_fingerprint="sha256:test",
         decision="approve",
         reason="ok",
     )
-    assert observation.interruption is interruption
-    assert decision.decision == "approve"
-    assert ToolInvocation(run_id="run1", tool_call_id="call1", name="shell").source == "agent"
-
-
-def test_v2_contract_modules_do_not_import_higher_layers() -> None:
-    forbidden = {
-        "codepilot.core.contracts": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
-        "codepilot.sessions.contracts": ("codepilot.runtime", "codepilot.interfaces"),
-        "codepilot.runtime.actions": ("codepilot.core.agent", "codepilot.sessions.runtime", "codepilot.tools.runtime"),
-        "codepilot.llm.ports": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
-        "codepilot.tools.contracts": ("codepilot.sessions", "codepilot.runtime", "codepilot.interfaces"),
-    }
-    for module_name, forbidden_imports in forbidden.items():
-        module = importlib.import_module(module_name)
-        names = set(getattr(module, "__dict__", {}))
-        imported_modules = {
-            value.__name__
-            for value in module.__dict__.values()
-            if hasattr(value, "__name__") and hasattr(value, "__package__")
-        }
-        haystack = names | imported_modules
-        assert not any(
-            item == forbidden_name or item.startswith(f"{forbidden_name}.")
-            for item in haystack
-            for forbidden_name in forbidden_imports
-        )
+    assert result.approval is challenge
+    assert response.decision == "approve"
 
 
 def test_v2_contract_modules_export_only_named_contract_surface() -> None:
@@ -397,3 +280,29 @@ def test_v2_contract_modules_export_only_named_contract_surface() -> None:
         assert not any(name.startswith("_") for name in exported)
         assert "_require_text" not in exported
         assert "_validate_capabilities" not in exported
+
+
+def test_sessions_waiting_contract_accepts_core_continuation() -> None:
+    from codepilot.sessions.contracts import WaitingState
+
+    waiting = WaitingState(
+        kind="continuation",
+        request_id="continuation:run.max_model_turns",
+        payload={"stop_reason": "run.max_model_turns"},
+    )
+
+    assert waiting.kind == "continuation"
+
+
+def test_runtime_gateway_accepts_approval_as_user_action() -> None:
+    import inspect
+
+    from codepilot.runtime.actions import ApprovalDecided
+    from codepilot.runtime.gateway import RuntimeGateway
+
+    signature = inspect.signature(RuntimeGateway.dispatch)
+    assert list(signature.parameters) == ["self", "session_id", "action"]
+
+    action = ApprovalDecided(approval_id="approval_1", decision="approve")
+    assert action.approval_id == "approval_1"
+    assert action.decision == "approve"

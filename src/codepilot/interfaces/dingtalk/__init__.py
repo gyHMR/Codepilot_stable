@@ -1,3 +1,5 @@
+"""DingTalk 界面包：转发消息、命令、审批和审计事件。"""
+
 from __future__ import annotations
 
 # 新手导读：interfaces.dingtalk 是手机远程控制入口，只暴露桥接层契约。

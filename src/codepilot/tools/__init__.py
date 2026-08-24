@@ -1,75 +1,174 @@
-from __future__ import annotations
+"""Codepilot 工具子系统的公开 API。"""
 
-"""
-Codepilot 工具层（Tools Layer）公共接口。
+# 本文件是 tools 包的统一导出入口。
+# 所有外部模块（runtime、core、extensions 等）都通过此文件导入工具子系统类型，
+# 而不直接引用内部模块，以保持清晰的依赖边界。
 
-本模块是工具层的统一入口，导出所有核心类型和函数。
-工具层负责：
-  - 工具定义与注册（ToolDefinition、ToolRegistry）
-  - 权限决策与安全策略（PermissionPolicy）
-  - 审批流程管理（ApprovalProvider）
-  - 统一执行管线（ToolRuntime）
-  - 结果规范化与脱敏（ToolResultPolicy）
-
-层级位置：protocols → tools → core → sessions → runtime → interfaces
-工具层只依赖 protocols 层，不依赖 core/sessions/runtime。
-"""
-
-from .approvals import (
-    ApprovalDecision,
-    ApprovalProvider,
-    ApprovalRequest,
-    DeferredApprovalProvider,
+from .builtins import create_builtin_registrations
+from .codecs import (
+    DataclassCodec,
+    JsonObjectCodec,
+    ToolCodecError,
+    ToolSchemaError,
+    UnverifiedJsonCodec,
+    validate_json_schema,
 )
-from .builtins import create_builtin_tools
 from .contracts import (
-    PreparedToolCall,
-    PreparedToolCallResult,
-    ToolCallRequest,
-    ToolCatalogItem,
-    ToolCatalogView,
-    ToolDefinition,
-    ToolInterruption,
-    ToolInvocation,
-    ToolMetadata,
-    ToolObservation,
-    ToolPolicyContext,
-    ToolPort,
-    ToolResult,
-    ToolResumeDecision,
-    ToolRiskView,
+    CancellationToken,
+    CleanupStack,
+    EffectReporter,
+    ProgressReporter,
+    ToolAccessResolver,
+    ToolCategory,
+    ToolCodec,
+    ToolCheckpointPort,
+    ToolControlPort,
+    ToolExecutionContext,
+    ToolExecutionPort,
+    ToolExecutionRequest,
+    ToolHandler,
+    ToolHandlerError,
+    ToolOutputRenderer,
+    ToolRegistration,
+    ToolResumePreparation,
+    ToolSource,
+    ToolSpec,
 )
-from .permissions import PermissionPolicy, ToolDecision, ToolPermissionMode
-from .registry import ToolRegistry, get_builtin_tool_metadata
-from .restricted import RestrictedToolPort
+from .execution import (
+    ExecutionController,
+    ToolExecutionCancelledError,
+    ToolExecutionControlError,
+    ToolExecutionTimeoutError,
+    ToolProgressEvent,
+    ToolQueueFullError,
+    ToolQueueTimeoutError,
+    ToolRuntimeLimits,
+)
+from .registry import (
+    StaleToolRegistrationError,
+    ToolCatalogEntry,
+    ToolCatalogSnapshot,
+    ToolRegistrationConflictError,
+    ToolRegistrationNotFoundError,
+    ToolRegistry,
+    ToolRegistryError,
+)
+from .results import (
+    ArtifactContent,
+    ArtifactRef,
+    ImageContent,
+    TextContent,
+    ToolError,
+    ToolResult,
+    ToolTiming,
+    to_tool_result_message,
+)
 from .runtime import ToolRuntime
+from .security import (
+    ApprovalChallenge,
+    ApprovalGrant,
+    ApprovalResponse,
+    ConcurrencyPolicy,
+    OutputLimits,
+    OutputTrustPolicy,
+    PermissionDecision,
+    PermissionEngine,
+    PermissionRule,
+    TimeoutPolicy,
+    ToolAccessRequest,
+    ToolAccessResolution,
+    ToolEffect,
+    ToolEffectKind,
+    ToolMode,
+    ToolPolicy,
+    ToolResource,
+)
+from .state import (
+    InMemoryToolStateStore,
+    InteractionRequest,
+    InteractionResponse,
+    ToolAttemptRecord,
+    ToolAttemptState,
+    ToolStateConflictError,
+    ToolStateStore,
+)
+from .state_store import CheckpointToolStateStore, FileToolGrantStore
 
 __all__ = [
-    "ApprovalDecision",
-    "ApprovalProvider",
-    "ApprovalRequest",
-    "DeferredApprovalProvider",
-    "PermissionPolicy",
-    "PreparedToolCall",
-    "PreparedToolCallResult",
-    "ToolCallRequest",
-    "ToolCatalogItem",
-    "ToolCatalogView",
-    "ToolDecision",
-    "ToolDefinition",
-    "ToolInterruption",
-    "ToolInvocation",
-    "ToolMetadata",
-    "ToolObservation",
-    "ToolPermissionMode",
-    "ToolPolicyContext",
-    "ToolPort",
+    "ApprovalChallenge",
+    "ApprovalGrant",
+    "ApprovalResponse",
+    "ArtifactContent",
+    "ArtifactRef",
+    "CancellationToken",
+    "CleanupStack",
+    "CheckpointToolStateStore",
+    "ConcurrencyPolicy",
+    "DataclassCodec",
+    "EffectReporter",
+    "ExecutionController",
+    "FileToolGrantStore",
+    "ImageContent",
+    "InMemoryToolStateStore",
+    "InteractionRequest",
+    "InteractionResponse",
+    "JsonObjectCodec",
+    "OutputLimits",
+    "OutputTrustPolicy",
+    "PermissionDecision",
+    "PermissionEngine",
+    "PermissionRule",
+    "ProgressReporter",
+    "StaleToolRegistrationError",
+    "TextContent",
+    "TimeoutPolicy",
+    "ToolAccessRequest",
+    "ToolAccessResolution",
+    "ToolAccessResolver",
+    "ToolAttemptRecord",
+    "ToolAttemptState",
+    "ToolCatalogEntry",
+    "ToolCatalogSnapshot",
+    "ToolCategory",
+    "ToolCodec",
+    "ToolCodecError",
+    "ToolCheckpointPort",
+    "ToolControlPort",
+    "ToolEffect",
+    "ToolEffectKind",
+    "ToolError",
+    "ToolExecutionCancelledError",
+    "ToolExecutionContext",
+    "ToolExecutionPort",
+    "ToolExecutionControlError",
+    "ToolExecutionRequest",
+    "ToolExecutionTimeoutError",
+    "ToolHandler",
+    "ToolHandlerError",
+    "ToolMode",
+    "ToolOutputRenderer",
+    "ToolPolicy",
+    "ToolProgressEvent",
+    "ToolQueueFullError",
+    "ToolQueueTimeoutError",
+    "ToolRegistration",
+    "ToolResumePreparation",
+    "ToolRegistrationConflictError",
+    "ToolRegistrationNotFoundError",
     "ToolRegistry",
+    "ToolRegistryError",
+    "ToolResource",
     "ToolResult",
-    "ToolResumeDecision",
-    "ToolRiskView",
     "ToolRuntime",
-    "RestrictedToolPort",
-    "create_builtin_tools",
-    "get_builtin_tool_metadata",
+    "ToolRuntimeLimits",
+    "ToolSchemaError",
+    "ToolSource",
+    "ToolSpec",
+    "ToolStateConflictError",
+    "ToolStateStore",
+    "ToolTiming",
+    "UnverifiedJsonCodec",
+    "create_builtin_registrations",
+    "to_tool_result_message",
+    "validate_json_schema",
 ]

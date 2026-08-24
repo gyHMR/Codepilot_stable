@@ -1,3 +1,5 @@
+"""把运行事件追加写入可重放的 JSONL 记录。"""
+
 from __future__ import annotations
 
 # 新手导读：EventRecorder 负责把事件写入 JSONL。

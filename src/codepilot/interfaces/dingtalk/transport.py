@@ -1,3 +1,5 @@
+"""封装 DingTalk 事件接收、回复和长连接传输。"""
+
 from __future__ import annotations
 
 # 新手导读：transport.py 隔离钉钉 SDK 细节，测试可使用 fake transport 而不安装 SDK。

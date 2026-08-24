@@ -1,3 +1,5 @@
+"""把 Runtime 状态、消息、审批和事件渲染为终端文本。"""
+
 from __future__ import annotations
 
 """CLI 终端渲染工具。
@@ -465,7 +467,7 @@ class TerminalRenderer:
             return
         if event_type == "model_retry_start" and self.verbose:
             attempt = event.get("attempt", 0)
-            max_attempts = event.get("maxAttempts", 0)
+            max_attempts = event.get("max_attempts", 0)
             self._print(f"retry attempt {attempt}/{max_attempts}")
         elif self.verbose and event_type not in {"turn_start", "turn_end", "agent_start", "agent_end"}:
             self._print(f"event: {event_type}")
@@ -522,8 +524,7 @@ class TerminalRenderer:
         """渲染一次 run 的最终结果。
 
         Args:
-            record: ``RunFinishedFrame.record``。可能是 run record，也可能直接是
-                ``AssistantMessage``，因此通过 ``_final_message_from_record`` 统一提取。
+            record: ``RunFinishedFrame.record``。
 
         如果模型已经通过增量事件流式输出，这里只补一个换行；如果没有流式输出，
         则从最终记录中提取完整助手文本并显示。
@@ -705,9 +706,9 @@ class TerminalRenderer:
 
         Args:
             event: ``message_update`` 事件。文本通常在
-                ``assistantMessageEvent.delta``，旧格式可能在顶层 ``delta``。
+                ``assistant_message_event.delta``。
         """
-        assistant_event = event.get("assistantMessageEvent") or {}
+        assistant_event = event.get("assistant_message_event") or {}
         delta = str(assistant_event.get("delta", event.get("delta", "")))
         if not delta:
             return
@@ -739,7 +740,7 @@ class TerminalRenderer:
         这里会记录工具开始时间，供 ``_render_tool_end`` 计算耗时。
         """
         self._activity_started = False
-        tool_name = str(event.get("toolName", "unknown"))
+        tool_name = str(event.get("tool_name", "unknown"))
         args = dict(event.get("args", {}) or {})
         target = self._shorten_tail(self._extract_tool_target(tool_name, args), 64)
         action = self._tool_action_label(tool_name)
@@ -761,7 +762,7 @@ class TerminalRenderer:
             self._print(f"[tool] {action} {tool_name}" + (f"  {target}" if target else ""))
         self._current_tool = tool_name
         self._tool_start_time = time.time()
-        tool_call_id = str(event.get("toolCallId", ""))
+        tool_call_id = str(event.get("tool_call_id", ""))
         if tool_call_id:
             self._tool_start_times[tool_call_id] = self._tool_start_time
 
@@ -769,19 +770,19 @@ class TerminalRenderer:
         """渲染工具执行结束状态。
 
         Args:
-            event: 工具完成/失败/中断事件，包含 status、isError、errorReason 等字段。
+            event: 工具完成/失败/中断事件，包含 status、is_error、error_reason 等字段。
 
         ``approval_required`` 表示工具执行被审批中断，真正的审批框由
         ``ApprovalRequiredFrame`` 渲染，因此这里仅清理当前工具状态。
         """
-        status = event.get("status", "error" if event.get("isError", False) else "success")
+        status = event.get("status", "error" if event.get("is_error", False) else "success")
         if status == "approval_required":
             self._clear_current_tool(event)
             return
 
-        is_error = event.get("isError", False)
-        error_reason = event.get("errorReason")
-        tool_call_id = str(event.get("toolCallId", ""))
+        is_error = event.get("is_error", False)
+        error_reason = event.get("error_reason")
+        tool_call_id = str(event.get("tool_call_id", ""))
         started_at = self._tool_start_times.pop(tool_call_id, 0) if tool_call_id else self._tool_start_time
         elapsed = time.time() - started_at if started_at else 0
         elapsed_str = f"{elapsed:.1f}s" if elapsed >= 1 else f"{elapsed * 1000:.0f}ms"
@@ -951,7 +952,7 @@ class TerminalRenderer:
         """清理当前工具执行状态和计时缓存。"""
         self._current_tool = None
         self._tool_start_time = 0
-        tool_call_id = str(event.get("toolCallId", ""))
+        tool_call_id = str(event.get("tool_call_id", ""))
         if tool_call_id:
             self._tool_start_times.pop(tool_call_id, None)
 
@@ -1064,7 +1065,7 @@ class SimpleRenderer:
             return
         if event.get("type") != "message_update":
             return
-        assistant_event = event.get("assistantMessageEvent") or {}
+        assistant_event = event.get("assistant_message_event") or {}
         delta = str(assistant_event.get("delta", event.get("delta", "")))
         if delta:
             self.output(delta, end="")
@@ -1112,25 +1113,19 @@ class SimpleRenderer:
 
 
 def _final_message_from_record(record: Any | None) -> AssistantMessage | None:
-    """从不同形态的 run record 中提取最终助手消息。
+    """从当前 SessionRunRecord 的 CoreOutcome 提取最终助手消息。
 
     Args:
-        record: runtime 返回的完成记录。兼容直接传入 ``AssistantMessage``、
-            ``record.outcome.final_message`` 和 ``record.final_message`` 三种形态。
+        record: runtime 返回的完成记录。
 
     Returns:
         ``AssistantMessage`` 或 ``None``。
     """
     if record is None:
         return None
-    if isinstance(record, AssistantMessage):
-        return record
     outcome = getattr(record, "outcome", None)
-    if outcome is not None:
-        message = getattr(outcome, "final_message", None)
-        if message is not None:
-            return message
-    return getattr(record, "final_message", None)
+    message = getattr(outcome, "final_message", None) if outcome is not None else None
+    return message if isinstance(message, AssistantMessage) else None
 
 
 def _assistant_text(message: AssistantMessage) -> str:

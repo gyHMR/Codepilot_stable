@@ -1,3 +1,5 @@
+"""CLI 程序入口：装配 Runtime 并选择交互或单次执行模式。"""
+
 from __future__ import annotations
 
 """Codepilot 命令行入口。
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -168,6 +171,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Config key to explain (for 'explain' action)",
     )
     subparsers.add_parser("rpc", help="Start RPC mode (JSONL protocol)")
+    web_parser = subparsers.add_parser("web", help="Start local Web workspace")
+    web_parser.add_argument("--host", default="127.0.0.1")
+    web_parser.add_argument("--port", type=int, default=8000)
+    web_parser.add_argument("--workspace", default=".")
+    web_parser.add_argument("--reload", action="store_true", default=False)
+    web_parser.add_argument("--dev", action="store_true", default=False)
+    web_parser.add_argument("--frontend-port", type=int, default=5173)
     return parser
 
 
@@ -211,6 +221,23 @@ async def _run_from_args(args: argparse.Namespace) -> int:
     - ``--prompt``：单次提问，运行完即退出。
     - 默认：进入交互式 REPL。
     """
+
+    if args.command == "web":
+        from codepilot.interfaces.web.main import WebServerOptions, run_web_server
+
+        server_result = run_web_server(
+            WebServerOptions(
+                host=args.host,
+                port=args.port,
+                workspace=Path(args.workspace),
+                reload=args.reload,
+                dev=args.dev,
+                frontend_port=args.frontend_port,
+            )
+        )
+        if inspect.isawaitable(server_result):
+            await server_result
+        return 0
 
     intent = build_session_intent(args)
     if args.command == "config":

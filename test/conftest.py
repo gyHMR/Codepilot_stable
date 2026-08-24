@@ -9,8 +9,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+src_path = str(SRC)
+if src_path in sys.path:
+    sys.path.remove(src_path)
+sys.path.insert(0, src_path)
 
 
 @pytest.fixture

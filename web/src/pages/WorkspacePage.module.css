@@ -1,0 +1,16 @@
+.workbench { height: 100vh; min-height: 0; display: flex; flex-direction: column; background: var(--color-surface); }
+.topbar { height: var(--topbar-height); flex: 0 0 var(--topbar-height); display: flex; align-items: center; justify-content: space-between; padding: 0 18px; border-bottom: 1px solid var(--color-border); }
+.title { min-width: 0; display: flex; align-items: baseline; gap: 9px; }
+.title strong { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.title span { color: var(--color-text-muted); font-size: 11px; }
+.runBadge { display: flex; align-items: center; gap: 6px; color: var(--color-text-secondary); font-size: 12px; }
+.running { color: var(--color-accent); }
+.paused { color: var(--color-warning); }
+.failed { color: var(--color-danger); }
+.loading, .error { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--color-text-secondary); }
+.loading svg { animation: spin 1s linear infinite; }
+.error { flex-direction: column; }
+.error button { padding: 6px 12px; border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); background: var(--color-surface); cursor: pointer; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (max-width: 1050px) { .topbar { padding-right: 54px; } }
+@media (max-width: 720px) { .topbar { padding-left: 54px; } }

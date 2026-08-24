@@ -145,10 +145,10 @@ Model Provider
 - `ToolExecutionRequest`
 - `ToolResult`
 - `ToolProgressEvent`
-- `ApprovalChallenge/Decision`
+- `ApprovalChallenge/Response`
 - `InteractionRequest/Response`
 
-当前 `ToolCallRequest -> ToolResult -> ToolObservation -> ToolResultMessage` 的多层近重复结构应逐步收敛。
+迁移前的 `ToolCallRequest -> ToolResult -> ToolObservation -> ToolResultMessage` 多层近重复结构必须收敛；最终仅保留 canonical `ToolResult`，`ToolResultMessage` 只是面向模型对话的单向投影。
 
 ## 6. 模型可见协议
 
@@ -186,8 +186,9 @@ class ToolExecutionRequest:
     arguments: Mapping[str, object]
     mode: ToolMode
     registration_id: str
-    idempotency_key: str | None = None
     deadline_at_ms: int | None = None
+    raw_arguments: str | None = None
+    argument_parse_error: str | None = None
 ```
 
 Request 不得携带：
@@ -382,6 +383,7 @@ output Schema 只校验 handler 成功产生的领域输出。denied、approval�
 ```python
 @dataclass(frozen=True)
 class ToolExecutionContext:
+    request: ToolExecutionRequest
     cancellation: CancellationToken
     deadline_at_ms: int | None
     progress: ProgressReporter
@@ -603,6 +605,7 @@ class ToolAccessRequest:
     risk: RiskLevel
     reason: str
     safe_preview: Mapping[str, object]
+    approval_scopes: frozenset[ApprovalScope]
 ```
 
 资源统一为规范化 URI，例如：
@@ -648,7 +651,30 @@ class PermissionRule:
 
 Catalog 可见性不能代替执行授权。
 
-### 12.2 ApprovalChallenge
+### 12.2 Runtime 权限模式与能力边界
+
+第一版提供三种 Runtime 权限模式：
+
+| 模式 | workspace 读取 | 普通文件修改 | 受控项目命令 | 原始 Shell / 外部副作用 |
+|---|---|---|---|---|
+| `read-only` | allow | deny | deny | 外部读取 ask、凭据访问 deny、外部写 deny |
+| `workspace-write` | allow | allow | inspection / 可信 bounded mutation allow，repository execution ask | ask |
+| `ask` | allow | ask | ask | ask |
+
+`workspace-write` 是 Coding Agent 的默认执行边界。它只通过精确的 action/resource rule 放行工作区内普通 `write`、`edit`、`apply_patch`，以及 `command.inspection` 和可信固定 profile 的 `command.bounded_mutation`。会执行仓库代码的测试、lint、build 属于 `command.repository_execution`，首次必须审批，再按精确 Session/Project Grant 复用。涉及超过 20 个文件或估算输入超过 500,000 字节的写入使用独立 `.bulk` action，不继承普通写入授权。
+
+命令执行分为两个入口：
+
+- `command` 使用 argv 和 `create_subprocess_exec`，不解释管道、重定向、命令替换或复合 Shell 语法；只接受已识别的命令 profile。
+- `bash` 使用宿主 Shell，保留为需要审批的复杂命令入口；高风险、内部状态和敏感文件命令仍为不可审批的硬拒绝。
+
+命令评估统一返回 `CommandAssessment(profile, risk, effects, requires_shell, destructive, network)`。profile 为 `inspection`、`repository_execution`、`bounded_mutation`、`external_effect`、`destructive` 和 `unknown`。argv 与 raw Shell 只负责解析输入，风险、effects 和审批依据使用同一评估结果；`repository_execution` 与 `external_effect` 必须审批，`destructive` 和 `unknown` 不进入受控 command handler。
+
+Approval scope 由 AccessResolver 声明。普通结构化 workspace capability 可提供 `once/session/project`；原始 `bash`、`external_effect` 和 `.bulk` 写入只能使用 `once`，避免一次审批扩大为同工作区内任意后续命令或批量修改。
+
+不再提供 `block_dangerous_bash`、`bash_allow_patterns`、`bash_block_patterns` 配置。高风险拒绝属于不可关闭的 Runtime 硬约束；可自动执行的命令范围由结构化 command profile 和 PermissionRule 表达，旧配置键直接报错。
+
+### 12.3 ApprovalChallenge
 
 ```python
 @dataclass(frozen=True)
@@ -680,7 +706,7 @@ project
 
 暂不支持 global。
 
-### 12.3 ApprovalGrant
+### 12.4 ApprovalGrant
 
 批准后生成不可伪造的 Grant，而不是简单设置 `source=approval_resume`：
 
@@ -693,6 +719,8 @@ class ApprovalGrant:
     scope: ApprovalScope
     actions: tuple[str, ...]
     resources: tuple[ToolResource, ...]
+    effects: frozenset[ToolEffectKind]
+    risk: RiskLevel
     issued_at_ms: int
     expires_at_ms: int | None
 ```
@@ -704,12 +732,13 @@ class ApprovalGrant:
 - registration identity。
 - Schema。
 - 资源解析结果。
+- effect 不扩大且新调用 risk 不高于 Grant 上限。
 - 硬安全策略。
 - Grant 过期和消费状态。
 
 `approve_once` 必须单次消费。
 
-### 12.4 三种暂停语义
+### 12.5 三种暂停语义
 
 必须区分：
 
@@ -732,13 +761,12 @@ InteractionResponse 必须携带 interaction ID、request fingerprint、session/
 class TimeoutPolicy:
     default_execution_ms: int
     max_execution_ms: int
-    idle_timeout_ms: int | None = None
     cleanup_grace_ms: int = 5_000
 ```
 
-区分 queue timeout、execution timeout 和流式 idle timeout。
+第一版区分 queue timeout 和 execution timeout。未实现的 idle timeout 不进入协议；未来需要时以可观测 progress 驱动的独立策略扩展。
 
-有效 deadline 取 request、tool policy 和 runtime 剩余预算的最小值。
+AccessResolver 可携带已经校验的 requested execution timeout。有效 deadline 取 requested/default、tool max、request deadline 和 runtime 剩余预算的最小值。
 
 ### 13.2 取消
 
@@ -767,6 +795,7 @@ Shell、MCP、临时文件和子代理工具必须注册资源清理动作。清
 class ConcurrencyPolicy:
     mode: Literal["parallel", "serial"]
     group: str | None = None
+    max_parallel: int | None = None
 
 @dataclass(frozen=True)
 class ToolRuntimeLimits:
@@ -776,6 +805,7 @@ class ToolRuntimeLimits:
 
 - parallel 工具受 Session semaphore 限制。
 - serial 工具按 group 串行。
+- 带 `group + max_parallel` 的工具由 ExecutionController 按 Session/group 限流；MCP 不维护私有 semaphore。
 - workspace 写入使用 `workspace_mutation` group。
 - Plan 使用 `task_plan` group。
 - Shell 第一版使用 `system_command` group。
@@ -791,7 +821,7 @@ ToolRuntime 先按模型 ToolCall 顺序执行无副作用 preflight：materiali
 - 结果顺序与输入顺序一致。
 - 只并发连续、兼容的 parallel 工具。
 - serial 工具始终形成执行 fence，并按 group 排队；serial 注册的 group 不得为空。
-- approval/input 暂停后，后续调用不会通过 preflight，也不会启动。
+- approval/input/deny 暂停后，后续调用不会启动，并为每个调用返回标准 `interrupted` ToolResult；每个模型 ToolCall 必须恰好对应一个结果或暂停状态。
 - 已启动批次必须收集全部结果。
 - deny 默认阻止后续批次。
 - pending 超过上限返回 `tool.queue.full`。
@@ -880,7 +910,9 @@ interrupted
 
 ### 15.3 ToolStateStore
 
-tools 定义窄 Store Port，sessions 实现持久化，runtime 注入。
+Tools 定义 Attempt 状态、内存 Store 和 Checkpoint codec，Runtime 负责注入。Sessions 只把 Tools 提供的 opaque payload 保存为 `Checkpoint.components.tools`，不解释、索引或单独序列化 Tool 类型。
+
+Session 内的 pending Approval/Interaction 随 Progress 或 Waiting Boundary 原子提交，不再写入独立的 `.codepilot/sessions/<session_id>/tool_state.json`。Gateway 不维护第二份 ApprovalRegistry，pending approval 只从恢复后的 ToolStateStore 投影为界面 View。
 
 Store 保存：
 
@@ -888,9 +920,11 @@ Store 保存：
 - Attempt 状态。
 - Approval/Interaction challenge。
 - ApprovalGrant 消费状态。
-- 最终 Result。
+- 恢复当前 pending attempt 所需的最小状态。
 
-状态更新使用 expected-state compare-and-set，防止重复 resume 和重复执行。
+状态更新使用 expected-state compare-and-set，防止重复 resume 和重复执行。终态 ToolResult 不进入 Tool Checkpoint；它以 ToolResultMessage、领域事件和 Run Checkpoint cursor 为提交事实。
+
+`session` 和 `project` scope Grant 属于 Tools Security 的可复用策略状态，由 Tools 自己的工作区级 `tool_grants.json` 保存。Grant Store 与 Run Checkpoint 生命周期分离，但不能保存 Tool Attempt 或 Run 恢复状态。
 
 ### 15.4 崩溃恢复
 
@@ -900,6 +934,7 @@ Store 保存：
 - running/cleaning_up：标记 interrupted。
 - mutation 工具不自动重试。
 - 只有显式 retry-safe 工具可以自动重试。
+- Runtime 从 `Checkpoint.components.tools` 恢复新的内存 ToolStateStore，不读取独立 Tool 状态文件。
 
 无法自动恢复的 interrupted attempt 必须结算为 status=interrupted、error.code=tool.execution.interrupted，并保留已观察到的 effects；不能只停留在内部状态机中。
 
@@ -1011,16 +1046,42 @@ Hook 收敛为：
 
 所有来源最终进入相同 Registry 和 ToolRuntime。
 
-Extension/Skill/MCP 按 owner 进行原子批量注册：整批校验成功后才发布新 Catalog snapshot；任一注册失败则整批回滚。卸载或重连按 owner 撤销对应 revision，不影响其他 owner，也不能留下部分可见工具。
+内置与 Runtime 特殊工具名称先保留并 fail fast 注册。Extension/Skill/MCP 的每个 registration 独立校验和诊断，一个坏工具不能让同 owner 的其他合法工具静默消失；已发布注册仍通过 owner 标识支持卸载或重连。
+
+`tools.__init__` 作为受控公共 facade，只重导出 Extension 所需的稳定注册协议、Codec 接口、Policy 模型和 provider 接口，不导出 MaterializedTool 或内部服务。Extension API 应依赖该 facade，不能直接依赖 `tools.runtime`、`tools.security` 或 `tools.state` 的实现细节。
+
+### 18.1 Skill Package 与 Skill Runtime
+
+Skill 是显式启用的指令包，不是第二套 Extension API，也不是工具执行器。第一版只接受目录包，不保留单个 Markdown 文件兼容：
+
+```text
+<skill-root>/<skill-name>/
+├── SKILL.md
+├── references/
+├── scripts/
+└── assets/
+```
+
+`SKILL.md` 必须包含严格 YAML frontmatter：`name`、`version`、`description` 必填，`command`、`allowed_modes`、`required_tools`、`required_mcp` 可选；未知字段、目录名与 name 不一致、重复 name/command 均拒绝加载。Manifest 不能自行声明 source 或 trust，它们由 workspace 默认根或显式配置路径推导。
+
+Skill Runtime 只负责发现、校验、紧凑索引和受控读取，正文不在 Session 启动时注入模型。它向 Registry 注册两个 canonical 工具：
+
+- `load_skill`：按 name/command 延迟加载 `SKILL.md`，返回版本、来源、摘要和资源清单。
+- `read_skill_resource`：只读取 `references/`、`scripts/`、`assets/` 内 UTF-8 文本，拒绝绝对路径、路径逃逸、符号链接、二进制和超限文件。
+
+两者均声明 `filesystem_read` effect，并经过 ToolRuntime 的校验、权限、超时、并发、effect guard 和 ToolResult 投影。Skill Package 中的脚本默认只是可读资源；Skill Runtime 不提供脚本执行器。工作区内脚本如需运行，模型必须显式调用现有 `command` 或 `bash`，继续接受统一审批和安全策略；外部包脚本第一版不可直接执行。
+
+Skill 斜杠命令返回结构化 `CommandOutcome(prompt=...)`。RuntimeGateway 将其转换为正常模型运行，模型再调用 `load_skill`；命令 handler 不直接读取正文，也不绕过 ToolRuntime。第一版不实现 Skill 依赖安装、热重载、生命周期 Hook、Skill VM、隐式脚本执行和持久化 Skill 状态。
 
 ## 19. MCP 适配
 
 MCP 必须转换为 canonical ToolRegistration，不能保留特殊执行旁路。
 
 ```text
-MCP Definition
+MCP Streamable HTTP initialize/tools-list
+  -> MCPManager / MCPServerClient
   -> MCP Adapter
-  -> ToolSpec / Codec / Policy / Handler / Renderer
+  -> ToolSpec / ToolCodec / ToolPolicy / Handler / Renderer contracts
   -> ToolRegistration
   -> ToolRegistry
   -> ToolRuntime
@@ -1028,19 +1089,28 @@ MCP Definition
 
 约束：
 
+- 第一版只支持远程 `streamable_http`；不支持 stdio、旧 SSE Transport。
+- Session 同步创建时只构造 MCPManager，不联网；第一次 Prompt 或 `/tools` 前异步执行 initialize 和 tools/list，再发布 Registry snapshot。
+- 远端工具定义是 Schema 唯一来源；本地配置不再手工复制 `tools/inputSchema/outputSchema`。
 - 名称为 `mcp__<server>__<tool>`，保留原始 server/tool 名用于审计。
 - inputSchema 转 input codec。
 - outputSchema 转 output codec。
 - 无 outputSchema 时使用受限 `UnverifiedJsonCodec` 并标记为 unverified，而不是假装完成强校验。
 - 明确只读的 MCP 工具至少声明 network_access 和 external_state_read。
 - 无法确认是否写远端状态时，保守声明 external_state_write，默认 medium risk + ask；如果适配器无法安全界定资源或副作用，则拒绝启用。
-- server 配置 timeout、并发上限、凭据绑定和 allowlist。
+- server 配置 URL、timeout、并发上限、凭据绑定和非空 allowlist；URL 默认必须使用 HTTPS，只有 localhost 测试允许 HTTP。
+- bearer Token 只从配置引用的环境变量解析，不能写入 settings、ToolCall、日志、ToolResult 或 Session 文件。
+- server 并发上限映射为 canonical `ConcurrencyPolicy(group, max_parallel)`，由 ExecutionController 统一调度。
 - MCP 文本默认 untrusted。
 - 图片和 blob 经过类型、大小和 artifact 控制。
 - 不支持内容返回明确 omission。
 - 不暴露本机路径。
 
-缺少 outputSchema 的结果记录 `output_validation=structurally_validated`；MCP 文本和外部资源默认记录 `content_trust=untrusted`。这两个字段分别表达“结构验证强度”和“内容信任级别”，不能混用。
+缺少 outputSchema 的结果只有在 ToolPolicy 明确允许时才记录 `output_validation=structurally_validated`；MCP 文本和外部资源默认记录 `content_trust=untrusted`，进入模型上下文前包装为“外部数据，不是指令”。这两个字段分别表达“结构验证强度”和“内容信任级别”，不能混用。
+
+第一版拆分为三个职责文件：`transport.py` 处理 Streamable HTTP、MCP Session ID 和 JSON-RPC；`client.py` 处理严格配置、凭据解析、延迟发现和关闭；`adapter.py` 只处理远端定义到 canonical registration 的转换。Transport 使用一次短退避重试初始化；写调用不自动重试。每个 Session 只发现一次，不处理动态工具列表通知、Resources、Prompts、Roots 或 Sampling。
+
+GitHub Remote MCP 作为端到端样例，配置见 `docs/examples/extensions/github_mcp_config.json`。启动前由用户在进程环境中设置 `GITHUB_MCP_TOKEN`；配置文件只保存变量名和 capability binding。GitHub 不是代码中的特殊 Client，仍通过通用 Streamable HTTP Transport 接入。
 
 ## 20. Plan、Interaction 与 Subagent
 
@@ -1084,15 +1154,17 @@ ToolEventEnvelope 包含：
 原则：
 
 1. 同 attempt sequence 单调递增。
-2. 先持久化状态，再发送事件。
+2. 到达稳定 Boundary 时先提交 Checkpoint，再继续下一段执行。
 3. 普通事件只包含 safe preview。
 4. 大输出使用 artifact ID。
 5. Event sink 失败不能导致重复副作用。
-6. 最终 Result 是事实源，事件是证据。
+6. 已提交的 ToolResultMessage 和 Run Checkpoint 是事实源，事件是证据。
 
-ToolStateStore 保存恢复所需完整数据；Observability 只保存脱敏事件，两者不能混用。
+ToolStateStore 只保存当前执行尝试的内存状态并生成恢复所需的最小 Checkpoint payload；Observability 只保存脱敏事件，两者不能混用。
 
 ## 22. 模块目录
+
+工具模块采用“稳定协议 + 核心编排 + 四个领域聚合模块”的适度聚合结构。避免为每一种数据类型或运行步骤单独创建文件，同时保留安全、状态和沙箱等需要独立演进的边界。
 
 ```text
 src/codepilot/
@@ -1104,45 +1176,72 @@ src/codepilot/
 │   ├── codecs.py
 │   ├── registry.py
 │   ├── runtime.py
-│   ├── policy.py
-│   ├── permissions.py
-│   ├── approvals.py
-│   ├── scheduling.py
-│   ├── cancellation.py
-│   ├── progress.py
-│   ├── effects.py
+│   ├── execution.py
+│   ├── security.py
 │   ├── results.py
-│   ├── errors.py
-│   ├── rendering.py
-│   ├── guards.py
-│   ├── resources.py
-│   ├── artifacts.py
 │   ├── state.py
+│   ├── state_store.py
 │   ├── sandbox.py
 │   └── builtins/
-│       ├── filesystem.py
+│       ├── __init__.py
+│       ├── files.py
 │       ├── search.py
-│       ├── command.py
+│       ├── shell.py
 │       └── workspace.py
 ├── core/
 │   └── tool_adapters/
 │       ├── plan.py
 │       └── interaction.py
 ├── runtime/
-│   ├── composition.py
+│   ├── builder.py
+│   ├── tools.py
 │   └── tool_adapters/
 │       └── subagents.py
-├── sessions/
-│   └── tool_state_store.py
 └── extensions/
-    ├── tool_api.py
+    ├── api.py
+    ├── skills.py
+    ├── skill_runtime.py
     └── mcp/
         ├── adapter.py
-        ├── codec.py
-        └── renderer.py
+        ├── client.py
+        └── transport.py
 ```
 
-主要类型归属：contracts 放 Spec、Registration、Request 和 Context；codecs 放 codec；results/errors 放结算协议；resources/effects 放访问与副作用类型；rendering/guards/artifacts 放输出链；state 只定义 Store Port，sessions 实现持久化，runtime/composition.py 负责依赖装配。
+模块职责：
+
+| 模块 | 聚合职责 | 不应包含 |
+|---|---|---|
+| `__init__.py` | 受控公共 facade，重导出外部注册所需的稳定类型 | MaterializedTool、Runtime 内部服务、持久化实现 |
+| `contracts.py` | Spec、Registration、Request、Context、Handler/Resolver/Renderer 等稳定 Protocol | 具体执行流程、持久化实现、平台 I/O |
+| `codecs.py` | JSON Schema、输入输出 Codec、内置 Codec 实现 | Registry、权限和模型内容渲染 |
+| `registry.py` | 注册、materialize、Catalog snapshot、registration identity | handler 执行、安全审批 |
+| `runtime.py` | `prepare_batch/execute_prepared` 与 `prepare_resume/execute_prepared_resume` 管线编排 | 具体权限匹配、调度算法、文件系统安全实现 |
+| `execution.py` | timeout、取消、CleanupStack、基础调度、并发、progress | 权限规则、审批存储、结果渲染 |
+| `security.py` | ToolPolicy、资源/effect、Permission、Approval、AccessResolution | OS 沙箱实现、Runtime 主流程 |
+| `results.py` | ToolResult、ToolError、内容块和模型消息单向投影 | handler 调度、权限决策、Runtime 输出限额执行 |
+| `state.py` | Attempt 状态机、Store Port、恢复协议 | Session 持久化细节 |
+| `state_store.py` | Checkpoint codec、内存恢复适配和工作区 Grant Store | Session/Run 文件布局、Runtime 编排 |
+| `sandbox.py` | workspace 边界、敏感文件、Shell/路径安全与资源级防护 | 审批 UI、任务策略 |
+
+原细分设计按以下方式收敛：
+
+| 原职责文件 | 收敛后的模块 |
+|---|---|
+| `scheduling.py`、`cancellation.py`、`progress.py` | `execution.py` |
+| `policy.py`、`permissions.py`、`approvals.py`、`resources.py`、`effects.py` | `security.py` |
+| `errors.py`、`rendering.py`、`guards.py`、`artifacts.py` | `results.py` |
+| `state.py` | 继续独立，避免恢复协议挤入 Runtime |
+| `sandbox.py` | 继续独立，避免平台安全代码挤入 Security |
+
+`state.py` 定义 Attempt 状态、Interaction 恢复对象和 Store Port，`tools/state_store.py` 实现 Checkpoint codec 与 Grant Store；Runtime 负责装配，Sessions 只原子保存 opaque Tools component。Plan 和 Interaction 不放回 `tools/builtins`，仍由 Core adapter 注册；Subagent 仍由 Runtime adapter 注册。
+
+文件规模控制遵循以下规则：
+
+1. 不因只有一个 dataclass、Protocol 或 helper 就创建独立模块。
+2. `runtime.py` 只保留管线编排，复杂算法下沉到对应聚合模块，避免形成总控大文件。
+3. 单文件接近 800 行时检查职责边界；超过约 1,000 行且包含两个可以独立测试、独立演进的核心职责时再拆分。
+4. 拆分优先形成有业务含义的子模块或子包，不按“一类一文件”机械拆分。
+5. 私有 helper 与所属领域放在同一模块；只有被两个以上领域稳定复用时才提升为公共协议。
 
 ## 23. 测试规范
 
@@ -1173,7 +1272,7 @@ src/codepilot/
 
 ### 23.3 安全与审批
 
-覆盖路径/符号链接逃逸、敏感文件、Shell 工作区外访问、自授权参数、effect 超范围、审批指纹、过期、单次消费和作用域隔离。
+覆盖路径/符号链接逃逸、敏感文件、受控命令工作区外访问、原始 Shell 审批、自授权参数、effect 超范围、审批指纹、过期、单次消费和作用域隔离。
 
 ### 23.4 timeout、取消、恢复
 
@@ -1192,44 +1291,47 @@ src/codepilot/
 - adapters 不直接构造最终 ToolResult。
 - 生产代码不直接调用内置 handler。
 - 不再引入第二套跨层结果协议。
+- `runtime.py` 只编排 `registry/execution/security/results/state` 的公开接口，不实现具体权限匹配、调度或 sandbox 逻辑。
+- Extension/MCP 只通过 `codepilot.tools` 公共 facade 使用注册协议，不导入 ToolRuntime、MaterializedTool 或工具状态存储实现。
+- 禁止仅为单个简单类型创建无独立行为的新工具模块；模块拆分必须对应可独立测试和演进的职责。
 
 ## 24. 迁移方案
 
 ### 阶段 0：冻结旧协议
 
 - 不继续扩展旧 ToolResult/ToolObservation。
-- 记录当前行为并建立兼容测试。
+- 建立旧协议、旧 Session 和旧事件必须被拒绝的断代测试。
 - 暂不同时修改 Plan 业务语义。
 
 ### 阶段 1：建立新协议对象
 
-新增 Spec、Registration、Codec、ExecutionRequest、Result、Error、Policy、AccessRequest，并提供新 Result 到旧消息协议的适配器。
+在 `contracts.py` 建立 Spec、Registration、ExecutionRequest 和运行 Protocol；在 `results.py` 建立 Result/Error；在 `security.py` 建立 Policy、Resource、Effect 和 AccessRequest。执行结果只允许单向投影为模型消息，不提供旧执行协议适配器。
 
 ### 阶段 2：Registry 与 Codec
 
-- 建立 opaque Registry。
+- 在 `registry.py` 建立 opaque Registry，在 `codecs.py` 建立统一 Codec。
 - 默认禁止覆盖。
 - 增加 Catalog snapshot 和 registration identity。
 - 使用标准 JSON Schema validator。
-- 为旧定义提供临时 LegacyRegistrationAdapter。
+- 不提供 LegacyRegistrationAdapter；非 canonical registration 直接拒绝。
 
 ### 阶段 3：单工具执行闭环
 
-先实现 ToolRuntime.execute 的新链路，不同时迁移复杂并发和恢复。选择 workspace_status 或 read 完成第一个端到端切片。
+先实现 `prepare_batch/execute_prepared` 新链路，不同时迁移复杂并发和恢复。选择 workspace_status 或 read 完成第一个端到端切片。
 
 ### 阶段 4：逐个迁移 Builtins
 
-推荐顺序：workspace_status、read、ls、grep/find、write、edit、apply_patch、bash/PowerShell。
+推荐顺序：workspace_status、read、ls、grep/find、write、edit、apply_patch、command、bash/PowerShell。
 
 每迁移一个工具，同时完成 typed input/output、Schema、access resolver、effect、policy、description 和 compliance tests。
 
 ### 阶段 5：权限、安全与审批
 
-接入 action/resource/effect 权限、ApprovalGrant、ToolStateStore、敏感文件和 Shell 策略，移除内存 `_pending` 真值。
+在 `security.py` 接入 action/resource/effect 权限和 ApprovalGrant，在 `sandbox.py` 实现敏感文件与 Shell/路径策略，在 `state.py` 定义 ToolStateStore Port；移除内存 `_pending` 真值。
 
 ### 阶段 6：timeout、取消和基础并发
 
-实现通用 timeout、CancellationToken、CleanupStack、Session semaphore、parallel/serial group 和 execute_batch；移除 Core 自行 gather。
+在 `execution.py` 实现通用 timeout、CancellationToken、CleanupStack、Session semaphore、parallel/serial group 和 progress；由 `runtime.py` 编排 execute_batch，移除 Core 自行 gather。
 
 ### 阶段 7：特殊工具
 
@@ -1237,13 +1339,12 @@ src/codepilot/
 
 ### 阶段 8：Extension、Skill、MCP
 
-所有来源改为 canonical registration，删除 MCP 特殊执行旁路，接入 output trust、artifact 和 server 限制。
+所有来源改为 canonical registration。Skill 迁移为严格目录包，并通过 `load_skill`、`read_skill_resource` 延迟加载；不保留平铺 Markdown 兼容，不提供脚本执行旁路。MCP 第一版通过 `extensions/mcp/adapter.py` 使用 `codepilot.tools` 公共 facade 提供的 Codec、Policy、Result/Renderer 协议，删除 MCP 特殊执行旁路，接入 output trust、artifact 和 server 限制。
 
 ### 阶段 9：删除旧协议
 
 删除旧公开 execute、ToolCallRequest、PreparedToolCall、ToolObservation、重复 Approval 类型、关键 metadata 语义和不安全 legacy after hook。
-
-保留 Session 已持久化数据的向后读取兼容。
+不保留 Session 已持久化数据的向后读取兼容。
 
 ## 25. 验收标准
 

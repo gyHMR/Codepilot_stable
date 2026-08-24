@@ -1,14 +1,12 @@
-from __future__ import annotations
+"""Provider 注册中心 —— 根据 model.api 分发到具体模型适配器。
 
-# 新手导读：Provider registry 根据 model.api 分发到具体模型适配器。
-# 关注点：新增模型协议时通常先注册新的 provider，再扩展 models 目录。
+本文件管理 API provider 的注册和调用分发：
+1. ApiProvider — 注册的 provider 实现（包含 stream/stream_simple 函数）
+2. ApiProviderRegistry — 实例作用域的注册中心（runtime 组装时使用）
+3. 全局注册表 — 模块级注册函数（register_api_provider / get_api_provider）
+4. 内置 provider 注册 — register_builtin_api_providers()
 
-"""
-api -> provider 实现的注册中心。
-
-这样可以做到：
-1) stream() 时按 model.api 动态分发；
-2) 后续扩展新 provider 时只需注册，不改调用方代码。
+新增模型协议时，通常先注册新的 provider，再扩展 models 目录。
 """
 
 from dataclasses import dataclass, field
@@ -26,7 +24,7 @@ SimpleStreamFn = Callable[[Model, Context, SimpleStreamOptions | None], Assistan
 
 
 class LLMProvider(Protocol):
-    """LLM Provider 协议：由各模型 API 适配器实现。"""
+    """LLM Provider 协议 —— 由各模型 API 适配器实现。"""
 
     api: str
 
@@ -36,6 +34,8 @@ class LLMProvider(Protocol):
         context: Context,
         options: StreamOptions | None = None,
     ) -> AssistantMessageEventStream:
+        """执行标准流式调用并返回可关闭、可读取最终结果的事件流。"""
+
         ...
 
     def stream_simple(
@@ -44,31 +44,93 @@ class LLMProvider(Protocol):
         context: Context,
         options: SimpleStreamOptions | None = None,
     ) -> AssistantMessageEventStream:
+        """使用简化选项执行流式调用，供 Core 的模型端口适配器使用。"""
+
         ...
 
 
 @dataclass
 class ApiProvider:
-    """已注册的 API Provider 实现：对应一种模型线路协议（如 anthropic-messages、openai-compatible）。"""
-    api: str                                    # 协议标识（如 "openai-compatible"）
-    stream: StreamFn                            # 标准流式调用函数
-    stream_simple: SimpleStreamFn               # 简化流式调用函数
-    name: str = ""                              # 人类可读名称
-    provider_id: str = ""                       # Provider 标识
-    metadata: dict[str, object] = field(default_factory=dict)  # 附加元数据
+    """已注册的 API Provider 实现。
+
+    对应一种模型线路协议（如 anthropic-messages、openai-compatible）。
+
+    参数:
+        api: 协议标识（如 "openai-compatible"）
+        stream: 标准流式调用函数
+        stream_simple: 简化流式调用函数
+        name: 人类可读名称
+        provider_id: Provider 标识
+        metadata: 附加元数据
+    """
+    api: str
+    stream: StreamFn
+    stream_simple: SimpleStreamFn
+    name: str = ""
+    provider_id: str = ""
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
-# 全局 Provider 注册表：api -> ApiProvider
+# 全局 Provider 注册表：api → ApiProvider
 _REGISTRY: dict[str, ApiProvider] = {}
 
 
+class ApiProviderRegistry:
+    """实例作用域的 provider 注册中心。
+
+    每个 runtime 组装时可以创建一个独立的注册中心，
+    避免全局状态污染。同时也支持直接使用全局注册表。
+    """
+
+    def __init__(self) -> None:
+        self._providers: dict[str, ApiProvider] = {}
+
+    def register(self, provider: ApiProvider) -> None:
+        """注册一个 provider。"""
+        self._providers[provider.api] = provider
+
+    def get(self, api: str) -> ApiProvider | None:
+        """按 api 获取 provider。"""
+        return self._providers.get(api)
+
+    def require(self, api: str) -> ApiProvider:
+        """按 api 获取 provider，未注册时抛出 RuntimeError。"""
+        provider = self.get(api)
+        if provider is None:
+            raise RuntimeError(f"No API provider registered for api: {api}")
+        return provider
+
+    def stream_simple(
+        self,
+        model: Model,
+        context: Context,
+        options: SimpleStreamOptions | None = None,
+    ) -> AssistantMessageEventStream:
+        """按 model.api 分发到对应 provider 的简化流式调用。"""
+        return self.require(model.api).stream_simple(
+            model, context, options or SimpleStreamOptions()
+        )
+
+    async def complete_simple(
+        self,
+        model: Model,
+        context: Context,
+        options: SimpleStreamOptions | None = None,
+    ) -> AssistantMessage:
+        """简化流式调用并等待最终结果。"""
+        return await self.stream_simple(model, context, options).result()
+
+
+# ── 模块级全局注册表操作 ──────────────────────────────────────────────────────
+
+
 def register_api_provider(provider: ApiProvider) -> None:
-    """注册或覆盖某个 api 的 provider。"""
+    """注册或覆盖某个 api 的 provider（全局注册表）。"""
     _REGISTRY[provider.api] = provider
 
 
 def get_api_provider(api: str) -> ApiProvider | None:
-    """按 api 获取 provider；不存在返回 None。"""
+    """按 api 获取 provider；不存在返回 None（全局注册表）。"""
     return _REGISTRY.get(api)
 
 
@@ -126,16 +188,19 @@ async def complete_simple(
     return await stream_simple(model, context, options).result()
 
 
-def register_builtin_api_providers() -> None:
-    """Register built-in provider adapters explicitly during runtime assembly."""
+# ── 内置 Provider 注册 ────────────────────────────────────────────────────────
 
+
+def register_builtin_api_providers(registry: ApiProviderRegistry | None = None) -> None:
+    """在 runtime 组装时显式注册内置 provider 适配器。"""
     from .providers.anthropic import stream_anthropic, stream_simple_anthropic
     from .providers.openai import (
         stream_openai_compatible,
         stream_simple_openai_compatible,
     )
 
-    register_api_provider(
+    target = registry.register if registry is not None else register_api_provider
+    target(
         ApiProvider(
             api="anthropic-messages",
             stream=stream_anthropic,
@@ -144,7 +209,7 @@ def register_builtin_api_providers() -> None:
             provider_id="anthropic",
         )
     )
-    register_api_provider(
+    target(
         ApiProvider(
             api="openai-compatible",
             stream=stream_openai_compatible,
@@ -155,15 +220,22 @@ def register_builtin_api_providers() -> None:
     )
 
 
-def reset_api_providers() -> None:
-    """Clear and re-register built-in providers."""
+def builtin_api_provider_registry() -> ApiProviderRegistry:
+    """创建并注册所有内置 provider，返回配置好的注册中心。"""
+    registry = ApiProviderRegistry()
+    register_builtin_api_providers(registry)
+    return registry
 
+
+def reset_api_providers() -> None:
+    """清空并重新注册内置 provider。"""
     clear_api_providers()
     register_builtin_api_providers()
 
 
 __all__ = [
     "ApiProvider",
+    "ApiProviderRegistry",
     "LLMProvider",
     "SimpleStreamFn",
     "StreamFn",
@@ -173,6 +245,7 @@ __all__ = [
     "get_api_provider",
     "register_api_provider",
     "register_builtin_api_providers",
+    "builtin_api_provider_registry",
     "reset_api_providers",
     "stream",
     "stream_simple",

@@ -1,10 +1,5 @@
-from __future__ import annotations
-
-# 新手导读：runtime.py 定义 run 状态、run 结果和运行时事件。
-# 关注点：这里描述跨层可观察的运行事实，不管理 session，也不分发事件。
-
 """
-Agent 运行结果与事件类型定义。
+定义 Agent Run 的结果、停止语义与公共事件契约。
 
 定义了一次 Agent 运行（run）的完整结果结构：
 - 运行状态和停止原因
@@ -12,7 +7,12 @@ Agent 运行结果与事件类型定义。
 - 运行验证结果
 - 最终的运行结果汇总
 - 运行过程中的事件信封和事件 payload
+
+这些对象描述 Core 与 Runtime 已确认的可观察事实；Sessions 负责持久化，事件系统负责
+分发，Interface 只做投影。本模块本身不管理 Session，也不执行事件处理器。
 """
+
+from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -20,7 +20,7 @@ from typing import Any, Awaitable, Callable, Literal, TypedDict, cast
 
 from .errors import ErrorInfo
 from .conversation import AssistantMessage, Message, ToolResultMessage, UserMessage
-from .tools import ToolResult, ToolResultStatus
+from .tools import ToolResultStatus
 
 
 # ── 枚举类型 ────────────────────────────────────────────────────
@@ -49,10 +49,12 @@ AgentRunStopReason = Literal[
     "repeated_tool_call",    # 检测到重复的工具调用（可能陷入循环）
     "tool_call_limit",       # 工具调用数量超出限制
     "tool_unavailable",      # 模型请求了不可用工具
-    "run_guard",             # 运行护栏要求继续处理或等待用户
+    "completion_blocked",    # Core 完成策略判定任务尚不可结束
     "missing_tool_port",     # 内部工具端口缺失
     "missing_approval_decision",  # approval resume 缺少审批决定
     "internal_error",        # 内部错误
+    "deadline_exceeded",     # Run deadline exceeded
+    "runtime_error",         # Runtime infrastructure failure
 ]
 
 # 运行验证状态
@@ -82,10 +84,12 @@ _STOP_REASONS = frozenset(
         "repeated_tool_call",
         "tool_call_limit",
         "tool_unavailable",
-        "run_guard",
+        "completion_blocked",
         "missing_tool_port",
         "missing_approval_decision",
         "internal_error",
+        "deadline_exceeded",
+        "runtime_error",
     }
 )
 _VERIFICATION_STATUSES = frozenset({"passed", "failed", "cancelled", "unknown"})
@@ -186,7 +190,7 @@ RunSignalsVerificationStatus = Literal["unknown", "passed", "failed", "cancelled
 
 @dataclass
 class PlanSummary:
-    """Structured execution-plan snapshot saved with a run result."""
+    """随 Run 结果保存的结构化执行计划快照。"""
 
     schema_version: int
     plan_id: str
@@ -265,7 +269,7 @@ class PlanSummary:
 
 @dataclass
 class RunSignalsSummary:
-    """Observable run facts used by RunGuard and context reporting."""
+    """供 Runtime 投影与 Context 报告使用的可观察 Run 信号汇总。"""
 
     workspace_changed: bool = False
     affected_paths: list[str] = field(default_factory=list)
@@ -593,7 +597,6 @@ RuntimeEventType = Literal[
     "tool_failed",
     "tool_interrupted",
     "context_projected",
-    "context_preflight",
     "context_compacted",
     "context_projection_failed",
     "context_freshness_checked",
@@ -618,7 +621,6 @@ RuntimeEventType = Literal[
     "plan_completed",
     "plan_abandoned",
     "plan_state_warning",
-    "run_guard_checked",
     "file_diff",
     "error",
 ]
@@ -637,7 +639,6 @@ _RUNTIME_EVENT_TYPES = frozenset(
         "tool_failed",
         "tool_interrupted",
         "context_projected",
-        "context_preflight",
         "context_compacted",
         "context_projection_failed",
         "context_freshness_checked",
@@ -662,7 +663,6 @@ _RUNTIME_EVENT_TYPES = frozenset(
         "plan_completed",
         "plan_abandoned",
         "plan_state_warning",
-        "run_guard_checked",
         "file_diff",
         "error",
     }
@@ -670,7 +670,7 @@ _RUNTIME_EVENT_TYPES = frozenset(
 
 
 def ensure_runtime_event_type(value: object) -> RuntimeEventType:
-    """Validate a runtime event type shared by core/runtime/interfaces."""
+    """校验 Core、Runtime 与 Interface 共享的公共事件类型。"""
 
     text = str(value).strip() if value is not None else ""
     if not text:
@@ -681,86 +681,108 @@ def ensure_runtime_event_type(value: object) -> RuntimeEventType:
 
 
 class AgentEventBase(TypedDict):
-    """Stable envelope shared by all runtime events."""
+    """所有 Runtime 事件共用的稳定信封，负责贯穿 Run、Turn 与事件 ID。"""
 
     type: RuntimeEventType
-    runId: str
-    turnId: int
-    eventId: str
-    timestamp: int
-    sessionId: str | None
+    run_id: str
+    turn_id: int
+    event_id: str
+    timestamp_ms: int
+    session_id: str | None
 
 
 EventEnvelope = AgentEventBase
 
 
 class AgentStartEvent(AgentEventBase):
+    """Agent Run 开始事件。"""
+
     type: Literal["agent_start"]
 
 
 class AgentEndEvent(AgentEventBase):
+    """Agent Run 结束事件，携带唯一的终态结果。"""
+
     type: Literal["agent_end"]
     messages: list[Message]
     status: AgentRunStatus
-    stopReason: AgentRunStopReason
+    stop_reason: AgentRunStopReason
     counters: AgentRunCounters
     result: AgentRunResult
 
 
 class TurnStartEvent(AgentEventBase):
+    """Core 新一轮模型/工具循环开始事件。"""
+
     type: Literal["turn_start"]
 
 
 class TurnEndEvent(AgentEventBase):
+    """一轮循环结束事件，包含助手消息及本轮工具结果。"""
+
     type: Literal["turn_end"]
     message: AssistantMessage
-    toolResults: list[ToolResultMessage]
+    tool_results: list[ToolResultMessage]
 
 
 class MessageStartEvent(AgentEventBase):
+    """规范消息开始产生的事件。"""
+
     type: Literal["message_start"]
     message: Message
 
 
 class MessageUpdateEvent(AgentEventBase):
+    """流式消息增量事件，并保留 Provider 规范化后的增量载荷。"""
+
     type: Literal["message_update"]
     message: Message
-    assistantMessageEvent: dict[str, Any]
+    assistant_message_event: dict[str, Any]
 
 
 class MessageEndEvent(AgentEventBase):
+    """规范消息生成完毕事件。"""
+
     type: Literal["message_end"]
     message: Message
 
 
 class ModelRetryStartEvent(AgentEventBase):
+    """一次模型重试开始事件，记录次数、退避时间和上次错误。"""
+
     type: Literal["model_retry_start"]
     attempt: int
-    maxAttempts: int
-    delayMs: int
+    max_attempts: int
+    delay_ms: int
     error: ErrorInfo
 
 
 class ToolStartedEvent(AgentEventBase):
+    """工具调用开始事件，使用模型产生的 ``tool_call_id`` 关联后续结果。"""
+
     type: Literal["tool_started"]
-    toolCallId: str
-    toolName: str
+    tool_call_id: str
+    tool_name: str
     args: dict[str, Any]
 
 
 class ToolFinishedEvent(AgentEventBase):
+    """工具调用的统一终态事件，覆盖完成、失败与中断。"""
+
     type: Literal["tool_completed", "tool_failed", "tool_interrupted"]
-    toolCallId: str
-    toolName: str
+    tool_call_id: str
+    tool_name: str
     result: Any
     status: ToolResultStatus
-    isError: bool
+    is_error: bool
     approved: bool
-    approvalId: str | None
-    errorReason: str | None
+    approval_id: str | None
+    error_reason: str | None
 
 
 class ErrorEvent(AgentEventBase, total=False):
+    """可选字段的公共错误事件；``errorInfo`` 是结构化错误权威载荷。"""
+
     type: Literal["error"]
     error: str
     message: str

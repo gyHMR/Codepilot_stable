@@ -1,3 +1,5 @@
+"""解析 CLI 参数与环境变量，并构造 Runtime 配置输入。"""
+
 from __future__ import annotations
 
 """面向人类用户的 ``codepilot config`` 子命令。
@@ -33,6 +35,7 @@ _MODEL_CONFIG_TEMPLATE = {
     "base_url": "https://api.deepseek.com/v1",
     "api_key": "",
     "api_key_env": "DEEPSEEK_API_KEY",
+    "proxy_url": "",
     "context_window": 64000,
     "max_tokens": 8192,
     "reasoning": False,
@@ -58,7 +61,7 @@ def run_config_command(
     Args:
         action: 用户输入的配置动作，当前支持 ``init``、``show``、``check``、``explain``。
         workspace: 当前项目目录；配置文件会放在该目录下的 ``.codepilot``。
-        key: ``explain`` 动作要解释的配置键，例如 ``model`` 或 ``tool_execution``。
+        key: ``explain`` 动作要解释的配置键，例如 ``model`` 或 ``thinking_level``。
         intent: CLI 已经构造好的 ``SessionOpenIntent``。``explain`` 需要它来复用
             runtime 的完整配置解析规则。
 
@@ -202,7 +205,7 @@ def explain_config(intent: SessionOpenIntent, key: str | None) -> None:
     console = create_console()
     if not key:
         console.print("[error]Usage: codepilot config explain <key>[/error]")
-        console.print("[muted2]Available keys: model, provider, model_id, thinking_level, tool_execution, etc.[/muted2]")
+        console.print("[muted2]Available keys: model, provider, model_id, thinking_level, etc.[/muted2]")
         return
 
     try:

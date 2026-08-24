@@ -1,3 +1,5 @@
+"""提供面向编辑器或外部进程的 CLI JSON-RPC 投影。"""
+
 from __future__ import annotations
 
 """面向非人类客户端的 JSONL RPC 模式。

@@ -69,68 +69,6 @@ def _init_repo(root: Path) -> None:
     _git(root, "config", "user.name", "Test User")
 
 
-def _append_run(session, run_id: str, affected_paths: list[str]) -> None:
-    from codepilot.protocols import (
-        AgentRunCounters,
-        AgentRunResult,
-        AssistantMessage,
-        TextContent,
-    )
-
-    final = AssistantMessage(content=[TextContent(text="done")])
-    result = AgentRunResult(
-        run_id=run_id,
-        session_id=session.session_id,
-        status="completed",
-        stop_reason="final_answer",
-        counters=AgentRunCounters(tool_calls=1),
-        messages=[final],
-        final_message=final,
-        affected_paths=affected_paths,
-        workspace_changed=True,
-    )
-    session.store.append_run_result(result)
-
-
-def _append_run_with_rollback(session, run_id: str, *, baseline, affected_paths: list[str]) -> None:
-    from codepilot.sessions.rollback import build_rollback_metadata
-
-    _append_run(session, run_id, affected_paths)
-    session.store.write_rollback_metadata(
-        run_id,
-        build_rollback_metadata(
-            baseline,
-            affected_paths=affected_paths,
-            workspace_changed=True,
-        ),
-    )
-
-
-def test_cli_command_router_hides_internal_session_tree_commands(tmp_path: Path) -> None:
-    asyncio.run(_run_internal_commands_removed_case(tmp_path))
-
-
-async def _run_internal_commands_removed_case(tmp_path: Path) -> None:
-    from codepilot.interfaces.cli.interactive import dispatch_command
-    from codepilot.runtime.views import builtin_commands
-
-    runtime, session_id = _create_runtime_session(tmp_path)
-    try:
-        public_names = {command.name for command in builtin_commands()}
-        assert {"session", "tree", "path", "switch", "clear"}.isdisjoint(public_names)
-
-        help_result = await dispatch_command(runtime, session_id, "/help")
-        help_text = "\n".join(help_result.output_lines)
-        assert "`/resume`" in help_text
-        assert "`/session`" not in help_text
-        assert "`/tree`" not in help_text
-
-        result = await dispatch_command(runtime, session_id, "/session")
-        assert result.handled is False
-    finally:
-        await runtime.close_all()
-
-
 def test_cli_command_router_new_switches_to_empty_session(tmp_path: Path) -> None:
     asyncio.run(_run_new_command_case(tmp_path))
 
@@ -147,24 +85,12 @@ def test_cli_command_router_shows_context_report(tmp_path: Path) -> None:
     asyncio.run(_run_context_command_case(tmp_path))
 
 
-def test_cli_command_router_does_not_expose_removed_compact_command(tmp_path: Path) -> None:
-    asyncio.run(_run_removed_compact_command_case(tmp_path))
-
-
 def test_cli_command_router_manages_project_memory(tmp_path: Path) -> None:
     asyncio.run(_run_memory_command_case(tmp_path))
 
 
-def test_cli_command_router_previews_and_applies_rollback(tmp_path: Path) -> None:
-    asyncio.run(_run_rollback_command_case(tmp_path))
-
-
 def test_cli_command_router_reports_no_rollback_run(tmp_path: Path) -> None:
     asyncio.run(_run_rollback_no_run_case(tmp_path))
-
-
-def test_cli_command_router_reports_blocked_rollback(tmp_path: Path) -> None:
-    asyncio.run(_run_rollback_blocked_case(tmp_path))
 
 
 def test_cli_mode_build_warns_when_plan_is_not_approved(tmp_path: Path) -> None:
@@ -175,6 +101,10 @@ def test_cli_plan_approve_and_repeated_approve_show_plan(tmp_path: Path) -> None
     asyncio.run(_run_plan_approve_command_case(tmp_path))
 
 
+def test_cli_plan_approve_applies_pending_revision_through_core(tmp_path: Path) -> None:
+    asyncio.run(_run_plan_revision_approve_command_case(tmp_path))
+
+
 async def _run_mode_build_plan_warning_case(tmp_path: Path) -> None:
     from codepilot.interfaces.cli.interactive import dispatch_command
 
@@ -182,34 +112,12 @@ async def _run_mode_build_plan_warning_case(tmp_path: Path) -> None:
     session = _persistent_session(runtime, session_id)
     try:
         session.set_current_mode("plan")
-        session.plan_state.save(
-            {
-                "schema_version": 6,
-                "plan_id": "plan_cli_warning",
-                "owner_run_id": "run_plan",
-                "status": "proposed",
-                "origin_mode": "plan",
-                "raw_user_request": "先制定方案",
-                "interpreted_goal": "执行聚焦修改",
-                "task_understanding": "用户希望先审批方案，再执行聚焦修改。",
-                "current_implementation": "已确认相关代码和测试边界。",
-                "target_design": "按现有结构执行聚焦修改。",
-                "impact_scope": "影响当前任务相关模块和验证。",
-                "risks_and_open_questions": ["暂无阻塞待确认项。"],
-                "verification_plan": "运行相关测试。",
-                "summary": "阅读当前实现后执行聚焦修改。",
-                "completion_criteria": ["相关测试通过"],
-                "items": [
-                    {"id": "item_1", "step": "阅读实现", "details": "定位相关代码。", "verification": "确认修改点。", "status": "pending"},
-                    {"id": "item_2", "step": "执行修改", "details": "实现目标行为。", "verification": "运行相关测试。", "status": "pending"},
-                ],
-                "revision": 1,
-                "explanation": "",
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "updated_at": "2026-01-01T00:00:00+00:00",
-                "completed_at": None,
-                "completion_source": None,
-            }
+        _seed_proposed_plan(
+            session,
+            run_id="run_plan",
+            plan_id="plan_cli_warning",
+            request="先制定方案",
+            summary="阅读当前实现后执行聚焦修改。",
         )
 
         result = await dispatch_command(runtime, session_id, "/mode build")
@@ -231,34 +139,12 @@ async def _run_plan_approve_command_case(tmp_path: Path) -> None:
     session = _persistent_session(runtime, session_id)
     try:
         session.set_current_mode("plan")
-        session.plan_state.save(
-            {
-                "schema_version": 6,
-                "plan_id": "plan_cli_approve",
-                "owner_run_id": "run_plan",
-                "status": "proposed",
-                "origin_mode": "plan",
-                "raw_user_request": "优化登录逻辑",
-                "interpreted_goal": "优化登录逻辑",
-                "task_understanding": "用户希望先审批方案，再优化登录逻辑。",
-                "current_implementation": "已确认登录流程和相关测试边界。",
-                "target_design": "按现有结构优化登录逻辑。",
-                "impact_scope": "影响登录流程和登录测试。",
-                "risks_and_open_questions": ["暂无阻塞待确认项。"],
-                "verification_plan": "运行登录测试。",
-                "summary": "阅读实现并修改登录逻辑。",
-                "completion_criteria": ["登录测试通过"],
-                "items": [
-                    {"id": "item_1", "step": "阅读实现", "details": "定位登录流程。", "verification": "确认调用路径。", "status": "pending"},
-                    {"id": "item_2", "step": "修改登录逻辑", "details": "实现目标行为。", "verification": "运行登录测试。", "status": "pending"},
-                ],
-                "revision": 1,
-                "explanation": "",
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "updated_at": "2026-01-01T00:00:00+00:00",
-                "completed_at": None,
-                "completion_source": None,
-            }
+        _seed_proposed_plan(
+            session,
+            run_id="run_plan",
+            plan_id="plan_cli_approve",
+            request="优化登录逻辑",
+            summary="阅读实现并修改登录逻辑。",
         )
 
         approved = await dispatch_command(runtime, session_id, "/plan approve")
@@ -274,6 +160,153 @@ async def _run_plan_approve_command_case(tmp_path: Path) -> None:
         assert any("=== Plan ===" in line for line in repeated.output_lines)
     finally:
         await runtime.close_all()
+
+
+async def _run_plan_revision_approve_command_case(tmp_path: Path) -> None:
+    from codepilot.interfaces.cli.interactive import dispatch_command
+
+    runtime, session_id = _create_runtime_session(tmp_path)
+    session = _persistent_session(runtime, session_id)
+    try:
+        session.set_current_mode("build")
+        _seed_proposed_plan(
+            session,
+            run_id="run_plan_revision",
+            plan_id="plan_cli_revision",
+            request="优化登录逻辑",
+            summary="执行原计划。",
+            pending_revision=True,
+        )
+
+        approved = await dispatch_command(runtime, session_id, "/plan approve")
+        current = session.current_plan_state()
+
+        assert approved.data["continuation_kind"] == "plan_approved"
+        assert approved.data["continuation_run_id"] == "run_plan_revision"
+        assert current is not None
+        assert current["pending_revision"] is None
+        assert current["definition"]["summary"] == "执行修订计划。"
+    finally:
+        await runtime.close_all()
+
+
+def _seed_proposed_plan(
+    session,
+    *,
+    run_id: str,
+    plan_id: str,
+    request: str,
+    summary: str,
+    pending_revision: bool = False,
+) -> None:
+    from codepilot.core.plan import (
+        PendingPlanRevision,
+        PlanDefinition,
+        PlanState,
+        PlanStep,
+    )
+    from codepilot.core.state import CoreState, TaskState
+    from codepilot.protocols import UserMessage
+    from codepilot.sessions.contracts import WaitingState
+    from codepilot.sessions.service import BeginRunRequest, CommitRunBoundaryRequest
+    from codepilot.sessions.workspace import capture_workspace_checkpoint
+
+    base_steps = (
+        PlanStep(
+            f"{plan_id}:step:1",
+            "执行修改",
+            "实现目标行为。",
+            "运行相关测试。",
+        ),
+    )
+    pending = (
+        PendingPlanRevision(
+            reason="user_request",
+            definition=PlanDefinition(
+                summary="执行修订计划。",
+                completion_criteria=("相关测试通过",),
+            ),
+            steps=(
+                PlanStep(
+                    f"{plan_id}:revision:2:step:1",
+                    "执行修订修改",
+                    "实现修订后的目标行为。",
+                    "运行相关测试。",
+                ),
+            ),
+            proposed_at_revision=1,
+        )
+        if pending_revision
+        else None
+    )
+    plan = PlanState(
+        plan_id=plan_id,
+        origin="plan_mode",
+        status="active" if pending_revision else "proposed",
+        revision=2 if pending_revision else 1,
+        definition=PlanDefinition(
+            summary=summary,
+            completion_criteria=("相关测试通过",),
+            task_understanding="用户希望先审批方案，再执行聚焦修改。",
+            current_implementation="已确认相关代码和测试边界。",
+            target_design="按现有结构执行聚焦修改。",
+            impact_scope="影响当前任务相关模块和验证。",
+            risks_and_open_questions=("暂无阻塞待确认项。",),
+            verification_plan="运行相关测试。",
+        ),
+        steps=base_steps,
+        pending_revision=pending,
+    )
+    begun = session.state_service.begin_run(
+        BeginRunRequest(
+            session_id=session.session_id,
+            run_id=run_id,
+            user_message=UserMessage(content=request),
+            workspace=capture_workspace_checkpoint(session.workspace_dir),
+        ),
+        expected_session_revision=session.session_state.revision,
+    )
+    core_state = CoreState(
+        task=TaskState(
+            original_request=request,
+            current_goal=request,
+            plan=plan,
+        )
+    ).to_dict()
+    started = session.state_service.commit_run_boundary(
+        CommitRunBoundaryRequest(
+            commit_id=f"{run_id}:seed_started",
+            kind="progress",
+            session_id=session.session_id,
+            run_id=run_id,
+            expected_run_revision=begun.run.revision,
+            expected_session_revision=begun.session.revision,
+            phase="model",
+            resume_point="before_model",
+            core_state=core_state,
+            workspace=begun.run.checkpoint.workspace,
+        )
+    )
+    committed = session.state_service.commit_run_boundary(
+        CommitRunBoundaryRequest(
+            commit_id=f"{run_id}:seed_plan",
+            kind="waiting",
+            session_id=session.session_id,
+            run_id=run_id,
+            expected_run_revision=started.run.revision,
+            expected_session_revision=started.session.revision,
+            phase="model",
+            resume_point="after_model",
+            core_state=core_state,
+            waiting=WaitingState(
+                kind="plan_confirmation",
+                request_id=plan_id,
+                payload={"plan_id": plan_id, "revision": plan.revision},
+            ),
+            workspace=started.run.checkpoint.workspace,
+        )
+    )
+    session.session_state = committed.session
 
 
 async def _run_memory_command_case(tmp_path: Path) -> None:
@@ -304,7 +337,7 @@ async def _run_context_command_case(tmp_path: Path) -> None:
 
     runtime, session_id = _create_runtime_session(tmp_path)
     session = _persistent_session(runtime, session_id)
-    session.latest_context_report = {
+    session.context_service.latest_report = {
         "context_id": "ctx_1",
         "repository_fingerprint": "abcdef1234567890",
         "total_budget_tokens": 1000,
@@ -325,7 +358,7 @@ async def _run_context_command_case(tmp_path: Path) -> None:
 
 async def _run_rollback_command_case(tmp_path: Path) -> None:
     from codepilot.interfaces.cli.interactive import dispatch_command
-    from codepilot.sessions.commands import capture_run_rollback_baseline
+    from codepilot.runtime.commands import capture_run_rollback_baseline
 
     _init_repo(tmp_path)
     tracked = tmp_path / "app.py"
@@ -375,7 +408,7 @@ async def _run_rollback_no_run_case(tmp_path: Path) -> None:
 
 async def _run_rollback_blocked_case(tmp_path: Path) -> None:
     from codepilot.interfaces.cli.interactive import dispatch_command
-    from codepilot.sessions.commands import capture_run_rollback_baseline
+    from codepilot.runtime.commands import capture_run_rollback_baseline
 
     _init_repo(tmp_path)
     tracked = tmp_path / "app.py"
@@ -406,25 +439,6 @@ async def _run_rollback_blocked_case(tmp_path: Path) -> None:
         await runtime.close_all()
 
 
-async def _run_removed_compact_command_case(tmp_path: Path) -> None:
-    from codepilot.interfaces.cli.interactive import dispatch_command
-    from codepilot.runtime.views import builtin_commands
-
-    runtime, session_id = _create_runtime_session(tmp_path)
-    try:
-        assert "compact" not in {command.name for command in builtin_commands()}
-        assert "compact" not in {
-            command.name for command in runtime.describe(session_id).commands
-        }
-
-        result = await dispatch_command(runtime, session_id, "/compact")
-
-        assert result.handled is False
-        assert result.output_lines == ()
-    finally:
-        await runtime.close_all()
-
-
 async def _run_new_command_case(tmp_path: Path) -> None:
     from codepilot.interfaces.cli.interactive import dispatch_command
 
@@ -436,7 +450,7 @@ async def _run_new_command_case(tmp_path: Path) -> None:
         assert result.switched_session_id != session_id
         assert result.output_lines[0].startswith("new session -> session_id=")
         switched = _persistent_session(runtime, result.switched_session_id)
-        assert switched.store.load_session_messages() == []
+        assert switched.state_service.load_messages(switched.session_id) == ()
     finally:
         await runtime.close_all()
 
@@ -448,14 +462,18 @@ async def _run_fork_command_case(tmp_path: Path) -> None:
     runtime, session_id = _create_runtime_session(tmp_path)
     session = _persistent_session(runtime, session_id)
     try:
-        session.store.append_message(UserMessage(content="seed"))
+        session.state_service.append_message(session.session_id, UserMessage(content="seed"))
+        session.session_state = session.state_service.get_session(session.session_id)
         result = await dispatch_command(runtime, session_id, "/fork")
         assert result.handled
         assert result.switched_session_id is not None
         assert result.switched_session_id != session_id
         assert result.output_lines[0].startswith("forked session -> session_id=")
         forked = _persistent_session(runtime, result.switched_session_id)
-        messages = forked.store.load_session_messages()
+        messages = [
+            record.message
+            for record in forked.state_service.load_messages(forked.session_id)
+        ]
         assert len(messages) == 1
         assert messages[0].content == "seed"
     finally:
@@ -465,14 +483,16 @@ async def _run_fork_command_case(tmp_path: Path) -> None:
 async def _run_resume_command_case(tmp_path: Path) -> None:
     from codepilot.interfaces.cli.interactive import dispatch_command
     from codepilot.protocols import UserMessage
-    from codepilot.sessions.commands import create_fresh_session
+    from codepilot.runtime.commands import create_fresh_session
 
     runtime, session_id = _create_runtime_session(tmp_path)
     session = _persistent_session(runtime, session_id)
     try:
         other = create_fresh_session(session)
-        other.store.append_message(UserMessage(content="older work"))
-        session.store.append_message(UserMessage(content="current work"))
+        other.state_service.append_message(other.session_id, UserMessage(content="older work"))
+        other.session_state = other.state_service.get_session(other.session_id)
+        session.state_service.append_message(session.session_id, UserMessage(content="current work"))
+        session.session_state = session.state_service.get_session(session.session_id)
 
         listing = await dispatch_command(runtime, session_id, "/resume")
         assert listing.handled

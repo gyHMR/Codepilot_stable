@@ -3,159 +3,125 @@ from __future__ import annotations
 import asyncio
 import json
 
-
-def _metadata(name: str, *, read_only: bool, scopes=("read", "plan", "build")):
-    from codepilot.tools.contracts import ToolMetadata
-
-    return ToolMetadata(
-        name=name,
-        category="test",
-        read_only=read_only,
-        concurrency_safe=True,
-        exclusive=False,
-        requires_approval=False,
-        risk_level="low",
-        scopes=tuple(scopes),
-    )
+from tool_runtime_testkit import execute_tool
 
 
-def test_restricted_tool_port_only_exposes_and_executes_read_allowlist() -> None:
+def test_restricted_tool_port_only_exposes_and_executes_read_allowlist(tmp_path) -> None:
     async def run_case() -> None:
-        from codepilot.protocols import TextContent, Tool
-        from codepilot.tools.contracts import (
-            ToolCatalogItem,
-            ToolCatalogView,
-            ToolInvocation,
-            ToolObservation,
-        )
-        from codepilot.tools.restricted import RestrictedToolPort
+        from codepilot.tools.builtins import create_builtin_registrations
+        from codepilot.tools.contracts import ToolExecutionRequest
+        from codepilot.tools.registry import ToolRegistry
+        from codepilot.runtime.subagents.tools import RestrictedToolPort
+        from codepilot.tools.runtime import ToolRuntime
 
-        class BaseTools:
-            def __init__(self) -> None:
-                self.executed_modes: list[str] = []
-
-            def catalog(self, current_mode: str = "build"):
-                return ToolCatalogView(
-                    (
-                        ToolCatalogItem(
-                            spec=Tool(name="read", description="Read", parameters={}),
-                            metadata=_metadata("read", read_only=True),
-                        ),
-                        ToolCatalogItem(
-                            spec=Tool(name="propose_plan", description="Plan", parameters={}),
-                            metadata=_metadata("propose_plan", read_only=True),
-                        ),
-                        ToolCatalogItem(
-                            spec=Tool(name="dispatch_exploration", description="Dispatch", parameters={}),
-                            metadata=_metadata("dispatch_exploration", read_only=True, scopes=("plan",)),
-                        ),
-                        ToolCatalogItem(
-                            spec=Tool(name="write", description="Write", parameters={}),
-                            metadata=_metadata("write", read_only=False, scopes=("build",)),
-                        ),
-                    )
-                )
-
-            async def execute(self, invocation):
-                self.executed_modes.append(invocation.current_mode)
-                return ToolObservation(
-                    tool_call_id=invocation.tool_call_id,
-                    name=invocation.name,
-                    status="success",
-                    content=(TextContent(text="ok"),),
-                )
-
-        base = BaseTools()
+        (tmp_path / "sample.py").write_text("value = 1\n", encoding="utf-8", newline="\n")
+        registry = ToolRegistry()
+        ids = {
+            item.spec.name: registry.register(item)
+            for item in create_builtin_registrations(tmp_path, enabled_names=["read", "write"])
+        }
+        base = ToolRuntime(registry)
         restricted = RestrictedToolPort(base)
+        assert not hasattr(restricted, "execute")
+        assert not hasattr(restricted, "execute_batch")
 
-        names = {item.spec.name for item in restricted.catalog("plan").items}
+        names = {item.spec.name for item in restricted.catalog_snapshot(mode="plan").entries}
         assert names == {"read"}
 
-        allowed = await restricted.execute(
-            ToolInvocation(run_id="run1", tool_call_id="read1", name="read", current_mode="plan")
+        allowed = await execute_tool(
+            restricted,
+            ToolExecutionRequest(
+                "run1", "session1", "read1", "read", {"path": "sample.py"}, "plan", ids["read"]
+            )
         )
-        denied = await restricted.execute(
-            ToolInvocation(run_id="run1", tool_call_id="write1", name="write", current_mode="read")
+        denied = await execute_tool(
+            restricted,
+            ToolExecutionRequest(
+                "run1", "session1", "write1", "write", {"path": "x", "content": "x"}, "plan", ids["write"]
+            )
         )
-        denied_plan = await restricted.execute(
-            ToolInvocation(run_id="run1", tool_call_id="plan1", name="propose_plan", current_mode="read")
+        preparation = restricted.prepare_batch(
+            (
+                ToolExecutionRequest("run1", "session1", "read2", "read", {"path": "sample.py"}, "plan", ids["read"]),
+                ToolExecutionRequest("run1", "session1", "read3", "read", {"path": "sample.py"}, "plan", ids["read"]),
+            )
         )
+        batch = await restricted.execute_prepared(preparation.batch_id or "")
 
         assert allowed.status == "success"
-        assert base.executed_modes == ["read"]
+        assert [item.status for item in batch] == ["success", "success"]
         assert denied.status == "denied"
-        assert denied.metadata["error_code"] == "restricted_tool_denied"
-        assert denied_plan.status == "denied"
+        assert denied.error.code == "restricted_tool_denied"
 
     asyncio.run(run_case())
 
 
 def test_plan_policy_prioritizes_subagents_for_broad_repository_analysis() -> None:
-    from codepilot.sessions.runtime import _mode_policy
+    from codepilot.runtime.session_coordinator import _mode_policy
 
     policy = _mode_policy("plan")
 
-    assert "固定的宏观工作流" in policy
-    assert "探索阶段默认使用 dispatch_exploration" in policy
-    assert "主 Agent 不应先用大量 ls/read/grep/find" in policy
-    assert "主 Agent 负责" in policy
-    assert "框架负责" in policy
-    assert "list_exploration_agents" in policy
+    assert "已知文件或局部问题直接用 read/grep/find" in policy
+    assert "调查开放、跨模块或可拆成独立问题" in policy
     assert "dispatch_exploration" in policy
     assert "reuse=auto" in policy
+    assert "普通文本方案不是提交" in policy
+    assert "propose_plan 成功只表示等待用户审查" in policy
 
 
 def test_exploration_tool_descriptions_explain_preferred_and_reuse_behavior(tmp_path) -> None:
-    from codepilot.runtime.subagents import create_exploration_tools
+    from codepilot.runtime.subagents.tools import create_subagent_registrations
 
     tools = {
-        tool.name: tool
-        for tool in create_exploration_tools(
+        tool.spec.name: tool
+        for tool in create_subagent_registrations(
             workspace=tmp_path,
             session_provider=lambda: None,  # type: ignore[arg-type]
         )
     }
 
-    dispatch = tools["dispatch_exploration"].description
-    listed = tools["list_exploration_agents"].description
-    assert "Plan mode: use subagents to explore the repository" in dispatch
-    assert "before producing the final plan" in dispatch
-    assert "distinct investigation scopes" in dispatch
-    assert "The main agent must integrate their reports" in dispatch
+    dispatch = tools["dispatch_exploration"].spec.description
+    listed = tools["list_exploration_agents"].spec.description
+    assert "Plan mode only" in dispatch
+    assert "read-only exploration subagents" in dispatch
+    assert "distinct purpose and scope" in dispatch
+    assert "main agent must integrate and verify" in dispatch
     assert "reuse=auto" in dispatch
-    assert "does not explore the repository" in listed
-    assert "does not create or run subagents" in listed
-    assert "only to inspect reports already produced by dispatch_exploration" in listed
-    assert "Do not call it as the first exploration action" in listed
+    assert "without creating or running subagents" in listed
+    assert "reports already produced by dispatch_exploration" in listed
 
 
 def test_list_exploration_agents_empty_result_points_to_dispatch(tmp_path) -> None:
     async def run_case() -> None:
         from types import SimpleNamespace
 
-        from codepilot.runtime.subagents import create_exploration_tools
-        from codepilot.tools.contracts import ToolCallRequest
+        from codepilot.runtime.subagents.tools import create_subagent_registrations
+        from codepilot.tools.contracts import ToolExecutionRequest
+        from codepilot.tools.registry import ToolRegistry
+        from codepilot.tools.runtime import ToolRuntime
 
-        tools = {
-            tool.name: tool
-            for tool in create_exploration_tools(
+        registrations = create_subagent_registrations(
                 workspace=tmp_path,
                 session_provider=lambda: SimpleNamespace(session_id="session_a"),
             )
-        }
-        result = await tools["list_exploration_agents"].execute(
-            ToolCallRequest(
+        registry = ToolRegistry()
+        ids = {item.spec.name: registry.register(item) for item in registrations}
+        result = await execute_tool(
+            ToolRuntime(registry),
+            ToolExecutionRequest(
                 run_id="run_plan",
+                session_id="session_a",
                 tool_call_id="list1",
-                name="list_exploration_agents",
-                current_mode="plan",
+                tool_name="list_exploration_agents",
+                mode="plan",
                 arguments={},
+                registration_id=ids["list_exploration_agents"],
             )
         )
 
-        payload = json.loads(result.content[0].text)
+        payload = result.data
         assert payload == {
-            "agents": [],
+            "agents": (),
             "has_reports": False,
             "next_action": (
                 "Call dispatch_exploration to create read-only exploration subagents."
@@ -166,44 +132,39 @@ def test_list_exploration_agents_empty_result_points_to_dispatch(tmp_path) -> No
 
 
 def test_mode_policies_keep_one_agent_identity_and_separate_control_from_task() -> None:
-    from codepilot.sessions.runtime import _mode_policy
+    from codepilot.runtime.session_coordinator import _mode_policy
 
     plan = _mode_policy("plan")
     build = _mode_policy("build")
     read = _mode_policy("read")
 
-    assert "同一个 Coding Agent" in plan
-    assert "对象级" in plan
-    assert "控制级" in plan
-    assert "派发只读 Subagent 探索仓库" in plan
+    assert "只允许只读调查" in plan
     assert "禁止修改工作区" in plan
-    assert "普通文本方案不是可审批的 Task Plan" in plan
-    assert "不要先完整展示文本草案" in plan
-    assert "未经运行时确认批准" in plan
-    assert "声称已经开始实现" in plan
-    assert "执行目标" in build
-    assert "不是重新制定方案" in build
-    assert "不得创建、推进或完成" in read
+    assert "普通文本方案不是提交" in plan
+    assert "提交后不得开始实现" in plan
+    assert "直接执行第一个未完成步骤" in build
+    assert "不得创建第二份计划" in build
+    assert "不得创建、推进或关闭 Task Plan" in read
 
 
 def test_plan_approved_continuation_executes_existing_plan_without_replanning() -> None:
-    from codepilot.sessions.runtime import _continuation_control
+    from codepilot.runtime.session_coordinator import _continuation_control
 
     control = _continuation_control("plan_approved")
 
     assert control is not None
     assert control["scope"] == "approved_plan_execution_only"
     instruction = str(control["instruction"])
-    assert "first unfinished plan item" in instruction
-    assert "do not restate it, redesign it, or create another Task Plan" in instruction
-    assert "do not call create_build_plan" in instruction
-    assert "preserve the canonical item IDs exactly" in instruction
+    assert "第一个未完成步骤" in instruction
+    assert "不要复述、重新设计或创建第二份计划" in instruction
+    assert "保留现有 step_id" in instruction
     assert "update_plan_progress" in instruction
     assert "close_plan" in instruction
+    assert "不是完成任务的必要条件" in instruction
 
 
-def test_subagent_store_persists_session_scoped_reports_and_marks_stale(tmp_path) -> None:
-    from codepilot.sessions.subagents import SubagentStore
+def test_subagent_registry_keeps_process_local_reports_and_marks_stale(tmp_path) -> None:
+    from codepilot.runtime.subagents.runner import SubagentStore
 
     source = tmp_path / "src" / "app.py"
     source.parent.mkdir()
@@ -233,7 +194,7 @@ def test_subagent_store_persists_session_scoped_reports_and_marks_stale(tmp_path
     assert stored["report_id"]
     assert agents[0]["subagent_id"] == "runtime-reader"
     assert agents[0]["stale"] is False
-    assert (tmp_path / ".codepilot" / "sessions" / "session_a" / "subagents").exists()
+    assert not (tmp_path / ".codepilot" / "sessions" / "session_a" / "subagents").exists()
 
     source.write_text("print('v2')\n", encoding="utf-8")
 
@@ -243,8 +204,7 @@ def test_subagent_store_persists_session_scoped_reports_and_marks_stale(tmp_path
 def test_exploration_coordinator_returns_partial_results_and_skips_duplicates(tmp_path) -> None:
     async def run_case() -> None:
         from codepilot.llm.ports import ModelDescriptor
-        from codepilot.runtime.subagents import ExplorationCoordinator
-        from codepilot.sessions.subagents import SubagentStore
+        from codepilot.runtime.subagents.runner import ExplorationCoordinator, SubagentStore
 
         class FakeRunner:
             async def run(self, task, *, peer_assignments, previous_report=None):
@@ -396,8 +356,6 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
                                 id="plan1",
                                 name="propose_plan",
                                 arguments={
-                                    "raw_user_request": "完善 src/app.py，给我一个方案",
-                                    "interpreted_goal": "完善 src/app.py 的实现并完成验证。",
                                     "task_understanding": "用户希望先审批完善 src/app.py 的方案。",
                                     "current_implementation": "探索报告已定位 src/app.py 的当前实现。",
                                     "target_design": "按探索结果完善 src/app.py 的实现。",
@@ -405,6 +363,7 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
                                     "risks_and_open_questions": ["暂无阻塞待确认项。"],
                                     "verification_plan": "运行相关 Python 检查。",
                                     "summary": "Use exploration evidence to edit src/app.py.",
+                                    "explanation": "等待用户审批后执行。",
                                     "completion_criteria": ["Python 检查通过"],
                                     "items": [
                                         {
@@ -434,11 +393,12 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
                     base_url="",
                     reasoning=False,
                     input=["text"],
-                    context_window=4000,
+                    context_window=32000,
                     max_tokens=500,
                 ),
             )
         )
+        assert gateway.describe(ref.session_id).session.current_mode == "plan"
 
         frames = [
             frame
@@ -449,12 +409,33 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
         ]
         paused = [frame for frame in frames if isinstance(frame, RunPausedFrame)]
         session = gateway._require_session(ref.session_id)._session  # noqa: SLF001
-        messages = session.store.load_session_messages()
+        messages = [
+            record.message
+            for record in session.state_service.load_messages(session.session_id)
+        ]
+        completed_plan_events = [
+            frame.event
+            for frame in frames
+            if getattr(frame, "event", {}).get("type") == "tool_completed"
+                and getattr(frame, "event", {}).get("tool_name") == "propose_plan"
+        ]
+        assert completed_plan_events
+        assert completed_plan_events[0]["result"]["data"]["plan_operation"] == "propose_plan"
+        assert completed_plan_events[0]["result"]["data"]["core_command"]["kind"] == "submit_plan"
 
         assert paused
         assert paused[-1].record.stop_reason == "plan_approval_required"
-        assert session.plan_state.current()["interpreted_goal"] == "完善 src/app.py 的实现并完成验证。"
-        assert model_port.subagent_calls == 1
+        current_plan = session.current_plan_state()
+        assert current_plan is not None
+        assert current_plan["status"] == "proposed"
+        assert current_plan["definition"]["summary"] == "Use exploration evidence to edit src/app.py."
+        dispatch_data = next(
+            frame.event["result"]["data"]
+            for frame in frames
+            if getattr(frame, "event", {}).get("type") == "tool_completed"
+                and getattr(frame, "event", {}).get("tool_name") == "dispatch_exploration"
+        )
+        assert model_port.subagent_calls == 1, dispatch_data
         assert any(
             message.tool_name == "dispatch_exploration"
             for message in messages
@@ -465,5 +446,122 @@ def test_plan_mode_dispatch_exploration_feeds_proposed_plan_and_pauses(tmp_path)
             for message in messages
             if getattr(message, "role", "") == "assistant"
         )
+
+    asyncio.run(run_case())
+
+
+def test_plan_feedback_must_publish_a_new_canonical_revision(tmp_path) -> None:
+    async def run_case() -> None:
+        from codepilot.llm.ports import LLMCompleted
+        from codepilot.protocols import AssistantMessage, Model, TextContent, ToolCall
+        from codepilot.runtime import RuntimeGateway, SessionOpenIntent
+        from codepilot.runtime.actions import PromptSubmitted, RunPausedFrame
+
+        def plan_arguments(summary: str, phase_one: str) -> dict[str, object]:
+            return {
+                "task_understanding": "用户要完善登录模块并先审批方案。",
+                "current_implementation": "当前登录模块仍是演示实现。",
+                "target_design": "形成可验证的完整登录服务。",
+                "impact_scope": "影响登录实现和相关测试。",
+                "risks_and_open_questions": ["暂无阻塞待确认项。"],
+                "verification_plan": "运行登录相关测试。",
+                "summary": summary,
+                "completion_criteria": ["登录相关测试通过"],
+                "items": [
+                    {
+                        "step": phase_one,
+                        "details": "实现可独立运行和验证的第一阶段。",
+                        "verification": "运行第一阶段登录测试。",
+                    }
+                ],
+            }
+
+        class ModelPort:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.contexts: list[str] = []
+
+            async def stream(self, request):
+                self.calls += 1
+                self.contexts.append(
+                    request.system_prompt
+                    + "\n"
+                    + "\n".join(str(item.content) for item in request.messages)
+                )
+                if self.calls == 2:
+                    yield LLMCompleted(
+                        message=AssistantMessage(
+                            content=[TextContent(text="这是重新设计后的普通文本方案。")]
+                        )
+                    )
+                    return
+                revised = self.calls >= 3
+                yield LLMCompleted(
+                    message=AssistantMessage(
+                        content=[
+                            ToolCall(
+                                id="plan-revised" if revised else "plan-initial",
+                                name="propose_plan",
+                                arguments=plan_arguments(
+                                    "重新设计后的登录方案" if revised else "初始登录方案",
+                                    "交付可运行的最小登录 API"
+                                    if revised
+                                    else "创建登录模块骨架",
+                                ),
+                            )
+                        ]
+                    )
+                )
+
+        model_port = ModelPort()
+        gateway = RuntimeGateway(model_port=model_port)
+        ref = gateway.open_session(
+            SessionOpenIntent(
+                workspace_dir=tmp_path,
+                current_mode="plan",
+                memory_enabled=False,
+                model=Model(
+                    id="unit",
+                    name="Unit",
+                    api="unit",
+                    provider="unit",
+                    base_url="",
+                    reasoning=False,
+                    input=["text"],
+                    context_window=32_000,
+                    max_tokens=500,
+                ),
+            )
+        )
+
+        first_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                PromptSubmitted(text="完善登录模块，先给方案"),
+            )
+        ]
+        feedback_frames = [
+            frame
+            async for frame in gateway.dispatch(
+                ref.session_id,
+                PromptSubmitted(text="我不满意第一阶段，重新设计"),
+            )
+        ]
+        session = gateway._require_session(ref.session_id)._session  # noqa: SLF001
+        plan = session.current_plan_state()
+
+        assert any(isinstance(frame, RunPausedFrame) for frame in first_frames)
+        assert any(isinstance(frame, RunPausedFrame) for frame in feedback_frames)
+        assert model_port.calls == 3
+        assert plan is not None
+        assert plan["revision"] == 2
+        assert plan["definition"]["summary"] == "重新设计后的登录方案"
+        assert plan["steps"][0]["step"] == "交付可运行的最小登录 API"
+        assert "当前 mode=plan" in model_port.contexts[0]
+        assert "Continuation event: plan_feedback" in model_port.contexts[1]
+        assert "本轮必须成功调用 propose_plan" in model_port.contexts[1]
+
+        await gateway.close_all()
 
     asyncio.run(run_case())
